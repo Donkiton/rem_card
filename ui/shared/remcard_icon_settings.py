@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Callable, Iterable
 
-from PySide6.QtCore import QCoreApplication, QSize, Qt, QThread
+from PySide6.QtCore import QCoreApplication, QObject, QSize, Qt, QThread
 from PySide6.QtGui import QImage, QPixmap
 
 from rem_card.app.paths import get_icon_dir
@@ -50,6 +50,8 @@ _BLOB_RECORD_CACHE = BoundedBlobRecordCache(
     ttl_sec=_float_env("REMCARD_ICON_BLOB_CACHE_TTL_SEC", 300.0, minimum=5.0),
 )
 _PIXMAP_CLEANUP_APP = None
+_PRELOAD_RECEIVERS: dict[tuple[object, ...], QObject] = {}
+_PRELOAD_RECEIVERS_APP = None
 
 
 def _clear_pixmap_cache_if_gui_thread() -> bool:
@@ -517,6 +519,51 @@ def request_remcard_icon_pixmap(
             token=receiver_token,
         )
     return immediate
+
+
+def preload_remcard_icon_pixmaps(
+    icon_keys: Iterable[str],
+    *,
+    target_size=None,
+    aspect_mode=Qt.AspectRatioMode.KeepAspectRatio,
+    transformation_mode=Qt.TransformationMode.SmoothTransformation,
+) -> int:
+    """Start non-blocking icon loads so a later visible request can use the pixmap cache."""
+    app = QCoreApplication.instance()
+    if app is None or QThread.currentThread() != app.thread():
+        return 0
+
+    normalized_keys = _normalized_icon_keys(icon_keys)
+    if not normalized_keys:
+        return 0
+
+    size = _target_size(target_size)
+    size_key = None if size is None else (size.width(), size.height())
+    global _PRELOAD_RECEIVERS_APP
+    if _PRELOAD_RECEIVERS_APP is not app:
+        _PRELOAD_RECEIVERS.clear()
+        _PRELOAD_RECEIVERS_APP = app
+
+    for icon_key in normalized_keys:
+        receiver_key = (
+            icon_key,
+            size_key,
+            _enum_cache_key(aspect_mode),
+            _enum_cache_key(transformation_mode),
+        )
+        receiver = _PRELOAD_RECEIVERS.get(receiver_key)
+        if receiver is None:
+            receiver = QObject(app)
+            _PRELOAD_RECEIVERS[receiver_key] = receiver
+        request_remcard_icon_pixmap(
+            receiver,
+            icon_key,
+            target_size=size,
+            aspect_mode=aspect_mode,
+            transformation_mode=transformation_mode,
+            apply=lambda _receiver, _pixmap: None,
+        )
+    return len(normalized_keys)
 
 
 def current_remcard_icon_source(

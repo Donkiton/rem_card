@@ -40,6 +40,10 @@ W1A_STARTUP_IDLE_DELAY_MS = max(0, int(os.environ.get("REMCARD_W1A_STARTUP_IDLE_
 JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
 JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
 JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"
+PATIENT_PREVIEW_ICON_PREWARM_DELAY_MS = max(
+    0,
+    int(os.environ.get("REMCARD_PATIENT_PREVIEW_ICON_PREWARM_DELAY_MS", "1200")),
+)
 LOCAL_ORDER_FORCE_PREFIXES = (
     "orders_add_input:",
     "orders_edit_input:",
@@ -167,6 +171,19 @@ class NurseMainWidget(QWidget):
             QTimer.singleShot(CARD_UI_PREWARM_DELAY_MS, self._schedule_card_ui_prewarm)
         if JOURNAL_PREWARM_ENABLED:
             QTimer.singleShot(JOURNAL_PREWARM_DELAY_MS, self._schedule_journal_prewarm)
+        QTimer.singleShot(
+            PATIENT_PREVIEW_ICON_PREWARM_DELAY_MS,
+            self._preload_patient_preview_icons,
+        )
+
+    def _preload_patient_preview_icons(self) -> None:
+        if self._is_closing:
+            return
+        from rem_card.ui.patient_bed_management.side_patient_card import (
+            preload_patient_preview_icon_pixmaps,
+        )
+
+        preload_patient_preview_icon_pixmaps()
 
     def _build_add_patient_lock(self) -> RoleSessionLock:
         from rem_card.app.runtime_paths import get_dev_local_operation_lock_path, is_compiled
