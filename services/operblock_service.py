@@ -412,13 +412,7 @@ def _stage_rows_from_timeline_rows(rows: list[Mapping[str, Any]] | list[dict[str
 
 
 def _operation_stage_window_is_active(state: Mapping[str, Any] | dict[str, Any]) -> bool:
-    if not bool((state or {}).get("anesthesia_active")):
-        return False
-    if bool((state or {}).get("surgery_active")):
-        return True
-    anesthesia_start = _parse_dt((state or {}).get("current_anesthesia_start"))
-    surgery_end = _parse_dt((state or {}).get("last_surgery_end"))
-    return surgery_end is None or anesthesia_start is None or surgery_end < anesthesia_start
+    return bool((state or {}).get("anesthesia_active"))
 
 
 def _iso_or_none(value: datetime | None) -> str | None:
@@ -4571,7 +4565,7 @@ class OperBlockService:
             state = self._stage_state_from_cursor_rows(stage_rows)
             if not _operation_stage_window_is_active(state):
                 raise ValueError(
-                    "Этапы доступны после начала пособия, до начала операции и во время операции."
+                    "Этапы доступны после начала и до завершения пособия."
                 )
             self._assert_datetime_in_active_anesthesia_bounds(
                 cursor,
@@ -4653,7 +4647,7 @@ class OperBlockService:
             state = self._stage_state_from_cursor_rows(stage_rows)
             if not _operation_stage_window_is_active(state):
                 raise ValueError(
-                    "Этапы доступны после начала пособия, до начала операции и во время операции."
+                    "Этапы доступны после начала и до завершения пособия."
                 )
             event_dt = _parse_dt(row["event_time"])
             if event_dt is None:

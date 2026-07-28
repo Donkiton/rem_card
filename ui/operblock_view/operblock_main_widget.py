@@ -19787,13 +19787,7 @@ class OperBlockMainWidget(QWidget):
 
     def _operation_stages_available(self) -> bool:
         state = dict(getattr(self, "_current_stage_state", {}) or {})
-        if not bool(state.get("anesthesia_active")):
-            return False
-        if bool(state.get("surgery_active")):
-            return True
-        anesthesia_start = _minute_floor_dt(_parse_datetime_value(state.get("current_anesthesia_start")))
-        surgery_end = _minute_floor_dt(_parse_datetime_value(state.get("last_surgery_end")))
-        return surgery_end is None or anesthesia_start is None or surgery_end < anesthesia_start
+        return bool(state.get("anesthesia_active"))
 
     def _open_operation_stages_dialog(self):
         if self.is_view_only_mode():
@@ -19806,7 +19800,7 @@ class OperBlockMainWidget(QWidget):
             CustomMessageBox.warning(
                 self,
                 "Этапы",
-                "Этапы доступны после начала пособия, до начала операции и во время операции.",
+                "Этапы доступны после начала и до завершения пособия.",
             )
             return
         dialog = OperationStagesDialog(self._operation_stage_dialog_rows(), self)

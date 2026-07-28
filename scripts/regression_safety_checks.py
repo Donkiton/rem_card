@@ -25055,14 +25055,42 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         dialog.deleteLater()
         app.processEvents()
 
-        service.end_surgery(case_id, event_time=surgery_start_dt + timedelta(minutes=180))
+        surgery_end_dt = surgery_start_dt + timedelta(minutes=180)
+        after_surgery_stage_dt = surgery_end_dt + timedelta(minutes=1)
+        service.end_surgery(case_id, event_time=surgery_end_dt)
+        late_stage = service.add_operation_stage(
+            case_id,
+            "Контроль после окончания операции",
+            event_time=after_surgery_stage_dt,
+        )
+        if datetime.fromisoformat(str(late_stage.get("event_time")).replace(" ", "T")) != after_surgery_stage_dt:
+            return False, f"post-surgery stage has wrong time: {late_stage!r}"
+        updated_late_stage = service.update_operation_stage(
+            int(late_stage["source_id"]),
+            "Финальный контроль после окончания операции",
+            expected_revision=int(late_stage["revision"]),
+            event_time=after_surgery_stage_dt + timedelta(minutes=1),
+        )
+        if int(updated_late_stage.get("revision") or 0) != int(late_stage.get("revision") or 0) + 1:
+            return False, f"post-surgery stage revision did not increase: {updated_late_stage!r}"
+
+        anesthesia_end_dt = surgery_end_dt + timedelta(minutes=10)
+        service.end_anesthesia_with_transfer(
+            case_id,
+            "Хирургия",
+            event_time=anesthesia_end_dt,
+        )
         try:
-            service.add_operation_stage(case_id, "Поздний этап")
+            service.add_operation_stage(
+                case_id,
+                "Этап после завершения пособия",
+                event_time=anesthesia_end_dt + timedelta(minutes=1),
+            )
         except ValueError as exc:
-            if "до начала операции и во время операции" not in str(exc):
-                return False, f"unexpected closed-surgery stage error: {exc}"
+            if "до завершения пособия" not in str(exc):
+                return False, f"unexpected closed-anesthesia stage error: {exc}"
         else:
-            return False, "custom stage was added after surgery end"
+            return False, "custom stage was added after anesthesia end"
         return True, "ok"
     finally:
         manager.close()
