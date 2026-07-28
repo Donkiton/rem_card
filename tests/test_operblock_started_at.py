@@ -405,7 +405,7 @@ class OperBlockStagesTest(unittest.TestCase):
     def test_custom_stage_requires_active_anesthesia_and_respects_its_start(self):
         stage_time = self.started_at + timedelta(minutes=20)
 
-        with self.assertRaisesRegex(ValueError, "после начала пособия"):
+        with self.assertRaisesRegex(ValueError, "после начала"):
             self.service.add_operation_stage(
                 self.case["operation_case_id"],
                 "Установка катетера",
@@ -426,7 +426,7 @@ class OperBlockStagesTest(unittest.TestCase):
                 event_time=anesthesia_start - timedelta(minutes=1),
             )
 
-    def test_intermediate_stage_can_be_added_and_edited_before_surgery(self):
+    def test_custom_stage_can_be_added_and_edited_until_anesthesia_ends(self):
         anesthesia_start = self.started_at + timedelta(minutes=10)
         intermediate_time = self.started_at + timedelta(minutes=20)
         surgery_start = self.started_at + timedelta(minutes=25)
@@ -488,12 +488,42 @@ class OperBlockStagesTest(unittest.TestCase):
             ],
         )
 
-        self.service.end_surgery(case_id, event_time=surgery_start + timedelta(minutes=10))
-        with self.assertRaisesRegex(ValueError, "до начала операции и во время операции"):
+        surgery_end = surgery_start + timedelta(minutes=10)
+        late_stage_time = surgery_end + timedelta(minutes=1)
+        self.service.end_surgery(case_id, event_time=surgery_end)
+        late_stage = self.service.add_operation_stage(
+            case_id,
+            "Контроль гемостаза после операции",
+            event_time=late_stage_time,
+        )
+        updated_late_stage = self.service.update_operation_stage(
+            late_stage["source_id"],
+            "Финальный контроль гемостаза",
+            expected_revision=late_stage["revision"],
+            event_time=late_stage_time + timedelta(minutes=1),
+        )
+
+        self.assertEqual(updated_late_stage["display_label"], "Финальный контроль гемостаза")
+        self.assertEqual(updated_late_stage["revision"], 2)
+
+        anesthesia_end = late_stage_time + timedelta(minutes=5)
+        self.service.end_anesthesia_with_transfer(
+            case_id,
+            "Хирургия",
+            event_time=anesthesia_end,
+        )
+        with self.assertRaisesRegex(ValueError, "до завершения пособия"):
             self.service.add_operation_stage(
                 case_id,
-                "Поздний этап",
-                event_time=surgery_start + timedelta(minutes=11),
+                "Этап после завершения пособия",
+                event_time=anesthesia_end + timedelta(minutes=1),
+            )
+        with self.assertRaisesRegex(ValueError, "до завершения пособия"):
+            self.service.update_operation_stage(
+                late_stage["source_id"],
+                "Изменение после завершения пособия",
+                expected_revision=updated_late_stage["revision"],
+                event_time=late_stage_time + timedelta(minutes=2),
             )
 
     def test_dialog_orders_automatic_and_custom_stages_by_time(self):
@@ -532,7 +562,7 @@ class OperBlockStagesTest(unittest.TestCase):
         self.assertFalse(rows[1]["readonly"])
         self.assertTrue(rows[2]["readonly"])
 
-    def test_ui_stage_window_is_open_before_and_during_but_not_after_surgery(self):
+    def test_ui_stage_window_is_open_until_anesthesia_ends(self):
         anesthesia_start = self.started_at + timedelta(minutes=10)
         surgery_start = self.started_at + timedelta(minutes=25)
         surgery_end = surgery_start + timedelta(minutes=10)
@@ -559,6 +589,14 @@ class OperBlockStagesTest(unittest.TestCase):
             {
                 "surgery_active": False,
                 "last_surgery_end": surgery_end.isoformat(timespec="seconds"),
+            }
+        )
+        self.assertTrue(OperBlockMainWidget._operation_stages_available(widget))
+
+        widget._current_stage_state.update(
+            {
+                "anesthesia_active": False,
+                "last_anesthesia_end": (surgery_end + timedelta(minutes=5)).isoformat(timespec="seconds"),
             }
         )
         self.assertFalse(OperBlockMainWidget._operation_stages_available(widget))
