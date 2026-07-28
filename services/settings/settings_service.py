@@ -614,7 +614,15 @@ class SettingsService:
 
     def invalidate_cache(self, catalog_key: str | None = None) -> None:
         with self._value_cache_lock:
-            if catalog_key in {None, DISPLAY_SETTINGS_KEY, BACKGROUND_SETTINGS_KEY, STYLE_SETTINGS_KEY, PRINT_SETTINGS_KEY, OPERBLOCK_SETTINGS_KEY}:
+            if catalog_key in {
+                None,
+                DISPLAY_SETTINGS_KEY,
+                BACKGROUND_SETTINGS_KEY,
+                STYLE_SETTINGS_KEY,
+                PRINT_SETTINGS_KEY,
+                OPERBLOCK_SETTINGS_KEY,
+                LAB_ANALYSIS_KEY,
+            }:
                 self._app_setting_cache.clear()
             if catalog_key in {None, DIET_TEMPLATES_KEY}:
                 self._diet_templates_cache = None
@@ -3055,27 +3063,28 @@ class SettingsService:
         if log_change:
             self._bump_catalog_version(cursor, catalog_key, "app_settings", f"{scope}:{key}", "update", after=value)
 
-    def _sync_background_rows_in_tx(self, cursor, payload: Any) -> None:
+    @staticmethod
+    def _normalize_background_payload(payload: Any) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
-            return
+            return None
         try:
             from rem_card.ui.shared.background_settings import normalize_background_settings_payload
 
-            normalized_payload = normalize_background_settings_payload(payload)
+            return normalize_background_settings_payload(payload)
         except Exception:
-            normalized_payload = payload
+            return payload
 
-        backgrounds = normalized_payload.get("backgrounds")
-        if not isinstance(backgrounds, list):
-            return
-        active_key = ""
+    @staticmethod
+    def _active_background_key(normalized_payload: dict[str, Any]) -> str:
         try:
             from rem_card.ui.shared.background_settings import active_background_entry
 
-            active_key = str(active_background_entry(normalized_payload, require_file=False).get("id") or "")
+            return str(active_background_entry(normalized_payload, require_file=False).get("id") or "")
         except Exception:
-            active_key = ""
+            return ""
 
+    @staticmethod
+    def _background_keys(backgrounds: list[Any]) -> list[str]:
         active_keys: list[str] = []
         seen_keys: set[str] = set()
         for index, raw in enumerate(backgrounds, start=1):
@@ -3086,109 +3095,151 @@ class SettingsService:
                 continue
             active_keys.append(key)
             seen_keys.add(key)
+        return active_keys
 
-        disabled_at = now_text()
-        if active_keys:
-            placeholders = ", ".join("?" for _ in active_keys)
-            cursor.execute(
-                f"""
-                UPDATE ui_backgrounds
-                SET enabled = 0,
-                    active = 0,
-                    revision = COALESCE(revision, 0) + 1,
-                    updated_at = ?
-                WHERE scope = 'shared'
-                  AND enabled = 1
-                  AND background_key NOT IN ({placeholders})
-                """,
-                (disabled_at, *active_keys),
+    @staticmethod
+    def _disable_stale_background_rows(cursor, active_keys: list[str]) -> None:
+        if not active_keys:
+            return
+        placeholders = ", ".join("?" for _ in active_keys)
+        cursor.execute(
+            f"""
+            UPDATE ui_backgrounds
+            SET enabled = 0,
+                active = 0,
+                revision = COALESCE(revision, 0) + 1,
+                updated_at = ?
+            WHERE scope = 'shared'
+              AND enabled = 1
+              AND background_key NOT IN ({placeholders})
+            """,
+            (now_text(), *active_keys),
+        )
+
+    @staticmethod
+    def _hash_background_file(image_path: str) -> tuple[str, int]:
+        hasher = hashlib.sha256()
+        size_bytes = 0
+        with open(image_path, "rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                size_bytes += len(chunk)
+        return hasher.hexdigest(), size_bytes
+
+    def _background_row_media(
+        self,
+        raw: dict[str, Any],
+    ) -> tuple[str, str | None, str | None, int | None, str]:
+        file_name = str(raw.get("file") or "")
+        image_mime = str(raw.get("image_mime") or "").strip() or None
+        image_hash = str(raw.get("image_hash") or "").strip().lower() or None
+        try:
+            image_size_bytes = int(raw.get("image_size_bytes") or 0) or None
+        except (TypeError, ValueError):
+            image_size_bytes = None
+        image_path = ""
+        if file_name:
+            try:
+                from rem_card.ui.shared.background_settings import background_file_path
+
+                image_path = background_file_path(
+                    file_name,
+                    settings_db_path=self.db.db_path,
+                )
+            except Exception:
+                image_path = ""
+        if not image_path or not os.path.isfile(image_path):
+            return file_name, image_mime, image_hash, image_size_bytes, image_path
+        try:
+            image_mime = image_mime or mimetypes.guess_type(image_path)[0] or "application/octet-stream"
+            if not image_hash or not image_size_bytes:
+                calculated_hash, calculated_size = self._hash_background_file(image_path)
+                image_hash = image_hash or calculated_hash
+                image_size_bytes = image_size_bytes or calculated_size
+        except Exception:
+            pass
+        return file_name, image_mime, image_hash, image_size_bytes, image_path
+
+    def _upsert_background_row_in_tx(
+        self,
+        cursor,
+        *,
+        index: int,
+        raw: dict[str, Any],
+        active_key: str,
+    ) -> None:
+        key = str(raw.get("id") or f"background_{index}").strip()
+        if not key:
+            return
+        file_name, image_mime, image_hash, image_size_bytes, image_path = self._background_row_media(raw)
+        timestamp = now_text()
+        cursor.execute(
+            """
+            INSERT INTO ui_backgrounds (
+                background_key, name, scope, kind, value_json, image_blob,
+                image_mime, image_hash, image_size_bytes, enabled, active,
+                revision, created_at, updated_at
             )
+            VALUES (?, ?, 'shared', ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
+            ON CONFLICT(background_key) DO UPDATE SET
+                name = excluded.name,
+                kind = excluded.kind,
+                value_json = excluded.value_json,
+                image_blob = CASE
+                    WHEN excluded.image_hash IS NOT NULL THEN NULL
+                    ELSE ui_backgrounds.image_blob
+                END,
+                image_mime = COALESCE(excluded.image_mime, ui_backgrounds.image_mime),
+                image_hash = COALESCE(excluded.image_hash, ui_backgrounds.image_hash),
+                image_size_bytes = COALESCE(excluded.image_size_bytes, ui_backgrounds.image_size_bytes),
+                enabled = 1,
+                active = excluded.active,
+                revision = ui_backgrounds.revision + 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                key,
+                str(raw.get("name") or key),
+                "image" if file_name else "color",
+                _stable_json(raw),
+                None,
+                image_mime,
+                image_hash,
+                image_size_bytes,
+                1 if key == active_key else 0,
+                timestamp,
+                timestamp,
+            ),
+        )
+        if image_path and os.path.isfile(image_path):
+            # Файл в settings/backgrounds является основным хранилищем.
+            # Старый BLOB очищается без повторного чтения изображения по SMB.
+            cursor.execute(
+                "UPDATE ui_backgrounds SET image_blob = NULL WHERE background_key = ?",
+                (key,),
+            )
+
+    def _sync_background_rows_in_tx(self, cursor, payload: Any) -> None:
+        normalized_payload = self._normalize_background_payload(payload)
+        if normalized_payload is None:
+            return
+        backgrounds = normalized_payload.get("backgrounds")
+        if not isinstance(backgrounds, list):
+            return
+        active_key = self._active_background_key(normalized_payload)
+        self._disable_stale_background_rows(cursor, self._background_keys(backgrounds))
         for index, raw in enumerate(backgrounds, start=1):
             if not isinstance(raw, dict):
                 continue
-            key = str(raw.get("id") or f"background_{index}").strip()
-            if not key:
-                continue
-            file_name = str(raw.get("file") or "")
-            image_mime = str(raw.get("image_mime") or "").strip() or None
-            image_hash = str(raw.get("image_hash") or "").strip().lower() or None
-            try:
-                image_size_bytes = int(raw.get("image_size_bytes") or 0) or None
-            except (TypeError, ValueError):
-                image_size_bytes = None
-            image_path = ""
-            if file_name:
-                try:
-                    from rem_card.ui.shared.background_settings import background_file_path
-
-                    image_path = background_file_path(
-                        file_name,
-                        settings_db_path=self.db.db_path,
-                    )
-                except Exception:
-                    image_path = ""
-            if image_path and os.path.isfile(image_path):
-                try:
-                    image_mime = image_mime or mimetypes.guess_type(image_path)[0] or "application/octet-stream"
-                    if not image_hash or not image_size_bytes:
-                        hasher = hashlib.sha256()
-                        size_bytes = 0
-                        with open(image_path, "rb") as fh:
-                            while True:
-                                chunk = fh.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                hasher.update(chunk)
-                                size_bytes += len(chunk)
-                        image_hash = image_hash or hasher.hexdigest()
-                        image_size_bytes = image_size_bytes or size_bytes
-                except Exception:
-                    pass
-            cursor.execute(
-                """
-                INSERT INTO ui_backgrounds (
-                    background_key, name, scope, kind, value_json, image_blob,
-                    image_mime, image_hash, image_size_bytes, enabled, active,
-                    revision, created_at, updated_at
-                )
-                VALUES (?, ?, 'shared', ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
-                ON CONFLICT(background_key) DO UPDATE SET
-                    name = excluded.name,
-                    kind = excluded.kind,
-                    value_json = excluded.value_json,
-                    image_blob = CASE
-                        WHEN excluded.image_hash IS NOT NULL THEN NULL
-                        ELSE ui_backgrounds.image_blob
-                    END,
-                    image_mime = COALESCE(excluded.image_mime, ui_backgrounds.image_mime),
-                    image_hash = COALESCE(excluded.image_hash, ui_backgrounds.image_hash),
-                    image_size_bytes = COALESCE(excluded.image_size_bytes, ui_backgrounds.image_size_bytes),
-                    enabled = 1,
-                    active = excluded.active,
-                    revision = ui_backgrounds.revision + 1,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    key,
-                    str(raw.get("name") or key),
-                    "image" if file_name else "color",
-                    _stable_json(raw),
-                    None,
-                    image_mime,
-                    image_hash,
-                    image_size_bytes,
-                    1 if key == active_key else 0,
-                    now_text(),
-                    now_text(),
-                ),
+            self._upsert_background_row_in_tx(
+                cursor,
+                index=index,
+                raw=raw,
+                active_key=active_key,
             )
-            if image_path and os.path.isfile(image_path):
-                # Файл в settings/backgrounds является основным хранилищем.
-                # Старый BLOB очищается без повторного чтения изображения по SMB.
-                cursor.execute(
-                    "UPDATE ui_backgrounds SET image_blob = NULL WHERE background_key = ?",
-                    (key,),
-                )
 
     def materialize_background_image(self, background_key: str, target_path: str) -> bool:
         self.ensure_ready()
@@ -3332,12 +3383,7 @@ class SettingsService:
                 conn.close()
             lock.release()
 
-    def migrate_media_blobs_to_files(self, *, apply: bool = False, compact: bool = False) -> dict[str, Any]:
-        """Однократно выносит BLOB в hash-addressed файлы и удаляет старые фоны."""
-        if apply:
-            self.ensure_ready()
-        elif not os.path.isfile(self.db.db_path):
-            raise FileNotFoundError(f"БД настроек не найдена: {self.db.db_path}")
+    def _read_media_migration_rows(self) -> tuple[list[Any], list[Any], Any]:
         with self.db.read_connection() as conn:
             background_rows = conn.execute(
                 "SELECT background_key, value_json, image_blob, image_mime, image_hash, enabled "
@@ -3351,7 +3397,13 @@ class SettingsService:
                 "SELECT value_json FROM app_settings WHERE scope = 'shared' AND key = ?",
                 (BACKGROUND_SETTINGS_KEY,),
             ).fetchone()
+        return background_rows, icon_rows, app_row
 
+    @staticmethod
+    def _media_migration_background_payload(
+        background_rows: list[Any],
+        app_row: Any,
+    ) -> dict[str, Any]:
         try:
             raw_payload = json.loads(app_row["value_json"]) if app_row else {}
         except Exception:
@@ -3374,10 +3426,13 @@ class SettingsService:
             background_payload = normalize_background_settings_payload(raw_payload)
         except Exception:
             background_payload = raw_payload if isinstance(raw_payload, dict) else {}
+        return background_payload
 
-        row_by_key = {str(row["background_key"]): row for row in background_rows}
+    @staticmethod
+    def _original_background_files(background_rows: list[Any]) -> dict[str, str]:
         original_background_files: dict[str, str] = {}
-        for key, row in row_by_key.items():
+        for row in background_rows:
+            key = str(row["background_key"])
             try:
                 original_value = json.loads(row["value_json"] or "{}")
             except Exception:
@@ -3385,7 +3440,14 @@ class SettingsService:
             original_background_files[key] = os.path.basename(
                 str(original_value.get("file") or "")
             ) if isinstance(original_value, dict) else ""
-        backgrounds_dir = get_settings_backgrounds_dir_from_db_path(self.db.db_path)
+        return original_background_files
+
+    @staticmethod
+    def _prepare_background_media(
+        background_payload: dict[str, Any],
+        row_by_key: dict[str, Any],
+        backgrounds_dir: str,
+    ) -> tuple[list[tuple[str, dict[str, Any], bytes]], set[str], set[str]]:
         prepared_backgrounds: list[tuple[str, dict[str, Any], bytes]] = []
         referenced_keys: set[str] = set()
         referenced_files: set[str] = set()
@@ -3423,7 +3485,10 @@ class SettingsService:
             )
             referenced_files.add(new_file)
             prepared_backgrounds.append((background_key, entry, blob))
+        return prepared_backgrounds, referenced_keys, referenced_files
 
+    @staticmethod
+    def _prepare_icon_media(icon_rows: list[Any]) -> list[tuple[str, dict[str, Any], bytes, str, str]]:
         prepared_icons: list[tuple[str, dict[str, Any], bytes, str, str]] = []
         for row in icon_rows:
             try:
@@ -3450,18 +3515,37 @@ class SettingsService:
                     image_hash,
                 )
             )
+        return prepared_icons
 
-        existing_background_files = []
+    @staticmethod
+    def _media_migration_cleanup_targets(
+        *,
+        backgrounds_dir: str,
+        row_by_key: dict[str, Any],
+        referenced_keys: set[str],
+        referenced_files: set[str],
+    ) -> tuple[list[str], list[str]]:
+        existing_files = []
         if os.path.isdir(backgrounds_dir):
-            existing_background_files = [
+            existing_files = [
                 name
                 for name in os.listdir(backgrounds_dir)
                 if os.path.isfile(os.path.join(backgrounds_dir, name))
             ]
-        orphan_background_files = sorted(
-            name for name in existing_background_files if name not in referenced_files
-        )
+        orphan_files = sorted(name for name in existing_files if name not in referenced_files)
         unreferenced_rows = sorted(set(row_by_key).difference(referenced_keys))
+        return orphan_files, unreferenced_rows
+
+    @staticmethod
+    def _media_migration_preview(
+        *,
+        prepared_backgrounds: list[tuple[str, dict[str, Any], bytes]],
+        prepared_icons: list[tuple[str, dict[str, Any], bytes, str, str]],
+        row_by_key: dict[str, Any],
+        original_background_files: dict[str, str],
+        unreferenced_rows: list[str],
+        orphan_background_files: list[str],
+    ) -> dict[str, Any]:
         pending_backgrounds = sum(
             1
             for key, entry, _blob in prepared_backgrounds
@@ -3472,7 +3556,7 @@ class SettingsService:
                 != original_background_files.get(key, "")
             )
         )
-        preview = {
+        return {
             "applied": False,
             "backgrounds_pending": pending_backgrounds,
             "icons_pending": len(prepared_icons),
@@ -3480,79 +3564,115 @@ class SettingsService:
             "background_files_to_remove": len(orphan_background_files),
             "background_files_to_remove_names": orphan_background_files,
         }
-        if not apply:
-            return preview
 
+    @staticmethod
+    def _write_background_media_files(
+        backgrounds_dir: str,
+        prepared_backgrounds: list[tuple[str, dict[str, Any], bytes]],
+    ) -> None:
         os.makedirs(backgrounds_dir, exist_ok=True)
         for _key, entry, blob in prepared_backgrounds:
             target_path = os.path.join(backgrounds_dir, os.path.basename(str(entry["file"])))
-            if not os.path.isfile(target_path):
-                tmp_path = f"{target_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            if os.path.isfile(target_path):
+                continue
+            tmp_path = f"{target_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            try:
+                with open(tmp_path, "xb") as fh:
+                    fh.write(blob)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, target_path)
+            finally:
                 try:
-                    with open(tmp_path, "xb") as fh:
-                        fh.write(blob)
-                        fh.flush()
-                        os.fsync(fh.fileno())
-                    os.replace(tmp_path, target_path)
-                finally:
-                    try:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except OSError:
-                        pass
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    def _write_icon_media_files(
+        self,
+        prepared_icons: list[tuple[str, dict[str, Any], bytes, str, str]],
+    ) -> None:
         for icon_key, value, blob, image_mime, image_hash in prepared_icons:
             if value.get("asset_file"):
                 self._persist_icon_asset(icon_key, blob, image_mime, image_hash)
 
-        if prepared_backgrounds or prepared_icons or unreferenced_rows:
-            with self.db.transaction("settings_media_blob_migration") as cursor:
-                self._write_app_setting_in_tx(
+    @staticmethod
+    def _delete_unreferenced_background_rows(cursor, unreferenced_rows: list[str]) -> None:
+        if not unreferenced_rows:
+            return
+        placeholders = ",".join("?" for _ in unreferenced_rows)
+        cursor.execute(
+            f"DELETE FROM ui_backgrounds WHERE background_key IN ({placeholders})",
+            tuple(unreferenced_rows),
+        )
+
+    @staticmethod
+    def _clear_migrated_icon_blobs(
+        cursor,
+        prepared_icons: list[tuple[str, dict[str, Any], bytes, str, str]],
+    ) -> None:
+        for icon_key, value, blob, image_mime, image_hash in prepared_icons:
+            cursor.execute(
+                "UPDATE operblock_icons SET value_json = ?, image_blob = NULL, image_mime = ?, "
+                "image_hash = ?, image_size_bytes = ?, revision = revision + 1, updated_at = ? "
+                "WHERE icon_key = ?",
+                (
+                    _stable_json(value),
+                    image_mime,
+                    image_hash,
+                    len(blob),
+                    now_text(),
+                    icon_key,
+                ),
+            )
+
+    def _apply_media_migration_database(
+        self,
+        *,
+        background_payload: dict[str, Any],
+        prepared_backgrounds: list[tuple[str, dict[str, Any], bytes]],
+        prepared_icons: list[tuple[str, dict[str, Any], bytes, str, str]],
+        unreferenced_rows: list[str],
+    ) -> None:
+        if not prepared_backgrounds and not prepared_icons and not unreferenced_rows:
+            return
+        with self.db.transaction("settings_media_blob_migration") as cursor:
+            self._write_app_setting_in_tx(
+                cursor,
+                "shared",
+                BACKGROUND_SETTINGS_KEY,
+                background_payload,
+                changed_by_role="maintenance",
+                catalog_key=BACKGROUND_SETTINGS_KEY,
+            )
+            self._sync_background_rows_in_tx(cursor, background_payload)
+            self._delete_unreferenced_background_rows(cursor, unreferenced_rows)
+            self._clear_migrated_icon_blobs(cursor, prepared_icons)
+            if prepared_backgrounds or unreferenced_rows:
+                self._bump_catalog_version(
                     cursor,
-                    "shared",
                     BACKGROUND_SETTINGS_KEY,
-                    background_payload,
+                    "ui_backgrounds",
+                    None,
+                    "externalize_media",
                     changed_by_role="maintenance",
-                    catalog_key=BACKGROUND_SETTINGS_KEY,
                 )
-                self._sync_background_rows_in_tx(cursor, background_payload)
-                if unreferenced_rows:
-                    placeholders = ",".join("?" for _ in unreferenced_rows)
-                    cursor.execute(
-                        f"DELETE FROM ui_backgrounds WHERE background_key IN ({placeholders})",
-                        tuple(unreferenced_rows),
-                    )
-                for icon_key, value, blob, image_mime, image_hash in prepared_icons:
-                    cursor.execute(
-                        "UPDATE operblock_icons SET value_json = ?, image_blob = NULL, image_mime = ?, "
-                        "image_hash = ?, image_size_bytes = ?, revision = revision + 1, updated_at = ? "
-                        "WHERE icon_key = ?",
-                        (
-                            _stable_json(value),
-                            image_mime,
-                            image_hash,
-                            len(blob),
-                            now_text(),
-                            icon_key,
-                        ),
-                    )
-                if prepared_backgrounds or unreferenced_rows:
-                    self._bump_catalog_version(
-                        cursor,
-                        BACKGROUND_SETTINGS_KEY,
-                        "ui_backgrounds",
-                        None,
-                        "externalize_media",
-                        changed_by_role="maintenance",
-                    )
-                if prepared_icons:
-                    self._bump_catalog_version(
-                        cursor,
-                        OPERBLOCK_ICONS_KEY,
-                        "operblock_icons",
-                        None,
-                        "externalize_media",
-                        changed_by_role="maintenance",
-                    )
+            if prepared_icons:
+                self._bump_catalog_version(
+                    cursor,
+                    OPERBLOCK_ICONS_KEY,
+                    "operblock_icons",
+                    None,
+                    "externalize_media",
+                    changed_by_role="maintenance",
+                )
+
+    @staticmethod
+    def _remove_orphan_background_files(
+        backgrounds_dir: str,
+        orphan_background_files: list[str],
+    ) -> list[str]:
         deleted_background_files: list[str] = []
         for file_name in orphan_background_files:
             try:
@@ -3560,7 +3680,17 @@ class SettingsService:
                 deleted_background_files.append(file_name)
             except OSError:
                 pass
+        return deleted_background_files
 
+    def _media_migration_report(
+        self,
+        *,
+        prepared_backgrounds: list[tuple[str, dict[str, Any], bytes]],
+        prepared_icons: list[tuple[str, dict[str, Any], bytes, str, str]],
+        unreferenced_rows: list[str],
+        deleted_background_files: list[str],
+        compact: bool,
+    ) -> dict[str, Any]:
         report: dict[str, Any] = {
             "applied": True,
             "backgrounds_migrated": len(prepared_backgrounds),
@@ -3572,6 +3702,61 @@ class SettingsService:
         if compact:
             report["compaction"] = self._compact_settings_db_after_media_migration()
         return report
+
+    def migrate_media_blobs_to_files(self, *, apply: bool = False, compact: bool = False) -> dict[str, Any]:
+        """Однократно выносит BLOB в hash-addressed файлы и удаляет старые фоны."""
+        if apply:
+            self.ensure_ready()
+        elif not os.path.isfile(self.db.db_path):
+            raise FileNotFoundError(f"БД настроек не найдена: {self.db.db_path}")
+
+        background_rows, icon_rows, app_row = self._read_media_migration_rows()
+        background_payload = self._media_migration_background_payload(background_rows, app_row)
+        row_by_key = {str(row["background_key"]): row for row in background_rows}
+        original_background_files = self._original_background_files(background_rows)
+        backgrounds_dir = get_settings_backgrounds_dir_from_db_path(self.db.db_path)
+        prepared_backgrounds, referenced_keys, referenced_files = self._prepare_background_media(
+            background_payload,
+            row_by_key,
+            backgrounds_dir,
+        )
+        prepared_icons = self._prepare_icon_media(icon_rows)
+        orphan_background_files, unreferenced_rows = self._media_migration_cleanup_targets(
+            backgrounds_dir=backgrounds_dir,
+            row_by_key=row_by_key,
+            referenced_keys=referenced_keys,
+            referenced_files=referenced_files,
+        )
+        preview = self._media_migration_preview(
+            prepared_backgrounds=prepared_backgrounds,
+            prepared_icons=prepared_icons,
+            row_by_key=row_by_key,
+            original_background_files=original_background_files,
+            unreferenced_rows=unreferenced_rows,
+            orphan_background_files=orphan_background_files,
+        )
+        if not apply:
+            return preview
+
+        self._write_background_media_files(backgrounds_dir, prepared_backgrounds)
+        self._write_icon_media_files(prepared_icons)
+        self._apply_media_migration_database(
+            background_payload=background_payload,
+            prepared_backgrounds=prepared_backgrounds,
+            prepared_icons=prepared_icons,
+            unreferenced_rows=unreferenced_rows,
+        )
+        deleted_background_files = self._remove_orphan_background_files(
+            backgrounds_dir,
+            orphan_background_files,
+        )
+        return self._media_migration_report(
+            prepared_backgrounds=prepared_backgrounds,
+            prepared_icons=prepared_icons,
+            unreferenced_rows=unreferenced_rows,
+            deleted_background_files=deleted_background_files,
+            compact=compact,
+        )
 
     @staticmethod
     def _operblock_icons_seed_hash() -> str:
