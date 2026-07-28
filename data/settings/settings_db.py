@@ -7,6 +7,7 @@ import json
 import re
 import socket
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -477,8 +478,8 @@ class SettingsDatabase:
         status = "error"
         conn = self.connect(readonly=True)
         try:
-            status = "ok"
             yield conn
+            status = "ok"
         finally:
             try:
                 conn.close()
@@ -487,6 +488,11 @@ class SettingsDatabase:
                     "settings_read_ms",
                     round((time.perf_counter() - started) * 1000.0, 3),
                     status=status,
+                    caller_thread=(
+                        "main"
+                        if threading.current_thread() is threading.main_thread()
+                        else "background"
+                    ),
                 )
 
     @contextmanager

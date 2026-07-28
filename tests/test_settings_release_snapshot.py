@@ -115,7 +115,10 @@ class SettingsReleaseSnapshotTest(unittest.TestCase):
             )
             self.assertTrue(apply_report["applied"])
 
-            background_file = Path(get_settings_backgrounds_dir(str(target_baza))) / "release_bg.png"
+            background_file = (
+                Path(get_settings_backgrounds_dir(str(target_baza)))
+                / f"bg_{background_hash}.png"
+            )
             self.assertEqual(background_file.read_bytes(), background_blob)
             with target_service.db.read_connection() as conn:
                 background_row = conn.execute(
@@ -124,12 +127,23 @@ class SettingsReleaseSnapshotTest(unittest.TestCase):
                 icon_row = conn.execute(
                     "SELECT value_json, image_blob, image_hash FROM operblock_icons WHERE icon_key = 'custom:release'"
                 ).fetchone()
+                background_setting_row = conn.execute(
+                    "SELECT value_json FROM app_settings "
+                    "WHERE scope = 'shared' AND key = 'background_settings'"
+                ).fetchone()
             self.assertIsNotNone(background_row)
             self.assertIsNone(background_row["image_blob"])
             self.assertEqual(background_row["image_hash"], background_hash)
             self.assertIsNotNone(icon_row)
             self.assertIsNone(icon_row["image_blob"])
             self.assertEqual(icon_row["image_hash"], icon_hash)
+            applied_background_payload = json.loads(
+                background_setting_row["value_json"]
+            )
+            self.assertEqual(
+                applied_background_payload["backgrounds"][0]["file"],
+                f"bg_{background_hash}.png",
+            )
             icon_value = json.loads(icon_row["value_json"])
             icon_file = Path(get_settings_icon_assets_dir(str(target_baza))) / icon_value["asset_file"]
             self.assertEqual(icon_file.read_bytes(), icon_blob)

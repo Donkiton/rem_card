@@ -9,7 +9,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 
 from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.sqlite_shared import FileWriteLock, backup_connection, configure_connection, run_quick_check
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
 DB_CYCLE_META_KEY = "db_cycle_started_at"
@@ -17,6 +19,7 @@ ROTATION_ROLE_LOCK_STALE_TIMEOUT_SEC = 75.0
 ROTATION_BLOCKING_EMERGENCY_STATUSES = {"active", "merge_pending", "merging", "merge_failed"}
 MANUAL_ROTATION_UNDO_STATE_FILE = "manual_rotation_undo.json"
 MANUAL_ROTATION_UNDO_WINDOW = timedelta(hours=24)
+REPLICA_SNAPSHOT_WAIT_SEC = 20.0
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -27,7 +30,13 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return bool(row)
 
 
-def _read_cycle_started_at(conn: sqlite3.Connection, db_path: str, logger: logging.Logger) -> int:
+def _read_cycle_started_at(
+    conn: sqlite3.Connection,
+    db_path: str,
+    logger: logging.Logger,
+    *,
+    initialize_missing: bool = True,
+) -> int:
     fallback_ts = int(os.path.getmtime(db_path))
 
     if not _table_exists(conn, "meta"):
@@ -40,15 +49,110 @@ def _read_cycle_started_at(conn: sqlite3.Connection, db_path: str, logger: loggi
         except Exception:
             pass
 
-    try:
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
-            (DB_CYCLE_META_KEY, fallback_ts),
-        )
-    except Exception as exc:
-        logger.warning("Failed to initialize %s meta key: %s", DB_CYCLE_META_KEY, exc)
+    if initialize_missing:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                (DB_CYCLE_META_KEY, fallback_ts),
+            )
+        except Exception as exc:
+            logger.warning("Failed to initialize %s meta key: %s", DB_CYCLE_META_KEY, exc)
 
     return fallback_ts
+
+
+def _baza_dir_for_db(db_path: str) -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(db_path)))
+
+
+def _replica_snapshot_lease_dir(db_path: str) -> str:
+    return os.path.join(_baza_dir_for_db(db_path), "locks", "replica_snapshots")
+
+
+def _malformed_lock_quarantine_dir(db_path: str) -> str:
+    return os.path.join(_baza_dir_for_db(db_path), "quarantine", "locks")
+
+
+def _rotation_age_preflight(
+    db_path: str,
+    *,
+    max_age_days: int,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    conn = None
+    try:
+        conn = sqlite3.connect(
+            build_sqlite_file_uri(db_path, mode="ro"),
+            uri=True,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=1.0,
+        )
+        configure_connection(conn, readonly=True)
+        cycle_started_at = _read_cycle_started_at(
+            conn,
+            db_path,
+            logger,
+            initialize_missing=False,
+        )
+        age_days = max(0, int(time.time()) - int(cycle_started_at)) / 86400.0
+        return {
+            "ok": True,
+            "age_days": age_days,
+            "due": age_days >= int(max_age_days),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _active_replica_snapshot_leases(
+    db_path: str,
+    *,
+    logger: logging.Logger,
+) -> list[dict[str, Any]]:
+    lease_dir = _replica_snapshot_lease_dir(db_path)
+    if not os.path.isdir(lease_dir):
+        return []
+    active: list[dict[str, Any]] = []
+    quarantine_dir = _malformed_lock_quarantine_dir(db_path)
+    for name in sorted(os.listdir(lease_dir)):
+        if not name.lower().endswith(".lock"):
+            continue
+        path = os.path.join(lease_dir, name)
+        lease = FileWriteLock(
+            path,
+            stale_timeout_sec=60.0,
+            logger=logger,
+            allow_expired_lease_cleanup=True,
+            allow_legacy_replica_cleanup=True,
+            allow_malformed_cleanup=True,
+            malformed_quarantine_dir=quarantine_dir,
+        )
+        if lease.cleanup_abandoned(source="db_rotation_replica_wait"):
+            continue
+        if not os.path.exists(path):
+            continue
+        active.append({"path": path, "name": name})
+    return active
+
+
+def _wait_for_replica_snapshot_leases(
+    db_path: str,
+    *,
+    logger: logging.Logger,
+    timeout_sec: float = REPLICA_SNAPSHOT_WAIT_SEC,
+) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    while True:
+        active = _active_replica_snapshot_leases(db_path, logger=logger)
+        if not active:
+            return []
+        if time.monotonic() >= deadline:
+            return active
+        time.sleep(0.1)
 
 
 def _count_active_beds(conn: sqlite3.Connection) -> int:
@@ -480,10 +584,42 @@ def maybe_rotate_database_if_due(
     if not os.path.exists(db_path):
         return {"status": "missing"}
 
-    lock = FileWriteLock(rotation_lock_path, stale_timeout_sec=60.0, logger=logger)
+    if not force:
+        preflight = _rotation_age_preflight(
+            db_path,
+            max_age_days=max_age_days,
+            logger=logger,
+        )
+        if not preflight.get("ok"):
+            return {
+                "status": "check_failed",
+                "error": str(preflight.get("error") or "rotation age preflight failed"),
+            }
+        if not preflight.get("due"):
+            return {
+                "status": "not_due",
+                "age_days": round(float(preflight.get("age_days") or 0.0), 2),
+            }
+
+    lock = FileWriteLock(
+        rotation_lock_path,
+        stale_timeout_sec=60.0,
+        logger=logger,
+        allow_expired_lease_cleanup=True,
+        allow_legacy_replica_cleanup=True,
+        allow_malformed_cleanup=True,
+        malformed_quarantine_dir=_malformed_lock_quarantine_dir(db_path),
+    )
     owner_id = f"{socket.gethostname()}:{os.getpid()}:db_rotation"
     if not lock.acquire(owner_id=owner_id, source="db_rotation"):
         return {"status": "rotation_lock_busy"}
+    record_metric(
+        "db_rotation_lock_created",
+        1,
+        source=source,
+        force=bool(force),
+        rotation_lock_path=rotation_lock_path,
+    )
 
     db_lock = None
     conn = None
@@ -491,6 +627,15 @@ def maybe_rotate_database_if_due(
     fingerprint_before_backup: dict[str, int] | None = None
     temp_new_db_path = ""
     try:
+        active_replica_leases = _wait_for_replica_snapshot_leases(
+            db_path,
+            logger=logger,
+        )
+        if active_replica_leases:
+            return {
+                "status": "replica_snapshot_busy",
+                "active_replica_leases": active_replica_leases,
+            }
         if db_lock_path:
             db_lock = FileWriteLock(db_lock_path, stale_timeout_sec=10 * 60, logger=logger)
             if not db_lock.acquire(owner_id=owner_id, source="db_rotation"):
@@ -742,7 +887,13 @@ def maybe_rotate_database_if_due(
             _remove_db_with_sidecars(temp_new_db_path)
         if db_lock:
             db_lock.release()
-        lock.release()
+        released = lock.release()
+        record_metric(
+            "db_rotation_lock_released",
+            1 if released else 0,
+            source=source,
+            rotation_lock_path=rotation_lock_path,
+        )
 
 
 def cancel_manual_rotation(
@@ -762,13 +913,30 @@ def cancel_manual_rotation(
     if not status.get("available"):
         return {"status": "undo_unavailable", "reason": status.get("reason", "not_available")}
     state = dict(status["state"])
-    lock = FileWriteLock(rotation_lock_path, stale_timeout_sec=60.0, logger=logger)
+    lock = FileWriteLock(
+        rotation_lock_path,
+        stale_timeout_sec=60.0,
+        logger=logger,
+        allow_expired_lease_cleanup=True,
+        allow_legacy_replica_cleanup=True,
+        allow_malformed_cleanup=True,
+        malformed_quarantine_dir=_malformed_lock_quarantine_dir(db_path),
+    )
     owner_id = f"{socket.gethostname()}:{os.getpid()}:db_rotation_undo"
     if not lock.acquire(owner_id=owner_id, source="db_rotation_undo"):
         return {"status": "rotation_lock_busy"}
     db_lock = None
     moved_new_path = ""
     try:
+        active_replica_leases = _wait_for_replica_snapshot_leases(
+            db_path,
+            logger=logger,
+        )
+        if active_replica_leases:
+            return {
+                "status": "replica_snapshot_busy",
+                "active_replica_leases": active_replica_leases,
+            }
         if db_lock_path:
             db_lock = FileWriteLock(db_lock_path, stale_timeout_sec=10 * 60, logger=logger)
             if not db_lock.acquire(owner_id=owner_id, source="db_rotation_undo"):

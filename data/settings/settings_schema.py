@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA_VERSION_KEY = "schema_version"
 SEED_IMPORT_VERSION = "central_settings_v1"
 
@@ -492,6 +492,7 @@ def apply_schema(conn: sqlite3.Connection) -> None:
             image_blob BLOB,
             image_mime TEXT,
             image_hash TEXT,
+            image_size_bytes INTEGER,
             enabled INTEGER DEFAULT 1,
             active INTEGER DEFAULT 0,
             revision INTEGER DEFAULT 1,
@@ -530,6 +531,7 @@ def apply_schema(conn: sqlite3.Connection) -> None:
             image_blob BLOB,
             image_mime TEXT,
             image_hash TEXT,
+            image_size_bytes INTEGER,
             enabled INTEGER DEFAULT 1,
             sort_order INTEGER DEFAULT 0,
             revision INTEGER DEFAULT 1,
@@ -567,6 +569,8 @@ def apply_schema(conn: sqlite3.Connection) -> None:
         if sql:
             conn.execute(sql)
     _ensure_column(conn, "operblock_icons", "source", "TEXT DEFAULT 'seed'")
+    _ensure_column(conn, "ui_backgrounds", "image_size_bytes", "INTEGER")
+    _ensure_column(conn, "operblock_icons", "image_size_bytes", "INTEGER")
     now = now_text()
     conn.execute(
         """

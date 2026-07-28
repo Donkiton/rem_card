@@ -36,6 +36,7 @@ RECOVERY_LOCK_STALE_SEC = 10 * 60
 RECOVERY_LOCK_WAIT_SEC = 10 * 60
 DB_LOCK_WAIT_SEC = 60
 LOCK_HEARTBEAT_SEC = 5
+STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
 
 
 class StartupPolicyError(RuntimeError):
@@ -542,6 +543,32 @@ def _check_quick_with_retries(
         )
         time.sleep(2.0)
     return False, last_result, last_confirmed_corruption
+
+
+def _publish_startup_quickcheck_result(db_path: str) -> None:
+    try:
+        stat_result = os.stat(db_path)
+        os.environ[STARTUP_GUARD_QUICKCHECK_ENV] = json.dumps(
+            {
+                "result": "ok",
+                "pid": os.getpid(),
+                "checked_at_epoch": time.time(),
+                "db_path_norm": os.path.normcase(os.path.abspath(db_path)),
+                "size_bytes": int(stat_result.st_size),
+                "mtime_ns": int(
+                    getattr(
+                        stat_result,
+                        "st_mtime_ns",
+                        int(stat_result.st_mtime * 1_000_000_000),
+                    )
+                ),
+                "db_profile": NETWORK_SAFE_DB_PROFILE,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    except Exception:
+        os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
 
 
 def _apply_network_safe_profile(db_path: str) -> dict[str, Any]:
@@ -1135,6 +1162,9 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
                 role=role,
                 owner_id=owner_id,
             )
+            # DatabaseManager validates the exact same fingerprint and skips a
+            # second full quick_check in this process.
+            _publish_startup_quickcheck_result(db_path)
             write_audit_event(
                 "db_guard_ok",
                 baza_dir=baza_dir,

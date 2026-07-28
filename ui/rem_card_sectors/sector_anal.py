@@ -626,15 +626,14 @@ class SectorAnal(BaseSectorWidget):
         self._restore_header_state()
 
     def _apply_default_widths(self):
-        defaults = self._managed_default_header_payload()
-        widths = defaults.get("widths") if isinstance(defaults, dict) else None
-        self._set_column_widths(self._valid_widths(widths) or list(self.DEFAULT_COLUMN_WIDTHS))
-        visual_order = defaults.get("visual_order") if isinstance(defaults, dict) else None
-        self._apply_visual_order(visual_order)
+        # Таблица должна появляться сразу. Общие управляемые настройки читаются
+        # в фоне только если на этом ПК еще нет персонального состояния QSettings.
+        self._set_column_widths(list(self.DEFAULT_COLUMN_WIDTHS))
 
     def _restore_header_state(self):
         value = QSettings("MyHospital", "RemCard").value(self.HEADER_SETTINGS_KEY)
         if value is None:
+            self._load_managed_default_header_state_async()
             return
         restored = False
         self._restoring_header = True
@@ -646,6 +645,32 @@ class SectorAnal(BaseSectorWidget):
             self._restoring_header = False
         if restored:
             self._save_managed_default_header_state()
+        QTimer.singleShot(0, self._fit_columns_to_viewport)
+
+    def _load_managed_default_header_state_async(self) -> None:
+        current = getattr(self, "_columns_settings_worker", None)
+        if current is not None and current.isRunning():
+            return
+        worker = AsyncCallThread(self._read_lab_columns_settings, parent=self)
+        self._columns_settings_worker = worker
+        worker.succeeded.connect(self._apply_managed_default_header_payload)
+        worker.start()
+
+    def _apply_managed_default_header_payload(self, payload: object) -> None:
+        if QSettings("MyHospital", "RemCard").value(self.HEADER_SETTINGS_KEY) is not None:
+            return
+        active = payload.get("active") if isinstance(payload, dict) else None
+        role_payload = active.get(self.role_key) if isinstance(active, dict) else None
+        if not isinstance(role_payload, dict):
+            return
+        if role_payload.get("headers") != list(self.HEADERS):
+            return
+        widths = self._valid_widths(role_payload.get("widths"))
+        if widths is not None:
+            self._set_column_widths(widths)
+        self._apply_visual_order(
+            self._valid_visual_order(role_payload.get("visual_order"))
+        )
         QTimer.singleShot(0, self._fit_columns_to_viewport)
 
     def _on_section_resized(self, logical_index: int, old_size: int, new_size: int):
