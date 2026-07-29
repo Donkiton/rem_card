@@ -36,7 +36,7 @@ OPERBLOCK_SECTION_GROUPS = {
         "ob7": "7. Доля плановых",
         "ob8": "8. Среднее операций в день",
         "ob9": "9. Максимум операций за день",
-        "ob10": "10. Самая загруженная дата",
+        "ob10": "10. Самая загруженная дата и день недели",
         "ob11": "11. Ночные операции",
     },
     "Время и этапы": {
@@ -341,6 +341,27 @@ class OperBlockStatisticsReportBuilder:
             "Суббота",
             "Воскресенье",
         )[value.weekday()]
+
+    @staticmethod
+    def _top_weekday_label(counter: Counter | dict[str, int]) -> str:
+        if not counter:
+            return "н/д"
+        weekday_names = (
+            "Понедельник",
+            "Вторник",
+            "Среда",
+            "Четверг",
+            "Пятница",
+            "Суббота",
+            "Воскресенье",
+        )
+        max_count = max(int(count or 0) for count in counter.values())
+        busiest = [
+            name
+            for name in weekday_names
+            if int(counter.get(name, 0) or 0) == max_count
+        ]
+        return f"{', '.join(busiest)}: {max_count}"
 
     @staticmethod
     def _mkb_class(value: Any) -> str:
@@ -972,7 +993,6 @@ class OperBlockStatisticsReportBuilder:
         by_table = Counter(case["table_label"] for case in counted_cases)
         by_date = Counter(case["started_dt"].strftime("%d.%m.%Y") for case in counted_cases)
         by_weekday = Counter(self._weekday_name(case["started_dt"]) for case in counted_cases)
-        by_hour = Counter(case["started_dt"].strftime("%H:00") for case in counted_cases)
         night_cases = [
             case for case in counted_cases if case["started_dt"].hour >= 22 or case["started_dt"].hour < 6
         ]
@@ -1288,7 +1308,6 @@ class OperBlockStatisticsReportBuilder:
             "by_table": by_table,
             "by_date": by_date,
             "by_weekday": by_weekday,
-            "by_hour": by_hour,
             "night_count": len(night_cases),
             "room_durations": room_durations,
             "room_hours": sum(room_durations) / 60.0,
@@ -1361,8 +1380,11 @@ class OperBlockStatisticsReportBuilder:
         emergency = int(stats["by_table"].get("Экстренная", 0))
         planned = int(stats["by_table"].get("Плановая", 0))
         busiest_day = self._top_label(stats["by_date"])
-        busiest_weekday = self._top_label(stats["by_weekday"])  # noqa: F841 - требуется отдельное решение по составу отчета
-        busiest_hour = self._top_label(stats["by_hour"])  # noqa: F841 - требуется отдельное решение по составу отчета
+        busiest_weekday = self._top_weekday_label(stats["by_weekday"])
+        busiest_period = (
+            f"Дата: {escape(busiest_day)}<br/>"
+            f"День недели: {escape(busiest_weekday)}"
+        )
         avg_vitals = self._avg_or_none(stats["vitals_by_case"].values())
         mean_min_spo2 = self._avg_or_none(stats["min_spo2_values"])
         incomplete_stage = max(0, total - int(stats["full_stage_count"] or 0))
@@ -1382,7 +1404,11 @@ class OperBlockStatisticsReportBuilder:
                     ("7. Доля плановых", "Плановые / операции", self._fmt_pct(planned, total)),
                     ("8. Среднее операций в день", "Операции / дни периода", self._fmt_num(total / stats["period_days"] if stats["period_days"] else 0)),
                     ("9. Максимум операций за день", "Максимальное число стартов в одну дату", self._fmt_num(max(stats["by_date"].values(), default=0), 0)),
-                    ("10. Самая загруженная дата", "Дата с максимальным числом стартов", busiest_day),
+                    (
+                        "10. Самая загруженная дата и день недели",
+                        "Конкретная дата и день недели с максимальным числом стартов",
+                        busiest_period,
+                    ),
                     ("11. Ночные операции", "Начало операции с 22:00 до 05:59", f"{self._fmt_num(stats['night_count'], 0)} ({self._fmt_pct(stats['night_count'], total)})"),
                 ],
             ),
