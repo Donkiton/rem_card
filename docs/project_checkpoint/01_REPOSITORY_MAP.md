@@ -96,7 +96,6 @@ Gates, benchmarks, release helpers.
 - `architecture_safety_check.py`;
 - `regression_safety_checks.py`;
 - `code_quality_checks.py`;
-- `style_audit_check.py`;
 - `network_acceptance_runner.py`;
 - `multi_client_stress.py`;
 - `restore_drill.py`;
