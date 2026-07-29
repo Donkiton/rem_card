@@ -61,6 +61,8 @@ Implemented: lazy ChartWidget, chart snapshot dedupe, repeated snapshot apply de
 
 Actual style path: `settings/color_scheme/style_settings.json` (`ui/styles/theme_storage.py:23-24`). Built-in presets only `remcard_light` and `remcard_dark`; `gray_compact`/`high_contrast` not found. Corrupt JSON is quarantined as `*.broken` and defaults are saved.
 
+Централизация всех стилей отменена как обязательное правило. Локальные фиксированные HEX-цвета и `setStyleSheet` допустимы; не вводить обязательную проверку централизации без нового продуктового решения.
+
 Display settings path: `settings/display_settings/display_settings.json`; includes W1a/W1b enabled flags (`ui/shared/display_settings_storage.py`).
 
 Файлы фонов: загруженные пользователем изображения лежат в `<BAZA_DIR>\settings\backgrounds`, а не в `icon`. `ui/shared/background_settings.py` хранит в settings DB только безопасные имена файлов, сначала ищет общую папку, умеет переносить старые файлы из `icon` в `settings\backgrounds` и восстанавливать отсутствующие файлы из `ui_backgrounds.image_blob` после release snapshot/update. BLOB-страховка для фоновых файлов ограничена 32 МБ. `icon/fon.png` оставлять только как встроенный стандартный фон.
@@ -87,7 +89,6 @@ python -m compileall app data services ui scripts
 python scripts\architecture_safety_check.py
 python scripts\regression_safety_checks.py
 python scripts\code_quality_checks.py
-python scripts\style_audit_check.py
 python scripts\network_acceptance_runner.py --operations 24 --benchmark-clicks 3
 python scripts\validate_backups.py --max-files 20 --move-invalid
 python scripts\restore_drill.py --max-files 20 --cleanup-restored

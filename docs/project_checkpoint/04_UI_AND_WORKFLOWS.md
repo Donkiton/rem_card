@@ -80,8 +80,6 @@ Snapshot/read-model:
 - status: `build_status_snapshot()` (`services/remcard_facade.py:321-341`).
 - IVL: `build_ivl_snapshot()` (`services/remcard_facade.py:395-416`).
 
-Known risks: many legacy inline styles remain but tracked by `scripts/style_audit_check.py` baseline.
-
 ## 5. PatientForm
 
 Файл: `ui/patient_bed_management/patient_form.py`.
