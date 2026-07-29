@@ -241,16 +241,3 @@ def apply_infusion_spin_style(spin, state: str = "normal") -> None:
         }}
         """,
     )
-
-
-def apply_minigame_label_style(label, variant: str = "primary") -> None:
-    variant = str(variant or "primary")
-    if variant == "title":
-        qss = f"font-size: 18px; font-weight: bold; color: {_t('text.primary')};"
-    elif variant == "accent":
-        qss = f"font-weight: bold; color: {_t('sector.title_text')};"
-    elif variant == "secondary":
-        qss = f"color: {_t('text.secondary')};"
-    else:
-        qss = f"font-weight: bold; color: {_t('text.primary')};"
-    _set_style(label, qss)

@@ -41,8 +41,6 @@ SKIP_DIR_NAMES = {
 ALLOWED_F_BLOCKS = {
     ("app/main.py", "_main_impl"),
     ("app/sqlite_shared.py", "SQLiteWriteController.transaction"),
-    ("services/bars_auth_service.py", "BarsAuthService.list_department_patients"),
-    ("services/bars_auth_service.py", "BarsAuthService._extract_visible_patient_rows"),
     ("services/operblock_timeline.py", "timeline_event_row_to_medication_event"),
     ("data/dao/patient_status_dao.py", "PatientStatusDAO.change_status_with_outcome_details"),
     ("scripts/regression_safety_checks.py", "_check_orders_pending_states_before_commit"),

@@ -224,7 +224,7 @@ PatientForm:
 
 Workers:
 
-- `AsyncCallThread` — не `QThread`, а `QObject` + Python `threading.Thread`, сигналы `succeeded/failed/finished` (`ui/shared/async_call.py:7-82`). Используется для snapshot loads, W1a, beds, BARS.
+- `AsyncCallThread` — не `QThread`, а `QObject` + Python `threading.Thread`, сигналы `succeeded/failed/finished` (`ui/shared/async_call.py:7-82`). Используется для snapshot loads, W1a и beds.
 - `DataUpdateMonitor(QThread)` (`services/data_update_monitor.py:12-189`).
 - `PdfBuildWorker(QThread)` (`ui/shared/pdf_build_worker.py:10-29`).
 - `HtmlPdfWorker(QThread)` (`ui/shared/html_pdf_worker.py:9-40`).
@@ -266,7 +266,7 @@ Shutdown:
 
 `ThemeStorage` при повреждённом JSON quarantines файл как `*.broken` и создаёт defaults (`ui/styles/theme_storage.py:71-118`). `ThemeManager` применяет QSS к `QApplication`, tooltip palette и runtime container styles (`ui/styles/theme_manager.py:17-133`, `135-176`). QSS строится в `ui/styles/qss_builder.py:7-120`.
 
-Настройки отображения W1a/W1b/кнопок хранятся отдельно: `settings/display_settings/display_settings.json`, `DisplaySettingsStorage` (`ui/shared/display_settings_storage.py:14-18`, `83-120`, `277-321`). Мини-игры есть как bonus UI: `ui/shared/minigames/*`, сервисы `services/minigames/*`; пути scores/users идут в data root `minigames` (`services/minigames/minigame_paths.py:25-33`).
+Настройки отображения W1a/W1b/кнопок хранятся отдельно: `settings/display_settings/display_settings.json`, `DisplaySettingsStorage` (`ui/shared/display_settings_storage.py:14-18`, `83-120`, `277-321`).
 
 ## 14. Тесты, проверки, acceptance gates
 

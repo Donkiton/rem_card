@@ -15,7 +15,7 @@ PROJECT_ROOT = os.path.dirname(APP_ROOT)
 DICTIONARIES_TARGET = os.path.join("rem_card", "data", "dictionaries")
 SETTINGS_TARGET = os.path.join("rem_card", "settings")
 SETTINGS_RELEASE_TARGET = os.path.join("rem_card", "settings_release")
-PACKAGE_DIRS = ("app", "data", "services", "standalone", "ui")
+PACKAGE_DIRS = ("app", "data", "services", "ui")
 ALIAS_RESOURCE_DIRS = ("icon",)
 ENTRYPOINT_FILES = (
     "run_doctor.py",

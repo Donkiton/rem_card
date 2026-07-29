@@ -22,8 +22,6 @@ class Sector8Panel(QWidget):
     calc_clicked = Signal()
     electrolytes_calc_clicked = Signal()
     add_patient_clicked = Signal()
-    bonus_clicked = Signal()
-    bars_clicked = Signal()
     user_report_clicked = Signal()
     user_reports_clicked = Signal()
 
@@ -31,7 +29,6 @@ class Sector8Panel(QWidget):
         super().__init__(parent)
         self.icon_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "icon")
         self.icon_dir = os.path.normpath(self.icon_dir)
-        self._bars_auth_state = False
         self._reports_count_worker = None
         self._last_reports_count = 0
         self._is_closing = False
@@ -89,14 +86,6 @@ class Sector8Panel(QWidget):
         self.btn_add_patient.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_add_patient.clicked.connect(self.add_patient_clicked.emit)
 
-        # 1.3 Кнопка БАРС с индикатором авторизации
-        self.btn_bars = QPushButton(" БАРС", self)
-        self.btn_bars.setIconSize(QSize(18, 18))
-        self.btn_bars.setMinimumHeight(32)
-        self.btn_bars.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.btn_bars.clicked.connect(self.bars_clicked.emit)
-        self.set_bars_auth_state(False)
-
         # Кнопка Калькулятор
         self.btn_calc = QPushButton(" Калькулятор", self)
         calc_icon = os.path.join(self.icon_dir, "calc.png")
@@ -114,15 +103,6 @@ class Sector8Panel(QWidget):
         self.btn_electrolytes_calc.setMinimumHeight(32)
         self.btn_electrolytes_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_electrolytes_calc.clicked.connect(self.electrolytes_calc_clicked.emit)
-
-        # Кнопка Бонус
-        self.btn_bonus = QPushButton(" Бонус", self)
-        bonus_icon = os.path.join(self.icon_dir, "bonus.png")
-        self.btn_bonus.setIcon(QIcon(bonus_icon))
-        self.btn_bonus.setIconSize(QSize(18, 18))
-        self.btn_bonus.setMinimumHeight(32)
-        self.btn_bonus.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.btn_bonus.clicked.connect(self.bonus_clicked.emit)
 
         # 2. Кнопка Назад
         self.btn_back = QPushButton(" Назад", self)
@@ -156,10 +136,8 @@ class Sector8Panel(QWidget):
             "user_report": self.btn_user_report,
             "user_reports": self.btn_user_reports,
             "add_patient": self.btn_add_patient,
-            "bars": self.btn_bars,
             "calc": self.btn_calc,
             "electrolytes_calc": self.btn_electrolytes_calc,
-            "bonus": self.btn_bonus,
             "settings": self.btn_settings,
             "back": self.btn_back,
             "exit": self.btn_exit,
@@ -225,16 +203,6 @@ class Sector8Panel(QWidget):
         except Exception:
             pass
         button.setEnabled(enabled)
-
-    def set_bars_auth_state(self, authorized: bool):
-        self._bars_auth_state = bool(authorized)
-        button = getattr(self, "btn_bars", None)
-        if button is None:
-            return
-        icon_name = "done.png" if self._bars_auth_state else "notdone.png"
-        icon_path = os.path.join(self.icon_dir, icon_name)
-        button.setIcon(QIcon(icon_path))
-        button.setToolTip("БАРС: авторизация пройдена" if self._bars_auth_state else "БАРС: требуется авторизация")
 
     def refresh_user_reports_count(self):
         button = getattr(self, "btn_user_reports", None)
