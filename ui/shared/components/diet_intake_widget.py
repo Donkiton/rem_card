@@ -24,6 +24,7 @@ from rem_card.app.paths import get_icon_dir
 from rem_card.app.logger import logger
 from rem_card.services import persistent_snapshot_cache
 from rem_card.services.diet_service import schedule_items
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.styles.theme import COLOR_SECONDARY
 
@@ -77,6 +78,8 @@ class DietIntakeWidget(QWidget):
         self._sync_prn_pending = False
         self._destroyed = False
         self._write_pending = False
+        self._refresh_generation = 0
+        self._refresh_worker = None
         self._fact_undo_stack = []
         self._sync_prn_timer = QTimer(self)
         self._sync_prn_timer.setSingleShot(True)
@@ -417,12 +420,12 @@ class DietIntakeWidget(QWidget):
             logger.warning("DietIntakeWidget cache version check failed: %s", exc)
             return False
 
-    def _store_snapshot_cache(self):
+    def _store_snapshot_cache(self, *, version: int | None = None):
         key = self._cache_key()
         if key is None:
             return
         self._snapshot_cache[key] = {
-            "version": self._current_change_id(),
+            "version": self._current_change_id() if version is None else int(version),
             "templates": list(self._templates or []),
             "plan": self._plan,
             "events": list(self._events or []),
@@ -450,24 +453,113 @@ class DietIntakeWidget(QWidget):
                 if change.get("entity_name")
             }
         if payload.get("forced") or changed.intersection(DIET_ENTITIES):
-            self.refresh_data(force=True)
+            self.refresh_data(
+                force=True,
+                reload_templates="diet_templates" in changed,
+            )
 
-    def refresh_data(self, *, force: bool = False):
+    def refresh_data(
+        self,
+        *,
+        force: bool = False,
+        reload_templates: bool = False,
+    ):
         if not self.service or not self.admission_id or not self.shift_date:
             self._render_empty("Нет пациента")
             return
         if not force and self._apply_cached_snapshot_if_available() and self._is_cached_snapshot_current():
             return
-        try:
-            self._reload_templates_from_service()
-            self._plan = self.service.get_diet_plan(self.admission_id, self.shift_date)
-            self._events = self.service.get_oral_intake_events(self.admission_id, self.shift_date)
-        except Exception as exc:
-            logger.warning("DietIntakeWidget refresh failed: %s", exc, exc_info=True)
-            self._render_empty("Не удалось загрузить питание")
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        context_key = self._cache_key()
+        service = self.service
+        admission_id = int(self.admission_id)
+        shift_date = self.shift_date
+        should_reload_templates = bool(reload_templates or not self._templates)
+        cached_templates = list(self._templates)
+
+        def job():
+            templates = (
+                list(service.list_diet_templates() or [])
+                if should_reload_templates
+                else cached_templates
+            )
+            plan = service.get_diet_plan(admission_id, shift_date)
+            events = service.get_oral_intake_events(admission_id, shift_date)
+            version = 0
+            if hasattr(service, "get_latest_change_id"):
+                version = int(
+                    service.get_latest_change_id(
+                        admission_id=admission_id,
+                        include_global=True,
+                    )
+                    or 0
+                )
+            return {
+                "templates": templates,
+                "plan": plan,
+                "events": list(events or []),
+                "version": version,
+            }
+
+        worker = AsyncCallThread(job, parent=self)
+        self._refresh_worker = worker
+        worker.succeeded.connect(
+            lambda result, expected=generation, key=context_key: self._apply_refresh_result(
+                result,
+                expected_generation=expected,
+                context_key=key,
+            )
+        )
+        worker.failed.connect(
+            lambda exc, expected=generation, key=context_key: self._handle_refresh_failure(
+                exc,
+                expected_generation=expected,
+                context_key=key,
+            )
+        )
+        worker.start()
+
+    def _apply_refresh_result(
+        self,
+        result: object,
+        *,
+        expected_generation: int,
+        context_key,
+    ) -> None:
+        if (
+            self._destroyed
+            or expected_generation != self._refresh_generation
+            or context_key != self._cache_key()
+            or not isinstance(result, dict)
+        ):
             return
-        self._store_snapshot_cache()
+        self._templates = list(result.get("templates") or [])
+        self._templates_by_id = {
+            int(template.id): template
+            for template in self._templates
+            if getattr(template, "id", None) is not None
+        }
+        self._plan = result.get("plan")
+        self._events = list(result.get("events") or [])
+        self._store_snapshot_cache(version=int(result.get("version") or 0))
         self._render()
+
+    def _handle_refresh_failure(
+        self,
+        exc: object,
+        *,
+        expected_generation: int,
+        context_key,
+    ) -> None:
+        if (
+            self._destroyed
+            or expected_generation != self._refresh_generation
+            or context_key != self._cache_key()
+        ):
+            return
+        logger.warning("DietIntakeWidget refresh failed: %s", exc, exc_info=True)
+        self._render_empty("Не удалось загрузить питание")
 
     def _reload_templates_from_service(self):
         if not self.service:

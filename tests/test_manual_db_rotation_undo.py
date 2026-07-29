@@ -3,16 +3,19 @@ from __future__ import annotations
 import os
 import sqlite3
 import json
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from rem_card.app.db_lifecycle import (
     cancel_manual_rotation,
     find_active_rotation_role_locks,
     manual_rotation_undo_status,
+    maybe_rotate_database_if_due,
     rotate_database_now,
 )
 from rem_card.app.role_session_lock import RoleSessionLock
-from rem_card.app.sqlite_shared import configure_connection
+from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
 from rem_card.app.unified_db_schema import ensure_unified_schema
 
 
@@ -114,3 +117,53 @@ def test_only_exact_current_role_lock_nonce_is_ignored(tmp_path):
         ) == []
     finally:
         lock.release()
+
+
+def test_rotation_waits_for_active_replica_snapshot_lease(tmp_path):
+    archive_dir = tmp_path / "archiv"
+    db_path = archive_dir / "rao_journal.db"
+    _create_db(str(db_path))
+    lease_path = tmp_path / "locks" / "replica_snapshots" / "doctor.lock"
+    lease = FileWriteLock(
+        str(lease_path),
+        lease_duration_sec=30.0,
+        allow_expired_lease_cleanup=True,
+    )
+    assert lease.acquire("doctor-test", "local_replica_snapshot")
+    result = {}
+
+    thread = threading.Thread(
+        target=lambda: result.update(_rotate(str(db_path), str(archive_dir))),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while not (archive_dir / "db_rotation.lock").exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (archive_dir / "db_rotation.lock").exists()
+        time.sleep(0.15)
+        assert thread.is_alive()
+    finally:
+        lease.release()
+    thread.join(timeout=5.0)
+    assert result["status"] == "rotated"
+    assert not (archive_dir / "db_rotation.lock").exists()
+
+
+def test_not_due_auto_rotation_does_not_create_rotation_lock(tmp_path):
+    archive_dir = tmp_path / "archiv"
+    db_path = archive_dir / "rao_journal.db"
+    _create_db(str(db_path))
+    rotation_lock_path = archive_dir / "db_rotation.lock"
+
+    result = maybe_rotate_database_if_due(
+        db_path=str(db_path),
+        archive_dir=str(archive_dir),
+        rotation_lock_path=str(rotation_lock_path),
+        max_age_days=180,
+        force=False,
+    )
+
+    assert result["status"] == "not_due"
+    assert not rotation_lock_path.exists()

@@ -843,6 +843,12 @@ def restore_from_best_available_source(
 
 
 class FileWriteLock:
+    _AUDITED_SOURCES = {
+        "db_rotation",
+        "db_rotation_undo",
+        "local_replica_snapshot",
+    }
+
     def __init__(
         self,
         lock_path: str,
@@ -852,6 +858,9 @@ class FileWriteLock:
         lease_duration_sec: float | None = None,
         allow_expired_lease_cleanup: bool = False,
         allow_legacy_replica_cleanup: bool = False,
+        allow_malformed_cleanup: bool = False,
+        malformed_grace_sec: float = 5.0,
+        malformed_quarantine_dir: str | None = None,
     ):
         self.lock_path = lock_path
         self.stale_timeout_sec = stale_timeout_sec
@@ -863,6 +872,13 @@ class FileWriteLock:
         )
         self.allow_expired_lease_cleanup = bool(allow_expired_lease_cleanup)
         self.allow_legacy_replica_cleanup = bool(allow_legacy_replica_cleanup)
+        self.allow_malformed_cleanup = bool(allow_malformed_cleanup)
+        self.malformed_grace_sec = max(0.25, float(malformed_grace_sec))
+        self.malformed_quarantine_dir = (
+            os.path.abspath(os.path.normpath(malformed_quarantine_dir))
+            if malformed_quarantine_dir
+            else ""
+        )
         self._owner_token = None
         self._owner_thread_id = None
         self._reentrancy = 0
@@ -931,9 +947,17 @@ class FileWriteLock:
             )
         except json.JSONDecodeError as exc:
             content_hash = ""
+            size = None
+            mtime_ns = None
+            inode = None
             try:
+                stat_result = os.stat(self.lock_path)
                 with open(self.lock_path, "rb") as fh:
-                    content_hash = hashlib.sha256(fh.read()).hexdigest()
+                    content = fh.read()
+                content_hash = hashlib.sha256(content).hexdigest()
+                size = int(stat_result.st_size)
+                mtime_ns = getattr(stat_result, "st_mtime_ns", None)
+                inode = getattr(stat_result, "st_ino", None)
             except Exception:
                 pass
             return _LockFileSnapshot(
@@ -941,6 +965,9 @@ class FileWriteLock:
                 readable=False,
                 reason="parse_error",
                 content_hash=content_hash,
+                size=size,
+                mtime_ns=mtime_ns,
+                inode=inode,
                 error_class=type(exc).__name__,
                 error_message_sanitized=_sanitize_sqlite_error_message(exc),
             )
@@ -960,6 +987,19 @@ class FileWriteLock:
             and right.exists
             and left.readable
             and right.readable
+            and left.content_hash == right.content_hash
+            and left.size == right.size
+            and left.mtime_ns == right.mtime_ns
+            and left.inode == right.inode
+        )
+
+    @staticmethod
+    def _same_file_snapshot(left: _LockFileSnapshot, right: _LockFileSnapshot) -> bool:
+        return (
+            left.exists
+            and right.exists
+            and left.readable == right.readable
+            and left.reason == right.reason
             and left.content_hash == right.content_hash
             and left.size == right.size
             and left.mtime_ns == right.mtime_ns
@@ -1103,6 +1143,92 @@ class FileWriteLock:
         self.logger.warning("Removed local dead-PID db lock at %s (pid=%s host=%s)", self.lock_path, holder_pid, holder_host)
         return True
 
+    def _malformed_quarantine_path(self, snapshot: _LockFileSnapshot) -> str:
+        target_dir = self.malformed_quarantine_dir or os.path.dirname(self.lock_path)
+        os.makedirs(target_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        digest = str(snapshot.content_hash or "empty")[:12]
+        base_name = os.path.basename(self.lock_path)
+        return os.path.join(
+            target_dir,
+            f"{base_name}.{stamp}.{digest}.{uuid.uuid4().hex[:8]}.malformed",
+        )
+
+    def _cleanup_malformed_lock(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self.allow_malformed_cleanup:
+            return False
+        started = time.perf_counter()
+        snapshot = self._read_lock_snapshot()
+        if not snapshot.exists or snapshot.readable or snapshot.reason != "parse_error":
+            return False
+        try:
+            stat_result = os.stat(self.lock_path)
+            age_sec = max(0.0, time.time() - float(stat_result.st_mtime))
+        except OSError:
+            return False
+        if age_sec < self.malformed_grace_sec:
+            self._record_cleanup_skipped(
+                "malformed_grace_period",
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+            )
+            return False
+
+        # A second identical observation prevents cleanup while another process
+        # is still publishing the JSON payload over SMB.
+        time.sleep(0.03)
+        latest = self._read_lock_snapshot()
+        if not self._same_file_snapshot(snapshot, latest):
+            self._record_cleanup_skipped(
+                "changed_during_malformed_cleanup",
+                latest if latest.exists else snapshot,
+                source=source,
+                metric_context=metric_context,
+            )
+            return False
+
+        quarantine_path = self._malformed_quarantine_path(snapshot)
+        try:
+            os.replace(self.lock_path, quarantine_path)
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            self._record_cleanup_failed(
+                "malformed_quarantine_failed",
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+                exc=exc,
+            )
+            return False
+
+        record_metric(
+            "sqlite_write_lock_malformed_quarantined",
+            1,
+            reason=snapshot.reason,
+            quarantine_path=quarantine_path,
+            lock_content_hash=snapshot.content_hash,
+            lock_size=snapshot.size,
+            elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
+            **self._cleanup_metric_fields(
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+            ),
+        )
+        self.logger.warning(
+            "Quarantined malformed db lock %s -> %s",
+            self.lock_path,
+            quarantine_path,
+        )
+        return True
+
     def _cleanup_expired_replica_lease(
         self,
         *,
@@ -1116,7 +1242,10 @@ class FileWriteLock:
         if not snapshot.exists or not snapshot.readable:
             return False
         payload = dict(snapshot.payload or {})
-        if str(payload.get("source") or "") != "local_replica_sync":
+        if str(payload.get("source") or "") not in {
+            "local_replica_sync",
+            "local_replica_snapshot",
+        }:
             return False
 
         now = time.time()
@@ -1178,6 +1307,39 @@ class FileWriteLock:
         )
         return True
 
+    def cleanup_abandoned(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+    ) -> bool:
+        """Safely recover only locks with independently provable abandonment."""
+        if self._cleanup_malformed_lock(
+            source=source,
+            metric_context=metric_context,
+        ):
+            return True
+        if self._cleanup_local_dead_pid_lock(
+            source=source,
+            metric_context=metric_context,
+        ):
+            return True
+        return self._cleanup_expired_replica_lease(
+            source=source,
+            metric_context=metric_context,
+        )
+
+    def cleanup_malformed(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+    ) -> bool:
+        return self._cleanup_malformed_lock(
+            source=source,
+            metric_context=metric_context,
+        )
+
     def _is_stale(self, payload: Optional[dict[str, Any]]) -> bool:
         if payload is _LOCK_READ_UNAVAILABLE:
             # Ошибка чтения lock-файла не означает "stale".
@@ -1215,21 +1377,44 @@ class FileWriteLock:
         raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
 
         while True:
+            fd = None
+            created_here = False
             try:
                 fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                created_here = True
                 try:
-                    os.write(fd, raw)
+                    written = 0
+                    while written < len(raw):
+                        chunk_size = os.write(fd, raw[written:])
+                        if chunk_size <= 0:
+                            raise OSError("lock payload write returned no progress")
+                        written += int(chunk_size)
+                    os.fsync(fd)
                 finally:
                     os.close(fd)
+                    fd = None
                 with self._mutex:
                     self._owner_token = payload
                     self._owner_thread_id = thread_id
                     self._reentrancy = 1
+                if source in self._AUDITED_SOURCES:
+                    record_metric(
+                        "sqlite_write_lock_acquired",
+                        1,
+                        lock_path=self.lock_path,
+                        operation_name=source,
+                        source=source,
+                        lock_token=str(payload.get("lock_token") or ""),
+                    )
                 return True
             except FileExistsError:
                 existing = self._try_read_payload()
                 if existing is _LOCK_READ_UNAVAILABLE:
-                    self._cleanup_local_dead_pid_lock(source=source, metric_context=metric_context)
+                    if self.cleanup_abandoned(
+                        source=source,
+                        metric_context=metric_context,
+                    ):
+                        continue
                     return False
                 if self._is_self_orphan(existing, owner_id, thread_id):
                     try:
@@ -1249,6 +1434,38 @@ class FileWriteLock:
                     continue
                 if self._is_stale(existing):
                     self.logger.warning("Observed stale db lock at %s; age-only cleanup is disabled", self.lock_path)
+                return False
+            except Exception as exc:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                if created_here:
+                    try:
+                        os.remove(self.lock_path)
+                    except FileNotFoundError:
+                        pass
+                    except Exception as cleanup_exc:
+                        self.logger.warning(
+                            "Failed to remove incomplete db lock %s after create error: %s",
+                            self.lock_path,
+                            cleanup_exc,
+                        )
+                record_metric(
+                    "sqlite_write_lock_create_failed",
+                    1,
+                    lock_path=self.lock_path,
+                    operation_name=source,
+                    source=source,
+                    error_class=type(exc).__name__,
+                    error_message_sanitized=_sanitize_sqlite_error_message(exc),
+                )
+                self.logger.warning(
+                    "Failed to create complete db lock %s: %s",
+                    self.lock_path,
+                    exc,
+                )
                 return False
 
     def refresh(self, *, metadata: Optional[dict[str, Any]] = None) -> bool:
@@ -1342,6 +1559,15 @@ class FileWriteLock:
                         )
                         return False
                     os.remove(self.lock_path)
+                    released_source = str((owner_token or {}).get("source") or "")
+                    if released_source in self._AUDITED_SOURCES:
+                        record_metric(
+                            "sqlite_write_lock_released",
+                            1,
+                            lock_path=self.lock_path,
+                            source=released_source,
+                            lock_token=expected_token,
+                        )
                     return True
                 except FileNotFoundError:
                     return True

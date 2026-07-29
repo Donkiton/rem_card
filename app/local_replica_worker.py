@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import re
 import socket
 import sqlite3
 import threading
 import time
+import uuid
 from typing import Any
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
@@ -37,6 +39,21 @@ class LocalReplicaRotationBusy(LocalReplicaWorkerError):
             "Обновление локальной реплики отложено: выполняется другая операция "
             "снимка или ротации базы."
         )
+
+
+def replica_snapshot_lease_dir(central_db_path: str) -> str:
+    baza_dir = os.path.dirname(os.path.dirname(os.path.abspath(central_db_path)))
+    return os.path.join(baza_dir, "locks", "replica_snapshots")
+
+
+def malformed_lock_quarantine_dir(central_db_path: str) -> str:
+    baza_dir = os.path.dirname(os.path.dirname(os.path.abspath(central_db_path)))
+    return os.path.join(baza_dir, "quarantine", "locks")
+
+
+def _safe_lease_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "")).strip("._")
+    return cleaned[:80] or "client"
 
 
 def _remove_with_sidecars(db_path: str) -> None:
@@ -214,6 +231,8 @@ class LocalReplicaWorkerClient:
         *,
         central_db_path: str,
         rotation_lock_path: str | None = None,
+        snapshot_lease_dir: str | None = None,
+        snapshot_lease_id: str | None = None,
         timeout_sec: float = DEFAULT_REPLICA_SYNC_TIMEOUT_SEC,
     ):
         self.central_db_path = os.path.abspath(central_db_path)
@@ -221,6 +240,19 @@ class LocalReplicaWorkerClient:
             os.path.abspath(rotation_lock_path)
             if rotation_lock_path
             else ""
+        )
+        self.snapshot_lease_dir = os.path.abspath(
+            snapshot_lease_dir or replica_snapshot_lease_dir(self.central_db_path)
+        )
+        lease_id = snapshot_lease_id or (
+            f"{socket.gethostname()}_{os.getpid()}_{uuid.uuid4().hex[:12]}"
+        )
+        self.snapshot_lease_path = os.path.join(
+            self.snapshot_lease_dir,
+            f"{_safe_lease_component(lease_id)}.lock",
+        )
+        self.malformed_quarantine_dir = malformed_lock_quarantine_dir(
+            self.central_db_path
         )
         self.timeout_sec = max(0.2, min(30.0, float(timeout_sec)))
         self._mutex = threading.Lock()
@@ -288,30 +320,55 @@ class LocalReplicaWorkerClient:
         )
         deadline = time.monotonic() + effective_timeout
         with self._mutex:
-            rotation_lock = (
+            rotation_gate = (
                 FileWriteLock(
                     self.rotation_lock_path,
                     stale_timeout_sec=60.0,
-                    lease_duration_sec=max(15.0, effective_timeout * 2.0 + 3.0),
                     allow_expired_lease_cleanup=True,
                     allow_legacy_replica_cleanup=True,
+                    allow_malformed_cleanup=True,
+                    malformed_quarantine_dir=self.malformed_quarantine_dir,
                 )
                 if self.rotation_lock_path
                 else None
             )
-            rotation_lock_acquired = False
+            snapshot_lease = FileWriteLock(
+                self.snapshot_lease_path,
+                stale_timeout_sec=60.0,
+                lease_duration_sec=max(15.0, effective_timeout * 2.0 + 3.0),
+                allow_expired_lease_cleanup=True,
+                allow_legacy_replica_cleanup=True,
+                allow_malformed_cleanup=True,
+                malformed_quarantine_dir=self.malformed_quarantine_dir,
+            )
+            snapshot_lease_acquired = False
             try:
-                if rotation_lock is not None:
-                    owner_id = (
-                        f"{socket.gethostname()}:{os.getpid()}:"
-                        "local_replica_sync"
+                if rotation_gate is not None and os.path.exists(
+                    self.rotation_lock_path
+                ):
+                    rotation_gate.cleanup_abandoned(
+                        source="local_replica_rotation_gate",
                     )
-                    if not rotation_lock.acquire(
-                        owner_id=owner_id,
-                        source="local_replica_sync",
-                    ):
+                    if os.path.exists(self.rotation_lock_path):
                         raise LocalReplicaRotationBusy()
-                    rotation_lock_acquired = True
+
+                owner_id = (
+                    f"{socket.gethostname()}:{os.getpid()}:"
+                    "local_replica_snapshot"
+                )
+                if not snapshot_lease.acquire(
+                    owner_id=owner_id,
+                    source="local_replica_snapshot",
+                ):
+                    raise LocalReplicaRotationBusy()
+                snapshot_lease_acquired = True
+
+                # Close the race where rotation starts after the first check but
+                # before this client publishes its reader lease.
+                if rotation_gate is not None and os.path.exists(
+                    self.rotation_lock_path
+                ):
+                    raise LocalReplicaRotationBusy()
                 self._ensure_started()
                 self._pipe.send(
                     {
@@ -337,8 +394,8 @@ class LocalReplicaWorkerClient:
                     f"Процесс локальной реплики завершился без результата: {exc}"
                 ) from exc
             finally:
-                if rotation_lock_acquired and rotation_lock is not None:
-                    rotation_lock.release()
+                if snapshot_lease_acquired:
+                    snapshot_lease.release()
 
             if not response.get("ok"):
                 _remove_with_sidecars(temp_db_path)

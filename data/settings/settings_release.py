@@ -618,21 +618,12 @@ def _background_file_name_from_row(row: dict[str, Any]) -> str:
     return _safe_file_name(value.get("file"))
 
 
-def _icon_asset_file_name_from_row(row: dict[str, Any]) -> str:
-    value = _row_value_payload(row)
-    return _safe_file_name(value.get("asset_file"))
-
-
 def _icon_asset_name_for_blob(row: dict[str, Any], blob: bytes) -> str:
-    existing = _icon_asset_file_name_from_row(row)
-    if existing:
-        return existing
-    icon_key = _safe_media_name_part(row.get("icon_key"))
-    image_hash = str(row.get("image_hash") or hashlib.sha256(blob).hexdigest())
+    image_hash = hashlib.sha256(blob).hexdigest()
     extension = mimetypes.guess_extension(str(row.get("image_mime") or "")) or ".bin"
     if extension == ".jpe":
         extension = ".jpg"
-    return f"{icon_key}_{image_hash[:16]}{extension.lower()}"
+    return f"icon_{image_hash}{extension.lower()}"
 
 
 def _copy_blob_atomic(blob: bytes, target_path: str) -> None:
@@ -665,13 +656,34 @@ def _prepare_row_media_for_apply(
             prepared[column] = _decode_blob_file_ref(value, snapshot_dir)
 
     if table_name == "ui_backgrounds" and isinstance(prepared.get("image_blob"), (bytes, bytearray)):
-        file_name = _background_file_name_from_row(prepared)
+        blob = bytes(prepared["image_blob"])
+        original_file_name = _background_file_name_from_row(prepared)
+        extension = os.path.splitext(original_file_name)[1].lower()
+        if not extension:
+            extension = mimetypes.guess_extension(
+                str(prepared.get("image_mime") or "")
+            ) or ".bin"
+        image_hash = hashlib.sha256(blob).hexdigest()
+        file_name = f"bg_{image_hash}{extension}"
         if file_name:
             target_path = os.path.join(db.settings_dir, SETTINGS_BACKGROUNDS_DIR_NAME, file_name)
-            _copy_blob_atomic(bytes(prepared["image_blob"]), target_path)
+            _copy_blob_atomic(blob, target_path)
+            value = _row_value_payload(prepared)
+            value["file"] = file_name
+            value["image_hash"] = image_hash
+            value["image_size_bytes"] = len(blob)
+            value["image_mime"] = (
+                str(prepared.get("image_mime") or "")
+                or mimetypes.guess_type(file_name)[0]
+                or "application/octet-stream"
+            )
+            prepared["value_json"] = _stable_json(value)
+            prepared["image_hash"] = image_hash
+            prepared["image_size_bytes"] = len(blob)
             prepared["image_blob"] = None
     elif table_name == "operblock_icons" and isinstance(prepared.get("image_blob"), (bytes, bytearray)):
         blob = bytes(prepared["image_blob"])
+        image_hash = hashlib.sha256(blob).hexdigest()
         if str(prepared.get("source") or "") != "seed":
             file_name = _icon_asset_name_for_blob(prepared, blob)
             target_path = os.path.join(db.settings_dir, SETTINGS_ICON_ASSETS_DIR_NAME, file_name)
@@ -679,8 +691,63 @@ def _prepare_row_media_for_apply(
             value = _row_value_payload(prepared)
             value["asset_file"] = file_name
             prepared["value_json"] = _stable_json(value)
+        prepared["image_hash"] = image_hash
+        prepared["image_size_bytes"] = len(blob)
         prepared["image_blob"] = None
     return prepared
+
+
+def _sync_background_app_setting_media(cursor: sqlite3.Cursor) -> bool:
+    app_row = cursor.execute(
+        "SELECT value_json FROM app_settings "
+        "WHERE scope = 'shared' AND key = 'background_settings'"
+    ).fetchone()
+    if not app_row:
+        return False
+    try:
+        payload = json.loads(str(app_row["value_json"] or "{}"))
+    except Exception:
+        return False
+    backgrounds = payload.get("backgrounds") if isinstance(payload, dict) else None
+    if not isinstance(backgrounds, list):
+        return False
+    rows = cursor.execute(
+        "SELECT background_key, value_json, image_mime, image_hash, image_size_bytes "
+        "FROM ui_backgrounds WHERE enabled = 1"
+    ).fetchall()
+    media_by_key: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        value = _row_value_payload(row)
+        file_name = _safe_file_name(value.get("file"))
+        if not file_name:
+            continue
+        media_by_key[str(row["background_key"] or "")] = {
+            "file": file_name,
+            "image_hash": str(row["image_hash"] or value.get("image_hash") or ""),
+            "image_size_bytes": int(
+                row["image_size_bytes"] or value.get("image_size_bytes") or 0
+            ),
+            "image_mime": str(row["image_mime"] or value.get("image_mime") or ""),
+        }
+    changed = False
+    for entry in backgrounds:
+        if not isinstance(entry, dict):
+            continue
+        media = media_by_key.get(str(entry.get("id") or ""))
+        if not media:
+            continue
+        for key, value in media.items():
+            if value and entry.get(key) != value:
+                entry[key] = value
+                changed = True
+    if not changed:
+        return False
+    cursor.execute(
+        "UPDATE app_settings SET value_json = ?, revision = revision + 1, updated_at = ? "
+        "WHERE scope = 'shared' AND key = 'background_settings'",
+        (_stable_json(payload), now_text()),
+    )
+    return True
 
 
 def _upsert_release_row(
@@ -832,6 +899,12 @@ def apply_settings_release_snapshot(
                 elif status == "preserved":
                     report["preserved_rows"] += 1
             report["tables"][table.name] = table_report
+
+        if (
+            not preserve_existing_background_rows
+            and _sync_background_app_setting_media(cursor)
+        ):
+            changed_catalogs.add("background_settings")
 
         now = now_text()
         for key, value in (

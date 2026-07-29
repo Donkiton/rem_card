@@ -45,6 +45,30 @@ def _write_settings_lock(lock_path: str, *, source: str = "settings_test_holder"
 
 
 class SettingsStartupWritesTest(unittest.TestCase):
+    def test_app_settings_are_served_from_memory_after_startup_prime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SettingsDatabase(baza_dir=str(Path(tmp) / "baza"))
+            service = SettingsService(db)
+            service.ensure_ready()
+            expected = service.get_app_setting(
+                "shared",
+                "background_settings",
+                default={},
+            )
+
+            with patch.object(
+                db,
+                "read_connection",
+                side_effect=AssertionError("unexpected synchronous settings read"),
+            ):
+                cached = service.get_app_setting(
+                    "shared",
+                    "background_settings",
+                    default={},
+                )
+
+            self.assertEqual(cached, expected)
+
     def test_operblock_startup_never_repairs_backgrounds(self):
         for role in ("operblock", "operblock_planned", "operblock_emergency"):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as tmp:

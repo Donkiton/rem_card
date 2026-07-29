@@ -398,6 +398,7 @@ class DbRotationDialog(BaseStyledDialog):
             "invalid_state": "Данные об отмене ручной ротации повреждены.",
             "rotation_lock_busy": "Ротация или другая операция с БД уже выполняется.",
             "db_lock_busy": "БД сейчас занята другой операцией.",
+            "replica_snapshot_busy": "Не завершился фоновый снимок локальной реплики. Повторите действие через несколько секунд.",
             "undo_validation_failed": "Отмена невозможна: одна из БД не прошла проверку доступности.",
             "deferred_active_role_lock": "Отмена невозможна: есть активная рабочая сессия.",
             "deferred_active_emergency_session": "Отмена невозможна: есть активная аварийная сессия медсестры.",
@@ -556,6 +557,8 @@ class DbRotationDialog(BaseStyledDialog):
             return "Ротация невозможна: БД сейчас занята другой операцией."
         if status == "rotation_lock_busy":
             return "Ротация уже выполняется на другом рабочем месте."
+        if status == "replica_snapshot_busy":
+            return "Ротация отложена: не завершился фоновый снимок локальной реплики. Повторите действие через несколько секунд."
         if status == "new_db_failed":
             if result.get("current_preserved"):
                 return (

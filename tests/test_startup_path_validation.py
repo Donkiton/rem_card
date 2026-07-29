@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import json
+import sqlite3
 import sys
+import tempfile
 import unittest
 import logging
 from datetime import datetime
@@ -16,6 +19,7 @@ if str(PACKAGE_PARENT) not in sys.path:
 
 from rem_card.app import logger as app_logger  # noqa: E402
 from rem_card.app import paths, runtime_paths, startup_db_guard  # noqa: E402
+from rem_card.data.dao.db_manager import DatabaseManager  # noqa: E402
 
 
 class StartupPathValidationTest(unittest.TestCase):
@@ -81,7 +85,34 @@ class StartupPathValidationTest(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 startup_db_guard._ensure_guard_dirs(root)
 
-        self.assertFalse(runtime_paths.startup_baza_paths_recently_validated(root, [required]))
+            self.assertFalse(runtime_paths.startup_baza_paths_recently_validated(root, [required]))
+
+    def test_guard_hands_exact_quickcheck_fingerprint_to_database_manager(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "journal.db")
+            connection = sqlite3.connect(db_path)
+            connection.execute("CREATE TABLE test_value(id INTEGER PRIMARY KEY)")
+            connection.commit()
+            connection.close()
+            env_key = startup_db_guard.STARTUP_GUARD_QUICKCHECK_ENV
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(env_key, None)
+                startup_db_guard._publish_startup_quickcheck_result(db_path)
+                payload = json.loads(os.environ[env_key])
+                manager = DatabaseManager.__new__(DatabaseManager)
+                matched, age_sec = DatabaseManager._startup_guard_quickcheck_matches(
+                    manager,
+                    {
+                        "db_path_norm": payload["db_path_norm"],
+                        "size_bytes": payload["size_bytes"],
+                        "mtime_ns": payload["mtime_ns"],
+                        "db_profile": payload["db_profile"],
+                    },
+                )
+                os.environ.pop(env_key, None)
+
+            self.assertTrue(matched)
+            self.assertLess(float(age_sec or 0.0), 1.0)
 
     def test_ensure_directories_skips_only_shared_sweep_and_always_creates_local_dirs(self):
         with (

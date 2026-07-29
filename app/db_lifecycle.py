@@ -9,7 +9,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 
 from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.sqlite_shared import FileWriteLock, backup_connection, configure_connection, run_quick_check
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
 DB_CYCLE_META_KEY = "db_cycle_started_at"
@@ -17,6 +19,7 @@ ROTATION_ROLE_LOCK_STALE_TIMEOUT_SEC = 75.0
 ROTATION_BLOCKING_EMERGENCY_STATUSES = {"active", "merge_pending", "merging", "merge_failed"}
 MANUAL_ROTATION_UNDO_STATE_FILE = "manual_rotation_undo.json"
 MANUAL_ROTATION_UNDO_WINDOW = timedelta(hours=24)
+REPLICA_SNAPSHOT_WAIT_SEC = 20.0
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -27,7 +30,13 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     return bool(row)
 
 
-def _read_cycle_started_at(conn: sqlite3.Connection, db_path: str, logger: logging.Logger) -> int:
+def _read_cycle_started_at(
+    conn: sqlite3.Connection,
+    db_path: str,
+    logger: logging.Logger,
+    *,
+    initialize_missing: bool = True,
+) -> int:
     fallback_ts = int(os.path.getmtime(db_path))
 
     if not _table_exists(conn, "meta"):
@@ -40,15 +49,110 @@ def _read_cycle_started_at(conn: sqlite3.Connection, db_path: str, logger: loggi
         except Exception:
             pass
 
-    try:
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
-            (DB_CYCLE_META_KEY, fallback_ts),
-        )
-    except Exception as exc:
-        logger.warning("Failed to initialize %s meta key: %s", DB_CYCLE_META_KEY, exc)
+    if initialize_missing:
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                (DB_CYCLE_META_KEY, fallback_ts),
+            )
+        except Exception as exc:
+            logger.warning("Failed to initialize %s meta key: %s", DB_CYCLE_META_KEY, exc)
 
     return fallback_ts
+
+
+def _baza_dir_for_db(db_path: str) -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(db_path)))
+
+
+def _replica_snapshot_lease_dir(db_path: str) -> str:
+    return os.path.join(_baza_dir_for_db(db_path), "locks", "replica_snapshots")
+
+
+def _malformed_lock_quarantine_dir(db_path: str) -> str:
+    return os.path.join(_baza_dir_for_db(db_path), "quarantine", "locks")
+
+
+def _rotation_age_preflight(
+    db_path: str,
+    *,
+    max_age_days: int,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    conn = None
+    try:
+        conn = sqlite3.connect(
+            build_sqlite_file_uri(db_path, mode="ro"),
+            uri=True,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=1.0,
+        )
+        configure_connection(conn, readonly=True)
+        cycle_started_at = _read_cycle_started_at(
+            conn,
+            db_path,
+            logger,
+            initialize_missing=False,
+        )
+        age_days = max(0, int(time.time()) - int(cycle_started_at)) / 86400.0
+        return {
+            "ok": True,
+            "age_days": age_days,
+            "due": age_days >= int(max_age_days),
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _active_replica_snapshot_leases(
+    db_path: str,
+    *,
+    logger: logging.Logger,
+) -> list[dict[str, Any]]:
+    lease_dir = _replica_snapshot_lease_dir(db_path)
+    if not os.path.isdir(lease_dir):
+        return []
+    active: list[dict[str, Any]] = []
+    quarantine_dir = _malformed_lock_quarantine_dir(db_path)
+    for name in sorted(os.listdir(lease_dir)):
+        if not name.lower().endswith(".lock"):
+            continue
+        path = os.path.join(lease_dir, name)
+        lease = FileWriteLock(
+            path,
+            stale_timeout_sec=60.0,
+            logger=logger,
+            allow_expired_lease_cleanup=True,
+            allow_legacy_replica_cleanup=True,
+            allow_malformed_cleanup=True,
+            malformed_quarantine_dir=quarantine_dir,
+        )
+        if lease.cleanup_abandoned(source="db_rotation_replica_wait"):
+            continue
+        if not os.path.exists(path):
+            continue
+        active.append({"path": path, "name": name})
+    return active
+
+
+def _wait_for_replica_snapshot_leases(
+    db_path: str,
+    *,
+    logger: logging.Logger,
+    timeout_sec: float = REPLICA_SNAPSHOT_WAIT_SEC,
+) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    while True:
+        active = _active_replica_snapshot_leases(db_path, logger=logger)
+        if not active:
+            return []
+        if time.monotonic() >= deadline:
+            return active
+        time.sleep(0.1)
 
 
 def _count_active_beds(conn: sqlite3.Connection) -> int:
@@ -446,6 +550,476 @@ def rotate_database_now(
     )
 
 
+def _rotation_request_preflight(
+    *,
+    db_path: str,
+    runtime_mode: str | None,
+    max_age_days: int,
+    force: bool,
+    logger: logging.Logger,
+) -> dict[str, Any] | None:
+    if not _runtime_allows_rotation(runtime_mode):
+        return {"status": "rotation_forbidden_runtime", "runtime_mode": str(runtime_mode or "")}
+    if not os.path.exists(db_path):
+        return {"status": "missing"}
+    if force:
+        return None
+    preflight = _rotation_age_preflight(
+        db_path,
+        max_age_days=max_age_days,
+        logger=logger,
+    )
+    if not preflight.get("ok"):
+        return {
+            "status": "check_failed",
+            "error": str(preflight.get("error") or "rotation age preflight failed"),
+        }
+    if preflight.get("due"):
+        return None
+    return {
+        "status": "not_due",
+        "age_days": round(float(preflight.get("age_days") or 0.0), 2),
+    }
+
+
+def _rotation_source_eligibility(
+    conn: sqlite3.Connection,
+    *,
+    db_path: str,
+    max_age_days: int,
+    force: bool,
+    blocked_role_lock_paths: Any,
+    blocked_emergency_roots: Any,
+    ignored_lock_nonces: Mapping[str, str] | None,
+    logger: logging.Logger,
+) -> tuple[dict[str, Any] | None, float]:
+    cycle_started_at = _read_cycle_started_at(conn, db_path, logger)
+    age_seconds = max(0, int(time.time()) - int(cycle_started_at))
+    age_days = age_seconds / 86400.0
+    if not force and age_days < max_age_days:
+        return {"status": "not_due", "age_days": round(age_days, 2)}, age_days
+
+    active_role_locks = find_active_rotation_role_locks(
+        blocked_role_lock_paths,
+        ignored_lock_nonces=ignored_lock_nonces,
+        logger=logger,
+    )
+    if active_role_locks:
+        logger.info(
+            "DB rotation is due (age=%.1f days), but blocking role lock(s) are active: %s",
+            age_days,
+            active_role_locks,
+        )
+        return {
+            "status": "deferred_active_role_lock",
+            "age_days": round(age_days, 2),
+            "blocked_roles": active_role_locks,
+        }, age_days
+
+    active_emergency_sessions = find_active_emergency_nurse_sessions(
+        blocked_emergency_roots,
+        logger=logger,
+    )
+    if active_emergency_sessions:
+        logger.info(
+            "DB rotation is due (age=%.1f days), but emergency nurse session(s) are active: %s",
+            age_days,
+            active_emergency_sessions,
+        )
+        return {
+            "status": "deferred_active_emergency_session",
+            "age_days": round(age_days, 2),
+            "blocked_emergency_sessions": active_emergency_sessions,
+        }, age_days
+
+    active_beds = _count_active_beds(conn)
+    if active_beds > 0:
+        logger.info(
+            "DB rotation is due (age=%.1f days), but %s occupied bed(s) still active. Rotation deferred.",
+            age_days,
+            active_beds,
+        )
+        return {
+            "status": "deferred_active_beds",
+            "age_days": round(age_days, 2),
+            "active_beds": active_beds,
+        }, age_days
+
+    ok, quick_result = run_quick_check(conn)
+    if ok:
+        return None, age_days
+    return {
+        "status": "source_quick_check_failed",
+        "age_days": round(age_days, 2),
+        "error": str(quick_result),
+    }, age_days
+
+
+def _create_pre_rotation_backup(
+    conn: sqlite3.Connection,
+    *,
+    db_path: str,
+    backup_dir: str | None,
+    invalid_dir: str | None,
+    runtime_mode: str | None,
+    source: str,
+    force: bool,
+    max_age_days: int,
+    age_days: float,
+    logger: logging.Logger,
+) -> tuple[dict[str, Any] | None, str, dict[str, int] | None]:
+    fingerprint = _db_file_fingerprint(db_path)
+    baza_dir = os.path.dirname(os.path.dirname(db_path))
+    effective_backup_dir = backup_dir or os.path.join(baza_dir, "backups", "valid")
+    effective_invalid_dir = invalid_dir or os.path.join(baza_dir, "backup_health", "invalid_backups")
+    backup_path = _build_pre_rotation_backup_path(effective_backup_dir, db_path, source)
+    try:
+        backup_connection(
+            conn,
+            backup_path,
+            invalid_dir=effective_invalid_dir,
+            logger=logger,
+            validate=True,
+            source=f"{source}_pre_rotation",
+        )
+        _write_rotation_backup_context(
+            backup_path,
+            {
+                "source": source,
+                "runtime_mode": str(runtime_mode or ""),
+                "db_path": os.path.abspath(db_path),
+                "db_fingerprint": fingerprint,
+                "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "force": bool(force),
+                "max_age_days": int(max_age_days),
+                "age_days": round(age_days, 2),
+            },
+        )
+    except Exception as exc:
+        logger.error("Pre-rotation backup failed: %s", exc, exc_info=True)
+        return {
+            "status": "pre_rotation_backup_failed",
+            "age_days": round(age_days, 2),
+            "error": str(exc),
+            "backup_path": backup_path,
+        }, backup_path, fingerprint
+    return None, backup_path, fingerprint
+
+
+def _prepare_rotation_source(
+    *,
+    db_path: str,
+    backup_dir: str | None,
+    invalid_dir: str | None,
+    runtime_mode: str | None,
+    source: str,
+    force: bool,
+    max_age_days: int,
+    blocked_role_lock_paths: Any,
+    blocked_emergency_roots: Any,
+    ignored_lock_nonces: Mapping[str, str] | None,
+    logger: logging.Logger,
+) -> tuple[dict[str, Any] | None, str, dict[str, int] | None]:
+    conn = None
+    try:
+        conn = sqlite3.connect(
+            db_path,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=5.0,
+        )
+        configure_connection(conn)
+        failure, age_days = _rotation_source_eligibility(
+            conn,
+            db_path=db_path,
+            max_age_days=max_age_days,
+            force=force,
+            blocked_role_lock_paths=blocked_role_lock_paths,
+            blocked_emergency_roots=blocked_emergency_roots,
+            ignored_lock_nonces=ignored_lock_nonces,
+            logger=logger,
+        )
+        if failure:
+            return failure, "", None
+        return _create_pre_rotation_backup(
+            conn,
+            db_path=db_path,
+            backup_dir=backup_dir,
+            invalid_dir=invalid_dir,
+            runtime_mode=runtime_mode,
+            source=source,
+            force=force,
+            max_age_days=max_age_days,
+            age_days=age_days,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.error("DB lifecycle check failed: %s", exc, exc_info=True)
+        return {"status": "check_failed", "error": str(exc)}, "", None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _rotation_fingerprint_failure(
+    *,
+    db_path: str,
+    backup_path: str,
+    fingerprint_before: dict[str, int] | None,
+    logger: logging.Logger,
+) -> dict[str, Any] | None:
+    try:
+        fingerprint_after = _db_file_fingerprint(db_path)
+    except Exception as exc:
+        return {
+            "status": "source_fingerprint_failed",
+            "error": str(exc),
+            "backup_path": backup_path,
+        }
+    if fingerprint_before is not None and fingerprint_after == fingerprint_before:
+        return None
+    logger.warning(
+        "DB rotation aborted: DB changed after pre-rotation backup. before=%s after=%s",
+        fingerprint_before,
+        fingerprint_after,
+    )
+    return {
+        "status": "source_changed_after_backup",
+        "backup_path": backup_path,
+        "before": fingerprint_before,
+        "after": fingerprint_after,
+    }
+
+
+def _prepare_fresh_rotation_database(
+    *,
+    db_path: str,
+    backup_path: str,
+    backup_dir: str | None,
+    invalid_dir: str | None,
+    logger: logging.Logger,
+) -> tuple[dict[str, Any] | None, str]:
+    temp_new_db_path = _build_temp_new_db_path(db_path)
+    new_conn = None
+    try:
+        new_conn = sqlite3.connect(
+            temp_new_db_path,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=5.0,
+        )
+        configure_connection(new_conn)
+        baza_dir = os.path.dirname(os.path.dirname(db_path))
+        ensure_unified_schema_with_migration_backup(
+            new_conn,
+            db_path=temp_new_db_path,
+            backup_dir=backup_dir or os.path.join(baza_dir, "backups", "valid"),
+            invalid_dir=invalid_dir or os.path.join(baza_dir, "backup_health", "invalid_backups"),
+            policy_path=os.path.join(baza_dir, "config", "client_policy.json"),
+            baza_dir=baza_dir,
+            logger=logger,
+            source="db_rotation_schema_init",
+        )
+        with new_conn:
+            new_conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                (DB_CYCLE_META_KEY, int(time.time())),
+            )
+        ok, quick_result = run_quick_check(new_conn)
+        if not ok:
+            raise RuntimeError(f"fresh DB quick_check failed: {quick_result}")
+    except Exception as exc:
+        logger.error("DB rotation failed while preparing fresh DB: %s", exc, exc_info=True)
+        return {
+            "status": "new_db_failed",
+            "error": str(exc),
+            "backup_path": backup_path,
+            "current_preserved": True,
+        }, temp_new_db_path
+    finally:
+        if new_conn is not None:
+            try:
+                new_conn.close()
+            except Exception:
+                pass
+    return None, temp_new_db_path
+
+
+def _move_rotation_sidecars(source_path: str, target_path: str) -> None:
+    for extension in ("-journal", "-wal", "-shm"):
+        source_sidecar = f"{source_path}{extension}"
+        if os.path.exists(source_sidecar):
+            os.replace(source_sidecar, f"{target_path}{extension}")
+
+
+def _rollback_rotation_install(db_path: str, archived_path: str) -> tuple[bool, str]:
+    if not os.path.exists(archived_path) or os.path.exists(db_path):
+        return False, ""
+    try:
+        os.replace(archived_path, db_path)
+        _move_rotation_sidecars(archived_path, db_path)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _install_fresh_rotation_database(
+    *,
+    db_path: str,
+    archive_dir: str,
+    temp_new_db_path: str,
+    backup_path: str,
+    logger: logging.Logger,
+) -> tuple[dict[str, Any] | None, str]:
+    os.makedirs(archive_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(db_path))[0]
+    archived_path = _build_unique_archive_path(archive_dir=archive_dir, base_name=base_name)
+    try:
+        os.replace(db_path, archived_path)
+        _move_rotation_sidecars(db_path, archived_path)
+        os.replace(temp_new_db_path, db_path)
+    except Exception as exc:
+        rollback_ok, rollback_error = _rollback_rotation_install(db_path, archived_path)
+        logger.error(
+            "DB rotation install failed: %s rollback_ok=%s rollback_error=%s",
+            exc,
+            rollback_ok,
+            rollback_error,
+            exc_info=True,
+        )
+        return {
+            "status": "rotate_failed",
+            "error": str(exc),
+            "archived_path": archived_path,
+            "backup_path": backup_path,
+            "rollback_ok": rollback_ok,
+            "rollback_error": rollback_error,
+        }, archived_path
+    return None, archived_path
+
+
+def _rotation_success_result(
+    *,
+    source: str,
+    db_path: str,
+    archive_dir: str,
+    archived_path: str,
+    backup_path: str,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    undo_state_path = _record_manual_rotation_undo_state(
+        source=source,
+        db_path=db_path,
+        archive_dir=archive_dir,
+        archived_path=archived_path,
+        backup_path=backup_path,
+    )
+    logger.warning(
+        "DB lifecycle rotation completed: %s -> %s | backup=%s | source=%s",
+        db_path,
+        archived_path,
+        backup_path,
+        source,
+    )
+    return {
+        "status": "rotated",
+        "archived_path": archived_path,
+        "backup_path": backup_path,
+        "undo_state_path": undo_state_path,
+    }
+
+
+def _run_rotation_under_lock(
+    *,
+    db_path: str,
+    archive_dir: str,
+    db_lock_path: str | None,
+    owner_id: str,
+    backup_dir: str | None,
+    invalid_dir: str | None,
+    runtime_mode: str | None,
+    source: str,
+    force: bool,
+    max_age_days: int,
+    blocked_role_lock_paths: Any,
+    blocked_emergency_roots: Any,
+    ignored_lock_nonces: Mapping[str, str] | None,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    db_lock = None
+    temp_new_db_path = ""
+    try:
+        active_replica_leases = _wait_for_replica_snapshot_leases(db_path, logger=logger)
+        if active_replica_leases:
+            return {
+                "status": "replica_snapshot_busy",
+                "active_replica_leases": active_replica_leases,
+            }
+        if db_lock_path:
+            db_lock = FileWriteLock(db_lock_path, stale_timeout_sec=10 * 60, logger=logger)
+            if not db_lock.acquire(owner_id=owner_id, source="db_rotation"):
+                return {"status": "db_lock_busy"}
+
+        failure, backup_path, fingerprint = _prepare_rotation_source(
+            db_path=db_path,
+            backup_dir=backup_dir,
+            invalid_dir=invalid_dir,
+            runtime_mode=runtime_mode,
+            source=source,
+            force=force,
+            max_age_days=max_age_days,
+            blocked_role_lock_paths=blocked_role_lock_paths,
+            blocked_emergency_roots=blocked_emergency_roots,
+            ignored_lock_nonces=ignored_lock_nonces,
+            logger=logger,
+        )
+        if failure:
+            return failure
+        failure = _rotation_fingerprint_failure(
+            db_path=db_path,
+            backup_path=backup_path,
+            fingerprint_before=fingerprint,
+            logger=logger,
+        )
+        if failure:
+            return failure
+        failure, temp_new_db_path = _prepare_fresh_rotation_database(
+            db_path=db_path,
+            backup_path=backup_path,
+            backup_dir=backup_dir,
+            invalid_dir=invalid_dir,
+            logger=logger,
+        )
+        if failure:
+            return failure
+        failure, archived_path = _install_fresh_rotation_database(
+            db_path=db_path,
+            archive_dir=archive_dir,
+            temp_new_db_path=temp_new_db_path,
+            backup_path=backup_path,
+            logger=logger,
+        )
+        if failure:
+            return failure
+        temp_new_db_path = ""
+        return _rotation_success_result(
+            source=source,
+            db_path=db_path,
+            archive_dir=archive_dir,
+            archived_path=archived_path,
+            backup_path=backup_path,
+            logger=logger,
+        )
+    finally:
+        if temp_new_db_path:
+            _remove_db_with_sidecars(temp_new_db_path)
+        if db_lock:
+            db_lock.release()
+
+
 def maybe_rotate_database_if_due(
     *,
     db_path: str,
@@ -464,285 +1038,63 @@ def maybe_rotate_database_if_due(
     ignored_lock_nonces: Mapping[str, str] | None = None,
 ) -> dict:
     """
-    Архивирует БД, только если:
-    1) используется сетевой runtime, а не аварийная/локальная БД,
-    2) возраст БД >= max_age_days или передан force=True,
-    3) нет активных ролей, которые держат БД открытой для ротации,
-    4) нет активной/незавершенной аварийной сессии медсестры,
-    5) нет занятых коек,
-    6) создан и валидирован pre-rotation backup.
+    Архивирует сетевую БД после проверок возраста, активных сессий и backup.
     """
     logger = logger or logging.getLogger(__name__)
+    preflight_failure = _rotation_request_preflight(
+        db_path=db_path,
+        runtime_mode=runtime_mode,
+        max_age_days=max_age_days,
+        force=force,
+        logger=logger,
+    )
+    if preflight_failure:
+        return preflight_failure
 
-    if not _runtime_allows_rotation(runtime_mode):
-        return {"status": "rotation_forbidden_runtime", "runtime_mode": str(runtime_mode or "")}
-
-    if not os.path.exists(db_path):
-        return {"status": "missing"}
-
-    lock = FileWriteLock(rotation_lock_path, stale_timeout_sec=60.0, logger=logger)
+    lock = FileWriteLock(
+        rotation_lock_path,
+        stale_timeout_sec=60.0,
+        logger=logger,
+        allow_expired_lease_cleanup=True,
+        allow_legacy_replica_cleanup=True,
+        allow_malformed_cleanup=True,
+        malformed_quarantine_dir=_malformed_lock_quarantine_dir(db_path),
+    )
     owner_id = f"{socket.gethostname()}:{os.getpid()}:db_rotation"
     if not lock.acquire(owner_id=owner_id, source="db_rotation"):
         return {"status": "rotation_lock_busy"}
-
-    db_lock = None
-    conn = None
-    backup_path = ""
-    fingerprint_before_backup: dict[str, int] | None = None
-    temp_new_db_path = ""
+    record_metric(
+        "db_rotation_lock_created",
+        1,
+        source=source,
+        force=bool(force),
+        rotation_lock_path=rotation_lock_path,
+    )
     try:
-        if db_lock_path:
-            db_lock = FileWriteLock(db_lock_path, stale_timeout_sec=10 * 60, logger=logger)
-            if not db_lock.acquire(owner_id=owner_id, source="db_rotation"):
-                return {"status": "db_lock_busy"}
-
-        try:
-            conn = sqlite3.connect(
-                db_path,
-                check_same_thread=False,
-                isolation_level=None,
-                timeout=5.0,
-            )
-            configure_connection(conn)
-
-            cycle_started_at = _read_cycle_started_at(conn, db_path, logger)
-            age_seconds = max(0, int(time.time()) - int(cycle_started_at))
-            age_days = age_seconds / 86400.0
-
-            if not force and age_days < max_age_days:
-                return {
-                    "status": "not_due",
-                    "age_days": round(age_days, 2),
-                }
-
-            active_role_locks = find_active_rotation_role_locks(
-                blocked_role_lock_paths,
-                ignored_lock_nonces=ignored_lock_nonces,
-                logger=logger,
-            )
-            if active_role_locks:
-                logger.info(
-                    "DB rotation is due (age=%.1f days), but blocking role lock(s) are active: %s",
-                    age_days,
-                    active_role_locks,
-                )
-                return {
-                    "status": "deferred_active_role_lock",
-                    "age_days": round(age_days, 2),
-                    "blocked_roles": active_role_locks,
-                }
-
-            active_emergency_sessions = find_active_emergency_nurse_sessions(
-                blocked_emergency_roots,
-                logger=logger,
-            )
-            if active_emergency_sessions:
-                logger.info(
-                    "DB rotation is due (age=%.1f days), but emergency nurse session(s) are active: %s",
-                    age_days,
-                    active_emergency_sessions,
-                )
-                return {
-                    "status": "deferred_active_emergency_session",
-                    "age_days": round(age_days, 2),
-                    "blocked_emergency_sessions": active_emergency_sessions,
-                }
-
-            active_beds = _count_active_beds(conn)
-            if active_beds > 0:
-                logger.info(
-                    "DB rotation is due (age=%.1f days), but %s occupied bed(s) still active. Rotation deferred.",
-                    age_days,
-                    active_beds,
-                )
-                return {
-                    "status": "deferred_active_beds",
-                    "age_days": round(age_days, 2),
-                    "active_beds": active_beds,
-                }
-
-            ok, quick_result = run_quick_check(conn)
-            if not ok:
-                return {
-                    "status": "source_quick_check_failed",
-                    "age_days": round(age_days, 2),
-                    "error": str(quick_result),
-                }
-
-            fingerprint_before_backup = _db_file_fingerprint(db_path)
-            baza_dir = os.path.dirname(os.path.dirname(db_path))
-            effective_backup_dir = backup_dir or os.path.join(baza_dir, "backups", "valid")
-            effective_invalid_dir = invalid_dir or os.path.join(baza_dir, "backup_health", "invalid_backups")
-            backup_path = _build_pre_rotation_backup_path(effective_backup_dir, db_path, source)
-            try:
-                backup_connection(
-                    conn,
-                    backup_path,
-                    invalid_dir=effective_invalid_dir,
-                    logger=logger,
-                    validate=True,
-                    source=f"{source}_pre_rotation",
-                )
-                _write_rotation_backup_context(
-                    backup_path,
-                    {
-                        "source": source,
-                        "runtime_mode": str(runtime_mode or ""),
-                        "db_path": os.path.abspath(db_path),
-                        "db_fingerprint": fingerprint_before_backup,
-                        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                        "force": bool(force),
-                        "max_age_days": int(max_age_days),
-                        "age_days": round(age_days, 2),
-                    },
-                )
-            except Exception as exc:
-                logger.error("Pre-rotation backup failed: %s", exc, exc_info=True)
-                return {
-                    "status": "pre_rotation_backup_failed",
-                    "age_days": round(age_days, 2),
-                    "error": str(exc),
-                    "backup_path": backup_path,
-                }
-        except Exception as exc:
-            logger.error("DB lifecycle check failed: %s", exc, exc_info=True)
-            return {"status": "check_failed", "error": str(exc)}
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                conn = None
-
-        try:
-            fingerprint_after_backup = _db_file_fingerprint(db_path)
-        except Exception as exc:
-            return {
-                "status": "source_fingerprint_failed",
-                "error": str(exc),
-                "backup_path": backup_path,
-            }
-        if fingerprint_before_backup is None or fingerprint_after_backup != fingerprint_before_backup:
-            logger.warning(
-                "DB rotation aborted: DB changed after pre-rotation backup. before=%s after=%s",
-                fingerprint_before_backup,
-                fingerprint_after_backup,
-            )
-            return {
-                "status": "source_changed_after_backup",
-                "backup_path": backup_path,
-                "before": fingerprint_before_backup,
-                "after": fingerprint_after_backup,
-            }
-
-        temp_new_db_path = _build_temp_new_db_path(db_path)
-        new_conn = None
-        try:
-            new_conn = sqlite3.connect(
-                temp_new_db_path,
-                check_same_thread=False,
-                isolation_level=None,
-                timeout=5.0,
-            )
-            configure_connection(new_conn)
-            baza_dir = os.path.dirname(os.path.dirname(db_path))
-            ensure_unified_schema_with_migration_backup(
-                new_conn,
-                db_path=temp_new_db_path,
-                backup_dir=backup_dir or os.path.join(baza_dir, "backups", "valid"),
-                invalid_dir=invalid_dir or os.path.join(baza_dir, "backup_health", "invalid_backups"),
-                policy_path=os.path.join(baza_dir, "config", "client_policy.json"),
-                baza_dir=baza_dir,
-                logger=logger,
-                source="db_rotation_schema_init",
-            )
-            with new_conn:
-                new_conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                    (DB_CYCLE_META_KEY, int(time.time())),
-                )
-            ok, quick_result = run_quick_check(new_conn)
-            if not ok:
-                raise RuntimeError(f"fresh DB quick_check failed: {quick_result}")
-        except Exception as exc:
-            logger.error("DB rotation failed while preparing fresh DB: %s", exc, exc_info=True)
-            return {
-                "status": "new_db_failed",
-                "error": str(exc),
-                "backup_path": backup_path,
-                "current_preserved": True,
-            }
-        finally:
-            if new_conn is not None:
-                try:
-                    new_conn.close()
-                except Exception:
-                    pass
-
-        # Выполняем ротацию под тем же lock, чтобы исключить гонки.
-        os.makedirs(archive_dir, exist_ok=True)
-        base_name = os.path.splitext(os.path.basename(db_path))[0]
-        archived_path = _build_unique_archive_path(archive_dir=archive_dir, base_name=base_name)
-
-        try:
-            os.replace(db_path, archived_path)
-            for ext in ("-journal", "-wal", "-shm"):
-                src = f"{db_path}{ext}"
-                if os.path.exists(src):
-                    os.replace(src, f"{archived_path}{ext}")
-            os.replace(temp_new_db_path, db_path)
-            temp_new_db_path = ""
-        except Exception as exc:
-            rollback_ok = False
-            rollback_error = ""
-            if os.path.exists(archived_path) and not os.path.exists(db_path):
-                try:
-                    os.replace(archived_path, db_path)
-                    for ext in ("-journal", "-wal", "-shm"):
-                        archived_sidecar = f"{archived_path}{ext}"
-                        if os.path.exists(archived_sidecar):
-                            os.replace(archived_sidecar, f"{db_path}{ext}")
-                    rollback_ok = True
-                except Exception as rollback_exc:
-                    rollback_error = str(rollback_exc)
-            logger.error("DB rotation install failed: %s rollback_ok=%s rollback_error=%s", exc, rollback_ok, rollback_error, exc_info=True)
-            return {
-                "status": "rotate_failed",
-                "error": str(exc),
-                "archived_path": archived_path,
-                "backup_path": backup_path,
-                "rollback_ok": rollback_ok,
-                "rollback_error": rollback_error,
-            }
-
-        undo_state_path = _record_manual_rotation_undo_state(
-            source=source,
+        return _run_rotation_under_lock(
             db_path=db_path,
             archive_dir=archive_dir,
-            archived_path=archived_path,
-            backup_path=backup_path,
+            db_lock_path=db_lock_path,
+            owner_id=owner_id,
+            backup_dir=backup_dir,
+            invalid_dir=invalid_dir,
+            runtime_mode=runtime_mode,
+            source=source,
+            force=force,
+            max_age_days=max_age_days,
+            blocked_role_lock_paths=blocked_role_lock_paths,
+            blocked_emergency_roots=blocked_emergency_roots,
+            ignored_lock_nonces=ignored_lock_nonces,
+            logger=logger,
         )
-
-        logger.warning(
-            "DB lifecycle rotation completed: %s -> %s | backup=%s | source=%s",
-            db_path,
-            archived_path,
-            backup_path,
-            source,
-        )
-        return {
-            "status": "rotated",
-            "archived_path": archived_path,
-            "backup_path": backup_path,
-            "undo_state_path": undo_state_path,
-        }
     finally:
-        if temp_new_db_path:
-            _remove_db_with_sidecars(temp_new_db_path)
-        if db_lock:
-            db_lock.release()
-        lock.release()
+        released = lock.release()
+        record_metric(
+            "db_rotation_lock_released",
+            1 if released else 0,
+            source=source,
+            rotation_lock_path=rotation_lock_path,
+        )
 
 
 def cancel_manual_rotation(
@@ -762,13 +1114,30 @@ def cancel_manual_rotation(
     if not status.get("available"):
         return {"status": "undo_unavailable", "reason": status.get("reason", "not_available")}
     state = dict(status["state"])
-    lock = FileWriteLock(rotation_lock_path, stale_timeout_sec=60.0, logger=logger)
+    lock = FileWriteLock(
+        rotation_lock_path,
+        stale_timeout_sec=60.0,
+        logger=logger,
+        allow_expired_lease_cleanup=True,
+        allow_legacy_replica_cleanup=True,
+        allow_malformed_cleanup=True,
+        malformed_quarantine_dir=_malformed_lock_quarantine_dir(db_path),
+    )
     owner_id = f"{socket.gethostname()}:{os.getpid()}:db_rotation_undo"
     if not lock.acquire(owner_id=owner_id, source="db_rotation_undo"):
         return {"status": "rotation_lock_busy"}
     db_lock = None
     moved_new_path = ""
     try:
+        active_replica_leases = _wait_for_replica_snapshot_leases(
+            db_path,
+            logger=logger,
+        )
+        if active_replica_leases:
+            return {
+                "status": "replica_snapshot_busy",
+                "active_replica_leases": active_replica_leases,
+            }
         if db_lock_path:
             db_lock = FileWriteLock(db_lock_path, stale_timeout_sec=10 * 60, logger=logger)
             if not db_lock.acquire(owner_id=owner_id, source="db_rotation_undo"):

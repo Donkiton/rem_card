@@ -19,6 +19,7 @@ from rem_card.app.local_replica_worker import (
     LocalReplicaRotationBusy,
     LocalReplicaWorkerClient,
     LocalReplicaWorkerTimeout,
+    replica_snapshot_lease_dir,
 )
 from rem_card.app.sqlite_shared import FileWriteLock
 from rem_card.data.dao.db_manager import DatabaseManager
@@ -237,7 +238,7 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertTrue(self.replica.sync_once())
         self.assertTrue(self.replica.is_ready(max_stale_sec=10.0))
 
-    def test_snapshot_and_database_rotation_use_the_same_lock(self):
+    def test_snapshot_uses_reader_lease_without_creating_rotation_lock(self):
         rotation_lock_path = self.root / "db_rotation.lock"
         client = LocalReplicaWorkerClient(
             central_db_path=str(self.central_path),
@@ -259,13 +260,18 @@ class LocalReplicaSyncTest(unittest.TestCase):
 
         thread = threading.Thread(target=run_sync, daemon=True)
         thread.start()
+        lease_dir = Path(replica_snapshot_lease_dir(str(self.central_path)))
         deadline = time.monotonic() + 1.0
-        while not rotation_lock_path.exists() and time.monotonic() < deadline:
+        while (
+            not list(lease_dir.glob("*.lock"))
+            and time.monotonic() < deadline
+        ):
             time.sleep(0.01)
         competing_lock = FileWriteLock(str(rotation_lock_path))
         try:
-            self.assertTrue(rotation_lock_path.exists())
-            self.assertFalse(
+            self.assertFalse(rotation_lock_path.exists())
+            self.assertTrue(list(lease_dir.glob("*.lock")))
+            self.assertTrue(
                 competing_lock.acquire(
                     owner_id="test-rotation",
                     source="db_rotation",
@@ -280,6 +286,48 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["value"]["status"], "snapshot_ready")
         self.assertFalse(rotation_lock_path.exists())
+        self.assertFalse(list(lease_dir.glob("*.lock")))
+
+    def test_rotation_busy_keeps_last_good_replica_available(self):
+        rotation_lock_path = self.root / "db_rotation.lock"
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            rotation_lock_path=str(rotation_lock_path),
+            sync_interval_sec=60.0,
+        )
+        self.assertTrue(self.replica.sync_once())
+        lock = FileWriteLock(str(rotation_lock_path))
+        self.assertTrue(lock.acquire("test-rotation", "db_rotation"))
+        try:
+            self.assertFalse(self.replica.sync_once())
+            self.assertTrue(self.replica.is_ready(max_stale_sec=10.0))
+            health = self.replica.health_snapshot()
+            self.assertEqual(health["consecutive_failures"], 0)
+            self.assertEqual(
+                health["last_sync_error_class"],
+                "LocalReplicaRotationBusy",
+            )
+        finally:
+            lock.release()
+
+    def test_old_empty_lock_is_quarantined_before_reuse(self):
+        lock_path = self.root / "empty.lock"
+        lock_path.write_bytes(b"")
+        old = time.time() - 60.0
+        os.utime(lock_path, (old, old))
+        quarantine_dir = self.root / "lock_quarantine"
+        lock = FileWriteLock(
+            str(lock_path),
+            allow_malformed_cleanup=True,
+            malformed_grace_sec=0.1,
+            malformed_quarantine_dir=str(quarantine_dir),
+        )
+        try:
+            self.assertTrue(lock.acquire("new-owner", "db_rotation"))
+            self.assertTrue(list(quarantine_dir.glob("*.malformed")))
+        finally:
+            lock.release()
 
     def test_busy_rotation_lock_fails_fast_without_worker_timeout(self):
         rotation_lock_path = self.root / "db_rotation.lock"

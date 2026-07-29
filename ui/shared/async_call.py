@@ -111,10 +111,21 @@ class AsyncCallThread(QObject):
         try:
             result = self._fn(*self._args, **self._kwargs)
         except Exception as exc:
-            self.failed.emit(exc)
+            try:
+                self.failed.emit(exc)
+            except RuntimeError:
+                # QObject мог быть удален вместе с закрытым виджетом, пока
+                # фоновая функция завершалась.
+                pass
         else:
-            self.succeeded.emit(result)
+            try:
+                self.succeeded.emit(result)
+            except RuntimeError:
+                pass
         finally:
             with self._state_lock:
                 self._running = False
-            self.finished.emit()
+            try:
+                self.finished.emit()
+            except RuntimeError:
+                self._release_keepalive()

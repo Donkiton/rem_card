@@ -134,7 +134,13 @@ class LocalReplicaSync:
         with self._lock:
             if self._local_conn is None or self.last_sync_ok_ts <= 0:
                 return False
-            if self.consecutive_failures > 0 or self.last_sync_error is not None:
+            rotation_deferred = (
+                self.last_sync_error_class == LocalReplicaRotationBusy.__name__
+            )
+            if (
+                self.consecutive_failures > 0
+                or (self.last_sync_error is not None and not rotation_deferred)
+            ):
                 return False
             age_sec = max(0.0, time.time() - self.last_sync_ok_ts)
             return age_sec <= max(1.0, float(max_stale_sec))
@@ -229,6 +235,24 @@ class LocalReplicaSync:
                     recovered_after,
                 )
             return True
+        except LocalReplicaRotationBusy as exc:
+            with self._lock:
+                self.last_sync_error = str(exc)
+                self.last_sync_error_class = type(exc).__name__
+                self._current_backoff_sec = self.sync_interval_sec
+                self._next_retry_not_before = (
+                    time.monotonic() + self.sync_interval_sec
+                )
+            record_metric(
+                "local_replica_sync_deferred",
+                1,
+                reason="rotation_busy",
+                duration_ms=round(
+                    (time.perf_counter() - started) * 1000.0,
+                    3,
+                ),
+            )
+            return False
         except Exception as exc:
             with self._lock:
                 self.last_sync_error = str(exc)

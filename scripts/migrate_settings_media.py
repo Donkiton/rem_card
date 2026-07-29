@@ -23,7 +23,10 @@ from rem_card.services.settings.settings_service import SettingsService, get_set
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Вынести изображения фонов и иконок из БД настроек в общие файлы. Запускать вне рабочей смены."
+        description=(
+            "Вынести изображения фонов и иконок из БД настроек в hash-addressed "
+            "файлы и удалить неиспользуемые фоны. Запускать вне рабочей смены."
+        )
     )
     parser.add_argument("--apply", action="store_true", help="Подтвердить изменение БД настроек")
     parser.add_argument(

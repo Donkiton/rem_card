@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
+import hashlib
 import json
 import os
 import re
@@ -11,7 +12,14 @@ import time
 from typing import Any
 
 from rem_card.app.paths import get_icon_dir
-from rem_card.app.settings_db_paths import get_settings_backgrounds_dir
+from rem_card.app.settings_db_paths import (
+    get_settings_backgrounds_dir_from_db_path,
+    get_settings_db_path,
+)
+from rem_card.app.settings_media_cache import (
+    media_cache_path,
+    schedule_media_cache_fill,
+)
 from rem_card.ui.styles.theme_storage import get_style_settings_path
 
 
@@ -43,15 +51,28 @@ def invalidate_background_settings_cache() -> None:
     _ACTIVE_BACKGROUND_CACHE.clear()
 
 
-def get_background_files_dir() -> str:
+def _active_settings_db_path() -> str:
+    try:
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        return str(get_settings_service().db.db_path)
+    except Exception:
+        return get_settings_db_path()
+
+
+def get_background_files_dir(settings_db_path: str | None = None) -> str:
     override = os.environ.get(BACKGROUND_SETTINGS_ENV)
     if override:
         return str(Path(get_background_settings_path()).parent / "backgrounds")
-    return get_settings_backgrounds_dir()
+    return get_settings_backgrounds_dir_from_db_path(
+        settings_db_path or _active_settings_db_path()
+    )
 
 
-def ensure_background_files_dir() -> str:
-    directory = os.path.abspath(os.path.normpath(get_background_files_dir()))
+def ensure_background_files_dir(settings_db_path: str | None = None) -> str:
+    directory = os.path.abspath(
+        os.path.normpath(get_background_files_dir(settings_db_path))
+    )
     os.makedirs(directory, exist_ok=True)
     return directory
 
@@ -163,7 +184,7 @@ def _normalize_custom_entry(data: Any, index: int) -> dict[str, Any] | None:
     entry_id = re.sub(r"[^A-Za-z0-9_-]+", "_", raw_id).strip("_") or f"background_{index}"
     file_name = _safe_file_name(data.get("file"))
     name = str(data.get("name") or "").strip() or f"Дополнительный фон {index}"
-    return {
+    entry = {
         "id": entry_id,
         "name": name,
         "file": file_name,
@@ -171,6 +192,19 @@ def _normalize_custom_entry(data: Any, index: int) -> dict[str, Any] | None:
         "end": normalize_month_day(data.get("end"), "12-31"),
         "locked": False,
     }
+    image_hash = str(data.get("image_hash") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", image_hash):
+        entry["image_hash"] = image_hash
+    try:
+        image_size_bytes = int(data.get("image_size_bytes") or 0)
+    except (TypeError, ValueError):
+        image_size_bytes = 0
+    if image_size_bytes > 0:
+        entry["image_size_bytes"] = image_size_bytes
+    image_mime = str(data.get("image_mime") or "").strip()
+    if image_mime:
+        entry["image_mime"] = image_mime
+    return entry
 
 
 def normalize_background_settings_payload(payload: Any) -> dict[str, Any]:
@@ -187,7 +221,15 @@ def normalize_background_settings_payload(payload: Any) -> dict[str, Any]:
             default_file = _safe_file_name(raw.get("file")) or DEFAULT_BACKGROUND_FILE
             break
 
-    backgrounds = [_default_background_entry(default_file)]
+    default_entry = _default_background_entry(default_file)
+    for raw in raw_backgrounds:
+        if isinstance(raw, dict) and str(raw.get("id") or "").strip() == DEFAULT_BACKGROUND_ID:
+            metadata = _normalize_custom_entry({**raw, "id": "default_metadata"}, 0) or {}
+            for key in ("image_hash", "image_size_bytes", "image_mime"):
+                if key in metadata:
+                    default_entry[key] = metadata[key]
+            break
+    backgrounds = [default_entry]
     used_ids = {DEFAULT_BACKGROUND_ID}
     custom_index = 1
     for raw in raw_backgrounds:
@@ -213,17 +255,31 @@ def normalize_background_settings_payload(payload: Any) -> dict[str, Any]:
     }
 
 
-def background_storage_file_path(file_name: str) -> str:
-    return os.path.join(get_background_files_dir(), _safe_file_name(file_name) or DEFAULT_BACKGROUND_FILE)
+def background_storage_file_path(
+    file_name: str,
+    *,
+    settings_db_path: str | None = None,
+) -> str:
+    return os.path.join(
+        get_background_files_dir(settings_db_path),
+        _safe_file_name(file_name) or DEFAULT_BACKGROUND_FILE,
+    )
 
 
 def background_legacy_file_path(file_name: str) -> str:
     return os.path.join(get_icon_dir(), _safe_file_name(file_name) or DEFAULT_BACKGROUND_FILE)
 
 
-def background_file_path(file_name: str) -> str:
+def background_file_path(
+    file_name: str,
+    *,
+    settings_db_path: str | None = None,
+) -> str:
     safe_name = _safe_file_name(file_name) or DEFAULT_BACKGROUND_FILE
-    shared_path = background_storage_file_path(safe_name)
+    shared_path = background_storage_file_path(
+        safe_name,
+        settings_db_path=settings_db_path,
+    )
     if os.path.isfile(shared_path):
         return shared_path
 
@@ -237,16 +293,49 @@ def background_entry_file_path(entry: dict[str, Any]) -> str:
     return background_file_path(str(entry.get("file") or DEFAULT_BACKGROUND_FILE))
 
 
-def ensure_background_file_available(entry: dict[str, Any]) -> str:
+def ensure_background_file_available(
+    entry: dict[str, Any],
+    *,
+    allow_network_fallback: bool = True,
+    settings_db_path: str | None = None,
+) -> str:
     file_name = _safe_file_name(entry.get("file"))
     if not file_name:
         return ""
 
-    shared_path = background_storage_file_path(file_name)
-    if os.path.isfile(shared_path):
+    settings_db_path = settings_db_path or _active_settings_db_path()
+    shared_path = background_storage_file_path(
+        file_name,
+        settings_db_path=settings_db_path,
+    )
+    image_hash = str(entry.get("image_hash") or "").strip().lower()
+    try:
+        image_size_bytes = int(entry.get("image_size_bytes") or 0)
+    except (TypeError, ValueError):
+        image_size_bytes = 0
+    if re.fullmatch(r"[0-9a-f]{64}", image_hash):
+        cached_path = media_cache_path(
+            settings_db_path=settings_db_path,
+            kind="backgrounds",
+            image_hash=image_hash,
+            source_path=shared_path,
+        )
+        if cached_path and os.path.isfile(cached_path):
+            return cached_path
+        schedule_media_cache_fill(
+            source_path=shared_path,
+            settings_db_path=settings_db_path,
+            kind="backgrounds",
+            image_hash=image_hash,
+            expected_size=image_size_bytes or None,
+            on_ready=lambda _path: invalidate_background_settings_cache(),
+        )
+        if allow_network_fallback and os.path.isfile(shared_path):
+            return shared_path
+    elif os.path.isfile(shared_path):
         return shared_path
 
-    if _materialize_background_from_db(entry, shared_path) and os.path.isfile(shared_path):
+    if allow_network_fallback and _materialize_background_from_db(entry, shared_path) and os.path.isfile(shared_path):
         return shared_path
 
     legacy_path = background_legacy_file_path(file_name)
@@ -261,6 +350,19 @@ def ensure_background_file_available(entry: dict[str, Any]) -> str:
         return legacy_path
 
     return shared_path
+
+
+def schedule_background_cache_warmup(
+    payload: dict[str, Any],
+    *,
+    settings_db_path: str,
+) -> None:
+    entry = active_background_entry(payload, require_file=False)
+    ensure_background_file_available(
+        entry,
+        allow_network_fallback=False,
+        settings_db_path=settings_db_path,
+    )
 
 
 def active_background_entry(
@@ -300,19 +402,37 @@ def _materialize_background_from_db(entry: dict[str, Any], path: str) -> bool:
 def get_active_background_path(today: date | None = None) -> str:
     storage = BackgroundSettingsStorage()
     current_date = today or date.today()
-    try:
-        settings_mtime = os.path.getmtime(storage.path)
-    except OSError:
-        settings_mtime = None
+    settings_mtime = None
+    if storage._file_mode:
+        try:
+            settings_mtime = os.path.getmtime(storage.path)
+        except OSError:
+            settings_mtime = None
     cache_key = f"{current_date.isoformat()}|{storage.path}|{settings_mtime}"
     if _ACTIVE_BACKGROUND_CACHE.get("key") == cache_key:
-        return str(_ACTIVE_BACKGROUND_CACHE.get("path") or background_file_path(DEFAULT_BACKGROUND_FILE))
+        return str(
+            _ACTIVE_BACKGROUND_CACHE.get("path")
+            or background_legacy_file_path(DEFAULT_BACKGROUND_FILE)
+        )
 
     payload = storage.load()
-    entry = active_background_entry(payload, current_date)
-    path = ensure_background_file_available(entry)
+    entry = active_background_entry(payload, current_date, require_file=False)
+    path = ensure_background_file_available(entry, allow_network_fallback=False)
     if not os.path.isfile(path):
-        path = background_file_path(DEFAULT_BACKGROUND_FILE)
+        default_entry = next(
+            (
+                item
+                for item in payload.get("backgrounds") or ()
+                if str(item.get("id") or "") == DEFAULT_BACKGROUND_ID
+            ),
+            _default_background_entry(),
+        )
+        path = ensure_background_file_available(
+            default_entry,
+            allow_network_fallback=False,
+        )
+    if not os.path.isfile(path):
+        path = background_legacy_file_path(DEFAULT_BACKGROUND_FILE)
     _ACTIVE_BACKGROUND_CACHE["key"] = cache_key
     _ACTIVE_BACKGROUND_CACHE["path"] = path
     return path
@@ -342,24 +462,48 @@ def copy_background_to_backgrounds_dir(source_path: str) -> str:
         raise ValueError("Поддерживаются только изображения PNG, JPG, JPEG, BMP, GIF или WEBP.")
 
     backgrounds_dir = ensure_background_files_dir()
-
-    existing = os.path.abspath(os.path.join(backgrounds_dir, os.path.basename(source)))
-    if os.path.normcase(source) == os.path.normcase(existing):
-        return os.path.basename(source)
-
-    stem = os.path.splitext(os.path.basename(source))[0]
-    safe_stem = re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_")[:36] or "background"
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"fon_{stamp}_{safe_stem}"
-
-    target = os.path.join(backgrounds_dir, f"{base_name}{extension}")
-    counter = 2
-    while os.path.exists(target):
-        target = os.path.join(backgrounds_dir, f"{base_name}_{counter}{extension}")
-        counter += 1
-
-    _copy_file_atomic(source, target)
+    hasher = hashlib.sha256()
+    with open(source, "rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    target = os.path.join(backgrounds_dir, f"bg_{hasher.hexdigest()}{extension}")
+    if os.path.normcase(source) != os.path.normcase(target) and not os.path.isfile(target):
+        _copy_file_atomic(source, target)
     return os.path.basename(target)
+
+
+def _enrich_background_media_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_background_settings_payload(payload)
+    for entry in normalized.get("backgrounds") or ():
+        file_name = _safe_file_name(entry.get("file"))
+        if not file_name:
+            continue
+        path = background_storage_file_path(file_name)
+        if not os.path.isfile(path):
+            path = background_legacy_file_path(file_name)
+        if not os.path.isfile(path):
+            continue
+        hasher = hashlib.sha256()
+        size_bytes = 0
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                size_bytes += len(chunk)
+        entry["image_hash"] = hasher.hexdigest()
+        entry["image_size_bytes"] = size_bytes
+        try:
+            import mimetypes
+
+            entry["image_mime"] = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        except Exception:
+            entry["image_mime"] = "application/octet-stream"
+    return normalized
 
 
 def copy_background_to_icon_dir(source_path: str) -> str:
@@ -400,7 +544,7 @@ class BackgroundSettingsStorage:
         return normalize_background_settings_payload(payload)
 
     def save(self, payload: dict[str, Any]) -> None:
-        normalized = normalize_background_settings_payload(payload)
+        normalized = _enrich_background_media_metadata(payload)
         if not self._file_mode:
             from rem_card.services.settings.settings_service import BACKGROUND_SETTINGS_KEY, get_settings_service
 
