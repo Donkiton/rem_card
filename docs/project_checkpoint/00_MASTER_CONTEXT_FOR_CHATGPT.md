@@ -266,6 +266,8 @@ Shutdown:
 
 `ThemeStorage` при повреждённом JSON quarantines файл как `*.broken` и создаёт defaults (`ui/styles/theme_storage.py:71-118`). `ThemeManager` применяет QSS к `QApplication`, tooltip palette и runtime container styles (`ui/styles/theme_manager.py:17-133`, `135-176`). QSS строится в `ui/styles/qss_builder.py:7-120`.
 
+Централизованное хранение всех цветов и QSS не является обязательным quality gate. Для экранов допустимы локальные фиксированные HEX-цвета и `setStyleSheet`; `ui/styles` сохраняется для уже используемых общих тем и компонентов.
+
 Настройки отображения W1a/W1b/кнопок хранятся отдельно: `settings/display_settings/display_settings.json`, `DisplaySettingsStorage` (`ui/shared/display_settings_storage.py:14-18`, `83-120`, `277-321`).
 
 ## 14. Тесты, проверки, acceptance gates
@@ -275,7 +277,6 @@ Shutdown:
 - `python scripts/architecture_safety_check.py` — блокирует UI direct sqlite/write SQL/run_write/private service, profile mismatch, live DB copy bypass, проверяет backup/recovery artifacts (`scripts/architecture_safety_check.py:77-160`).
 - `python scripts/regression_safety_checks.py` — большой набор regression checks: DB safety, migrations, recovery, optimistic locks, sync/read coordinator, W1a/W1b, workers, PatientForm, chart, medical audit (`scripts/regression_safety_checks.py:8538-8675`).
 - `python scripts/code_quality_checks.py` — F821, BOM, complexity baseline (`scripts/code_quality_checks.py:56-180`).
-- `python scripts/style_audit_check.py` — inline style/color audit с baseline (`scripts/style_audit_check.py:11-174`, `322+`).
 - `python scripts/network_acceptance_runner.py --operations 24 --benchmark-clicks 3` — isolated temp Baza, multi-client stress, orders click benchmark, restore drill (`scripts/network_acceptance_runner.py:1-8`, `283-405`).
 - `python scripts/restore_drill.py --max-files 20` — restore backup в отдельную папку и quick/integrity (`scripts/restore_drill.py:1-8`, `158-178`).
 - `python scripts/validate_backups.py --max-files 20 --move-invalid` — проверка backup и перенос invalid (`scripts/validate_backups.py:1-10`, `43-111`).

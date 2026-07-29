@@ -25,15 +25,13 @@ python scripts\code_quality_checks.py
 python scripts\architecture_safety_check.py
 python scripts\regression_safety_checks.py
 python scripts\code_quality_checks.py
-python scripts\style_audit_check.py
 ```
 
 Что защищают:
 
 - architecture: UI no direct SQLite/write SQL, network profile, backup/recovery artifacts (`scripts/architecture_safety_check.py:77-160`);
 - regression: DB safety, backup, migrations, recovery, optimistic locks, sync/read coordinator, W1a/W1b, workers, PatientForm, chart, medical audit (`scripts/regression_safety_checks.py:8538-8675`);
-- code quality: undefined names, BOM, complexity baseline;
-- style audit: inline QSS/colors baseline (`scripts/style_audit_check.py:11-174`, `322+`).
+- code quality: undefined names, BOM, complexity baseline.
 
 ## 3. UI smoke
 
