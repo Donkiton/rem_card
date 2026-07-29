@@ -91,12 +91,6 @@ class OrdersModel(QAbstractTableModel):
             time_iso = self.time_slots[col-1].isoformat()
             return self.admin_map.get((order.id, time_iso))
 
-        if role == Qt.BackgroundRole:
-            # Логика цвета (выбытие пациента и т.д.)
-            if col > 0:
-                time_point = self.time_slots[col-1]  # noqa: F841 - подсветка времени выбытия требует отдельного решения
-                # TODO: проверка выбытия пациента
-
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):

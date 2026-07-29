@@ -50,7 +50,7 @@ ALLOWED_F_BLOCKS = {
     ("scripts/regression_safety_checks.py", "_check_operblock_operation_stages_custom_events"): 90,
     ("scripts/regression_safety_checks.py", "_check_operblock_icons_settings_db"): 48,
     ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._stage_state"): 46,
-    ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._calculate_statistics"): 162,
+    ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._calculate_statistics"): 161,
     ("services/settings/settings_service.py", "SettingsService._repair_background_settings_from_rows"): 44,
     ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"): 46,
     ("ui/operblock_view/operblock_main_widget.py", "OperBlockMainWidget._build_timeline_events"): 58,

@@ -348,6 +348,36 @@ def test_operblock_statistics_boundary_and_started_at_index():
         conn.close()
 
 
+def test_operblock_statistics_reports_busiest_date_and_all_tied_weekdays():
+    conn = sqlite3.connect(":memory:")
+    try:
+        _create_operblock_schema(conn)
+        conn.executemany(
+            "INSERT INTO operation_cases (id, status, started_at) VALUES (?, 'completed', ?)",
+            [
+                (1, "2026-07-06 08:00:00"),
+                (2, "2026-07-13 10:00:00"),
+                (3, "2026-07-07 09:00:00"),
+                (4, "2026-07-14 11:00:00"),
+            ],
+        )
+        builder = OperBlockStatisticsReportBuilder(
+            _Manager(conn),
+            "2026-07-06",
+            "2026-07-14",
+        )
+
+        stats = builder._calculate_statistics()
+        html = builder.generate_report_html(["ob10"])
+
+        assert "by_hour" not in stats
+        assert stats["by_weekday"] == {"Понедельник": 2, "Вторник": 2}
+        assert "10. Самая загруженная дата и день недели" in html
+        assert "Дата: 06.07.2026: 1<br/>День недели: Понедельник, Вторник: 2" in html
+    finally:
+        conn.close()
+
+
 def test_multi_db_snapshot_filters_with_half_open_boundary(tmp_path: Path):
     db_path = tmp_path / "analytics.sqlite"
     source = sqlite3.connect(db_path)

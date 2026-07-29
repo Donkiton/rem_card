@@ -437,7 +437,6 @@ class PrescriptionEngine:
             group_info = self.groups.get(group_key, {})
             
             freq = d.get("freq", 1)
-            priority = group_info.get("priority_level", 3)  # noqa: F841 - семантику приоритета нужно уточнить отдельно
             shift = group_info.get("offset_min", 0)
             duration_min = drug_info.get("duration_min", 0)
             
