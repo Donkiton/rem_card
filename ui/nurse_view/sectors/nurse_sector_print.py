@@ -1,12 +1,10 @@
-import os
 import pathlib
 import datetime
 import re
-from typing import Optional, Tuple
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, 
-    QPushButton, QLabel, QFrame, QApplication
+    QPushButton, QLabel, QFrame
 )
 from PySide6.QtCore import Qt, QThread, Signal
 

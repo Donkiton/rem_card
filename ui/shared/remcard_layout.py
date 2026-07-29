@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QStackedWidget, QSizePolicy)
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.foreground_activity import mark_foreground_activity
 from rem_card.app.logger import logger

@@ -1,5 +1,4 @@
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame)
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel)
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.styles.theme import COLOR_DANGER, COLOR_PRIMARY
 

@@ -337,7 +337,6 @@ class ChartDataProcessor:
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            pass
 
         return {
             "densified_data": data,

@@ -1,10 +1,8 @@
-import os
 from copy import copy
-from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex, Signal, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Tuple
-from ...data.dto.remcard_dto import OrderDTO, OrderType, OrderStatus, AdministrationDTO
+from typing import List, Dict, Tuple
+from ...data.dto.remcard_dto import OrderDTO, OrderStatus, AdministrationDTO
 from ...data.dao.sync_cursor import EPOCH_SYNC_TS, is_cursor_newer, make_sync_cursor
 
 class OrdersModel(QAbstractTableModel):
@@ -96,9 +94,8 @@ class OrdersModel(QAbstractTableModel):
         if role == Qt.BackgroundRole:
             # Логика цвета (выбытие пациента и т.д.)
             if col > 0:
-                time_point = self.time_slots[col-1]
+                time_point = self.time_slots[col-1]  # noqa: F841 - подсветка времени выбытия требует отдельного решения
                 # TODO: проверка выбытия пациента
-                pass
 
         return None
 

@@ -1,9 +1,8 @@
-from PySide6.QtWidgets import (QSplitter, QSizePolicy, QVBoxLayout, QWidget, QFrame)
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtCore import Signal
 from datetime import datetime
 from ...patient_bed_management.bed_labels import is_recovery_bed
 from ...rem_card_sectors.sector_4_sub import Sector4b, Sector4v
-from ...shared.layout_components import SplitterManager
 
 class PatientBedRow(QWidget):
     """Компонент W1 для списка коек. Должен быть визуальным клоном сектора W."""

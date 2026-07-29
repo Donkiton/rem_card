@@ -406,7 +406,7 @@ class DisplaySettingsStorage:
         self.last_error = None
         if not self._file_mode:
             try:
-                from rem_card.services.settings.settings_service import DISPLAY_SETTINGS_KEY, get_settings_service
+                from rem_card.services.settings.settings_service import get_settings_service
 
                 payload = get_settings_service().get_app_setting("shared", "display_settings", default=None)
                 if isinstance(payload, dict):

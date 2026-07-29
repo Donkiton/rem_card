@@ -453,11 +453,11 @@ STYLE_SIDE_PATIENT_CARD = f"""
         background: transparent;
     }}
 """
-STYLE_SIDE_PATIENT_PHOTO = f"""
-    QLabel {{
+STYLE_SIDE_PATIENT_PHOTO = """
+    QLabel {
         border: none;
         background-color: transparent;
-    }}
+    }
 """
 STYLE_SIDE_PATIENT_NAME = f"color: {TEXT_PRIMARY}; font-weight: 800; font-size: 27px;"
 STYLE_SIDE_PATIENT_DIAGNOSIS = f"color: {TEXT_PRIMARY}; font-weight: 500; font-size: 18px;"
@@ -577,8 +577,8 @@ STYLE_PATIENT_FORM_SECTION_TITLE = (
     "color: #1e6ff2; font-size: 13px; font-weight: 900; "
     "background: transparent; border: none;"
 )
-STYLE_PATIENT_FORM_CANCEL_BUTTON = f"""
-    QPushButton {{
+STYLE_PATIENT_FORM_CANCEL_BUTTON = """
+    QPushButton {
         background: #ffffff;
         border: 1px solid #dbe5f0;
         border-radius: 5px;
@@ -586,18 +586,18 @@ STYLE_PATIENT_FORM_CANCEL_BUTTON = f"""
         font-weight: 800;
         font-size: 13px;
         padding: 0px;
-    }}
-    QPushButton:hover {{
+    }
+    QPushButton:hover {
         background: #f7fbff;
         border-color: #bdd8ff;
-    }}
-    QPushButton:disabled {{
+    }
+    QPushButton:disabled {
         background: #f8fafc;
         color: #9aa8bd;
-    }}
+    }
 """
-STYLE_PATIENT_FORM_SAVE_BUTTON = f"""
-    QPushButton {{
+STYLE_PATIENT_FORM_SAVE_BUTTON = """
+    QPushButton {
         background: #0d6efd;
         border: 1px solid #0b63e5;
         border-radius: 5px;
@@ -605,15 +605,15 @@ STYLE_PATIENT_FORM_SAVE_BUTTON = f"""
         font-weight: 800;
         font-size: 13px;
         padding: 0px;
-    }}
-    QPushButton:hover {{
+    }
+    QPushButton:hover {
         background: #075fe8;
-    }}
-    QPushButton:disabled {{
+    }
+    QPushButton:disabled {
         background: #eef4ff;
         color: #9aa8bd;
         border-color: #dbe5f0;
-    }}
+    }
 """
 STYLE_FORM_DATETIME_EDIT = f"""
     QDateTimeEdit, QDateEdit, QTimeEdit {{

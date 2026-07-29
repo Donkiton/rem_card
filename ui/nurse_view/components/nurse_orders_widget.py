@@ -6,12 +6,10 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from datetime import datetime, timedelta
 from copy import copy
 import os
-import sqlite3
 import time
 from ...shared.orders_model import OrdersModel
 from ...shared.orders_delegate import OrdersDelegate
 from ...shared.async_call import AsyncCallThread
-from rem_card.data.dto.remcard_dto import OrderStatus
 from rem_card.app.logger import logger
 from ...styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY,
                             BORDER_COLOR, BG_LIGHT, STYLE_ORDERS_VERTICAL_SCROLLBAR)

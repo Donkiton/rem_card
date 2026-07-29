@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel)
 from PySide6.QtCore import Qt
 
 class PatientActionPanel(QWidget):

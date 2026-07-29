@@ -1,12 +1,9 @@
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
-from rem_card.ui.shared.custom_title_bar import CustomTitleBar
-from rem_card.ui.styles.theme import STYLE_CUSTOM_DIALOG
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-    QTextEdit, QComboBox, QDateTimeEdit, QLineEdit, QFormLayout, QDoubleSpinBox, QCheckBox,
-    QFrame
+    QHBoxLayout, QPushButton, QLabel, QTextEdit, QComboBox,
+    QDateTimeEdit, QLineEdit, QFormLayout, QDoubleSpinBox, QCheckBox
 )
-from PySide6.QtCore import Qt, QDateTime, Signal, QPoint
+from PySide6.QtCore import QDateTime
 from ...data.dto.remcard_dto import AdministrationDTO
 from ...services.prescription_engine import engine
 import re
@@ -339,7 +336,6 @@ class ManualEntryDialog(BaseStyledDialog):
 
     def fill_from_order(self, order):
         drug_data = getattr(self, "drug_data", {}) or {}
-        drug_key = getattr(self, "drug_key", None) or getattr(order, "drug_key", None)
 
         if drug_data.get("latin"):
             self.name_input.setText(str(drug_data.get("latin") or ""))

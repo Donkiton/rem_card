@@ -13,7 +13,6 @@ from rem_card.services.analytics.period import normalize_analytics_period
 from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
 from rem_card.ui.styles.theme import (
     ANALYTICS_CHART_COLORS,
-    BG_CARD,
     COLOR_PRIMARY_DARK,
     TEXT_PRIMARY,
 )

@@ -7,7 +7,6 @@ from ..dto.remcard_dto import PatientDTO
 from .patient_status_dao import PatientStatusDAO
 from ..dto.remcard_dto import PatientStatus
 from rem_card.app.patient_age import parse_date_value
-from rem_card.services.shift_service import ShiftService
 from ...app.logger import logger
 from ...app.db_cycle_registry import discover_db_cycle_paths, select_db_paths_for_period
 from ...app.archive_schema_cache import get_archive_schema

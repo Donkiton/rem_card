@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Optional, Tuple, Dict
 
-from ..data.dto.remcard_dto import OrderDTO, AdministrationDTO, OrderType, OrderStatus
+from ..data.dto.remcard_dto import OrderDTO, AdministrationDTO
 from ..data.dao.db_manager import DatabaseManager
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric

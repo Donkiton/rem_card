@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFrame
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QFrame
 from PySide6.QtCore import Qt, Signal
 from rem_card.app.roles import (
     ROLE_DOCTOR,

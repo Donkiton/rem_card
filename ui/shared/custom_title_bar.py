@@ -1,7 +1,7 @@
 import os
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QApplication
-from PySide6.QtCore import Qt, QPoint, Signal
-from PySide6.QtGui import QFont, QIcon, QPixmap
+from PySide6.QtCore import Qt, QPoint
+from PySide6.QtGui import QFont, QPixmap
 from rem_card.app.version import APP_DISPLAY_TITLE
 from rem_card.ui.styles.shared_styles import apply_main_frame_window_style
 

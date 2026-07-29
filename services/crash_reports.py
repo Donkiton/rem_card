@@ -7,7 +7,6 @@ import json
 import os
 import re
 import socket
-import sys
 import tempfile
 import threading
 import time

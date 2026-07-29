@@ -338,7 +338,7 @@ class SettingsDatabase:
                         "settings_schema_init",
                         force=True,
                     ),
-                ) as _cursor:
+                ):
                     apply_schema_called = True
                     settings_schema.apply_schema(conn)
                     apply_schema_wrote = True

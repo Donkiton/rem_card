@@ -3,12 +3,12 @@ import pyqtgraph as pg
 import warnings
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, QEvent, QPointF, QRect, QTimeLine
-from PySide6.QtGui import QPainter, QFont, QColor, QBrush, QPainterPath
+from PySide6.QtGui import QPainter, QFont, QColor, QPainterPath
 from datetime import datetime, timedelta
 from .chart_data_processor import ChartDataProcessor
-from ..styles.theme import (BG_MAIN, BG_LIGHT, TEXT_PRIMARY, BORDER_COLOR, 
-                            COLOR_VITAL_AD_LINE, COLOR_VITAL_AD_BG, COLOR_VITAL_PULSE, 
-                            COLOR_VITAL_SPO2, COLOR_VITAL_TEMP, COLOR_VITAL_RESP, COLOR_VITAL_CVP)
+from ..styles.theme import (BG_MAIN, BG_LIGHT, BORDER_COLOR, COLOR_VITAL_AD_LINE,
+                            COLOR_VITAL_AD_BG, COLOR_VITAL_PULSE, COLOR_VITAL_SPO2,
+                            COLOR_VITAL_TEMP, COLOR_VITAL_RESP, COLOR_VITAL_CVP)
 
 pg.setConfigOption("background", "transparent")
 pg.setConfigOption("foreground", "k")
@@ -601,7 +601,7 @@ class ChartWidget(QWidget):
             if closest_vital is not None:
                 time_str = closest_vital.timestamp.strftime('%H:%M')
                 
-                html = f"<div style='font-family: Segoe UI; font-size: 13px; padding: 5px; background-color: #ebecef;'>"
+                html = "<div style='font-family: Segoe UI; font-size: 13px; padding: 5px; background-color: #ebecef;'>"
                 html += f"<b>Время: {time_str}</b><br>"
                 
                 def f_val(val):

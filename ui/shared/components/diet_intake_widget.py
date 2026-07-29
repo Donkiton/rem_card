@@ -925,7 +925,6 @@ class DietIntakeWidget(QWidget):
             return
         changes = [dict(change) for change in changes]
         admission_id = self.admission_id
-        shift_date = self.shift_date
         service = self.service
 
         def op():

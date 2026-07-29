@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 
 from PySide6.QtCore import QDateTime, Qt
 from PySide6.QtWidgets import (

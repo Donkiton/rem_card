@@ -8,7 +8,6 @@ import sqlite3
 import uuid
 from dataclasses import replace
 from datetime import datetime
-from typing import Any
 
 from rem_card.app.db_runtime_context import DbRuntimeContext
 from rem_card.app.emergency_metadata import (

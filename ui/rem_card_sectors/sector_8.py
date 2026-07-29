@@ -1,6 +1,4 @@
 from rem_card.ui.shared.base_sector import BaseSectorWidget
-from PySide6.QtWidgets import (QVBoxLayout, QLabel, QWidget)
-from PySide6.QtCore import Qt
 
 class Sector8(BaseSectorWidget):
     def __init__(self, parent=None):
@@ -25,7 +23,6 @@ class Sector8(BaseSectorWidget):
     def init_ui(self):
         # Очищаем содержимое контейнера, если оно было создано в базовом классе
         self.container.setStyleSheet("background: transparent; border: none;")
-        pass
 
     def set_content(self, widget):
         """Метод для добавления кнопок управления в сектор"""

@@ -2959,64 +2959,94 @@ class OperBlockChartWidget(ChartWidget):
             gaps_by_x=gaps_by_x,
         )
 
+    @staticmethod
+    def _order_marker_row_signature(row: dict) -> tuple:
+        return (
+            str(row.get("id") or ""),
+            str(row.get("source") or ""),
+            int(row.get("source_id") or 0),
+            int(row.get("revision") or 0),
+            str(row.get("datetime") or ""),
+            str(row.get("display_label") or ""),
+            str(row.get("text") or row.get("raw_text") or ""),
+            str(row.get("route") or ""),
+            str(row.get("comment") or ""),
+        )
+
+    @staticmethod
+    def _order_marker_rate_history_signature(history: dict | None) -> tuple:
+        row = history or {}
+        return (
+            str(row.get("event_time") or ""),
+            str(row.get("rate_value") or ""),
+            str(row.get("rate_unit") or ""),
+            str(row.get("revision") or ""),
+        )
+
+    @staticmethod
+    def _order_marker_dose_history_signature(history: dict | None) -> tuple:
+        row = history or {}
+        return (
+            str(row.get("event_time") or ""),
+            str(row.get("dose_text") or ""),
+            str(row.get("revision") or ""),
+        )
+
+    @classmethod
+    def _order_marker_interval_signature(cls, row: dict) -> tuple:
+        payload = row.get("payload")
+        payload_key = (
+            (
+                str(payload.get("start_revision")),
+                str(payload.get("dose_text")),
+                str(payload.get("display_dose_text")),
+            )
+            if isinstance(payload, dict)
+            else ("", "", "")
+        )
+        return (
+            str(row.get("interval_id") or ""),
+            str(row.get("status") or ""),
+            str(row.get("start_time") or ""),
+            str(row.get("end_time") or ""),
+            str(row.get("current_rate_value") or ""),
+            str(row.get("current_rate_unit") or ""),
+            tuple(
+                cls._order_marker_rate_history_signature(history)
+                for history in list(row.get("rate_history") or [])
+            ),
+            tuple(
+                cls._order_marker_dose_history_signature(history)
+                for history in list(row.get("dose_history") or [])
+            ),
+            *payload_key,
+        )
+
+    @staticmethod
+    def _operation_stage_signature(row: dict) -> tuple:
+        return (
+            str(row.get("id") or ""),
+            str(row.get("stage_kind") or ""),
+            str(row.get("event_time") or ""),
+            str(row.get("display_label") or row.get("raw_text") or ""),
+            int(row.get("revision") or 0),
+        )
+
     def _current_order_marker_signature(self) -> tuple:
         start_key = self._order_marker_start.isoformat() if isinstance(self._order_marker_start, datetime) else None
         visible_hours = round(float(getattr(self, "visible_hours", OPERBLOCK_INITIAL_CHART_HOURS)), 3)
         view_left, view_right = self._current_timeline_view_bounds(visible_hours)
         view_key = (round(view_left, 3), round(view_right, 3))
         rows_key = tuple(
-            (
-                str(row.get("id") or ""),
-                str(row.get("source") or ""),
-                int(row.get("source_id") or 0),
-                int(row.get("revision") or 0),
-                str(row.get("datetime") or ""),
-                str(row.get("display_label") or ""),
-                str(row.get("text") or row.get("raw_text") or ""),
-                str(row.get("route") or ""),
-                str(row.get("comment") or ""),
-            )
+            self._order_marker_row_signature(row)
             for row in self._order_marker_rows
         )
         intervals_key = tuple(
-            (
-                str(row.get("interval_id") or ""),
-                str(row.get("status") or ""),
-                str(row.get("start_time") or ""),
-                str(row.get("end_time") or ""),
-                str(row.get("current_rate_value") or ""),
-                str(row.get("current_rate_unit") or ""),
-                tuple(
-                    (
-                        str((history or {}).get("event_time") or ""),
-                        str((history or {}).get("rate_value") or ""),
-                        str((history or {}).get("rate_unit") or ""),
-                        str((history or {}).get("revision") or ""),
-                    )
-                    for history in list(row.get("rate_history") or [])
-                ),
-                tuple(
-                    (
-                        str((history or {}).get("event_time") or ""),
-                        str((history or {}).get("dose_text") or ""),
-                        str((history or {}).get("revision") or ""),
-                    )
-                    for history in list(row.get("dose_history") or [])
-                ),
-                str((row.get("payload") or {}).get("start_revision") if isinstance(row.get("payload"), dict) else ""),
-                str((row.get("payload") or {}).get("dose_text") if isinstance(row.get("payload"), dict) else ""),
-                str((row.get("payload") or {}).get("display_dose_text") if isinstance(row.get("payload"), dict) else ""),
-            )
+            self._order_marker_interval_signature(row)
             for row in self._infusion_interval_rows
         )
         stages_key = tuple(
-            (
-                str(row.get("id") or ""),
-                str(row.get("stage_kind") or ""),
-                str(row.get("event_time") or ""),
-                str(row.get("display_label") or row.get("raw_text") or ""),
-                int(row.get("revision") or 0),
-            )
+            self._operation_stage_signature(row)
             for row in getattr(self, "_operation_stage_rows", []) or []
         )
         active_infusion_minute_key = ""

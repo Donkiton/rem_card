@@ -4,8 +4,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
     QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, 
-    QMessageBox, QFormLayout, QDialog, QDialogButtonBox,
-    QComboBox, QFrame
+    QFormLayout, QDialogButtonBox, QComboBox, QFrame
 )
 from PySide6.QtCore import Qt
 from rem_card.services.prescription_engine import engine

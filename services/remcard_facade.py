@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple, Dict, Any, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from ..data.dao.sync_cursor import is_cursor_newer, normalize_sync_cursor

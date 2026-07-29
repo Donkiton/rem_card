@@ -36,26 +36,24 @@ SKIP_DIR_NAMES = {
     "venv",
 }
 
-# Existing F-ranked blocks. This list allows the current codebase to pass while
-# still blocking any newly introduced F-ranked function/class.
+# Existing F-ranked blocks and their maximum accepted complexity. This allows
+# gradual cleanup while blocking both new F-ranked blocks and baseline growth.
 ALLOWED_F_BLOCKS = {
-    ("app/main.py", "_main_impl"),
-    ("app/sqlite_shared.py", "SQLiteWriteController.transaction"),
-    ("services/operblock_timeline.py", "timeline_event_row_to_medication_event"),
-    ("data/dao/patient_status_dao.py", "PatientStatusDAO.change_status_with_outcome_details"),
-    ("scripts/regression_safety_checks.py", "_check_orders_pending_states_before_commit"),
-    ("scripts/regression_safety_checks.py", "_check_orders_fast_click_path_stays_local"),
-    ("scripts/regression_safety_checks.py", "_check_performance_a_guards_present"),
-    ("scripts/regression_safety_checks.py", "_check_sync_coordinator_classifies_targeted_refresh"),
-    ("scripts/regression_safety_checks.py", "_check_operblock_operation_stages_custom_events"),
-    ("scripts/regression_safety_checks.py", "_check_operblock_icons_settings_db"),
-    ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._stage_state"),
-    ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._calculate_statistics"),
-    ("services/settings/settings_service.py", "SettingsService._repair_background_settings_from_rows"),
-    ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"),
-    ("ui/operblock_view/operblock_chart_widget.py", "OperBlockChartWidget._current_order_marker_signature"),
-    ("ui/operblock_view/operblock_main_widget.py", "OccupyTableDialog.set_data"),
-    ("ui/operblock_view/operblock_main_widget.py", "OperBlockMainWidget._build_timeline_events"),
+    ("app/main.py", "_main_impl"): 63,
+    ("app/sqlite_shared.py", "SQLiteWriteController.transaction"): 59,
+    ("services/operblock_timeline.py", "timeline_event_row_to_medication_event"): 48,
+    ("data/dao/patient_status_dao.py", "PatientStatusDAO.change_status_with_outcome_details"): 43,
+    ("scripts/regression_safety_checks.py", "_check_orders_pending_states_before_commit"): 49,
+    ("scripts/regression_safety_checks.py", "_check_orders_fast_click_path_stays_local"): 48,
+    ("scripts/regression_safety_checks.py", "_check_performance_a_guards_present"): 44,
+    ("scripts/regression_safety_checks.py", "_check_sync_coordinator_classifies_targeted_refresh"): 41,
+    ("scripts/regression_safety_checks.py", "_check_operblock_operation_stages_custom_events"): 90,
+    ("scripts/regression_safety_checks.py", "_check_operblock_icons_settings_db"): 48,
+    ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._stage_state"): 46,
+    ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._calculate_statistics"): 162,
+    ("services/settings/settings_service.py", "SettingsService._repair_background_settings_from_rows"): 44,
+    ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"): 46,
+    ("ui/operblock_view/operblock_main_widget.py", "OperBlockMainWidget._build_timeline_events"): 58,
 }
 
 
@@ -67,13 +65,13 @@ def _is_skipped(path: Path) -> bool:
     return any(part in SKIP_DIR_NAMES for part in path.parts)
 
 
-def _run_flake8_f821() -> dict[str, Any]:
+def _run_flake8_static_analysis() -> dict[str, Any]:
     command = [
         sys.executable,
         "-m",
         "flake8",
         ".",
-        "--select=F821",
+        "--select=F401,F402,F541,F811,F821,F841",
         "--exclude=.git,__pycache__,build,dist,tmp,.venv,venv,.pytest_cache,.mypy_cache,.remcard,.ruff_cache",
     ]
     started = time.perf_counter()
@@ -84,7 +82,7 @@ def _run_flake8_f821() -> dict[str, Any]:
         text=True,
     )
     return {
-        "name": "flake8_f821",
+        "name": "flake8_static_analysis",
         "ok": proc.returncode == 0,
         "duration_sec": round(time.perf_counter() - started, 3),
         "command": command,
@@ -127,6 +125,7 @@ def _scan_complexity_f() -> dict[str, Any]:
             "error": f"radon is unavailable: {exc}",
             "blocks": [],
             "new_f_blocks": [],
+            "worsened_f_blocks": [],
             "missing_baseline_blocks": [],
         }
 
@@ -162,18 +161,35 @@ def _scan_complexity_f() -> dict[str, Any]:
         for item in blocks
         if (item["path"], item["name"]) not in ALLOWED_F_BLOCKS
     ]
+    worsened_f_blocks = [
+        {
+            **item,
+            "allowed_complexity": ALLOWED_F_BLOCKS[(item["path"], item["name"])],
+        }
+        for item in blocks
+        if (
+            (item["path"], item["name"]) in ALLOWED_F_BLOCKS
+            and item["complexity"] > ALLOWED_F_BLOCKS[(item["path"], item["name"])]
+        )
+    ]
     missing_baseline_blocks = [
         {"path": path, "name": name}
-        for path, name in sorted(ALLOWED_F_BLOCKS - found)
+        for path, name in sorted(ALLOWED_F_BLOCKS.keys() - found)
     ]
 
     return {
         "name": "radon_cc_min_f",
-        "ok": not parse_errors and not new_f_blocks,
+        "ok": (
+            not parse_errors
+            and not new_f_blocks
+            and not worsened_f_blocks
+            and not missing_baseline_blocks
+        ),
         "duration_sec": round(time.perf_counter() - started, 3),
         "equivalent_command": [sys.executable, "-m", "radon", "cc", ".", "-s", "--min", "F"],
         "blocks": blocks,
         "new_f_blocks": new_f_blocks,
+        "worsened_f_blocks": worsened_f_blocks,
         "missing_baseline_blocks": missing_baseline_blocks,
         "parse_errors": parse_errors,
     }
@@ -181,7 +197,7 @@ def _scan_complexity_f() -> dict[str, Any]:
 
 def main() -> int:
     checks = [
-        _run_flake8_f821(),
+        _run_flake8_static_analysis(),
         _scan_bom(),
         _scan_complexity_f(),
     ]

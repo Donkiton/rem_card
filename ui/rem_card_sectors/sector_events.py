@@ -1,12 +1,11 @@
 import inspect
-import os
 from collections import OrderedDict
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from datetime import datetime
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QPushButton, QScrollArea, QFrame, QLineEdit, QComboBox, QMessageBox, QDateTimeEdit, QApplication, QDialog)
-from PySide6.QtCore import Qt, Signal, QDateTime, QTimer
-from PySide6.QtGui import QColor, QIcon
+                             QPushButton, QScrollArea, QFrame, QLineEdit, QDateTimeEdit, QApplication, QDialog)
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QColor
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.data.dto.remcard_dto import PatientStatus
 from rem_card.ui.rem_card_sectors.s_print.movement import movement_comment_text

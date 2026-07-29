@@ -37,7 +37,6 @@ from rem_card.app.emergency_validation import (
     SnapshotValidationResult,
     compute_file_hash,
     validate_medical_db_snapshot,
-    validate_settings_db_snapshot,
 )
 from rem_card.app.runtime_outage import runtime_outage_startup_request_path
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
