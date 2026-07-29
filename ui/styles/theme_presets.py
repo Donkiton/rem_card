@@ -162,11 +162,6 @@ LIGHT_TOKENS: dict[str, Any] = {
     "print.table_header_bg": "#e9ecef",
     "print.table_header_text": "#1f2933",
     "print.warning": "#f39c12",
-    "minigame.window.bg": "#f8f9fa",
-    "minigame.window.border": "#bdc3c7",
-    "minigame.dialog.bg": "#ffffff",
-    "minigame.dialog.text": "#2c3e50",
-    "minigame.button.bg": "#007bff",
 }
 
 
@@ -272,11 +267,6 @@ DARK_TOKENS: dict[str, Any] = {
     "print.table_header_bg": "#e9ecef",
     "print.table_header_text": "#1f2933",
     "print.warning": "#f39c12",
-    "minigame.window.bg": "#1f2327",
-    "minigame.window.border": "#555e67",
-    "minigame.dialog.bg": "#252a2f",
-    "minigame.dialog.text": "#eef1f3",
-    "minigame.button.bg": "#343a40",
 }
 
 

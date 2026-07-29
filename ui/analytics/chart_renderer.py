@@ -150,7 +150,7 @@ def plot_pie_with_legend(
     right_pad = max(26.0, min(46.0, max_label_len * 1.25 + 8.0))
     x_right = max(100.0, max(percentages, default=0.0)) + right_pad
 
-    bars = ax.barh(
+    rectangles = ax.barh(
         y_positions,
         percentages,
         height=0.62,
@@ -169,10 +169,10 @@ def plot_pie_with_legend(
     ax.grid(axis="y", visible=False)
     ax.set_ylabel("")
 
-    for bar, value_label in zip(bars, value_labels):
+    for rectangle, value_label in zip(rectangles, value_labels):
         ax.text(
-            min(bar.get_width() + 1.4, x_right - 1.0),
-            bar.get_y() + bar.get_height() / 2,
+            min(rectangle.get_width() + 1.4, x_right - 1.0),
+            rectangle.get_y() + rectangle.get_height() / 2,
             value_label,
             va="center",
             ha="left",

@@ -21,7 +21,6 @@ class NurseSector8Panel(QWidget):
     add_patient_clicked = Signal()
     archive_clicked = Signal()
     calc_clicked = Signal()
-    bonus_clicked = Signal()
     settings_clicked = Signal()
     user_report_clicked = Signal()
     user_reports_clicked = Signal()
@@ -97,15 +96,6 @@ class NurseSector8Panel(QWidget):
         self.btn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_calc.clicked.connect(self.calc_clicked.emit)
 
-        # Кнопка Бонус
-        self.btn_bonus = QPushButton(" Бонус", self)
-        bonus_icon = os.path.join(self.icon_dir, "bonus.png")
-        self.btn_bonus.setIcon(QIcon(bonus_icon))
-        self.btn_bonus.setIconSize(QSize(18, 18))
-        self.btn_bonus.setMinimumHeight(32)
-        self.btn_bonus.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.btn_bonus.clicked.connect(self.bonus_clicked.emit)
-
         # Кнопка Настройки
         self.btn_settings = QPushButton(" Настройки", self)
         settings_icon = os.path.join(self.icon_dir, "settings.png")
@@ -139,7 +129,6 @@ class NurseSector8Panel(QWidget):
             "user_reports": self.btn_user_reports,
             "add_patient": self.btn_add_patient,
             "calc": self.btn_calc,
-            "bonus": self.btn_bonus,
             "settings": self.btn_settings,
             "back": self.btn_back,
             "exit": self.btn_exit,

@@ -12294,11 +12294,6 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
         ),
     ]
 
-    doctor_widget_text = (PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py").read_text(encoding="utf-8")
-    forbidden_bars_autocheck = ("_check_bars_auth_async", "_bars_auth_check_worker", "_on_bars_auth_check_")
-    if any(marker in doctor_widget_text for marker in forbidden_bars_autocheck):
-        return False, "doctor_bars_auth: startup BARS auth-check worker must stay absent"
-
     def _async_call_uses_parent_self(method: ast.FunctionDef) -> bool:
         for node in ast.walk(method):
             if not isinstance(node, ast.Call):
@@ -12838,50 +12833,6 @@ def _check_pdf_build_runs_in_worker(temp_root: str) -> tuple[bool, str]:
             if "_start" not in method_source:
                 return False, f"{relative_path}: {method_name} does not delegate PDF build"
     return True, "ok"
-
-
-def _check_bars_dialog_has_no_periodic_polling(temp_root: str) -> tuple[bool, str]:
-    _ = temp_root
-    dialog_path = PROJECT_ROOT / "ui" / "doctor_view" / "bars_auth_dialog.py"
-    dialog_source = dialog_path.read_text(encoding="utf-8")
-    forbidden_markers = (
-        "_poll_timer",
-        "setInterval(1800)",
-        "timeout.connect(self._check_authorized_async)",
-        "QTimer.singleShot(900, self._check_authorized_async)",
-    )
-    for marker in forbidden_markers:
-        if marker in dialog_source:
-            return False, f"bars dialog must not use periodic auth polling: {marker}"
-
-    tree = ast.parse(dialog_source)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        func_name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
-        if func_name != "AsyncCallThread":
-            continue
-        for keyword in node.keywords:
-            if keyword.arg == "parent" and isinstance(keyword.value, ast.Name) and keyword.value.id == "self":
-                return False, "bars dialog AsyncCallThread must stay parentless"
-
-    if "def shutdown" not in dialog_source or "deactivate" not in dialog_source:
-        return False, "bars dialog must deactivate service on close"
-    if "self.authorized = False" not in dialog_source:
-        return False, "bars dialog close must leave BARS inactive"
-
-    standalone_source = (PROJECT_ROOT / "standalone" / "bars_button_app.py").read_text(encoding="utf-8")
-    if "QTimer.singleShot(400, self._check_bars_auth_async)" in standalone_source:
-        return False, "standalone BARS must not auto-check in manual mode"
-    doctor_source = (PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py").read_text(encoding="utf-8")
-    if "dialog.authorized or service.last_authorized" in doctor_source or "dialog.authorized or self._bars_auth_service.last_authorized" in standalone_source:
-        return False, "BARS button must become inactive after dialog closes"
-    if "self._bars_auth_service = None" not in doctor_source or "self._set_bars_auth_state(False)" not in doctor_source:
-        return False, "doctor BARS button must drop service and indicator after close"
-    return True, "ok"
-
-
 def _check_report_pdf_opening_uses_shared_helper(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     opener_source = (PROJECT_ROOT / "ui" / "shared" / "pdf_opener.py").read_text(encoding="utf-8")
@@ -28415,7 +28366,6 @@ def main(argv: list[str] | None = None):
         ("performance_a_guards_present", _check_performance_a_guards_present),
         ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
         ("pdf_build_runs_in_worker", _check_pdf_build_runs_in_worker),
-        ("bars_dialog_has_no_periodic_polling", _check_bars_dialog_has_no_periodic_polling),
         ("report_pdf_opening_uses_shared_helper", _check_report_pdf_opening_uses_shared_helper),
         ("analytics_runs_outside_ui_callbacks", _check_analytics_runs_outside_ui_callbacks),
         ("diet_intake_cached_snapshot_refreshes_templates", _check_diet_intake_cached_snapshot_refreshes_templates),

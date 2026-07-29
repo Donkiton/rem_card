@@ -266,17 +266,3 @@ Display settings:
 
 - `DisplaySettingsStorage` (`ui/shared/display_settings_storage.py:14-18`, `83-120`, `277-321`);
 - W1a/W1b enabled flags (`display_settings_storage.py:261-274`).
-
-## 16. Мини-игры
-
-UI:
-
-- `ui/shared/minigames/bonus_dialog.py`;
-- arcade/snake/user/leaderboard widgets under `ui/shared/minigames/`.
-
-Services:
-
-- `services/minigames/minigame_paths.py` stores data under data root `minigames` (`services/minigames/minigame_paths.py:25-33`);
-- user/score stores in `services/minigames/`.
-
-Style audit allows minigame-specific inline style baseline (`scripts/style_audit_check.py:120-153`).

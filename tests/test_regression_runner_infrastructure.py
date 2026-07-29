@@ -336,7 +336,7 @@ def test_main_routes_fast_jobs_one_through_parallel_subprocess_path(monkeypatch,
         )
 
     assert raised.value.code == 0
-    assert captured["total"] == 538
+    assert captured["total"] == 537
     assert captured["jobs"] == 1
     assert captured["shard_count"] == 2
     assert captured["deadline_monotonic"] is not None

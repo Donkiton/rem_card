@@ -146,8 +146,6 @@ class DoctorRemCardWidget(QWidget):
         self._add_patient_lock = self._build_add_patient_lock()
         self._add_patient_lock_held = False
         self._add_patient_locked_by_other = False
-        self._bars_auth_service = None
-        
         logger.debug(f"DoctorRemCardWidget init patient_service={self.patient_service}")
         
         self.init_ui()
@@ -2223,12 +2221,8 @@ class DoctorRemCardWidget(QWidget):
         self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
         self.sector8_panel.electrolytes_calc_clicked.connect(self.on_electrolyte_calculator_clicked)
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
-        self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
-        self.sector8_panel.bars_clicked.connect(self.on_bars_clicked)
         self.sector8_panel.user_report_clicked.connect(self.on_user_report_clicked)
         self.sector8_panel.user_reports_clicked.connect(self.on_user_reports_clicked)
-        self.sector8_panel.set_bars_auth_state(False)
-        logger.info("[StartupDiag] phase=bars_auth_autocheck_disabled")
 
         if hasattr(self.layout_manager, 'beds_selection_widget'):
             self.layout_manager.beds_selection_widget.patient_selected.connect(self.on_patient_selected_from_list)
@@ -3584,32 +3578,6 @@ class DoctorRemCardWidget(QWidget):
             self._release_add_patient_lock()
             raise
 
-    def _get_bars_auth_service(self):
-        if self._bars_auth_service is None:
-            from rem_card.services.bars_auth_service import BarsAuthService
-
-            self._bars_auth_service = BarsAuthService()
-        return self._bars_auth_service
-
-    def _set_bars_auth_state(self, authorized: bool):
-        panel = getattr(self, "sector8_panel", None)
-        if self._is_qobject_alive(panel) and hasattr(panel, "set_bars_auth_state"):
-            panel.set_bars_auth_state(bool(authorized))
-
-    def on_bars_clicked(self):
-        from rem_card.ui.doctor_view.bars_auth_dialog import BarsAuthDialog
-
-        service = self._get_bars_auth_service()
-        dialog = BarsAuthDialog(service, self)
-        try:
-            dialog.exec()
-        finally:
-            deactivate = getattr(service, "deactivate", None)
-            if callable(deactivate):
-                deactivate()
-            self._bars_auth_service = None
-            self._set_bars_auth_state(False)
-
     def on_refresh_beds_clicked(self):
         self.force_refresh_everywhere()
         if hasattr(self, 'chart'):
@@ -3868,16 +3836,6 @@ class DoctorRemCardWidget(QWidget):
         except Exception as exc:
             logger.warning("Electrolyte calculator: failed to load 24h diuresis: %s", exc)
             return None
-
-    def on_bonus_clicked(self):
-        try:
-            from rem_card.app.runtime_paths import resolve_baza_dir
-            from rem_card.ui.shared.minigames.bonus_dialog import BonusDialog
-
-            dialog = BonusDialog(role="doctor", data_root_provider=resolve_baza_dir, parent=self)
-            dialog.exec()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Бонус", f"Не удалось открыть бонус:\n{exc}")
 
     def on_global_archive_clicked(self):
         if hasattr(self, "content_stack"):

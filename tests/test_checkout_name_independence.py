@@ -102,7 +102,6 @@ def test_official_direct_scripts_bootstrap_before_rem_card_imports():
         *PROJECT_ROOT.joinpath("scripts").glob("*.py"),
         PROJECT_ROOT / "app" / "main.py",
         PROJECT_ROOT / "app" / "updater_main.py",
-        PROJECT_ROOT / "standalone" / "bars_button_app.py",
     ]
     missing_bootstrap: list[str] = []
     for path in candidates:

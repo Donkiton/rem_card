@@ -1475,7 +1475,6 @@ class NurseMainWidget(QWidget):
         self.sector8_panel.refresh_clicked.connect(self.force_refresh_everywhere)
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
         self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
-        self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
         self.sector8_panel.settings_clicked.connect(self.on_settings_clicked)
         self.sector8_panel.user_report_clicked.connect(self.on_user_report_clicked)
         self.sector8_panel.user_reports_clicked.connect(self.on_user_reports_clicked)
@@ -2425,18 +2424,6 @@ class NurseMainWidget(QWidget):
 
         reply = CustomMessageBox.question(self, "Подтверждение", "Выйти из программы?", CustomMessageBox.Yes | CustomMessageBox.No, CustomMessageBox.No)
         if reply == CustomMessageBox.Yes: self.window().close()
-
-    def on_bonus_clicked(self):
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
-
-        try:
-            from rem_card.app.runtime_paths import resolve_baza_dir
-            from rem_card.ui.shared.minigames.bonus_dialog import BonusDialog
-
-            dialog = BonusDialog(role="nurse", data_root_provider=resolve_baza_dir, parent=self)
-            dialog.exec()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Бонус", f"Не удалось открыть бонус:\n{exc}")
 
     def on_settings_clicked(self):
         self._remember_settings_return_mode()

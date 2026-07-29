@@ -20,7 +20,6 @@
 | `RemCard.spec` | PyInstaller сборка шести EXE и update package: doctor, nurse, operblock emergency/planned, path setup, updater. | Release build. |
 | `VERSION` | Версия приложения; читается release/build/version code (`app/version.py`, `scripts/build_release.py`). | UI/update/build. |
 | `CHANGELOG.md` | Changelog; build script обновляет release notes. | `scripts/build_release.py`. |
-| `bars.py` | BARS-related entry/helper. ТРЕБУЕТ УТОЧНЕНИЯ. | BARS workflow. |
 | `update_db.py` | Ручной helper миграции unified schema под lock/integrity-check. Для обычного релиза использовать release/update flow, не этот скрипт. | Ручные операции сопровождения. |
 
 ## 2. Папки
@@ -68,7 +67,6 @@ DAO, DTO, dictionaries, MKB data.
 - `services/order_service.py`, `services/order_domain_service.py` — orders and W1a read-model.
 - `services/patient_bed_management/service.py` — patient/bed operations with optimistic locks.
 - `services/analytics/*` — analytics/graphs read managers.
-- `services/minigames/*` — isolated minigame state.
 
 Нельзя: включать local-first/outbox by default, обходить `enqueue_write` в UI, ослаблять conflict checks.
 
@@ -122,10 +120,6 @@ Gates, benchmarks, release helpers.
 ### `icon/`
 
 Иконки для EXE и UI. `RemCard.spec:80`, `127`, `141`, `155`, `169`.
-
-### `standalone/`, `tmp/`
-
-ТРЕБУЕТ УТОЧНЕНИЯ. Не являются основным runtime path по найденному коду.
 
 ## 3. Entry points
 

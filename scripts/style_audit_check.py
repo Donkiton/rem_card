@@ -56,7 +56,6 @@ LEGACY_BASELINE_COUNTS: dict[Path, dict[str, int]] = {
     Path("ui/analytics/statistics_dialog.py"): {"qss": 15},
     Path("ui/doctor_view/administration_dialog.py"): {"hex": 6, "qss": 4},
     Path("ui/doctor_view/archive_widget.py"): {"hex": 2, "qss": 17},
-    Path("ui/doctor_view/bars_auth_dialog.py"): {"hex": 11, "qss": 9},
     Path("ui/doctor_view/card_list_widget.py"): {"hex": 7, "qss": 2},
     Path("ui/doctor_view/components/beds_selection_widget.py"): {"qss": 3},
     Path("ui/doctor_view/components/control_panel.py"): {"hex": 8, "qss": 7},
@@ -139,8 +138,6 @@ LEGACY_BASELINE_COUNTS: dict[Path, dict[str, int]] = {
     Path("ui/shared/components/vital_settings_dialog.py"): {"hex": 3, "qss": 2},
     Path("ui/shared/hybrid_shift_time_picker.py"): {"hex": 18, "qss": 1},
     Path("ui/shared/emergency_dialogs.py"): {"hex": 1, "qss": 1},
-    Path("ui/shared/minigames/arcade_widgets.py"): {"hex": 47, "qss": 2},
-    Path("ui/shared/minigames/snake_widget.py"): {"hex": 8, "qss": 3},
     Path("ui/shared/navigation_widgets.py"): {"qss": 5},
     Path("ui/shared/vitals_widget.py"): {"hex": 6, "qss": 3},
 }
@@ -169,20 +166,12 @@ MEDICAL_CHART_COLORS_ALLOWED = frozenset(
     }
 )
 
-GAME_CANVAS_COLORS_ALLOWED = frozenset(
-    {
-        Path("ui/shared/minigames/arcade_widgets.py"),
-        Path("ui/shared/minigames/snake_widget.py"),
-    }
-)
-
 TEST_FIXTURES_ALLOWED = frozenset()
 
 LEGACY_UI_QSS_ALLOWED = frozenset(
     path
     for path, counts in LEGACY_BASELINE_COUNTS.items()
     if "qss" in counts
-    and path not in GAME_CANVAS_COLORS_ALLOWED
     and path not in PRINT_HTML_ALLOWED
 )
 
@@ -235,10 +224,6 @@ def _allowed_category(path: Path, kind: str) -> str | None:
         return "theme"
     if kind in ("hex", "rgb") and _matches(path, MEDICAL_CHART_COLORS_ALLOWED):
         return "medical-chart-colors"
-    if kind in ("hex", "rgb") and _matches(path, GAME_CANVAS_COLORS_ALLOWED):
-        return "game-canvas-colors"
-    if kind == "qss" and _matches(path, GAME_CANVAS_COLORS_ALLOWED):
-        return "game-canvas-qss"
     if _matches(path, PRINT_HTML_ALLOWED):
         return "print-html"
     if _matches(path, TEST_FIXTURES_ALLOWED):
