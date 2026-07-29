@@ -41,19 +41,9 @@ SKIP_DIR_NAMES = {
 ALLOWED_F_BLOCKS = {
     ("app/main.py", "_main_impl"): 63,
     ("app/sqlite_shared.py", "SQLiteWriteController.transaction"): 59,
-    ("services/operblock_timeline.py", "timeline_event_row_to_medication_event"): 48,
     ("data/dao/patient_status_dao.py", "PatientStatusDAO.change_status_with_outcome_details"): 43,
-    ("scripts/regression_safety_checks.py", "_check_orders_pending_states_before_commit"): 49,
-    ("scripts/regression_safety_checks.py", "_check_orders_fast_click_path_stays_local"): 48,
-    ("scripts/regression_safety_checks.py", "_check_performance_a_guards_present"): 44,
-    ("scripts/regression_safety_checks.py", "_check_sync_coordinator_classifies_targeted_refresh"): 41,
-    ("scripts/regression_safety_checks.py", "_check_operblock_operation_stages_custom_events"): 90,
-    ("scripts/regression_safety_checks.py", "_check_operblock_icons_settings_db"): 48,
-    ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._stage_state"): 46,
     ("services/analytics/operblock_statistics_service.py", "OperBlockStatisticsReportBuilder._calculate_statistics"): 161,
-    ("services/settings/settings_service.py", "SettingsService._repair_background_settings_from_rows"): 44,
     ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"): 46,
-    ("ui/operblock_view/operblock_main_widget.py", "OperBlockMainWidget._build_timeline_events"): 58,
 }
 
 

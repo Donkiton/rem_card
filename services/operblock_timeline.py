@@ -342,7 +342,7 @@ def operation_stage_kind_from_payload(payload: Mapping[str, Any] | None) -> str:
     return kind if kind in OPERBLOCK_STAGE_KIND_LABELS else ""
 
 
-def timeline_event_row_to_medication_event(row: Mapping[str, Any]) -> Optional[OperBlockMedicationEvent]:
+def _timeline_event_identity(row: Mapping[str, Any]) -> Optional[tuple[datetime, int, str]]:
     event_time = _parse_dt(row.get("event_time"))
     source_id = int(row.get("id") or 0)
     if event_time is None or source_id <= 0:
@@ -350,10 +350,26 @@ def timeline_event_row_to_medication_event(row: Mapping[str, Any]) -> Optional[O
     event_type = str(row.get("event_type") or "").strip()
     if event_type not in OPERBLOCK_TIMELINE_EVENT_TYPES:
         return None
+    return event_time, source_id, event_type
+
+
+def _timeline_event_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    payload = _parse_payload_json(row.get("payload_json"))
+    parent_event_id = row.get("parent_event_id")
+    if parent_event_id is not None:
+        payload["parent_event_id"] = int(parent_event_id)
+    return payload
+
+
+def _timeline_event_labels(
+    row: Mapping[str, Any],
+    *,
+    event_type: str,
+    payload: Mapping[str, Any],
+) -> tuple[str, str, str]:
     raw_text = str(row.get("raw_text") or row.get("display_label") or row.get("drug_label") or "").strip()
     drug_label = str(row.get("drug_label") or "").strip()
     display_label = str(row.get("display_label") or "").strip()
-    payload = _parse_payload_json(row.get("payload_json"))
     stage_kind = operation_stage_kind_from_payload(payload)
     if stage_kind:
         label = OPERBLOCK_STAGE_KIND_LABELS[stage_kind]
@@ -383,9 +399,20 @@ def timeline_event_row_to_medication_event(row: Mapping[str, Any]) -> Optional[O
         parsed = parse_operblock_medication_text(raw_text or drug_label or display_label)
         drug_label = drug_label or str(parsed["drug_label"])
         display_label = display_label or str(parsed["display_label"])
-    parent_event_id = row.get("parent_event_id")
-    if parent_event_id is not None:
-        payload["parent_event_id"] = int(parent_event_id)
+    return raw_text, drug_label, display_label
+
+
+def timeline_event_row_to_medication_event(row: Mapping[str, Any]) -> Optional[OperBlockMedicationEvent]:
+    identity = _timeline_event_identity(row)
+    if identity is None:
+        return None
+    event_time, source_id, event_type = identity
+    payload = _timeline_event_payload(row)
+    raw_text, drug_label, display_label = _timeline_event_labels(
+        row,
+        event_type=event_type,
+        payload=payload,
+    )
     return OperBlockMedicationEvent(
         id=f"timeline_event:{source_id}",
         source="timeline_event",

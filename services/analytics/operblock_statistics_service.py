@@ -529,8 +529,8 @@ class OperBlockStatisticsReportBuilder:
         return result
 
     @classmethod
-    def _stage_state(cls, rows: list[dict[str, Any]]) -> dict[str, Any]:
-        stage_rows = []
+    def _normalized_stage_rows(cls, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        stage_rows: list[dict[str, Any]] = []
         for row in rows:
             payload = cls._json_dict(row.get("payload_json"))
             kind = str(payload.get("stage_kind") or payload.get("operation_stage") or "").strip()
@@ -541,39 +541,27 @@ class OperBlockStatisticsReportBuilder:
                 continue
             stage_rows.append({"kind": kind, "event_dt": event_dt, "payload": payload})
         stage_rows.sort(key=lambda item: item["event_dt"])
+        return stage_rows
 
-        anesthesia_intervals = []
-        surgery_intervals = []
+    @classmethod
+    def _anesthesia_stage_summary(cls, stage_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        intervals: list[dict[str, Any]] = []
         anesthesia_start = None
-        surgery_start = None
         current_anesthesia_type = ""
         current_anesthesiologist = ""
         current_anesthetist = ""
-        current_operation_name = ""
-        current_surgeons = []
-        current_nurse = ""
         first_anesthesia_type = ""
         first_anesthesiologist = ""
         first_anesthetist = ""
-        first_operation_name = ""
-        first_surgeons = []
-        first_nurse = ""
         last_anesthesia_type = ""
         last_anesthesiologist = ""
         last_anesthetist = ""
-        last_operation_name = ""
-        last_surgeons = []
-        last_nurse = ""
         transfer_department = ""
-        custom_events = 0
 
         for row in stage_rows:
             payload = row["payload"]
             kind = row["kind"]
             event_dt = row["event_dt"]
-            if kind == "custom":
-                custom_events += 1
-                continue
             if kind == "anesthesia_start":
                 if anesthesia_start is None:
                     anesthesia_start = event_dt
@@ -600,7 +588,7 @@ class OperBlockStatisticsReportBuilder:
             elif kind == "anesthesia_end":
                 transfer_department = cls._clean_text(payload.get("transfer_department"), fallback="") or transfer_department
                 if anesthesia_start is not None and event_dt >= anesthesia_start:
-                    anesthesia_intervals.append(
+                    intervals.append(
                         {
                             "start": anesthesia_start,
                             "end": event_dt,
@@ -613,7 +601,44 @@ class OperBlockStatisticsReportBuilder:
                     current_anesthesia_type = ""
                     current_anesthesiologist = ""
                     current_anesthetist = ""
-            elif kind == "surgery_start":
+
+        if anesthesia_start is not None:
+            intervals.append(
+                {
+                    "start": anesthesia_start,
+                    "end": None,
+                    "type": current_anesthesia_type,
+                    "anesthesiologist": current_anesthesiologist,
+                    "anesthetist": current_anesthetist,
+                }
+            )
+        return {
+            "intervals": intervals,
+            "anesthesia_type": last_anesthesia_type or first_anesthesia_type,
+            "anesthesiologist": last_anesthesiologist or first_anesthesiologist,
+            "anesthetist": last_anesthetist or first_anesthetist,
+            "transfer_department": transfer_department,
+        }
+
+    @classmethod
+    def _surgery_stage_summary(cls, stage_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        intervals: list[dict[str, Any]] = []
+        surgery_start = None
+        current_operation_name = ""
+        current_surgeons: list[str] = []
+        current_nurse = ""
+        first_operation_name = ""
+        first_surgeons: list[str] = []
+        first_nurse = ""
+        last_operation_name = ""
+        last_surgeons: list[str] = []
+        last_nurse = ""
+
+        for row in stage_rows:
+            payload = row["payload"]
+            kind = row["kind"]
+            event_dt = row["event_dt"]
+            if kind == "surgery_start":
                 if surgery_start is None:
                     surgery_start = event_dt
                     current_operation_name = cls._clean_text(
@@ -633,7 +658,7 @@ class OperBlockStatisticsReportBuilder:
                     first_nurse = first_nurse or current_nurse
             elif kind == "surgery_end":
                 if surgery_start is not None and event_dt >= surgery_start:
-                    surgery_intervals.append(
+                    intervals.append(
                         {
                             "start": surgery_start,
                             "end": event_dt,
@@ -647,18 +672,8 @@ class OperBlockStatisticsReportBuilder:
                     current_surgeons = []
                     current_nurse = ""
 
-        if anesthesia_start is not None:
-            anesthesia_intervals.append(
-                {
-                    "start": anesthesia_start,
-                    "end": None,
-                    "type": current_anesthesia_type,
-                    "anesthesiologist": current_anesthesiologist,
-                    "anesthetist": current_anesthetist,
-                }
-            )
         if surgery_start is not None:
-            surgery_intervals.append(
+            intervals.append(
                 {
                     "start": surgery_start,
                     "end": None,
@@ -667,23 +682,36 @@ class OperBlockStatisticsReportBuilder:
                     "operating_nurse": current_nurse,
                 }
             )
+        return {
+            "intervals": intervals,
+            "operation_name": last_operation_name or first_operation_name,
+            "surgeons": last_surgeons or first_surgeons,
+            "operating_nurse": last_nurse or first_nurse,
+        }
 
+    @classmethod
+    def _stage_state(cls, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        stage_rows = cls._normalized_stage_rows(rows)
+        anesthesia = cls._anesthesia_stage_summary(stage_rows)
+        surgery = cls._surgery_stage_summary(stage_rows)
+        anesthesia_intervals = anesthesia["intervals"]
+        surgery_intervals = surgery["intervals"]
         return {
             "events": stage_rows,
-            "custom_events": custom_events,
+            "custom_events": sum(1 for row in stage_rows if row["kind"] == "custom"),
             "anesthesia_intervals": anesthesia_intervals,
             "surgery_intervals": surgery_intervals,
             "first_anesthesia_start": anesthesia_intervals[0]["start"] if anesthesia_intervals else None,
             "last_anesthesia_end": next((row["end"] for row in reversed(anesthesia_intervals) if row.get("end")), None),
             "first_surgery_start": surgery_intervals[0]["start"] if surgery_intervals else None,
             "last_surgery_end": next((row["end"] for row in reversed(surgery_intervals) if row.get("end")), None),
-            "anesthesia_type": last_anesthesia_type or first_anesthesia_type,
-            "anesthesiologist": last_anesthesiologist or first_anesthesiologist,
-            "anesthetist": last_anesthetist or first_anesthetist,
-            "operation_name": last_operation_name or first_operation_name,
-            "surgeons": last_surgeons or first_surgeons,
-            "operating_nurse": last_nurse or first_nurse,
-            "transfer_department": transfer_department,
+            "anesthesia_type": anesthesia["anesthesia_type"],
+            "anesthesiologist": anesthesia["anesthesiologist"],
+            "anesthetist": anesthesia["anesthetist"],
+            "operation_name": surgery["operation_name"],
+            "surgeons": surgery["surgeons"],
+            "operating_nurse": surgery["operating_nurse"],
+            "transfer_department": anesthesia["transfer_department"],
         }
 
     @staticmethod
