@@ -1,7 +1,7 @@
 import os
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                                QPushButton, QFrame, QDoubleSpinBox, QRadioButton, 
-                               QButtonGroup, QWidget, QGroupBox, QGridLayout)
+                               QButtonGroup, QGroupBox, QGridLayout)
 from PySide6.QtCore import Qt, QSignalBlocker, QPoint, QEvent
 from PySide6.QtGui import QPixmap
 

@@ -1361,8 +1361,8 @@ class OperBlockStatisticsReportBuilder:
         emergency = int(stats["by_table"].get("Экстренная", 0))
         planned = int(stats["by_table"].get("Плановая", 0))
         busiest_day = self._top_label(stats["by_date"])
-        busiest_weekday = self._top_label(stats["by_weekday"])
-        busiest_hour = self._top_label(stats["by_hour"])
+        busiest_weekday = self._top_label(stats["by_weekday"])  # noqa: F841 - требуется отдельное решение по составу отчета
+        busiest_hour = self._top_label(stats["by_hour"])  # noqa: F841 - требуется отдельное решение по составу отчета
         avg_vitals = self._avg_or_none(stats["vitals_by_case"].values())
         mean_min_spo2 = self._avg_or_none(stats["min_spo2_values"])
         incomplete_stage = max(0, total - int(stats["full_stage_count"] or 0))

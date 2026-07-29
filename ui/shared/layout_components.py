@@ -1,5 +1,5 @@
-from PySide6.QtWidgets import QSplitter, QSizePolicy, QStackedWidget, QWidget, QVBoxLayout
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtWidgets import QSplitter, QStackedWidget
+from PySide6.QtCore import QSize
 
 
 class CurrentPageStack(QStackedWidget):

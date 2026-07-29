@@ -2,7 +2,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QWidget, QFrame, QPushButton
 )
 from PySide6.QtCore import Qt
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 import math
 

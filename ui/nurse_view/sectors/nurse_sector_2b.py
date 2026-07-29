@@ -3,9 +3,7 @@ from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, 
 from rem_card.ui.styles.sector_styles import build_remcard_tab_button_style, build_remcard_tab_frame_style
 from rem_card.ui.styles.theme_manager import get_theme_manager
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget, QLabel
-from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QPixmap
-import os
+from PySide6.QtCore import Signal
 
 class NurseSector2b(BaseSectorWidget):
     """Сектор переключения вкладок для медсестры (без ИВЛ)."""

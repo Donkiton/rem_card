@@ -1,10 +1,10 @@
 import os
 import re
-from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
+from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 from PySide6.QtCore import Qt, QRect, QPoint
 from PySide6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygon
 from datetime import datetime, timedelta
-from ...data.dto.remcard_dto import OrderType, OrderStatus
+from ...data.dto.remcard_dto import OrderType
 from ...services.order_domain_service import (
     NURSE_MARK_EXECUTED,
     NURSE_MARK_NOT_EXECUTED,

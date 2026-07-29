@@ -1,5 +1,4 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QCheckBox, QHBoxLayout, QLabel
-from PySide6.QtCore import Qt
 
 class OrdersListWidget(QWidget):
     def __init__(self, parent=None):

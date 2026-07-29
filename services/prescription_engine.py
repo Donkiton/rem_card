@@ -332,7 +332,7 @@ class PrescriptionEngine:
         can_dilute = form_info.get("can_dilute", True)
         if can_dilute:
             if duration == -1:
-                res += f" [DUR:-1]"
+                res += " [DUR:-1]"
             else:
                 # Всегда добавляем тег, даже если 0, чтобы перебить дефолт из базы
                 res += f" [DUR:{duration}]"
@@ -437,7 +437,7 @@ class PrescriptionEngine:
             group_info = self.groups.get(group_key, {})
             
             freq = d.get("freq", 1)
-            priority = group_info.get("priority_level", 3)
+            priority = group_info.get("priority_level", 3)  # noqa: F841 - семантику приоритета нужно уточнить отдельно
             shift = group_info.get("offset_min", 0)
             duration_min = drug_info.get("duration_min", 0)
             
@@ -501,7 +501,7 @@ class PrescriptionEngine:
         events.sort(key=lambda x: x[0])
         
         active_items = set()
-        for time, diff, item_idx in events:
+        for _event_time, diff, item_idx in events:
             if diff == 1:
                 active_items.add(item_idx)
             else:

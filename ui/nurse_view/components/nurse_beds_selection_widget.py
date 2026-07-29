@@ -1,10 +1,9 @@
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QMessageBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea
 from PySide6.QtCore import Qt, Signal, QTimer, Slot, QCoreApplication, QThread
 from PySide6.QtGui import QPainter, QPixmap
 from .nurse_patient_bed_row import NursePatientBedRow
-import os
 from rem_card.app.logger import logger
 from rem_card.ui.shared.background_settings import get_active_background_path
 from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
@@ -418,7 +417,6 @@ class NurseBedsSelectionWidget(QWidget):
     def _on_refresh_failed(self, exc: Exception):
         if self._is_closing:
             return
-        pass
 
     def _on_partial_refresh_failed(self, exc: Exception):
         if self._is_closing:

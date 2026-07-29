@@ -7,7 +7,7 @@ from rem_card.ui.styles.sector_styles import (
 )
 from rem_card.ui.styles.theme_manager import get_theme_manager
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QTimer
 from datetime import datetime, timedelta
 
 class NurseSector2a(BaseSectorWidget):

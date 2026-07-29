@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
-import html
 import json
 from math import ceil
 import os
@@ -37,7 +36,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
     QFrame,
-    QGraphicsPathItem,
     QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
@@ -97,7 +95,6 @@ from rem_card.services.operblock_quick_orders import (
     load_operblock_quick_orders,
     normalize_operblock_quick_order_kind,
     normalize_operblock_quick_order_group,
-    save_operblock_quick_orders,
 )
 from rem_card.services.operblock_quick_order_buttons import (
     load_operblock_extra_quick_type_buttons,
@@ -187,7 +184,6 @@ from rem_card.ui.styles.theme import (
     BORDER_LIGHT,
     COLOR_DANGER,
     COLOR_PRIMARY_DARK,
-    COLOR_SUCCESS,
     COLOR_VITAL_AD_LINE,
     COLOR_VITAL_PULSE,
     COLOR_VITAL_SPO2,
@@ -9065,65 +9061,66 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
 
     def set_data(self, data: dict) -> None:
+        payload = data or {}
         self.handoff_id = (
-            int((data or {}).get("handoff_id"))
-            if (data or {}).get("handoff_id") not in (None, "")
+            int(payload.get("handoff_id"))
+            if payload.get("handoff_id") not in (None, "")
             else None
         )
         self.source_rao_admission_id = (
-            int((data or {}).get("source_rao_admission_id"))
-            if (data or {}).get("source_rao_admission_id") not in (None, "")
+            int(payload.get("source_rao_admission_id"))
+            if payload.get("source_rao_admission_id") not in (None, "")
             else None
         )
-        self.history_input.setText(str((data or {}).get("history_number") or ""))
-        self.full_name_input.setText(str((data or {}).get("full_name") or ""))
-        self._set_combo_text(self.gender_combo, str((data or {}).get("gender") or ""))
-        birth_date = parse_date_value((data or {}).get("birth_date"))
+        self.history_input.setText(str(payload.get("history_number") or ""))
+        self.full_name_input.setText(str(payload.get("full_name") or ""))
+        self._set_combo_text(self.gender_combo, str(payload.get("gender") or ""))
+        birth_date = parse_date_value(payload.get("birth_date"))
         if birth_date is not None:
             self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
         else:
             self.birth_date_input.clear()
-        code = normalize_operblock_mkb_code(str((data or {}).get("diagnosis_code") or ""))
+        code = normalize_operblock_mkb_code(str(payload.get("diagnosis_code") or ""))
         self.diagnosis_code_input.setText(code)
-        diagnosis_text = str((data or {}).get("diagnosis_text") or "").strip()
+        diagnosis_text = str(payload.get("diagnosis_text") or "").strip()
         if code:
             self._validate_mkb_code()
         if diagnosis_text and not self.diagnosis_text_input.text().strip():
             self._set_manual_diagnosis_enabled(True, text=diagnosis_text)
         elif diagnosis_text and not self.diagnosis_text_input.isReadOnly():
             self.diagnosis_text_input.setText(diagnosis_text)
-        self.operation_name_input.setText(str((data or {}).get("operation_name") or ""))
-        started_at = _parse_datetime_value((data or {}).get("started_at"))
+        self.operation_name_input.setText(str(payload.get("operation_name") or ""))
+        started_at = _parse_datetime_value(payload.get("started_at"))
         if started_at is not None:
             self.admission_time_input.set_datetime(started_at)
-        can_edit_started_at = bool((data or {}).get("can_edit_started_at", True))
+        can_edit_started_at = bool(payload.get("can_edit_started_at", True))
         self.admission_time_input.set_locked(
             not can_edit_started_at,
-            str((data or {}).get("started_at_edit_lock_reason") or OPERBLOCK_STARTED_AT_LOCK_TOOLTIP),
+            str(payload.get("started_at_edit_lock_reason") or OPERBLOCK_STARTED_AT_LOCK_TOOLTIP),
         )
         self.anesthesia_assistance_type_combo.setEditText(
-            normalize_operblock_anesthesia_type_label((data or {}).get("anesthesia_assistance_type"))
+            normalize_operblock_anesthesia_type_label(payload.get("anesthesia_assistance_type"))
         )
-        self.height_input.setText("" if (data or {}).get("height_cm") in (None, "") else str((data or {}).get("height_cm")))
-        weight = (data or {}).get("weight_kg")
+        self.height_input.setText("" if payload.get("height_cm") in (None, "") else str(payload.get("height_cm")))
+        weight = payload.get("weight_kg")
         self.weight_input.setText("" if weight in (None, "") else str(weight).replace(".", ","))
-        self.allergies_input.setText(str((data or {}).get("allergies") or ""))
+        self.allergies_input.setText(str(payload.get("allergies") or ""))
         self._set_fixed_combo_text(
             self.blood_group_combo,
-            str((data or {}).get("blood_group") or ""),
+            str(payload.get("blood_group") or ""),
             normalize_operblock_blood_group,
         )
         self._set_fixed_combo_text(
             self.blood_rh_combo,
-            str((data or {}).get("blood_rh") or ""),
+            str(payload.get("blood_rh") or ""),
             normalize_operblock_blood_rh,
         )
-        self._replace_surgeons([normalize_operblock_team_text(item) for item in (data or {}).get("surgeons") or []])
-        self._set_combo_text(self.operating_nurse_combo, str((data or {}).get("operating_nurse") or ""))
-        self._set_combo_text(self.anesthesiologist_combo, str((data or {}).get("anesthesiologist") or ""))
-        self._set_combo_text(self.anesthetist_combo, str((data or {}).get("anesthetist") or ""))
+        self._replace_surgeons([normalize_operblock_team_text(item) for item in payload.get("surgeons") or []])
+        self._set_combo_text(self.operating_nurse_combo, str(payload.get("operating_nurse") or ""))
+        self._set_combo_text(self.anesthesiologist_combo, str(payload.get("anesthesiologist") or ""))
+        self._set_combo_text(self.anesthetist_combo, str(payload.get("anesthetist") or ""))
         department_profile = normalize_profile_department(
-            (data or {}).get("department_profile"),
+            payload.get("department_profile"),
             clear_legacy_operblock=True,
         )
         self.department_profile_combo.setEditText(department_profile)
@@ -9133,7 +9130,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             (self.pulse_input, "preop_pulse"),
             (self.spo2_input, "preop_spo2"),
         ):
-            value = (data or {}).get(key)
+            value = payload.get(key)
             edit.setText("" if value in (None, "") else str(value))
     def _on_mkb_code_text_edited(self, text: str):
         normalized = normalize_operblock_mkb_code(text)
@@ -13253,7 +13250,6 @@ class OperBlockMainWidget(QWidget):
         stages_layout = QVBoxLayout(stages_panel)
         stages_layout.setContentsMargins(12, 10, 12, 10)
         stages_layout.setSpacing(8)
-        events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
         history = self._board_stage_history(patient)
         if not history:
             stages_layout.addWidget(self._board_operation_stages_empty_notice())
@@ -13360,8 +13356,8 @@ class OperBlockMainWidget(QWidget):
         label.setFixedHeight(54)
         label.setAlignment(Qt.AlignCenter)
         label.setStyleSheet(
-            f"""
-            QLabel {{
+            """
+            QLabel {
                 background-color: #F5F7FA;
                 color: #1F2D3D;
                 font-size: 22px;
@@ -13369,7 +13365,7 @@ class OperBlockMainWidget(QWidget):
                 border-bottom: 1px solid #DDE3EA;
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
-            }}
+            }
             """
         )
         operblock_startup_metrics.record_since(

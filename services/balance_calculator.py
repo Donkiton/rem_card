@@ -3,8 +3,7 @@ import time
 import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
-from rem_card.data.dto.remcard_dto import OrderDTO, AdministrationDTO, OrderStatus
-from rem_card.app.logger import logger
+from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus
 from rem_card.services.prescription_engine import engine
 
 class BalanceCalculator:

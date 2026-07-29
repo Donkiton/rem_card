@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTreeView,
-    QVBoxLayout,
 )
 
 from rem_card.data.settings.settings_import import (

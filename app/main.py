@@ -1187,7 +1187,6 @@ def _try_emergency_startup_after_network_failure(
 
     try:
         from rem_card.app.emergency_startup import (
-            DOCTOR_NETWORK_UNAVAILABLE_MESSAGE,
             classify_startup_failure,
             prepare_emergency_startup,
             record_emergency_startup_metric,

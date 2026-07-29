@@ -17,7 +17,8 @@ python scripts\code_quality_checks.py
 - `git diff --check` ловит whitespace/conflict markers;
 - `compileall` ловит syntax errors;
 - `architecture_safety_check.py` защищает DB/write/profile boundaries;
-- `code_quality_checks.py` ловит F821/BOM/complexity baseline (`scripts/code_quality_checks.py:56-180`).
+- `code_quality_checks.py` ловит статические ошибки Flake8, BOM и отклонения
+  complexity baseline.
 
 ## 2. Safety gates
 
@@ -31,7 +32,8 @@ python scripts\code_quality_checks.py
 
 - architecture: UI no direct SQLite/write SQL, network profile, backup/recovery artifacts (`scripts/architecture_safety_check.py:77-160`);
 - regression: DB safety, backup, migrations, recovery, optimistic locks, sync/read coordinator, W1a/W1b, workers, PatientForm, chart, medical audit (`scripts/regression_safety_checks.py:8538-8675`);
-- code quality: undefined names, BOM, complexity baseline.
+- code quality: неиспользуемый код и ошибки имен, BOM, новые или усложнившиеся
+  блоки с оценкой `F`.
 
 ## 3. UI smoke
 

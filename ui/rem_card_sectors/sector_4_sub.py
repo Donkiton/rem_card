@@ -4,7 +4,7 @@ from rem_card.services.shift_service import ShiftService
 from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget, QPushButton, QFrame)
-from PySide6.QtGui import QIcon, QFont
+from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
 from rem_card.ui.styles.theme import COLOR_PRIMARY_DARK
 

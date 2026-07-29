@@ -1,5 +1,5 @@
 from rem_card.ui.shared.base_sector import BaseSectorWidget
-from PySide6.QtWidgets import QVBoxLayout, QLabel, QWidget, QFrame
+from PySide6.QtWidgets import QVBoxLayout, QLabel, QFrame
 from PySide6.QtCore import Qt
 
 class NurseSectorProc(BaseSectorWidget):

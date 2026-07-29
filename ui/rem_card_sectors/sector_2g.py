@@ -1,5 +1,5 @@
 from rem_card.ui.shared.base_sector import BaseSectorWidget
-from PySide6.QtWidgets import QVBoxLayout, QLabel, QWidget, QSizePolicy
+from PySide6.QtWidgets import QVBoxLayout, QLabel, QWidget
 from PySide6.QtCore import Qt
 from rem_card.ui.styles.theme import (BG_MAIN, BG_LIGHT, TEXT_PRIMARY, BORDER_COLOR, 
                                      COLOR_VITAL_AD_BG, COLOR_VITAL_AD_LINE, 

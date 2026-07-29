@@ -2,11 +2,6 @@ import os
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QPushButton
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QSize, Qt
-from rem_card.ui.styles.theme import (COLOR_S2_SAVE_BG, COLOR_S2_SAVE_TEXT,
-                                     COLOR_S2_CLEAN_SHEET_BG, COLOR_S2_CLEAN_SHEET_TEXT,
-                                     COLOR_S2_CLEAR_BG, COLOR_S2_CLEAR_TEXT,
-                                     COLOR_S2_YESTERDAY_BG, COLOR_S2_YESTERDAY_TEXT,
-                                     COLOR_S2_ROLLBACK_BG, COLOR_S2_ROLLBACK_TEXT)
 
 class ControlPanel(QWidget):
     """Панель управления с кнопками (Сохранить, Очистить лист, Очистить назначения, Вчерашние назначения, Отменить изменения)."""

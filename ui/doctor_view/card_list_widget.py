@@ -2,7 +2,6 @@ import os
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QListWidget, QListWidgetItem, QDialog, QPushButton, QFrame
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, Signal, QSize, QTimer
-from datetime import datetime
 from rem_card.app.logger import logger
 from ..shared.async_call import AsyncCallThread
 from ..shared.custom_title_bar import CustomTitleBar

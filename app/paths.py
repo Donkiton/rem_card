@@ -26,9 +26,6 @@ def get_resources_dir() -> str:
     - Nuitka → папка exe
     - dev → корень проекта
     """
-    import os
-    import sys
-
     # PyInstaller onefile
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         return sys._MEIPASS

@@ -1,5 +1,3 @@
-import os
-import sys
 import multiprocessing
 
 from _local_rem_card_bootstrap import bootstrap_local_rem_card

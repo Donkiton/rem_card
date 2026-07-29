@@ -1,8 +1,8 @@
 import os
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                               QPushButton, QFrame, QApplication, QMessageBox)
-from PySide6.QtCore import Qt, QPoint, QSize, QEvent
-from PySide6.QtGui import QPixmap, QIcon
+                               QPushButton, QFrame, QMessageBox)
+from PySide6.QtCore import Qt, QPoint, QEvent
+from PySide6.QtGui import QPixmap
 
 from rem_card.ui.styles.shared_styles import apply_custom_dialog_style, apply_message_icon_style
 

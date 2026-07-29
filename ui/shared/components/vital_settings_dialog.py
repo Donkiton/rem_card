@@ -1,10 +1,10 @@
 import os
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QPushButton, QCheckBox, QWidget, QGridLayout, QFrame, QSizePolicy)
-from PySide6.QtCore import Qt, Signal, Property, QPropertyAnimation, QEasingCurve, QRect, QPoint, QEvent
-from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPixmap, QIcon
+                             QPushButton, QCheckBox, QGridLayout, QFrame, QSizePolicy)
+from PySide6.QtCore import Qt, Signal, Property, QPropertyAnimation, QEasingCurve, QPoint, QEvent
+from PySide6.QtGui import QColor, QPainter, QBrush, QPixmap, QIcon
 
-from rem_card.ui.styles.theme import STYLE_CUSTOM_DIALOG, BG_LIGHT, TEXT_PRIMARY, CUSTOM_DIALOG_BORDER, CUSTOM_DIALOG_RADIUS
+from rem_card.ui.styles.theme import STYLE_CUSTOM_DIALOG
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 class ToggleSwitch(QCheckBox):

@@ -6,7 +6,6 @@
 - Другие графики (g61-g65)
 """
 
-from datetime import datetime
 
 try:
     import pandas as pd

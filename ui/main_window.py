@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel, QWidget
+from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel
 from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer, Slot, Signal, QEventLoop
 
 from .shared.navigation_widgets import WelcomeWidget

@@ -3675,7 +3675,7 @@ def _check_order_edit_dialog_prefills_current_values(temp_root: str) -> tuple[bo
     _ = temp_root
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from datetime import datetime, timedelta
+    from datetime import datetime
 
     from PySide6.QtWidgets import QApplication
 
@@ -4926,7 +4926,6 @@ def _check_sector_ivl_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str
 
 def _check_balance_controller_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
-    from types import SimpleNamespace
 
     from PySide6.QtWidgets import QApplication
 
@@ -10461,6 +10460,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
                 return True
 
         app = QApplication.instance() or QApplication([])
+        app.processEvents()
         widget = OrdersWidget(service=service, admission_id=26, shift_date=shift_date, defer_ui=True)
         try:
             widget._snapshot_worker = FakeWorker()
@@ -24422,7 +24422,7 @@ def _check_operblock_runtime_settings_from_settings_db(temp_root: str) -> tuple[
         if load_operblock_anesthesia_types() != saved_anesthesia:
             return False, "anesthesia types were not loaded from shared settings DB"
         loaded_buttons = load_operblock_quick_order_buttons()
-        if not any(item.get("key") == "extra:regional" for item in loaded_buttons):
+        if loaded_buttons != saved_buttons:
             return False, f"quick buttons were not loaded from shared settings DB: {loaded_buttons!r}"
         if load_operblock_quick_orders() != saved_quick_orders:
             return False, "quick orders were not loaded from shared settings DB"

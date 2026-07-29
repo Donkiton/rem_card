@@ -5,8 +5,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
     QListWidget, QListWidgetItem, QLineEdit, QSplitter,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox,
-    QDoubleSpinBox, QSpinBox, QFormLayout, QGroupBox, QDialog, QCheckBox, QFrame,
-    QApplication, QAbstractItemView
+    QDoubleSpinBox, QFormLayout, QCheckBox, QFrame, QApplication, QAbstractItemView
 )
 from PySide6.QtCore import Qt, Signal, QEvent, QPoint, QTimer
 from rem_card.services.prescription_engine import engine
@@ -528,7 +527,6 @@ class TemplateDrugCharacteristicsDialog(BaseStyledDialog):
                         break
 
             # self.freq_spin.setValue(initial_data.get("freq", 1))
-            pass
         else:
             # Загружаем дефолты из справочника
             form_key = self.drug_data.get("form_key")

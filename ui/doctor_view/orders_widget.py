@@ -5,7 +5,7 @@ import time
 from copy import copy, deepcopy
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, 
-    QHeaderView, QAbstractItemView, QFrame, QPushButton, QSizePolicy, QApplication
+    QHeaderView, QAbstractItemView, QFrame, QSizePolicy, QApplication
 )
 from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, QTimer, Signal
 from datetime import datetime, timedelta
@@ -68,7 +68,7 @@ class OrdersWidget(QWidget):
     def __init__(self, service=None, admission_id=None, shift_date=None, parent=None, defer_ui=False):
         super().__init__(parent)
         self.setAttribute(Qt.WA_StyledBackground, True)
-        self.service = remcard_service = service
+        self.service = service
         self.admission_id = admission_id
         self.shift_date = shift_date
         self._defer_ui = defer_ui

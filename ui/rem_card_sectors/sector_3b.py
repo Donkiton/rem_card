@@ -1,7 +1,7 @@
 import os
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QLineEdit)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame)
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap, QIntValidator
+from PySide6.QtGui import QPixmap
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 
 class Sector3b(BaseSectorWidget):

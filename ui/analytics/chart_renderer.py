@@ -261,8 +261,6 @@ def _preferred_font(font_manager) -> str:
 
 
 def _prepare_figure(figure) -> None:
-    import matplotlib.pyplot as plt
-
     figure.patch.set_facecolor(BG_CARD)
     width, height = figure.get_size_inches()
     if width < MIN_FIGURE_WIDTH_IN or height < MIN_FIGURE_HEIGHT_IN:

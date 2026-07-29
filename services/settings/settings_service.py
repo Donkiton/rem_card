@@ -10,7 +10,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Optional
 
 from rem_card.app.db_runtime_context import DbRuntimeContext

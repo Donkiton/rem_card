@@ -1,6 +1,6 @@
 import os
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QLabel, QMessageBox, QFrame)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QLabel)
 from PySide6.QtCore import Qt, Signal, QSize
 from PySide6.QtGui import QIntValidator, QIcon
 from rem_card.ui.shared.base_sector import BaseSectorWidget
