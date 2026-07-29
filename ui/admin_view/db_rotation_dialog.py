@@ -118,7 +118,7 @@ class DbRotationDialog(BaseStyledDialog):
         buttons.addWidget(self.rotate_btn)
 
         self.undo_btn = QPushButton("Отменить ручную ротацию")
-        self.undo_btn.setObjectName("DialogOkBtn")
+        self.undo_btn.setObjectName("DbRotationPrimaryButton")
         self.undo_btn.clicked.connect(self._on_undo_clicked)
         buttons.addWidget(self.undo_btn)
 
