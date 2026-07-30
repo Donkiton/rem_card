@@ -49,6 +49,58 @@ ORDERS_FORCED_RELOAD_COOLDOWN_MS = max(
 )
 
 
+class _OptimisticAdminChanges:
+    def __init__(self, widget: "OrdersWidget", op_prefix: str):
+        self.widget = widget
+        self.op_prefix = op_prefix
+        self.previous_by_key: dict = {}
+        self.changed_keys: list = []
+
+    def _remember(self, item_key) -> None:
+        if item_key in self.previous_by_key:
+            return
+        admin_map = self.widget.model.admin_map
+        had_previous = item_key in admin_map
+        self.previous_by_key[item_key] = (
+            had_previous,
+            copy(admin_map[item_key]) if had_previous else None,
+        )
+
+    def set_admin(self, item_key, next_admin) -> None:
+        admin_map = self.widget.model.admin_map
+        if admin_map.get(item_key) == next_admin:
+            return
+        self._remember(item_key)
+        if next_admin is not None:
+            next_admin.is_committed = 0
+            setattr(next_admin, "_pending_cell_action", self.op_prefix)
+        admin_map[item_key] = next_admin
+        self.changed_keys.append(item_key)
+
+    def remove_admin(self, item_key) -> None:
+        admin_map = self.widget.model.admin_map
+        if item_key not in admin_map:
+            return
+        self._remember(item_key)
+        existing = admin_map.get(item_key)
+        existing_status = str(getattr(existing, "status", "") or "")
+        if (
+            existing is not None
+            and existing_status == "planned"
+            and self.widget._is_committed_value(getattr(existing, "is_committed", 0))
+        ):
+            tombstone = copy(existing)
+            tombstone.status = "deleted"
+            tombstone.is_committed = 0
+            tombstone.comment = ""
+            tombstone.actual_time = None
+            setattr(tombstone, "_pending_cell_action", self.op_prefix)
+            admin_map[item_key] = tombstone
+        else:
+            del admin_map[item_key]
+        self.changed_keys.append(item_key)
+
+
 class OrdersWidget(QWidget):
     draftStatusChanged = Signal(bool)
     administrationStatusChanged = Signal(bool)
@@ -2985,6 +3037,189 @@ class OrdersWidget(QWidget):
             volume_ml=float(getattr(previous_admin, "volume_ml", 0.0) or 0.0),
         )
 
+    def _add_optimistic_single(
+        self,
+        changes: _OptimisticAdminChanges,
+        key,
+        order: OrderDTO,
+        admin: AdministrationDTO,
+        planned_time: datetime,
+    ) -> None:
+        changes.set_admin(
+            key,
+            self._new_optimistic_admin(
+                order,
+                planned_time,
+                role="single",
+                previous_admin=admin,
+            ),
+        )
+
+    def _add_optimistic_chain(
+        self,
+        changes: _OptimisticAdminChanges,
+        order: OrderDTO,
+        planned_time: datetime,
+    ) -> None:
+        desired_slots = self._optimistic_chain_slots(order, planned_time)
+        available_slots = []
+        for pos, slot in enumerate(desired_slots):
+            item_key = (order.id, slot.isoformat())
+            existing = self.model.admin_map.get(item_key)
+            if (
+                existing
+                and str(getattr(existing, "status", "") or "") == "planned"
+                and pos > 0
+            ):
+                break
+            available_slots.append(slot)
+        if not available_slots:
+            return
+
+        chain_id = (
+            f"optimistic:{order.id}:{planned_time.isoformat()}"
+            if len(available_slots) > 1
+            else None
+        )
+        for pos, slot in enumerate(available_slots):
+            if len(available_slots) == 1:
+                role = "single"
+            elif pos == 0:
+                role = "start"
+            elif pos == len(available_slots) - 1:
+                role = "end"
+            else:
+                role = "body"
+            item_key = (order.id, slot.isoformat())
+            changes.set_admin(
+                item_key,
+                self._new_optimistic_admin(
+                    order,
+                    slot,
+                    role=role,
+                    chain_id=chain_id,
+                    previous_admin=self.model.admin_map.get(item_key),
+                ),
+            )
+
+    def _apply_middle_click_optimistic(
+        self,
+        changes: _OptimisticAdminChanges,
+        key,
+        admin: AdministrationDTO | None,
+        *,
+        status: str,
+        role: str,
+    ) -> None:
+        if admin is None:
+            return
+        if status == "cancelled":
+            changes.remove_admin(key)
+            return
+        if status != "planned":
+            return
+
+        chain_keys = self._chain_keys_for_admin(key, admin)
+        chain_id = getattr(admin, "big_chain_id", None)
+        if role == "start":
+            cancelled_admin = copy(admin)
+            cancelled_admin.status = "cancelled"
+            cancelled_admin.cell_role = role
+            changes.set_admin(key, cancelled_admin)
+            for item_key in chain_keys:
+                if item_key != key:
+                    changes.remove_admin(item_key)
+            return
+        if role == "body":
+            end_admin = copy(admin)
+            end_admin.status = "planned"
+            end_admin.cell_role = "end"
+            changes.set_admin(key, end_admin)
+            for item_key in chain_keys:
+                if item_key[1] > key[1]:
+                    changes.remove_admin(item_key)
+            return
+        if role == "end":
+            cancelled_admin = copy(admin)
+            cancelled_admin.status = "cancelled"
+            cancelled_admin.cell_role = "single"
+            cancelled_admin.big_chain_id = chain_id
+            changes.set_admin(key, cancelled_admin)
+            remaining_keys = [item_key for item_key in chain_keys if item_key != key]
+            if remaining_keys:
+                prev_key = max(remaining_keys, key=lambda item: item[1])
+                prev_admin = copy(self.model.admin_map.get(prev_key))
+                if prev_admin is not None:
+                    prev_admin.cell_role = "single" if len(remaining_keys) == 1 else "end"
+                    changes.set_admin(prev_key, prev_admin)
+            return
+
+        cancelled_admin = copy(admin)
+        cancelled_admin.status = "cancelled"
+        cancelled_admin.cell_role = "single"
+        cancelled_admin.big_chain_id = chain_id
+        changes.set_admin(key, cancelled_admin)
+
+    def _trim_optimistic_chain(
+        self,
+        changes: _OptimisticAdminChanges,
+        key,
+        admin: AdministrationDTO,
+        *,
+        role: str,
+    ) -> None:
+        chain_keys = self._chain_keys_for_admin(key, admin)
+        if role == "start":
+            for item_key in chain_keys:
+                changes.remove_admin(item_key)
+            return
+        if role == "body":
+            end_admin = copy(admin)
+            end_admin.cell_role = "end"
+            changes.set_admin(key, end_admin)
+            for item_key in chain_keys:
+                if item_key[1] > key[1]:
+                    changes.remove_admin(item_key)
+            return
+        if role != "end":
+            return
+
+        remaining_keys = [item_key for item_key in chain_keys if item_key != key]
+        changes.remove_admin(key)
+        prev_keys = [item_key for item_key in remaining_keys if item_key[1] < key[1]]
+        if not prev_keys:
+            return
+        prev_key = max(prev_keys, key=lambda item: item[1])
+        prev_admin = copy(self.model.admin_map.get(prev_key))
+        if prev_admin is not None:
+            prev_admin.cell_role = "single" if len(remaining_keys) == 1 else "end"
+            changes.set_admin(prev_key, prev_admin)
+
+    def _apply_primary_click_optimistic(
+        self,
+        changes: _OptimisticAdminChanges,
+        key,
+        order: OrderDTO,
+        admin: AdministrationDTO | None,
+        planned_time: datetime,
+        *,
+        status: str,
+        role: str,
+        is_long: bool,
+    ) -> None:
+        if admin is None or status in ("deleted", "cancelled"):
+            if is_long:
+                self._add_optimistic_chain(changes, order, planned_time)
+            else:
+                self._add_optimistic_single(changes, key, order, admin, planned_time)
+            return
+        if status != "planned":
+            return
+        if is_long and role in ("start", "body", "end"):
+            self._trim_optimistic_chain(changes, key, admin, role=role)
+        elif role == "single":
+            changes.remove_admin(key)
+
     def _apply_optimistic_cell(
         self,
         index,
@@ -3008,181 +3243,45 @@ class OrdersWidget(QWidget):
             self._perf_mark_click(perf_click_id, "optimistic_skip")
             return {}
 
-        previous_by_key = {}
-        changed_keys = []
-
-        def remember(item_key):
-            if item_key not in previous_by_key:
-                had_previous = item_key in self.model.admin_map
-                previous_by_key[item_key] = (
-                    had_previous,
-                    copy(self.model.admin_map[item_key]) if had_previous else None,
-                )
-
-        def set_admin(item_key, next_admin):
-            if self.model.admin_map.get(item_key) == next_admin:
-                return
-            remember(item_key)
-            if next_admin is not None:
-                next_admin.is_committed = 0
-                setattr(next_admin, "_pending_cell_action", op_prefix)
-            self.model.admin_map[item_key] = next_admin
-            changed_keys.append(item_key)
-
-        def remove_admin(item_key):
-            if item_key not in self.model.admin_map:
-                return
-            remember(item_key)
-            existing = self.model.admin_map.get(item_key)
-            existing_status = str(getattr(existing, "status", "") or "")
-            if existing is not None and existing_status == "planned" and self._is_committed_value(
-                getattr(existing, "is_committed", 0)
-            ):
-                tombstone = copy(existing)
-                tombstone.status = "deleted"
-                tombstone.is_committed = 0
-                tombstone.comment = ""
-                tombstone.actual_time = None
-                setattr(tombstone, "_pending_cell_action", op_prefix)
-                self.model.admin_map[item_key] = tombstone
-            else:
-                del self.model.admin_map[item_key]
-            changed_keys.append(item_key)
-
-        def add_planned_single():
-            set_admin(
-                key,
-                self._new_optimistic_admin(
-                    order,
-                    planned_time,
-                    role="single",
-                    previous_admin=admin,
-                ),
-            )
-
-        def add_planned_chain():
-            desired_slots = self._optimistic_chain_slots(order, planned_time)
-            available_slots = []
-            for pos, slot in enumerate(desired_slots):
-                item_key = (order.id, slot.isoformat())
-                existing = self.model.admin_map.get(item_key)
-                if existing and str(getattr(existing, "status", "") or "") == "planned" and pos > 0:
-                    break
-                available_slots.append(slot)
-            if not available_slots:
-                return
-            chain_id = None
-            if len(available_slots) > 1:
-                chain_id = f"optimistic:{order.id}:{planned_time.isoformat()}"
-            for pos, slot in enumerate(available_slots):
-                role = "single" if len(available_slots) == 1 else ("start" if pos == 0 else ("end" if pos == len(available_slots) - 1 else "body"))
-                item_key = (order.id, slot.isoformat())
-                set_admin(
-                    item_key,
-                    self._new_optimistic_admin(
-                        order,
-                        slot,
-                        role=role,
-                        chain_id=chain_id,
-                        previous_admin=self.model.admin_map.get(item_key),
-                    ),
-                )
-
+        changes = _OptimisticAdminChanges(self, op_prefix)
         status = str(getattr(admin, "status", "") or "") if admin else ""
         role = str(getattr(admin, "cell_role", "") or "") if admin else ""
         is_long = self._is_long_order(order)
 
-        if op_prefix == "orders_right_click":
-            pass
-        elif op_prefix == "orders_middle_click":
-            if not admin:
-                pass
-            elif status == "planned":
-                chain_keys = self._chain_keys_for_admin(key, admin)
-                chain_id = getattr(admin, "big_chain_id", None)
-                if role == "start":
-                    cancelled_admin = copy(admin)
-                    cancelled_admin.status = "cancelled"
-                    cancelled_admin.cell_role = role
-                    set_admin(key, cancelled_admin)
-                    for item_key in chain_keys:
-                        if item_key != key:
-                            remove_admin(item_key)
-                elif role == "body":
-                    end_admin = copy(admin)
-                    end_admin.status = "planned"
-                    end_admin.cell_role = "end"
-                    set_admin(key, end_admin)
-                    for item_key in chain_keys:
-                        if item_key[1] > key[1]:
-                            remove_admin(item_key)
-                elif role == "end":
-                    cancelled_admin = copy(admin)
-                    cancelled_admin.status = "cancelled"
-                    cancelled_admin.cell_role = "single"
-                    cancelled_admin.big_chain_id = chain_id
-                    set_admin(key, cancelled_admin)
-                    remaining_keys = [item_key for item_key in chain_keys if item_key != key]
-                    if remaining_keys:
-                        prev_key = max(remaining_keys, key=lambda item: item[1])
-                        prev_admin = copy(self.model.admin_map.get(prev_key))
-                        if prev_admin is not None:
-                            prev_admin.cell_role = "single" if len(remaining_keys) == 1 else "end"
-                            set_admin(prev_key, prev_admin)
-                else:
-                    cancelled_admin = copy(admin)
-                    cancelled_admin.status = "cancelled"
-                    cancelled_admin.cell_role = "single"
-                    cancelled_admin.big_chain_id = chain_id
-                    set_admin(key, cancelled_admin)
-            elif status == "cancelled":
-                remove_admin(key)
-        else:
-            if not admin or status in ("deleted", "cancelled"):
-                if is_long:
-                    add_planned_chain()
-                else:
-                    add_planned_single()
-            elif status == "planned":
-                if is_long and role in ("start", "body", "end"):
-                    chain_keys = self._chain_keys_for_admin(key, admin)
-                    if role == "start":
-                        for item_key in chain_keys:
-                            remove_admin(item_key)
-                    elif role == "body":
-                        end_admin = copy(admin)
-                        end_admin.cell_role = "end"
-                        set_admin(key, end_admin)
-                        for item_key in chain_keys:
-                            if item_key[1] > key[1]:
-                                remove_admin(item_key)
-                    elif role == "end":
-                        remaining_keys = [item_key for item_key in chain_keys if item_key != key]
-                        remove_admin(key)
-                        prev_keys = [item_key for item_key in remaining_keys if item_key[1] < key[1]]
-                        if prev_keys:
-                            prev_key = max(prev_keys, key=lambda item: item[1])
-                            prev_admin = copy(self.model.admin_map.get(prev_key))
-                            if prev_admin is not None:
-                                prev_admin.cell_role = "single" if len(remaining_keys) == 1 else "end"
-                                set_admin(prev_key, prev_admin)
-                elif role == "single":
-                    remove_admin(key)
+        if op_prefix == "orders_middle_click":
+            self._apply_middle_click_optimistic(
+                changes,
+                key,
+                admin,
+                status=status,
+                role=role,
+            )
+        elif op_prefix != "orders_right_click":
+            self._apply_primary_click_optimistic(
+                changes,
+                key,
+                order,
+                admin,
+                planned_time,
+                status=status,
+                role=role,
+                is_long=is_long,
+            )
 
-        if changed_keys:
-            self._emit_admin_cell_changes(changed_keys)
-            self._mark_local_cell_draft_guard(changed_keys)
+        if changes.changed_keys:
+            self._emit_admin_cell_changes(changes.changed_keys)
+            self._mark_local_cell_draft_guard(changes.changed_keys)
             logger.info(
                 "[OrdersClick] local_cell_update role=doctor admission_id=%s op=%s order_id=%s changed_cells=%s",
                 self.admission_id,
                 op_prefix,
                 getattr(order, "id", None),
-                len(set(changed_keys)),
+                len(set(changes.changed_keys)),
             )
             self._perf_mark_click(perf_click_id, "optimistic")
         else:
             self._perf_mark_click(perf_click_id, "optimistic_skip")
-        return previous_by_key
+        return changes.previous_by_key
 
     def _enqueue_cell_write(
         self,
