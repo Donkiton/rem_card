@@ -40,7 +40,6 @@ SKIP_DIR_NAMES = {
 # gradual cleanup while blocking both new F-ranked blocks and baseline growth.
 ALLOWED_F_BLOCKS = {
     ("app/main.py", "_main_impl"): 63,
-    ("app/sqlite_shared.py", "SQLiteWriteController.transaction"): 59,
 }
 
 
