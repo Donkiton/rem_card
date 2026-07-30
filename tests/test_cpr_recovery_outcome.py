@@ -8,6 +8,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -18,11 +19,12 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
 from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton  # noqa: E402
 
 from rem_card.data.dao.patient_status_dao import PatientStatusDAO  # noqa: E402
 from rem_card.data.dto.remcard_dto import PatientStatus  # noqa: E402
 from rem_card.services.patient_status_service import PatientStatusService  # noqa: E402
+from rem_card.services.shift_service import ShiftService  # noqa: E402
 from rem_card.ui.rem_card_sectors.outcome_dialogs import (  # noqa: E402
     DEATH_OUTCOME_RECOVERY,
     DeathOutcomeDialog,
@@ -287,6 +289,15 @@ class CprRecoveryOutcomeTest(unittest.TestCase):
                 "biological_death_time": biological_dt.strftime("%H:%M"),
             },
         }
+
+    @staticmethod
+    def _click_time_action(picker, label):
+        button = next(
+            button
+            for button in picker.findChildren(QPushButton)
+            if button.text() == label
+        )
+        button.click()
 
     def _record_cpr(self, clinical_dt, recovery_dt):
         payload = self._payload_at(clinical_dt, recovery_dt)
@@ -554,6 +565,140 @@ class CprRecoveryOutcomeTest(unittest.TestCase):
         self.assertNotEqual(dialog.result(), QDialog.Accepted)
         self.assertEqual(dialog.result_data["event_time"], datetime(2025, 1, 1, 9, 50))
         self.assertIn("cardiac_arrest_measures_json", dialog.result_data["admission_details"])
+
+    def test_now_buttons_update_both_death_times(self):
+        dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 12, 0))
+        self.addCleanup(_dispose_qt_widget, dialog)
+
+        with patch.object(ShiftService, "current_shift_time", return_value="10:00"):
+            dialog.clinical_time_picker.set_time("09:00")
+            dialog.biological_time_picker.set_time("10:30")
+            self._click_time_action(dialog.clinical_time_picker, "Сейчас")
+            self.assertEqual(dialog.clinical_time_picker.value_str(), "10:00")
+
+            dialog.clinical_time_picker.set_time("09:00")
+            self._click_time_action(dialog.biological_time_picker, "Сейчас")
+            self.assertEqual(dialog.biological_time_picker.value_str(), "10:00")
+
+    def test_shift_service_exposes_current_time_for_picker(self):
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2025, 1, 1, 10, 17, tzinfo=tz)
+
+        with patch("rem_card.services.shift_service.datetime", FixedDateTime):
+            value = ShiftService.current_shift_time(datetime(2025, 1, 1, 12, 0))
+
+        self.assertEqual(value, "10:17")
+
+    def test_biological_minus_30_stops_one_minute_after_clinical_death(self):
+        dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 14, 0))
+        self.addCleanup(_dispose_qt_widget, dialog)
+        dialog.clinical_time_picker.set_time("14:00")
+        dialog.biological_time_picker.set_time("14:20")
+
+        self._click_time_action(dialog.biological_time_picker, "-30 мин")
+
+        self.assertEqual(dialog.biological_time_picker.value_str(), "14:01")
+        self.assertIn("спустя 1 минут", dialog.comment_edit.text())
+
+    def test_biological_quick_actions_never_cross_clinical_death(self):
+        dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 14, 0))
+        self.addCleanup(_dispose_qt_widget, dialog)
+        cases = [
+            ("-5 мин", "14:15", 15),
+            ("-30 мин", "14:01", 1),
+            ("-1 час", "14:01", 1),
+        ]
+
+        for label, expected_time, expected_minutes in cases:
+            with self.subTest(label=label):
+                dialog.clinical_time_picker.set_time("14:00")
+                dialog.biological_time_picker.set_time("14:20")
+                self._click_time_action(dialog.biological_time_picker, label)
+                self.assertEqual(dialog.biological_time_picker.value_str(), expected_time)
+                self.assertEqual(dialog._death_duration_minutes(), expected_minutes)
+
+    def test_clinical_time_moving_past_biological_moves_outcome_by_one_minute(self):
+        dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 14, 0))
+        self.addCleanup(_dispose_qt_widget, dialog)
+        dialog.clinical_time_picker.set_time("14:00")
+        dialog.biological_time_picker.set_time("14:20")
+
+        dialog.clinical_time_picker.set_time("14:30")
+
+        self.assertEqual(dialog.biological_time_picker.value_str(), "14:31")
+        self.assertEqual(dialog._death_duration_minutes(), 1)
+
+    def test_manual_biological_time_cannot_move_before_clinical_death(self):
+        dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 14, 0))
+        self.addCleanup(_dispose_qt_widget, dialog)
+        dialog.clinical_time_picker.set_time("14:00")
+        dialog.biological_time_picker.set_time("14:20")
+
+        dialog.biological_time_picker.set_time("13:50")
+
+        self.assertEqual(dialog.biological_time_picker.value_str(), "14:01")
+        self.assertEqual(dialog._death_duration_minutes(), 1)
+
+    def test_death_comment_and_dates_use_elapsed_time_across_midnight(self):
+        dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 23, 55))
+        self.addCleanup(_dispose_qt_widget, dialog)
+        dialog.clinical_time_picker.set_time("23:55")
+        dialog.biological_time_picker.set_time("00:10")
+
+        clinical_dt, biological_dt = dialog._resolve_death_datetimes()
+
+        self.assertEqual(dialog._death_duration_minutes(), 15)
+        self.assertIn("спустя 15 минут", dialog.comment_edit.text())
+        self.assertEqual(clinical_dt, datetime(2025, 1, 1, 23, 55))
+        self.assertEqual(biological_dt, datetime(2025, 1, 2, 0, 10))
+
+    def test_death_dates_preserve_short_interval_across_shift_boundary(self):
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2025, 1, 2, 7, 50, tzinfo=tz)
+
+        dialog = DeathOutcomeDialog({}, datetime(2025, 1, 2, 7, 50))
+        self.addCleanup(_dispose_qt_widget, dialog)
+        dialog.clinical_time_picker.set_time("07:40")
+        dialog.biological_time_picker.set_time("08:10")
+
+        with patch(
+            "rem_card.ui.rem_card_sectors.outcome_dialogs.datetime",
+            FixedDateTime,
+        ):
+            clinical_dt, biological_dt = dialog._resolve_death_datetimes()
+
+        self.assertEqual(dialog._death_duration_minutes(), 30)
+        self.assertEqual(clinical_dt, datetime(2025, 1, 2, 7, 40))
+        self.assertEqual(biological_dt, datetime(2025, 1, 2, 8, 10))
+
+    def test_latest_activity_does_not_move_biological_death_to_next_day(self):
+        dialog = DeathOutcomeDialog(
+            {"latest_activity_datetime": "2025-01-01T14:00:00"},
+            datetime(2025, 1, 1, 14, 5),
+        )
+        self.addCleanup(_dispose_qt_widget, dialog)
+        dialog.clinical_time_picker.set_time("13:40")
+        dialog.biological_time_picker.set_time("14:00")
+
+        self._click_time_action(dialog.biological_time_picker, "-30 мин")
+        clinical_dt, biological_dt = dialog._resolve_death_datetimes()
+
+        self.assertEqual(dialog.biological_time_picker.value_str(), "13:41")
+        self.assertEqual(clinical_dt, datetime(2025, 1, 1, 13, 40))
+        self.assertEqual(biological_dt, datetime(2025, 1, 1, 13, 41))
+        self.assertEqual(dialog._death_duration_minutes(), 1)
+        self.assertNotIn("1440", dialog.comment_edit.text())
+
+        with patch(
+            "rem_card.ui.rem_card_sectors.outcome_dialogs.CustomMessageBox.warning"
+        ) as warning:
+            dialog._on_accept()
+        warning.assert_called_once()
+        self.assertIn("последней записи пациента", warning.call_args.args[2])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QPoint, QSettings, Qt
@@ -610,6 +610,10 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         }
         self._last_auto_comment = ""
         self._comment_manually_changed = False
+        self._adjusting_death_times = False
+        self._clinical_time_value = ""
+        self._biological_time_value = ""
+        self._death_interval_minutes = 30
         self.setFixedWidth(874)
         self.setMinimumHeight(720)
         self._init_ui()
@@ -669,11 +673,18 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         self._make_death_section_expanding(self.biological_frame, DEATH_TIME_SECTION_WIDTH)
         self.biological_time_picker = self._make_time_picker()
         self.biological_time_picker.set_time(biological_default_time)
+        self.biological_time_picker.set_offset_handler(self._apply_biological_offset)
         biological_layout.addWidget(self.biological_time_picker, 0, Qt.AlignLeft)
         time_row.addWidget(self.biological_frame, 1)
         body_layout.addLayout(time_row)
-        self.clinical_time_picker.timeChanged.connect(self._update_auto_comment)
-        self.biological_time_picker.timeChanged.connect(self._update_auto_comment)
+        self._clinical_time_value = clinical_default_time
+        self._biological_time_value = biological_default_time
+        self._death_interval_minutes = max(
+            1,
+            self._forward_time_difference(clinical_default_time, biological_default_time),
+        )
+        self.clinical_time_picker.timeChanged.connect(self._on_clinical_time_changed)
+        self.biological_time_picker.timeChanged.connect(self._on_biological_time_changed)
 
         cause_frame, cause_layout = self._section("Причина остановки сердца")
         self._make_death_section_expanding(cause_frame, DEATH_WIDE_SECTION_WIDTH)
@@ -876,6 +887,130 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
     def _is_recovery_outcome(self) -> bool:
         return self._outcome_type() == DEATH_OUTCOME_RECOVERY
 
+    @staticmethod
+    def _time_minutes(value: str) -> int:
+        hour, minute = map(int, ShiftService.normalize_time(value).split(":"))
+        return hour * 60 + minute
+
+    @classmethod
+    def _forward_time_difference(cls, start_time: str, end_time: str) -> int:
+        return (cls._time_minutes(end_time) - cls._time_minutes(start_time)) % ShiftService.MINUTES_PER_SHIFT
+
+    @classmethod
+    def _signed_time_difference(cls, start_time: str, end_time: str) -> int:
+        delta = cls._forward_time_difference(start_time, end_time)
+        if delta > ShiftService.MINUTES_PER_SHIFT // 2:
+            delta -= ShiftService.MINUTES_PER_SHIFT
+        return delta
+
+    @classmethod
+    def _add_time_minutes(cls, value: str, delta_minutes: int) -> str:
+        total_minutes = (cls._time_minutes(value) + int(delta_minutes)) % ShiftService.MINUTES_PER_SHIFT
+        hour, minute = divmod(total_minutes, 60)
+        return f"{hour:02d}:{minute:02d}"
+
+    def _set_biological_time(self, value: str) -> None:
+        if self.biological_time_picker.value_str() == value:
+            return
+        self._adjusting_death_times = True
+        try:
+            self.biological_time_picker.set_time(value)
+            self._biological_time_value = value
+        finally:
+            self._adjusting_death_times = False
+
+    def _apply_biological_offset(self, _current_time: str, delta_minutes: int) -> str:
+        current_interval = max(1, int(self._death_interval_minutes))
+        target_interval = max(
+            1,
+            min(
+                ShiftService.MINUTES_PER_SHIFT - 1,
+                current_interval + int(delta_minutes),
+            ),
+        )
+        return self._add_time_minutes(
+            self.clinical_time_picker.value_str(),
+            target_interval,
+        )
+
+    def _on_clinical_time_changed(self, value: str) -> None:
+        if self._adjusting_death_times:
+            return
+
+        previous_value = self._clinical_time_value or value
+        clinical_delta = self._signed_time_difference(previous_value, value)
+        target_interval = int(self._death_interval_minutes) - clinical_delta
+        self._clinical_time_value = value
+
+        if not 1 <= target_interval < ShiftService.MINUTES_PER_SHIFT:
+            target_interval = 1
+            self._set_biological_time(self._add_time_minutes(value, target_interval))
+
+        self._death_interval_minutes = target_interval
+        self._update_auto_comment()
+
+    def _on_biological_time_changed(self, value: str) -> None:
+        if self._adjusting_death_times:
+            return
+
+        clinical_time = self.clinical_time_picker.value_str()
+        previous_value = self._biological_time_value or value
+        biological_delta = self._signed_time_difference(previous_value, value)
+        target_interval = int(self._death_interval_minutes) + biological_delta
+        self._biological_time_value = value
+        if not 1 <= target_interval < ShiftService.MINUTES_PER_SHIFT:
+            target_interval = 1
+            self._set_biological_time(self._add_time_minutes(clinical_time, target_interval))
+
+        self._death_interval_minutes = target_interval
+        self._update_auto_comment()
+
+    def _death_duration_minutes(self) -> int:
+        return max(
+            1,
+            min(
+                ShiftService.MINUTES_PER_SHIFT - 1,
+                int(self._death_interval_minutes),
+            ),
+        )
+
+    def _resolve_death_datetimes(self) -> Tuple[datetime, datetime]:
+        duration_minutes = self._death_duration_minutes()
+        outcome_dt = ShiftService.resolve_outcome_datetime(
+            self.biological_time_picker.value_str(),
+            self.shift_date,
+            reference_dt=datetime.now(),
+        ).replace(second=0, microsecond=0)
+        clinical_dt = outcome_dt - timedelta(minutes=duration_minutes)
+        return clinical_dt, outcome_dt
+
+    def _validate_death_datetimes(self, clinical_dt: datetime, outcome_dt: datetime) -> bool:
+        not_before = self._outcome_not_before()
+        if not_before is not None and clinical_dt < not_before:
+            CustomMessageBox.warning(
+                self,
+                "Проверьте время",
+                "Время клинической смерти не может быть раньше поступления "
+                "или начала текущего состояния пациента.",
+            )
+            return False
+
+        latest_activity = self._context_datetime("latest_activity_datetime")
+        if latest_activity is not None and outcome_dt < latest_activity:
+            outcome_label = (
+                "восстановления кровообращения"
+                if self._is_recovery_outcome()
+                else "биологической смерти"
+            )
+            CustomMessageBox.warning(
+                self,
+                "Проверьте время",
+                f"Время {outcome_label} не может быть раньше последней записи пациента "
+                f"({latest_activity:%d.%m.%Y %H:%M}).",
+            )
+            return False
+        return True
+
     def _sync_outcome_mode(self, *_args):
         recovery = self._is_recovery_outcome()
         if hasattr(self, "biological_title_label"):
@@ -888,8 +1023,9 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
             self.protocol_frame.setVisible(not recovery)
         self._update_auto_comment()
 
-    def _protocol_payload(self) -> Dict[str, str]:
-        biological_dt = self._resolve_picker_datetime(self.biological_time_picker)
+    def _protocol_payload(self, biological_dt: Optional[datetime] = None) -> Dict[str, str]:
+        if biological_dt is None:
+            _clinical_dt, biological_dt = self._resolve_death_datetimes()
         doctor = self.protocol_doctor_combo.currentText().strip()
         return {
             "doctor": doctor,
@@ -993,12 +1129,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         return value
 
     def _auto_comment_text(self) -> str:
-        clinical_dt = self._resolve_picker_datetime(
-            self.clinical_time_picker,
-            enforce_latest_activity=False,
-        )
-        outcome_dt = self._resolve_picker_datetime(self.biological_time_picker)
-        minutes = max(0, int((outcome_dt - clinical_dt).total_seconds() // 60))
+        minutes = self._death_duration_minutes()
         if self._is_recovery_outcome():
             rounded_minutes = self._ceil_even_minutes(minutes)
             return (
@@ -1028,22 +1159,8 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         self._comment_manually_changed = False
 
     def _on_accept(self):
-        clinical_dt = self._resolve_picker_datetime(
-            self.clinical_time_picker,
-            enforce_latest_activity=False,
-        )
-        outcome_dt = self._resolve_picker_datetime(self.biological_time_picker)
-        if clinical_dt > outcome_dt:
-            end_label = (
-                "временем восстановления кровообращения"
-                if self._is_recovery_outcome()
-                else "временем биологической смерти"
-            )
-            CustomMessageBox.warning(
-                self,
-                "Проверьте время",
-                f"Время клинической смерти не может быть позже {end_label}.",
-            )
+        clinical_dt, outcome_dt = self._resolve_death_datetimes()
+        if not self._validate_death_datetimes(clinical_dt, outcome_dt):
             return
 
         cause = self.cause_combo.currentData()
@@ -1070,7 +1187,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         ]
         comment = self.comment_edit.text().strip()
         if self._is_recovery_outcome():
-            duration_minutes = max(0, int((outcome_dt - clinical_dt).total_seconds() // 60))
+            duration_minutes = self._death_duration_minutes()
             doctor = self.protocol_doctor_combo.currentText().strip() if hasattr(self, "protocol_doctor_combo") else ""
             payload = {
                 "outcome_type": DEATH_OUTCOME_RECOVERY,
@@ -1102,7 +1219,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
                 "cardiac_arrest_cause": cause,
                 "measures": measures,
                 "comment": comment,
-                "death_protocol": self._protocol_payload(),
+                "death_protocol": self._protocol_payload(outcome_dt),
             }
 
             self.result_data = {
