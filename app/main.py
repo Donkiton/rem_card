@@ -5,8 +5,9 @@ import os
 import socket
 import sys
 import time
+from dataclasses import dataclass
 from functools import partial
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 if __package__ in (None, ""):
     _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2102,8 +2103,35 @@ def main(forced_role: Optional[str] = None, path_setup: bool = False):
         sys.exit(1)
 
 
-def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
-    startup_started_at = time.perf_counter()
+@dataclass
+class _StartupSplashController:
+    app: Any
+    splash: Any
+
+    def close(self) -> None:
+        self.splash = _close_startup_splash(self.app, self.splash)
+
+    def finish(self, window: Any) -> None:
+        if self.splash is not None:
+            self.splash.finish(window)
+
+
+@dataclass
+class _StartupRuntimeState:
+    role_lock: Any
+    emergency_runtime_context: Any
+    window: Any = None
+    logger: Any = None
+    restart_requested: bool = False
+    exit_code: int = 1
+    structured_crash_recorded: bool = False
+    resources_shutdown_ok: bool = False
+
+
+def _parse_startup_arguments(
+    forced_role: Optional[str],
+    path_setup: bool,
+) -> tuple[argparse.Namespace, bool] | None:
     parser = argparse.ArgumentParser(description=APP_DISPLAY_TITLE)
     parser.add_argument("--role", choices=list(ROLE_KEYS), help="Начальная роль пользователя")
     parser.add_argument("--path-setup", action="store_true", help="Настроить путь к папке базы")
@@ -2122,7 +2150,15 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     args.role = _resolve_startup_role(args.role, forced_role)
     path_setup = bool(path_setup or args.path_setup)
     if not path_setup and not _ensure_compiled_data_path_configured():
-        return
+        return None
+    return args, path_setup
+
+
+def _prepare_startup_before_qt(
+    args: argparse.Namespace,
+    path_setup: bool,
+    startup_started_at: float,
+) -> bool:
     _opblock_startup_metrics_reset(args.role, startup_started_at)
     if not path_setup:
         try:
@@ -2150,15 +2186,17 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
 
     if path_setup:
         sys.exit(_run_path_setup())
+    return active_local_operblock_case
 
-    app, splash, QLocalSocket, QLocalServer, Qt, QTimer, theme_ui_init_ms = _create_startup_qt_context(args.role)
 
-    def close_startup_splash():
-        nonlocal splash
-        splash = _close_startup_splash(app, splash)
-
-    role_suffix = args.role if args.role else "default"
-    server_name = _single_instance_server_name(args.role)
+def _acquire_single_instance_for_startup(
+    role: Optional[str],
+    QLocalSocket: Any,
+    QLocalServer: Any,
+    splash_controller: _StartupSplashController,
+) -> tuple[Any, bool, str]:
+    role_suffix = role if role else "default"
+    server_name = _single_instance_server_name(role)
     server, server_listening, single_instance_status = _prepare_single_instance_server(
         QLocalSocket,
         QLocalServer,
@@ -2166,21 +2204,28 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         role_suffix,
     )
     if single_instance_status == SINGLE_INSTANCE_SHOWN:
-        close_startup_splash()
+        splash_controller.close()
         sys.exit(0)
     if single_instance_status == SINGLE_INSTANCE_UNRESPONSIVE:
-        close_startup_splash()
+        splash_controller.close()
         _show_unresponsive_single_instance_warning(role_suffix)
         sys.exit(1)
     if single_instance_status != SINGLE_INSTANCE_ACQUIRED:
-        close_startup_splash()
+        splash_controller.close()
         _show_native_warning(
             "Запуск RemCard",
             "Не удалось зарегистрировать локальный экземпляр приложения. "
             "Повторите запуск или перезагрузите ПК.",
         )
         sys.exit(1)
+    return server, server_listening, server_name
 
+
+def _prepare_runtime_context_for_startup(
+    args: argparse.Namespace,
+    active_local_operblock_case: bool,
+    splash_controller: _StartupSplashController,
+) -> tuple[Any, str, Any]:
     preselected_runtime_context, preselected_runtime_reason = _start_preselected_operblock_offline_context(
         args.role,
         active_local_case=active_local_operblock_case,
@@ -2190,286 +2235,524 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     if not _validate_compiled_startup_unless_runtime_preselected(
         args.role,
         preselected_runtime_context,
-        close_startup_splash=close_startup_splash,
+        close_startup_splash=splash_controller.close,
         emergency_startup_state=emergency_startup_state,
         emergency_startup_request=args.emergency_startup_request,
     ):
-        close_startup_splash()
+        splash_controller.close()
         sys.exit(1)
 
     emergency_runtime_context = _resolve_startup_runtime_context_after_guard(
         args.role,
         emergency_startup_state,
-        close_startup_splash,
+        splash_controller.close,
     )
-    _run_pending_emergency_merge_after_startup_guard(emergency_runtime_context, close_startup_splash)
+    _run_pending_emergency_merge_after_startup_guard(
+        emergency_runtime_context,
+        splash_controller.close,
+    )
 
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if BASE_DIR not in sys.path:
         sys.path.insert(0, BASE_DIR)
 
-    role_lock = _acquire_role_lock_for_startup(args.role, emergency_runtime_context, close_startup_splash)
+    role_lock = _acquire_role_lock_for_startup(
+        args.role,
+        emergency_runtime_context,
+        splash_controller.close,
+    )
+    return emergency_runtime_context, preselected_runtime_reason, role_lock
 
-    window = None
-    logger = None
-    restart_requested = False
-    exit_code = 1
-    structured_crash_recorded = False
-    try:
-        from rem_card.app.logger import (
-            flush_crash_reports_async,
-            init_crash_handler,
-            log_exception,
-            logger as _logger,
+
+def _bootstrap_startup_container(
+    bootstrap: Callable,
+    *,
+    role: Optional[str],
+    emergency_runtime_context: Any,
+    splash_controller: _StartupSplashController,
+    role_lock: Any,
+    emergency_startup_request: str,
+    logger: Any,
+    startup_started_at: float,
+    theme_ui_init_ms: float,
+    window: Any = None,
+    write_startup_log: bool = False,
+) -> tuple[Any, Any, Any]:
+    bootstrap_started = time.perf_counter()
+    if write_startup_log:
+        _write_startup_local_log(
+            "bootstrap starting: "
+            f"role={role}; "
+            f"runtime={getattr(emergency_runtime_context, 'mode', 'network')}"
         )
-        from rem_card.app.bootstrap import bootstrap
-        from rem_card.ui.main_window import MainWindow
-
-        logger = _logger
-        sys.excepthook = log_exception
-        init_crash_handler(role=args.role)
-        _startup_trace(logger, startup_started_at, "qt_ready", role=args.role or "default")
-
-        pending_single_instance_clients = []
-
-        container = None
-        if args.role in ROLE_KEYS:
-            bootstrap_started = time.perf_counter()
-            _write_startup_local_log(
-                "bootstrap starting: "
-                f"role={args.role}; runtime={getattr(emergency_runtime_context, 'mode', 'network')}"
-            )
-            container, emergency_runtime_context, role_lock = _bootstrap_container_with_emergency_fallback(
-                bootstrap,
-                role=args.role,
-                emergency_runtime_context=emergency_runtime_context,
-                before_user_message=close_startup_splash,
-                role_lock=role_lock,
-                emergency_startup_request=args.emergency_startup_request,
-            )
-            bootstrap_elapsed_ms = (time.perf_counter() - bootstrap_started) * 1000.0
-            _startup_trace(
-                logger,
-                startup_started_at,
-                "bootstrap_done",
-                elapsed_ms=f"{bootstrap_elapsed_ms:.1f}",
-            )
-            _log_startup_phase_metrics(
-                container,
-                logger,
-                startup_started_at,
-                theme_ui_init_ms=theme_ui_init_ms,
-                total_bootstrap_ms=bootstrap_elapsed_ms,
-            )
-            _opblock_startup_record_duration(args.role, "bootstrap_ms", bootstrap_elapsed_ms, source="app_main")
-            _install_startup_trace_hooks(container, logger, startup_started_at)
-
-        _run_pending_operblock_offline_migration_before_window(
-            role=args.role,
-            container=container,
-            app=app,
-            close_startup_splash=close_startup_splash,
-            logger=logger,
-        )
-
-        main_window_started = _opblock_startup_timer_start(args.role)
-        window = MainWindow(
-            container=container,
-            role=args.role,
-            role_session_lock=role_lock,
-            role_key=args.role if role_lock else None,
-        )
-        _opblock_startup_record_since(args.role, "main_window_create_ms", main_window_started, source="app_main")
-        _startup_trace(logger, startup_started_at, "main_window_constructed", role=args.role or "default")
-
-        if container is None:
-            bootstrap_started = time.perf_counter()
-            container, emergency_runtime_context, role_lock = _bootstrap_container_with_emergency_fallback(
-                bootstrap,
-                role=args.role,
-                emergency_runtime_context=emergency_runtime_context,
-                before_user_message=close_startup_splash,
-                role_lock=role_lock,
-                emergency_startup_request=args.emergency_startup_request,
-            )
-            bootstrap_elapsed_ms = (time.perf_counter() - bootstrap_started) * 1000.0
-            set_default_container = getattr(window, "set_default_container", None)
-            if callable(set_default_container):
-                set_default_container(container)
-            else:
-                window.container = container
-            _startup_trace(
-                logger,
-                startup_started_at,
-                "bootstrap_done",
-                elapsed_ms=f"{bootstrap_elapsed_ms:.1f}",
-            )
-            _log_startup_phase_metrics(
-                container,
-                logger,
-                startup_started_at,
-                theme_ui_init_ms=theme_ui_init_ms,
-                total_bootstrap_ms=bootstrap_elapsed_ms,
-            )
-            _opblock_startup_record_duration(args.role, "bootstrap_ms", bootstrap_elapsed_ms, source="app_main")
-            _install_startup_trace_hooks(container, logger, startup_started_at)
+    container, emergency_runtime_context, role_lock = _bootstrap_container_with_emergency_fallback(
+        bootstrap,
+        role=role,
+        emergency_runtime_context=emergency_runtime_context,
+        before_user_message=splash_controller.close,
+        role_lock=role_lock,
+        emergency_startup_request=emergency_startup_request,
+    )
+    bootstrap_elapsed_ms = (time.perf_counter() - bootstrap_started) * 1000.0
+    if window is not None:
+        set_default_container = getattr(window, "set_default_container", None)
+        if callable(set_default_container):
+            set_default_container(container)
         else:
             window.container = container
-        logger.info("Bootstrap completed")
+    _startup_trace(
+        logger,
+        startup_started_at,
+        "bootstrap_done",
+        elapsed_ms=f"{bootstrap_elapsed_ms:.1f}",
+    )
+    _log_startup_phase_metrics(
+        container,
+        logger,
+        startup_started_at,
+        theme_ui_init_ms=theme_ui_init_ms,
+        total_bootstrap_ms=bootstrap_elapsed_ms,
+    )
+    _opblock_startup_record_duration(
+        role,
+        "bootstrap_ms",
+        bootstrap_elapsed_ms,
+        source="app_main",
+    )
+    _install_startup_trace_hooks(container, logger, startup_started_at)
+    return container, emergency_runtime_context, role_lock
 
-        initial_role_prepared = False
-        if args.role in ROLE_KEYS and hasattr(window, "prepare_initial_role_ui_for_startup"):
-            role_ui_started = time.perf_counter()
-            prepared = bool(window.prepare_initial_role_ui_for_startup())
-            initial_role_prepared = prepared
-            _startup_trace(
-                logger,
-                startup_started_at,
-                "initial_role_ui_prepared",
-                role=args.role,
-                prepared=int(prepared),
-                elapsed_ms=f"{(time.perf_counter() - role_ui_started) * 1000.0:.1f}",
-            )
-            if prepared:
-                if hasattr(window, "start_initial_role_refresh"):
-                    window.start_initial_role_refresh()
-                _wait_for_initial_w1(
-                    app,
-                    window,
-                    logger,
-                    startup_started_at,
-                    _startup_w1_wait_ms(),
-                )
 
-        if splash is not None:
-            splash.finish(window)
-        window.show()
-        _schedule_operblock_offline_notice_after_window(
-            getattr(container, "runtime_context", emergency_runtime_context),
-            preselected_runtime_reason,
-            QTimer,
+def _prepare_initial_role_window(
+    app: Any,
+    window: Any,
+    logger: Any,
+    role: Optional[str],
+    startup_started_at: float,
+) -> bool:
+    if role not in ROLE_KEYS or not hasattr(window, "prepare_initial_role_ui_for_startup"):
+        return False
+    role_ui_started = time.perf_counter()
+    prepared = bool(window.prepare_initial_role_ui_for_startup())
+    _startup_trace(
+        logger,
+        startup_started_at,
+        "initial_role_ui_prepared",
+        role=role,
+        prepared=int(prepared),
+        elapsed_ms=f"{(time.perf_counter() - role_ui_started) * 1000.0:.1f}",
+    )
+    if prepared:
+        if hasattr(window, "start_initial_role_refresh"):
+            window.start_initial_role_refresh()
+        _wait_for_initial_w1(
+            app,
+            window,
+            logger,
+            startup_started_at,
+            _startup_w1_wait_ms(),
         )
-        _opblock_startup_record_window_shown(args.role, initial_role_prepared, QTimer)
-        if container is not None:
-            QTimer.singleShot(
-                350,
-                lambda current_container=container: _show_settings_startup_warnings_if_needed(current_container),
-            )
-        if initial_role_prepared and hasattr(window, "wake_initial_role_monitor"):
-            QTimer.singleShot(250, window.wake_initial_role_monitor)
-        QTimer.singleShot(1000, flush_crash_reports_async)
-        _startup_trace(logger, startup_started_at, "window_shown", role=args.role or "default")
+    return prepared
 
-        def on_new_connection():
-            while server.hasPendingConnections():
-                client = server.nextPendingConnection()
-                if client is None:
-                    continue
-                pending_single_instance_clients.append(client)
-                try:
-                    client.setParent(server)
-                    if not _handle_single_instance_show_request(client, window, Qt):
-                        logger.warning("Single-instance SHOW request was not acknowledged")
-                except RuntimeError as exc:
-                    logger.warning("Single-instance socket handling failed: %s", exc)
-                finally:
-                    if client in pending_single_instance_clients:
-                        pending_single_instance_clients.remove(client)
-                    try:
-                        client.disconnectFromServer()
-                    except RuntimeError:
-                        pass
-                    try:
-                        client.deleteLater()
-                    except RuntimeError:
-                        pass
 
-        server.newConnection.connect(on_new_connection)
-        if server.hasPendingConnections():
-            QTimer.singleShot(0, on_new_connection)
-
-        exit_code = app.exec()
-        restart_requested = bool(app.property("remcard_restart_requested"))
-        logger.info("Application exiting with code %s", exit_code)
-    except Exception as exc:
-        try:
-            from rem_card.services.crash_reports import capture_exception
-
-            structured_crash_recorded = capture_exception(
-                "unhandled_python_exception",
-                type(exc),
-                exc,
-                exc.__traceback__,
-                role=args.role,
-            ) is not None
-        except Exception:
-            # Crash reporting is a direct best-effort spool write. It must never
-            # recursively fail through the application logger.
-            structured_crash_recorded = False
-        close_startup_splash()
-        _write_startup_local_log(
-            "critical startup/runtime error: "
-            f"role={args.role or ''}; runtime={getattr(emergency_runtime_context, 'mode', 'network')}; "
-            f"error={exc!r}"
+def _show_startup_window(
+    *,
+    args: argparse.Namespace,
+    app: Any,
+    window: Any,
+    container: Any,
+    emergency_runtime_context: Any,
+    preselected_runtime_reason: str,
+    splash_controller: _StartupSplashController,
+    QTimer: Any,
+    flush_crash_reports_async: Callable,
+    logger: Any,
+    startup_started_at: float,
+) -> None:
+    initial_role_prepared = _prepare_initial_role_window(
+        app,
+        window,
+        logger,
+        args.role,
+        startup_started_at,
+    )
+    splash_controller.finish(window)
+    window.show()
+    _schedule_operblock_offline_notice_after_window(
+        getattr(container, "runtime_context", emergency_runtime_context),
+        preselected_runtime_reason,
+        QTimer,
+    )
+    _opblock_startup_record_window_shown(args.role, initial_role_prepared, QTimer)
+    if container is not None:
+        QTimer.singleShot(
+            350,
+            lambda current_container=container: _show_settings_startup_warnings_if_needed(
+                current_container
+            ),
         )
-        if logger:
-            logger.critical("Critical error during startup/runtime: %s", exc, exc_info=True)
-        else:
-            print(f"Critical startup error: {exc}")
-        try:
-            from rem_card.app.db_availability import is_database_unavailable_error
+    if initial_role_prepared and hasattr(window, "wake_initial_role_monitor"):
+        QTimer.singleShot(250, window.wake_initial_role_monitor)
+    QTimer.singleShot(1000, flush_crash_reports_async)
+    _startup_trace(
+        logger,
+        startup_started_at,
+        "window_shown",
+        role=args.role or "default",
+    )
 
-            if is_database_unavailable_error(exc) or isinstance(exc, (DataPathConfigurationError, FileNotFoundError, OSError)):
-                _write_startup_local_log(f"startup/runtime blocked: {exc}")
-                _show_custom_warning("База данных недоступна", str(exc))
-        except Exception:
-            pass
-        exit_code = 1
-    finally:
-        resources_shutdown_ok = False
-        if window and logger:
-            resources_shutdown_ok = _shutdown_window_resources(window, logger)
-        try:
-            if server is not None and server_listening:
-                server.close()
-                QLocalServer.removeServer(server_name)
-        except Exception:
-            pass
-        try:
-            if window and hasattr(window, "release_role_lock"):
-                window.release_role_lock()
-            elif role_lock:
-                role_lock.release()
-        except Exception:
-            pass
-        if exit_code == 0 and window and logger and resources_shutdown_ok:
-            _run_doctor_exit_db_rotation(window, args.role, logger)
-        if logger:
+
+def _connect_single_instance_requests(
+    server: Any,
+    window: Any,
+    Qt: Any,
+    QTimer: Any,
+    logger: Any,
+) -> None:
+    pending_single_instance_clients = []
+
+    def on_new_connection():
+        while server.hasPendingConnections():
+            client = server.nextPendingConnection()
+            if client is None:
+                continue
+            pending_single_instance_clients.append(client)
             try:
-                from rem_card.app.logger import finalize_crash_handler
+                client.setParent(server)
+                if not _handle_single_instance_show_request(client, window, Qt):
+                    logger.warning("Single-instance SHOW request was not acknowledged")
+            except RuntimeError as exc:
+                logger.warning("Single-instance socket handling failed: %s", exc)
+            finally:
+                if client in pending_single_instance_clients:
+                    pending_single_instance_clients.remove(client)
+                try:
+                    client.disconnectFromServer()
+                except RuntimeError:
+                    pass
+                try:
+                    client.deleteLater()
+                except RuntimeError:
+                    pass
 
-                finalize_crash_handler(
-                    exit_code=exit_code,
-                    crash_recorded=structured_crash_recorded,
-                )
-            except Exception as exc:
-                logger.warning("Crash handler finalization failed: %s", exc)
-        if exit_code == 0:
-            _launch_exit_update_if_needed()
+    server.newConnection.connect(on_new_connection)
+    if server.hasPendingConnections():
+        QTimer.singleShot(0, on_new_connection)
 
-    if restart_requested and exit_code == 0:
-        if not resources_shutdown_ok:
-            _show_native_warning(
-                "Перезапуск RemCard",
-                "Часть ресурсов программы не успела штатно завершиться. Запустите RemCard вручную после её полного закрытия.",
+
+def _run_startup_application(
+    *,
+    args: argparse.Namespace,
+    app: Any,
+    server: Any,
+    Qt: Any,
+    QTimer: Any,
+    theme_ui_init_ms: float,
+    preselected_runtime_reason: str,
+    splash_controller: _StartupSplashController,
+    startup_started_at: float,
+    state: _StartupRuntimeState,
+) -> None:
+    from rem_card.app.logger import (
+        flush_crash_reports_async,
+        init_crash_handler,
+        log_exception,
+        logger as _logger,
+    )
+    from rem_card.app.bootstrap import bootstrap
+    from rem_card.ui.main_window import MainWindow
+
+    state.logger = _logger
+    sys.excepthook = log_exception
+    init_crash_handler(role=args.role)
+    _startup_trace(
+        state.logger,
+        startup_started_at,
+        "qt_ready",
+        role=args.role or "default",
+    )
+
+    container = None
+    if args.role in ROLE_KEYS:
+        (
+            container,
+            state.emergency_runtime_context,
+            state.role_lock,
+        ) = _bootstrap_startup_container(
+            bootstrap,
+            role=args.role,
+            emergency_runtime_context=state.emergency_runtime_context,
+            splash_controller=splash_controller,
+            role_lock=state.role_lock,
+            emergency_startup_request=args.emergency_startup_request,
+            logger=state.logger,
+            startup_started_at=startup_started_at,
+            theme_ui_init_ms=theme_ui_init_ms,
+            write_startup_log=True,
+        )
+
+    _run_pending_operblock_offline_migration_before_window(
+        role=args.role,
+        container=container,
+        app=app,
+        close_startup_splash=splash_controller.close,
+        logger=state.logger,
+    )
+
+    main_window_started = _opblock_startup_timer_start(args.role)
+    state.window = MainWindow(
+        container=container,
+        role=args.role,
+        role_session_lock=state.role_lock,
+        role_key=args.role if state.role_lock else None,
+    )
+    _opblock_startup_record_since(
+        args.role,
+        "main_window_create_ms",
+        main_window_started,
+        source="app_main",
+    )
+    _startup_trace(
+        state.logger,
+        startup_started_at,
+        "main_window_constructed",
+        role=args.role or "default",
+    )
+
+    if container is None:
+        (
+            container,
+            state.emergency_runtime_context,
+            state.role_lock,
+        ) = _bootstrap_startup_container(
+            bootstrap,
+            role=args.role,
+            emergency_runtime_context=state.emergency_runtime_context,
+            splash_controller=splash_controller,
+            role_lock=state.role_lock,
+            emergency_startup_request=args.emergency_startup_request,
+            logger=state.logger,
+            startup_started_at=startup_started_at,
+            theme_ui_init_ms=theme_ui_init_ms,
+            window=state.window,
+        )
+    else:
+        state.window.container = container
+    state.logger.info("Bootstrap completed")
+
+    _show_startup_window(
+        args=args,
+        app=app,
+        window=state.window,
+        container=container,
+        emergency_runtime_context=state.emergency_runtime_context,
+        preselected_runtime_reason=preselected_runtime_reason,
+        splash_controller=splash_controller,
+        QTimer=QTimer,
+        flush_crash_reports_async=flush_crash_reports_async,
+        logger=state.logger,
+        startup_started_at=startup_started_at,
+    )
+    _connect_single_instance_requests(
+        server,
+        state.window,
+        Qt,
+        QTimer,
+        state.logger,
+    )
+
+    state.exit_code = app.exec()
+    state.restart_requested = bool(app.property("remcard_restart_requested"))
+    state.logger.info("Application exiting with code %s", state.exit_code)
+
+
+def _handle_startup_application_error(
+    exc: Exception,
+    *,
+    args: argparse.Namespace,
+    splash_controller: _StartupSplashController,
+    state: _StartupRuntimeState,
+) -> None:
+    try:
+        from rem_card.services.crash_reports import capture_exception
+
+        state.structured_crash_recorded = capture_exception(
+            "unhandled_python_exception",
+            type(exc),
+            exc,
+            exc.__traceback__,
+            role=args.role,
+        ) is not None
+    except Exception:
+        # Crash reporting is a direct best-effort spool write. It must never
+        # recursively fail through the application logger.
+        state.structured_crash_recorded = False
+    splash_controller.close()
+    _write_startup_local_log(
+        "critical startup/runtime error: "
+        f"role={args.role or ''}; "
+        f"runtime={getattr(state.emergency_runtime_context, 'mode', 'network')}; "
+        f"error={exc!r}"
+    )
+    if state.logger:
+        state.logger.critical(
+            "Critical error during startup/runtime: %s",
+            exc,
+            exc_info=True,
+        )
+    else:
+        print(f"Critical startup error: {exc}")
+    try:
+        from rem_card.app.db_availability import is_database_unavailable_error
+
+        if is_database_unavailable_error(exc) or isinstance(
+            exc,
+            (DataPathConfigurationError, FileNotFoundError, OSError),
+        ):
+            _write_startup_local_log(f"startup/runtime blocked: {exc}")
+            _show_custom_warning("База данных недоступна", str(exc))
+    except Exception:
+        pass
+    state.exit_code = 1
+
+
+def _finalize_startup_application(
+    *,
+    args: argparse.Namespace,
+    server: Any,
+    server_listening: bool,
+    server_name: str,
+    QLocalServer: Any,
+    state: _StartupRuntimeState,
+) -> None:
+    if state.window and state.logger:
+        state.resources_shutdown_ok = _shutdown_window_resources(
+            state.window,
+            state.logger,
+        )
+    try:
+        if server is not None and server_listening:
+            server.close()
+            QLocalServer.removeServer(server_name)
+    except Exception:
+        pass
+    try:
+        if state.window and hasattr(state.window, "release_role_lock"):
+            state.window.release_role_lock()
+        elif state.role_lock:
+            state.role_lock.release()
+    except Exception:
+        pass
+    if (
+        state.exit_code == 0
+        and state.window
+        and state.logger
+        and state.resources_shutdown_ok
+    ):
+        _run_doctor_exit_db_rotation(state.window, args.role, state.logger)
+    if state.logger:
+        try:
+            from rem_card.app.logger import finalize_crash_handler
+
+            finalize_crash_handler(
+                exit_code=state.exit_code,
+                crash_recorded=state.structured_crash_recorded,
             )
-        elif not _launch_requested_restart():
-            _show_native_warning(
-                "Перезапуск RemCard",
-                "Автоматически перезапустить программу не удалось. Запустите её вручную.",
-            )
+        except Exception as exc:
+            state.logger.warning("Crash handler finalization failed: %s", exc)
+    if state.exit_code == 0:
+        _launch_exit_update_if_needed()
 
-    sys.exit(exit_code)
+
+def _restart_after_clean_exit_if_requested(state: _StartupRuntimeState) -> None:
+    if not state.restart_requested or state.exit_code != 0:
+        return
+    if not state.resources_shutdown_ok:
+        _show_native_warning(
+            "Перезапуск RemCard",
+            "Часть ресурсов программы не успела штатно завершиться. "
+            "Запустите RemCard вручную после её полного закрытия.",
+        )
+    elif not _launch_requested_restart():
+        _show_native_warning(
+            "Перезапуск RemCard",
+            "Автоматически перезапустить программу не удалось. Запустите её вручную.",
+        )
+
+
+def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
+    startup_started_at = time.perf_counter()
+    parsed_startup = _parse_startup_arguments(forced_role, path_setup)
+    if parsed_startup is None:
+        return
+    args, path_setup = parsed_startup
+    active_local_operblock_case = _prepare_startup_before_qt(
+        args,
+        path_setup,
+        startup_started_at,
+    )
+
+    (
+        app,
+        splash,
+        QLocalSocket,
+        QLocalServer,
+        Qt,
+        QTimer,
+        theme_ui_init_ms,
+    ) = _create_startup_qt_context(args.role)
+    splash_controller = _StartupSplashController(app, splash)
+    server, server_listening, server_name = _acquire_single_instance_for_startup(
+        args.role,
+        QLocalSocket,
+        QLocalServer,
+        splash_controller,
+    )
+    (
+        emergency_runtime_context,
+        preselected_runtime_reason,
+        role_lock,
+    ) = _prepare_runtime_context_for_startup(
+        args,
+        active_local_operblock_case,
+        splash_controller,
+    )
+    state = _StartupRuntimeState(
+        role_lock=role_lock,
+        emergency_runtime_context=emergency_runtime_context,
+    )
+    try:
+        _run_startup_application(
+            args=args,
+            app=app,
+            server=server,
+            Qt=Qt,
+            QTimer=QTimer,
+            theme_ui_init_ms=theme_ui_init_ms,
+            preselected_runtime_reason=preselected_runtime_reason,
+            splash_controller=splash_controller,
+            startup_started_at=startup_started_at,
+            state=state,
+        )
+    except Exception as exc:
+        _handle_startup_application_error(
+            exc,
+            args=args,
+            splash_controller=splash_controller,
+            state=state,
+        )
+    finally:
+        _finalize_startup_application(
+            args=args,
+            server=server,
+            server_listening=server_listening,
+            server_name=server_name,
+            QLocalServer=QLocalServer,
+            state=state,
+        )
+
+    _restart_after_clean_exit_if_requested(state)
+    sys.exit(state.exit_code)
 
 
 if __name__ == "__main__":
