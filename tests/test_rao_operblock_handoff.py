@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import sqlite3
@@ -22,7 +22,10 @@ from rem_card.data.dto.remcard_dto import PatientStatus
 from rem_card.services.concurrency import DataConflictError
 from rem_card.services.analytics.recovery_summary import fetch_recovery_bed_admission_rows
 from rem_card.services.operblock_handoff_service import OperBlockHandoffService
-from rem_card.services.operblock_service import OperBlockService
+from rem_card.services.operblock_service import (
+    OperBlockService,
+    OperBlockSourceMovementChangedError,
+)
 from rem_card.services.patient_bed_management.service import PatientBedManagementService
 
 
@@ -155,6 +158,95 @@ def _dispatch_and_accept(
     return handoff, case
 
 
+def test_handoff_admission_time_is_editable_from_dispatch_time(db):
+    admission_id = _create_rao_patient(db, bed_number=11, history_number="101/1")
+    handoff = OperBlockHandoffService(db).dispatch_from_rao(admission_id)
+    service = OperBlockService(db)
+    payload = service.get_rao_handoff_form_data(int(handoff["id"]), "emergency")
+    dispatched_at = datetime.fromisoformat(str(handoff["dispatched_at"]))
+    expected_arrival_at = datetime.fromisoformat(str(handoff["expected_arrival_at"]))
+
+    assert payload["can_edit_started_at"] is True
+    assert datetime.fromisoformat(str(payload["started_at"])) == expected_arrival_at
+    assert datetime.fromisoformat(str(payload["started_at_min"])) == dispatched_at
+    payload["started_at"] = dispatched_at + timedelta(minutes=2)
+
+    case = service.create_operation_case(payload)
+
+    stored = db.fetch_one_remcard(
+        "SELECT started_at FROM operation_cases WHERE id = ?",
+        (case["operation_case_id"],),
+    )
+    assert datetime.fromisoformat(str(stored["started_at"])) == dispatched_at + timedelta(minutes=2)
+
+    edit_payload = service.get_operation_case_form_data(case["operation_case_id"])
+    assert edit_payload["can_edit_started_at"] is True
+    assert datetime.fromisoformat(str(edit_payload["started_at_min"])) == dispatched_at
+    edit_payload["started_at"] = dispatched_at
+    service.update_operation_case_form_data(case["operation_case_id"], edit_payload)
+
+    stored = db.fetch_one_remcard(
+        "SELECT started_at FROM operation_cases WHERE id = ?",
+        (case["operation_case_id"],),
+    )
+    assert datetime.fromisoformat(str(stored["started_at"])) == dispatched_at
+
+
+def test_handoff_admission_time_cannot_precede_dispatch(db):
+    admission_id = _create_rao_patient(db, bed_number=12, history_number="101/2")
+    handoff = OperBlockHandoffService(db).dispatch_from_rao(admission_id)
+    service = OperBlockService(db)
+    payload = service.get_rao_handoff_form_data(int(handoff["id"]), "planned")
+    dispatched_at = datetime.fromisoformat(str(handoff["dispatched_at"]))
+    payload["started_at"] = dispatched_at - timedelta(minutes=1)
+
+    with pytest.raises(ValueError, match="не может быть раньше времени отправки из РАО"):
+        service.create_operation_case(payload)
+
+    payload["started_at"] = dispatched_at + timedelta(minutes=1)
+    case = service.create_operation_case(payload)
+    edit_payload = service.get_operation_case_form_data(case["operation_case_id"])
+    edit_payload["started_at"] = dispatched_at - timedelta(minutes=1)
+    with pytest.raises(ValueError, match="не может быть раньше времени отправки из РАО"):
+        service.update_operation_case_form_data(case["operation_case_id"], edit_payload)
+
+
+def test_linked_case_can_move_earlier_after_clinical_data_but_not_forward(db):
+    admission_id = _create_rao_patient(db, bed_number=13, history_number="101/3")
+    handoff = OperBlockHandoffService(db).dispatch_from_rao(admission_id)
+    service = OperBlockService(db)
+    payload = service.get_rao_handoff_form_data(int(handoff["id"]), "emergency")
+    dispatched_at = datetime.fromisoformat(str(handoff["dispatched_at"]))
+    payload["started_at"] = dispatched_at + timedelta(minutes=2)
+    case = service.create_operation_case(payload)
+    db.conn.execute(
+        """
+        INSERT INTO operblock_timeline_events (
+            operation_case_id, admission_id, table_code, event_type, event_time,
+            display_label, status, payload_json
+        ) VALUES (?, ?, 'emergency', 'clinical_event', ?, 'Начало пособия', 'active',
+                  '{"stage_kind":"anesthesia_start"}')
+        """,
+        (
+            case["operation_case_id"],
+            case["admission_id"],
+            (dispatched_at + timedelta(minutes=10)).isoformat(timespec="seconds"),
+        ),
+    )
+    db.conn.commit()
+
+    edit_payload = service.get_operation_case_form_data(case["operation_case_id"])
+    assert edit_payload["can_edit_started_at"] is True
+    assert datetime.fromisoformat(str(edit_payload["started_at_max"])) == dispatched_at + timedelta(minutes=2)
+    edit_payload["started_at"] = dispatched_at
+    service.update_operation_case_form_data(case["operation_case_id"], edit_payload)
+
+    edit_payload = service.get_operation_case_form_data(case["operation_case_id"])
+    edit_payload["started_at"] = dispatched_at + timedelta(minutes=1)
+    with pytest.raises(ValueError, match="Время поступления в оперблок можно изменить"):
+        service.update_operation_case_form_data(case["operation_case_id"], edit_payload)
+
+
 def test_linked_return_uses_source_admission_after_bed_move_and_has_no_duplicate_status(db):
     admission_id = _create_rao_patient(db, bed_number=1, history_number="100/1")
     now = datetime.now().replace(second=0, microsecond=0).isoformat(timespec="seconds")
@@ -259,6 +351,109 @@ def test_linked_transfer_to_other_department_does_not_change_source_movement(db)
         "SELECT status FROM operblock_handoffs WHERE id = ?",
         (handoff["id"],),
     )["status"] == "completed_non_rao"
+
+
+def test_release_can_preserve_source_movement_after_explicit_confirmation(db):
+    admission_id = _create_rao_patient(db, bed_number=14, history_number="102/1")
+    handoff, case = _dispatch_and_accept(db, admission_id=admission_id, table_code="emergency")
+    db.conn.execute(
+        "UPDATE operation_cases SET transfer_department = 'РАО' WHERE id = ?",
+        (case["operation_case_id"],),
+    )
+    source_or = db.fetch_one_remcard(
+        """
+        SELECT id, start_time
+        FROM patient_status_events
+        WHERE admission_id = ? AND status = 'OR' AND end_time IS NULL
+        """,
+        (admission_id,),
+    )
+    returned_at = datetime.now().replace(second=0, microsecond=0).isoformat(timespec="seconds")
+    db.conn.execute(
+        """
+        UPDATE patient_status_events
+        SET end_time = ?, revision = revision + 1
+        WHERE id = ?
+        """,
+        (returned_at, int(source_or["id"])),
+    )
+    db.conn.execute(
+        """
+        INSERT INTO patient_status_events (
+            admission_id, status, reason_type, reason_text, start_time,
+            created_by, created_at, updated_at, last_modified_by, revision
+        ) VALUES (?, 'ACTIVE', 'manual', 'В отделении', ?, 'doctor', ?, ?, 'doctor', 3)
+        """,
+        (admission_id, returned_at, returned_at, returned_at),
+    )
+    db.conn.commit()
+    source_before = [
+        tuple(row)
+        for row in db.fetch_all_remcard(
+            """
+            SELECT id, status, start_time, end_time, revision, last_modified_by
+            FROM patient_status_events
+            WHERE admission_id = ?
+            ORDER BY id
+            """,
+            (admission_id,),
+        )
+    ]
+
+    service = OperBlockService(db)
+    with pytest.raises(
+        OperBlockSourceMovementChangedError,
+        match="Стол будет освобождён без изменения движения пациента",
+    ):
+        service.release_operation_table(case["operation_case_id"])
+
+    assert db.fetch_one_remcard(
+        "SELECT status FROM operation_cases WHERE id = ?",
+        (case["operation_case_id"],),
+    )["status"] == "active"
+    assert db.fetch_one_remcard(
+        "SELECT status FROM operation_table_assignments WHERE operation_case_id = ?",
+        (case["operation_case_id"],),
+    )["status"] == "active"
+
+    result = service.release_operation_table(
+        case["operation_case_id"],
+        preserve_source_movement=True,
+    )
+
+    assert result["source_movement_preserved"] is True
+    assert db.fetch_one_remcard(
+        "SELECT status FROM operation_cases WHERE id = ?",
+        (case["operation_case_id"],),
+    )["status"] == "closed"
+    assert db.fetch_one_remcard(
+        "SELECT status FROM operation_table_assignments WHERE operation_case_id = ?",
+        (case["operation_case_id"],),
+    )["status"] == "released"
+    source_after = [
+        tuple(row)
+        for row in db.fetch_all_remcard(
+            """
+            SELECT id, status, start_time, end_time, revision, last_modified_by
+            FROM patient_status_events
+            WHERE admission_id = ?
+            ORDER BY id
+            """,
+            (admission_id,),
+        )
+    ]
+    assert source_after == source_before
+    handoff_row = db.fetch_one_remcard(
+        """
+        SELECT status, effective_return_at, source_movement_preserved
+        FROM operblock_handoffs
+        WHERE id = ?
+        """,
+        (handoff["id"],),
+    )
+    assert handoff_row["status"] == "returned_to_rao"
+    assert handoff_row["effective_return_at"] == returned_at
+    assert handoff_row["source_movement_preserved"] == 1
 
 
 def test_manual_operation_case_can_be_late_bound_on_release(db):

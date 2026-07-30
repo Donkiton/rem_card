@@ -19,7 +19,10 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from rem_card.services.operblock_service import OperBlockService  # noqa: E402
+from rem_card.services.operblock_service import (  # noqa: E402
+    OperBlockService,
+    OperBlockSourceMovementChangedError,
+)
 from rem_card.ui.operblock_view.operblock_main_widget import (  # noqa: E402
     OperBlockAdmissionTimeInput,
     OperBlockMainWidget,
@@ -632,6 +635,58 @@ class OperBlockAdmissionTimeInputWidgetTest(unittest.TestCase):
         widget.time_input.clear()
         QTest.keyClicks(widget.time_input, "1540")
         self.assertEqual(widget.time_input.text(), "15:40")
+
+    def test_rao_time_bounds_clamp_keyboard_and_stepper_changes(self):
+        minimum = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
+        maximum = minimum + timedelta(hours=1)
+        widget = OperBlockAdmissionTimeInput(minimum + timedelta(minutes=30))
+        widget.set_bounds(minimum, maximum)
+
+        widget._step_time(-60)
+        self.assertEqual(widget.datetime_value(), minimum)
+
+        widget._step_time(120)
+        self.assertEqual(widget.datetime_value(), maximum)
+
+    def test_source_movement_warning_retries_release_with_preservation(self):
+        retries = []
+        widget = SimpleNamespace(
+            _write_pending=True,
+            _enqueue_release_case=lambda operation_case_id, **kwargs: retries.append(
+                (operation_case_id, kwargs)
+            ),
+        )
+        error = OperBlockSourceMovementChangedError(
+            "Движение пациента в исходной карте РАО уже изменено. "
+            "Стол будет освобождён без изменения движения пациента в исходной карте."
+        )
+
+        with patch(
+            "rem_card.ui.operblock_view.operblock_main_widget.CustomMessageBox.warning"
+        ) as warning:
+            OperBlockMainWidget._on_release_case_error(
+                widget,
+                17,
+                23,
+                False,
+                error,
+            )
+
+        self.assertFalse(widget._write_pending)
+        warning.assert_called_once()
+        self.assertIn("Стол будет освобождён", warning.call_args.args[2])
+        self.assertEqual(
+            retries,
+            [
+                (
+                    17,
+                    {
+                        "handoff_id": 23,
+                        "preserve_source_movement": True,
+                    },
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":
