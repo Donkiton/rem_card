@@ -712,6 +712,343 @@ class PatientStatusDAO:
             logger.error(f"[StatusDAO] Error changing status for admission {admission_id}: {e}", exc_info=True)
             return False
 
+    def _prepare_final_outcome(
+        self,
+        new_status: PatientStatus,
+        event_time: datetime,
+        admission_details: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        details = dict(admission_details or {})
+        event_dt = (event_time or datetime.now()).replace(second=0, microsecond=0)
+        outcome = {
+            "event_dt": event_dt,
+            "event_time_str": event_dt.isoformat(),
+            "now_str": datetime.now().replace(microsecond=0).isoformat(),
+            "transfer_department": None,
+            "transfer_lpu": None,
+            "transfer_lpu_other": None,
+            "measures_json": details.get("cardiac_arrest_measures_json"),
+            "cardiac_arrest_cause": details.get("cardiac_arrest_cause"),
+        }
+
+        if new_status == PatientStatus.TRANSFERRED:
+            transfer_department = str(details.get("transfer_department") or "").strip()
+            transfer_lpu = str(details.get("transfer_lpu") or "").strip() or None
+            transfer_lpu_other = str(details.get("transfer_lpu_other") or "").strip() or None
+            if not transfer_department:
+                logger.warning("[StatusDAO] Transfer outcome rejected: no transfer_department")
+                return None
+            if transfer_department == "Другое ЛПУ" and not transfer_lpu:
+                logger.warning("[StatusDAO] Transfer outcome rejected: no transfer_lpu")
+                return None
+            if transfer_lpu == "Другое ЛПУ" and not transfer_lpu_other:
+                logger.warning("[StatusDAO] Transfer outcome rejected: no transfer_lpu_other")
+                return None
+            outcome.update(
+                {
+                    "transfer_department": transfer_department,
+                    "transfer_lpu": transfer_lpu,
+                    "transfer_lpu_other": transfer_lpu_other,
+                }
+            )
+
+        clinical_death = details.get("clinical_death_datetime")
+        if isinstance(clinical_death, datetime):
+            clinical_death = clinical_death.replace(second=0, microsecond=0).isoformat()
+        elif clinical_death is not None:
+            clinical_death = str(clinical_death)
+        outcome["clinical_death"] = clinical_death
+        outcome["clinical_death_dt"] = (
+            self._parse_sqlite_dt(clinical_death) if clinical_death else None
+        )
+        return outcome
+
+    @staticmethod
+    def _fetch_active_outcome_status(cursor, admission_id: int):
+        cursor.execute(
+            """
+            SELECT id, status, start_time, COALESCE(revision, 0) AS revision
+            FROM patient_status_events
+            WHERE admission_id = ? AND end_time IS NULL
+            """,
+            (admission_id,),
+        )
+        return cursor.fetchone()
+
+    def _outcome_conflicts_with_cpr(
+        self,
+        cursor,
+        admission_id: int,
+        new_status: PatientStatus,
+        outcome: Dict[str, Any],
+    ) -> bool:
+        if new_status != PatientStatus.DEAD:
+            return False
+        death_interval_start = outcome["clinical_death_dt"] or outcome["event_dt"]
+        if not self._death_conflicts_with_cpr(cursor, admission_id, death_interval_start):
+            return False
+        logger.warning(
+            "[StatusDAO] Death outcome interval starting %s overlaps CPR event for admission %s",
+            death_interval_start,
+            admission_id,
+        )
+        return True
+
+    def _align_outcome_time_with_active_status(
+        self,
+        cursor,
+        admission_id: int,
+        current_active,
+        outcome: Dict[str, Any],
+        user_id: Optional[str],
+    ) -> bool:
+        current_start = self._parse_sqlite_dt(current_active["start_time"])
+        if not current_start:
+            return True
+        current_start_exact = current_start.replace(microsecond=0)
+        if outcome["event_dt"] >= current_start_exact:
+            return True
+
+        repaired_start = self._repair_future_initial_status_before_outcome(
+            cursor,
+            admission_id,
+            current_active,
+            outcome["event_dt"],
+            user_id,
+        )
+        if repaired_start is not None:
+            current_start_exact = repaired_start.replace(microsecond=0)
+        event_dt = outcome["event_dt"]
+        if (
+            event_dt < current_start_exact
+            and event_dt.replace(second=0, microsecond=0)
+            == current_start_exact.replace(second=0, microsecond=0)
+        ):
+            outcome["event_dt"] = current_start_exact
+            outcome["event_time_str"] = current_start_exact.isoformat()
+            return True
+        if event_dt >= current_start_exact:
+            return True
+
+        logger.warning(
+            "[StatusDAO] Outcome time %s is earlier than current status start %s for admission %s",
+            event_dt,
+            current_start_exact,
+            admission_id,
+        )
+        return False
+
+    def _close_active_status_for_outcome(
+        self,
+        cursor,
+        admission_id: int,
+        new_status: PatientStatus,
+        current_active,
+        outcome: Dict[str, Any],
+        user_id: Optional[str],
+        *,
+        expected_active_event_id: Optional[int],
+        expected_active_revision: Optional[int],
+    ) -> bool:
+        if not current_active:
+            logger.warning(
+                "[StatusDAO] Admission %s had no active status. Creating final %s at %s",
+                admission_id,
+                new_status.value,
+                outcome["event_time_str"],
+            )
+            return True
+
+        if (
+            expected_active_event_id is not None
+            and int(current_active["id"]) != int(expected_active_event_id)
+        ):
+            raise DataConflictError(DATA_CONFLICT_MESSAGE)
+        assert_revision_matches(current_active["revision"], expected_active_revision)
+        old_status = current_active["status"]
+        if old_status == new_status.value:
+            logger.debug(
+                "[StatusDAO] Admission %s is already in final status %s",
+                admission_id,
+                old_status,
+            )
+            return False
+        if not self._align_outcome_time_with_active_status(
+            cursor,
+            admission_id,
+            current_active,
+            outcome,
+            user_id,
+        ):
+            return False
+
+        latest_activity = self.get_latest_patient_activity_datetime(admission_id, cursor=cursor)
+        if (
+            latest_activity
+            and outcome["event_dt"] < latest_activity.replace(second=0, microsecond=0)
+        ):
+            logger.warning(
+                "[StatusDAO] Outcome time %s is earlier than latest patient activity %s for admission %s",
+                outcome["event_dt"],
+                latest_activity,
+                admission_id,
+            )
+            return False
+        if self._outcome_conflicts_with_cpr(cursor, admission_id, new_status, outcome):
+            return False
+
+        cursor.execute(
+            """
+            UPDATE patient_status_events
+            SET end_time = ?,
+                updated_at = ?,
+                last_modified_by = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+            """,
+            (
+                outcome["event_time_str"],
+                outcome["now_str"],
+                user_id,
+                current_active["id"],
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise DataConflictError(DATA_CONFLICT_MESSAGE)
+        logger.info(
+            "[StatusDAO] Admission %s: status changed %s -> %s at %s by %s",
+            admission_id,
+            old_status,
+            new_status.value,
+            outcome["event_time_str"],
+            user_id,
+        )
+        return True
+
+    @staticmethod
+    def _insert_final_status_event(
+        cursor,
+        admission_id: int,
+        new_status: PatientStatus,
+        outcome: Dict[str, Any],
+        reason_type: Optional[str],
+        reason_text: Optional[str],
+        user_id: Optional[str],
+    ) -> None:
+        cursor.execute(
+            """
+            INSERT INTO patient_status_events
+            (admission_id, status, reason_type, reason_text, start_time, created_by, created_at, updated_at, last_modified_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                admission_id,
+                new_status.value,
+                reason_type,
+                reason_text,
+                outcome["event_time_str"],
+                user_id,
+                outcome["now_str"],
+                outcome["now_str"],
+                user_id,
+            ),
+        )
+
+    @staticmethod
+    def _cancel_handoff_for_final_status(
+        cursor,
+        admission_id: int,
+        user_id: Optional[str],
+    ) -> None:
+        handoff_table = cursor.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'operblock_handoffs'
+            LIMIT 1
+            """
+        ).fetchone()
+        if not handoff_table:
+            return
+        from rem_card.services.operblock_handoff_service import OperBlockHandoffService
+
+        OperBlockHandoffService.mark_cancelled_for_status_change(
+            cursor,
+            admission_id,
+            actor=user_id,
+        )
+
+    @staticmethod
+    def _update_admission_final_outcome(
+        cursor,
+        admission_id: int,
+        new_status: PatientStatus,
+        outcome: Dict[str, Any],
+        expected_admission_revision: Optional[int],
+    ) -> None:
+        if new_status == PatientStatus.TRANSFERRED:
+            cursor.execute(
+                """
+                UPDATE admissions
+                SET outcome = ?,
+                    transfer_datetime = ?,
+                    transfer_department = ?,
+                    transfer_lpu = ?,
+                    transfer_lpu_other = ?,
+                    death_datetime = NULL,
+                    clinical_death_datetime = NULL,
+                    cardiac_arrest_cause = NULL,
+                    cardiac_arrest_measures_json = NULL,
+                    updated_at = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                  AND (? IS NULL OR COALESCE(revision, 0) = ?)
+                """,
+                (
+                    "переведен",
+                    outcome["event_time_str"],
+                    outcome["transfer_department"],
+                    outcome["transfer_lpu"],
+                    outcome["transfer_lpu_other"],
+                    outcome["now_str"],
+                    admission_id,
+                    expected_admission_revision,
+                    expected_admission_revision,
+                ),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE admissions
+                SET outcome = ?,
+                    transfer_datetime = NULL,
+                    transfer_department = NULL,
+                    transfer_lpu = NULL,
+                    transfer_lpu_other = NULL,
+                    death_datetime = ?,
+                    clinical_death_datetime = ?,
+                    cardiac_arrest_cause = ?,
+                    cardiac_arrest_measures_json = ?,
+                    updated_at = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                  AND (? IS NULL OR COALESCE(revision, 0) = ?)
+                """,
+                (
+                    "умер",
+                    outcome["event_time_str"],
+                    outcome["clinical_death"],
+                    outcome["cardiac_arrest_cause"],
+                    outcome["measures_json"],
+                    outcome["now_str"],
+                    admission_id,
+                    expected_admission_revision,
+                    expected_admission_revision,
+                ),
+            )
+        if expected_admission_revision is not None and cursor.rowcount != 1:
+            raise DataConflictError(DATA_CONFLICT_MESSAGE)
+
     def change_status_with_outcome_details(
         self,
         admission_id: int,
@@ -740,246 +1077,54 @@ class PatientStatusDAO:
                 expected_active_revision=expected_active_revision,
             )
 
-        details = dict(admission_details or {})
-        event_dt = (event_time or datetime.now()).replace(second=0, microsecond=0)
-        event_time_str = event_dt.isoformat()
-        now_str = datetime.now().replace(microsecond=0).isoformat()
-
-        if new_status == PatientStatus.TRANSFERRED:
-            transfer_department = str(details.get("transfer_department") or "").strip()
-            transfer_lpu = str(details.get("transfer_lpu") or "").strip() or None
-            transfer_lpu_other = str(details.get("transfer_lpu_other") or "").strip() or None
-            if not transfer_department:
-                logger.warning("[StatusDAO] Transfer outcome rejected: no transfer_department")
-                return False
-            if transfer_department == "Другое ЛПУ" and not transfer_lpu:
-                logger.warning("[StatusDAO] Transfer outcome rejected: no transfer_lpu")
-                return False
-            if transfer_lpu == "Другое ЛПУ" and not transfer_lpu_other:
-                logger.warning("[StatusDAO] Transfer outcome rejected: no transfer_lpu_other")
-                return False
-        else:
-            transfer_department = None
-            transfer_lpu = None
-            transfer_lpu_other = None
-
-        clinical_death = details.get("clinical_death_datetime")
-        if isinstance(clinical_death, datetime):
-            clinical_death = clinical_death.replace(second=0, microsecond=0).isoformat()
-        elif clinical_death is not None:
-            clinical_death = str(clinical_death)
-        clinical_death_dt = self._parse_sqlite_dt(clinical_death) if clinical_death else None
-
-        measures_json = details.get("cardiac_arrest_measures_json")
-        cardiac_arrest_cause = details.get("cardiac_arrest_cause")
+        outcome = self._prepare_final_outcome(new_status, event_time, admission_details)
+        if outcome is None:
+            return False
 
         try:
             with self.db.remcard_transaction(source="status_outcome_details") as cursor:
-                cursor.execute(
-                    "SELECT id, status, start_time, COALESCE(revision, 0) AS revision FROM patient_status_events WHERE admission_id = ? AND end_time IS NULL",
-                    (admission_id,),
-                )
-                current_active = cursor.fetchone()
-
-                if current_active:
-                    if expected_active_event_id is not None and int(current_active["id"]) != int(expected_active_event_id):
-                        raise DataConflictError(DATA_CONFLICT_MESSAGE)
-                    assert_revision_matches(current_active["revision"], expected_active_revision)
-                    old_status = current_active["status"]
-                    if old_status == new_status.value:
-                        logger.debug(
-                            "[StatusDAO] Admission %s is already in final status %s",
-                            admission_id,
-                            old_status,
-                        )
-                        return False
-
-                    current_start = self._parse_sqlite_dt(current_active["start_time"])
-                    if current_start:
-                        current_start_exact = current_start.replace(microsecond=0)
-                        if event_dt < current_start_exact:
-                            repaired_start = self._repair_future_initial_status_before_outcome(
-                                cursor,
-                                admission_id,
-                                current_active,
-                                event_dt,
-                                user_id,
-                            )
-                            if repaired_start is not None:
-                                current_start_exact = repaired_start.replace(microsecond=0)
-                            if event_dt < current_start_exact and event_dt.replace(second=0, microsecond=0) == current_start_exact.replace(second=0, microsecond=0):
-                                event_dt = current_start_exact
-                                event_time_str = event_dt.isoformat()
-                            elif event_dt < current_start_exact:
-                                logger.warning(
-                                    "[StatusDAO] Outcome time %s is earlier than current status start %s for admission %s",
-                                    event_dt,
-                                    current_start_exact,
-                                    admission_id,
-                                )
-                                return False
-
-                    latest_activity = self.get_latest_patient_activity_datetime(admission_id, cursor=cursor)
-                    if latest_activity and event_dt < latest_activity.replace(second=0, microsecond=0):
-                        logger.warning(
-                            "[StatusDAO] Outcome time %s is earlier than latest patient activity %s for admission %s",
-                            event_dt,
-                            latest_activity,
-                            admission_id,
-                        )
-                        return False
-
-                    death_interval_start = clinical_death_dt or event_dt
-                    if new_status == PatientStatus.DEAD and self._death_conflicts_with_cpr(cursor, admission_id, death_interval_start):
-                        logger.warning(
-                            "[StatusDAO] Death outcome interval starting %s overlaps CPR event for admission %s",
-                            death_interval_start,
-                            admission_id,
-                        )
-                        return False
-
-                    cursor.execute(
-                        """
-                        UPDATE patient_status_events
-                        SET end_time = ?,
-                            updated_at = ?,
-                            last_modified_by = ?,
-                            revision = COALESCE(revision, 0) + 1
-                        WHERE id = ?
-                        """,
-                        (event_time_str, now_str, user_id, current_active["id"]),
-                    )
-                    if cursor.rowcount != 1:
-                        raise DataConflictError(DATA_CONFLICT_MESSAGE)
-                    logger.info(
-                        "[StatusDAO] Admission %s: status changed %s -> %s at %s by %s",
-                        admission_id,
-                        old_status,
-                        new_status.value,
-                        event_time_str,
-                        user_id,
-                    )
-                else:
-                    logger.warning(
-                        "[StatusDAO] Admission %s had no active status. Creating final %s at %s",
-                        admission_id,
-                        new_status.value,
-                        event_time_str,
-                    )
-
-                death_interval_start = clinical_death_dt or event_dt
-                if new_status == PatientStatus.DEAD and self._death_conflicts_with_cpr(cursor, admission_id, death_interval_start):
-                    logger.warning(
-                        "[StatusDAO] Death outcome interval starting %s overlaps CPR event for admission %s",
-                        death_interval_start,
-                        admission_id,
-                    )
+                current_active = self._fetch_active_outcome_status(cursor, admission_id)
+                if not self._close_active_status_for_outcome(
+                    cursor,
+                    admission_id,
+                    new_status,
+                    current_active,
+                    outcome,
+                    user_id,
+                    expected_active_event_id=expected_active_event_id,
+                    expected_active_revision=expected_active_revision,
+                ):
                     return False
-
-                cursor.execute(
-                    """
-                    INSERT INTO patient_status_events
-                    (admission_id, status, reason_type, reason_text, start_time, created_by, created_at, updated_at, last_modified_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        admission_id,
-                        new_status.value,
-                        reason_type,
-                        reason_text,
-                        event_time_str,
-                        user_id,
-                        now_str,
-                        now_str,
-                        user_id,
-                    ),
+                if self._outcome_conflicts_with_cpr(
+                    cursor,
+                    admission_id,
+                    new_status,
+                    outcome,
+                ):
+                    return False
+                self._insert_final_status_event(
+                    cursor,
+                    admission_id,
+                    new_status,
+                    outcome,
+                    reason_type,
+                    reason_text,
+                    user_id,
                 )
-                handoff_table = cursor.execute(
-                    """
-                    SELECT 1
-                    FROM sqlite_master
-                    WHERE type = 'table' AND name = 'operblock_handoffs'
-                    LIMIT 1
-                    """
-                ).fetchone()
-                if handoff_table:
-                    from rem_card.services.operblock_handoff_service import OperBlockHandoffService
-
-                    OperBlockHandoffService.mark_cancelled_for_status_change(
-                        cursor,
-                        admission_id,
-                        actor=user_id,
-                    )
-
-                if new_status == PatientStatus.TRANSFERRED:
-                    cursor.execute(
-                        """
-                        UPDATE admissions
-                        SET outcome = ?,
-                            transfer_datetime = ?,
-                            transfer_department = ?,
-                            transfer_lpu = ?,
-                            transfer_lpu_other = ?,
-                            death_datetime = NULL,
-                            clinical_death_datetime = NULL,
-                            cardiac_arrest_cause = NULL,
-                            cardiac_arrest_measures_json = NULL,
-                            updated_at = ?,
-                            revision = COALESCE(revision, 0) + 1
-                        WHERE id = ?
-                          AND (? IS NULL OR COALESCE(revision, 0) = ?)
-                        """,
-                        (
-                            "переведен",
-                            event_time_str,
-                            transfer_department,
-                            transfer_lpu,
-                            transfer_lpu_other,
-                            now_str,
-                            admission_id,
-                            expected_admission_revision,
-                            expected_admission_revision,
-                        ),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        UPDATE admissions
-                        SET outcome = ?,
-                            transfer_datetime = NULL,
-                            transfer_department = NULL,
-                            transfer_lpu = NULL,
-                            transfer_lpu_other = NULL,
-                            death_datetime = ?,
-                            clinical_death_datetime = ?,
-                            cardiac_arrest_cause = ?,
-                            cardiac_arrest_measures_json = ?,
-                            updated_at = ?,
-                            revision = COALESCE(revision, 0) + 1
-                        WHERE id = ?
-                          AND (? IS NULL OR COALESCE(revision, 0) = ?)
-                        """,
-                        (
-                            "умер",
-                            event_time_str,
-                            clinical_death,
-                            cardiac_arrest_cause,
-                            measures_json,
-                            now_str,
-                            admission_id,
-                            expected_admission_revision,
-                            expected_admission_revision,
-                        ),
-                    )
-                if expected_admission_revision is not None and cursor.rowcount != 1:
-                    raise DataConflictError(DATA_CONFLICT_MESSAGE)
-
+                self._cancel_handoff_for_final_status(cursor, admission_id, user_id)
+                self._update_admission_final_outcome(
+                    cursor,
+                    admission_id,
+                    new_status,
+                    outcome,
+                    expected_admission_revision,
+                )
                 self._sync_active_cvc_for_outcome(
                     cursor,
                     admission_id,
                     new_status,
-                    event_time_str,
-                    now_str,
+                    outcome["event_time_str"],
+                    outcome["now_str"],
                     user_id,
                 )
                 return True
