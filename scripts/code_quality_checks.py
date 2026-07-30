@@ -42,7 +42,6 @@ ALLOWED_F_BLOCKS = {
     ("app/main.py", "_main_impl"): 63,
     ("app/sqlite_shared.py", "SQLiteWriteController.transaction"): 59,
     ("data/dao/patient_status_dao.py", "PatientStatusDAO.change_status_with_outcome_details"): 43,
-    ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"): 46,
 }
 
 
