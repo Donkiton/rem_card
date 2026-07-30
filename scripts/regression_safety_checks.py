@@ -709,6 +709,8 @@ def _check_compiled_startup_and_exit_full_update_checks(temp_root: str) -> tuple
     }
     required = (
         "_main_impl",
+        "_prepare_startup_before_qt",
+        "_finalize_startup_application",
         "_launch_regular_startup_update_if_needed",
         "_launch_startup_update",
         "_launch_exit_update_if_needed",
@@ -718,19 +720,25 @@ def _check_compiled_startup_and_exit_full_update_checks(temp_root: str) -> tuple
         return False, f"update lifecycle helpers are missing: {missing}"
 
     main_source = _cached_source_segment(source, functions["_main_impl"]) or ""
+    startup_source = _cached_source_segment(
+        source,
+        functions["_prepare_startup_before_qt"],
+    ) or ""
     order = [
-        main_source.find("_show_update_in_progress_if_needed()"),
-        main_source.find("_launch_regular_startup_update_if_needed(args.role)"),
-        main_source.find("_sync_release_settings_if_needed()"),
+        startup_source.find("_show_update_in_progress_if_needed()"),
+        startup_source.find("_launch_regular_startup_update_if_needed(args.role)"),
+        startup_source.find("_sync_release_settings_if_needed()"),
     ]
     if any(position < 0 for position in order) or order != sorted(order):
         return False, f"compiled startup full-update check is missing or ordered after UI setup: {order}"
     if not re.search(
         r"if _launch_regular_startup_update_if_needed\(args\.role\):\s+"
         r"(?:sys\.exit\(0\)|close_startup_splash\(\)\s+return 0)",
-        main_source,
+        startup_source,
     ):
         return False, "old compiled process does not stop after launching the startup updater"
+    if "_prepare_startup_before_qt(" not in main_source:
+        return False, "main startup coordinator does not call the pre-Qt update gate"
 
     regular_source = _cached_source_segment(
         source,
@@ -760,7 +768,15 @@ def _check_compiled_startup_and_exit_full_update_checks(temp_root: str) -> tuple
     )
     if any(token not in exit_source for token in exit_tokens):
         return False, "clean-exit full-update scan/launch contract is missing"
-    if "if exit_code == 0:" not in main_source or "_launch_exit_update_if_needed()" not in main_source:
+    finalize_source = _cached_source_segment(
+        source,
+        functions["_finalize_startup_application"],
+    ) or ""
+    if (
+        "if state.exit_code == 0:" not in finalize_source
+        or "_launch_exit_update_if_needed()" not in finalize_source
+        or "_finalize_startup_application(" not in main_source
+    ):
         return False, "clean-exit full-update check is not called from application shutdown"
     return True, "ok"
 
@@ -774,16 +790,16 @@ def _check_preselected_offline_skips_updater_network_probes(temp_root: str) -> t
         for node in main_tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    main_impl = functions.get("_main_impl")
+    startup_gate = functions.get("_prepare_startup_before_qt")
     finder = functions.get("_find_startup_update_candidate")
-    if main_impl is None or finder is None:
+    if startup_gate is None or finder is None:
         return False, "startup update functions are missing"
 
     def called_name(node: ast.Call) -> str:
         return node.func.id if isinstance(node.func, ast.Name) else ""
 
     guarded_if = None
-    for node in ast.walk(main_impl):
+    for node in ast.walk(startup_gate):
         if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
             continue
         test = node.test
@@ -813,7 +829,7 @@ def _check_preselected_offline_skips_updater_network_probes(temp_root: str) -> t
     }
     if not network_probe_calls.issubset(guarded_calls):
         return False, f"offline guard misses updater calls: {sorted(network_probe_calls - guarded_calls)}"
-    for node in ast.walk(main_impl):
+    for node in ast.walk(startup_gate):
         if isinstance(node, ast.Call) and called_name(node) in network_probe_calls:
             if id(node) not in guarded_node_ids:
                 return False, f"startup updater probe remains outside offline guard: {called_name(node)}"
@@ -2880,20 +2896,35 @@ def _check_startup_metrics_are_reported(temp_root: str) -> tuple[bool, str]:
 def _check_splash_before_startup_guard(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    main_start = source.find("def _main_impl")
-    if main_start < 0:
-        return False, "app/main.py must define _main_impl"
-    body = source[main_start:]
-    create_idx = body.find("_create_startup_qt_context(args.role)")
-    guard_idx = body.find("_validate_compiled_startup_unless_runtime_preselected(")
-    if guard_idx < 0:
-        guard_idx = body.find("_validate_compiled_role_startup(")
-    if create_idx < 0 or guard_idx < 0:
+    tree = ast.parse(source)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    required = ("_main_impl", "_prepare_runtime_context_for_startup")
+    if any(name not in functions for name in required):
+        return False, "app/main.py must define the startup coordinator and guard phase"
+    main_source = _cached_source_segment(source, functions["_main_impl"]) or ""
+    guard_source = _cached_source_segment(
+        source,
+        functions["_prepare_runtime_context_for_startup"],
+    ) or ""
+    create_idx = main_source.find("_create_startup_qt_context(args.role)")
+    single_instance_idx = main_source.find("_acquire_single_instance_for_startup(")
+    guard_phase_idx = main_source.find("_prepare_runtime_context_for_startup(")
+    if min(create_idx, single_instance_idx, guard_phase_idx) < 0:
         return False, "startup must create Qt/splash context and run StartupDbGuard"
-    if create_idx > guard_idx:
-        return False, "splash must be created before StartupDbGuard"
-    guard_block = body[guard_idx:body.find("role_suffix =", guard_idx)]
-    if "before_user_message=close_startup_splash" not in guard_block and "close_startup_splash=close_startup_splash" not in guard_block:
+    if not (create_idx < single_instance_idx < guard_phase_idx):
+        return False, "splash and single-instance ownership must precede StartupDbGuard"
+    guard_idx = guard_source.find(
+        "_validate_compiled_startup_unless_runtime_preselected("
+    )
+    if guard_idx < 0:
+        guard_idx = guard_source.find("_validate_compiled_role_startup(")
+    if guard_idx < 0:
+        return False, "startup guard phase does not run StartupDbGuard"
+    if "close_startup_splash=splash_controller.close" not in guard_source:
         return False, "StartupDbGuard user messages must close splash first"
     return True, "ok"
 
@@ -2901,20 +2932,45 @@ def _check_splash_before_startup_guard(temp_root: str) -> tuple[bool, str]:
 def _check_main_ui_waits_for_startup_gate(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    main_start = source.find("def _main_impl")
-    if main_start < 0:
-        return False, "app/main.py must define _main_impl"
-    body = source[main_start:]
-    guard_idx = body.find("_validate_compiled_startup_unless_runtime_preselected(")
-    if guard_idx < 0:
-        guard_idx = body.find("_validate_compiled_role_startup(")
-    bootstrap_idx = body.find("_bootstrap_container_with_emergency_fallback(")
-    window_idx = body.find("window = MainWindow(")
-    show_idx = body.find("window.show()")
-    if min(guard_idx, bootstrap_idx, window_idx, show_idx) < 0:
+    tree = ast.parse(source)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    required = (
+        "_main_impl",
+        "_prepare_runtime_context_for_startup",
+        "_run_startup_application",
+        "_show_startup_window",
+    )
+    if any(name not in functions for name in required):
         return False, "startup sequence must include guard, bootstrap, MainWindow and show"
-    if not (guard_idx < bootstrap_idx < window_idx < show_idx):
+    main_source = _cached_source_segment(source, functions["_main_impl"]) or ""
+    guard_source = _cached_source_segment(
+        source,
+        functions["_prepare_runtime_context_for_startup"],
+    ) or ""
+    runtime_source = _cached_source_segment(
+        source,
+        functions["_run_startup_application"],
+    ) or ""
+    show_source = _cached_source_segment(
+        source,
+        functions["_show_startup_window"],
+    ) or ""
+    guard_phase_idx = main_source.find("_prepare_runtime_context_for_startup(")
+    runtime_phase_idx = main_source.find("_run_startup_application(")
+    if min(guard_phase_idx, runtime_phase_idx) < 0 or guard_phase_idx > runtime_phase_idx:
         return False, "main UI must not be constructed or shown before green startup gate"
+    guard_tokens = ("_validate_compiled_startup_unless_runtime_preselected(",)
+    runtime_tokens = ("_bootstrap_startup_container(", "MainWindow(", "_show_startup_window(")
+    if any(token not in guard_source for token in guard_tokens):
+        return False, "startup guard phase lost compiled database validation"
+    if any(token not in runtime_source for token in runtime_tokens):
+        return False, "runtime phase lost bootstrap or MainWindow construction"
+    if "window.show()" not in show_source:
+        return False, "startup window phase no longer shows MainWindow"
     return True, "ok"
 
 
@@ -22217,20 +22273,44 @@ except Exception as exc:
 def _check_compiled_offline_startup_does_not_import_file_logger_before_classification(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    main_start = main_text.find("def _main_impl(")
-    main_end = main_text.find("\ndef ", main_start + 1)
-    body = main_text[main_start: main_end if main_end > main_start else len(main_text)]
-    guard_idx = body.find("_validate_compiled_startup_unless_runtime_preselected(")
+    tree = ast.parse(main_text)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    required = (
+        "_main_impl",
+        "_prepare_runtime_context_for_startup",
+        "_run_startup_application",
+    )
+    if any(name not in functions for name in required):
+        return False, "startup coordinator phases are missing"
+    main_body = _cached_source_segment(main_text, functions["_main_impl"]) or ""
+    guard_body = _cached_source_segment(
+        main_text,
+        functions["_prepare_runtime_context_for_startup"],
+    ) or ""
+    runtime_body = _cached_source_segment(
+        main_text,
+        functions["_run_startup_application"],
+    ) or ""
+    guard_idx = guard_body.find("_validate_compiled_startup_unless_runtime_preselected(")
     if guard_idx < 0:
-        guard_idx = body.find("_validate_compiled_role_startup(")
-    pending_idx = body.find("_run_pending_emergency_merge_after_startup_guard(")
-    logger_idx = body.find("from rem_card.app.logger import")
+        guard_idx = guard_body.find("_validate_compiled_role_startup(")
+    pending_idx = guard_body.find("_run_pending_emergency_merge_after_startup_guard(")
     if guard_idx < 0 or pending_idx < 0:
         return False, "startup guard or pending merge startup check is missing"
     if pending_idx < guard_idx:
         return False, "pending merge check still runs before startup classification"
-    if logger_idx >= 0 and logger_idx < guard_idx:
+    guard_phase_idx = main_body.find("_prepare_runtime_context_for_startup(")
+    runtime_phase_idx = main_body.find("_run_startup_application(")
+    if min(guard_phase_idx, runtime_phase_idx) < 0 or guard_phase_idx > runtime_phase_idx:
+        return False, "file logger runtime phase is not ordered after startup classification"
+    if "from rem_card.app.logger import" in guard_body:
         return False, "file logger import appears before startup classification"
+    if "from rem_card.app.logger import" not in runtime_body:
+        return False, "runtime phase no longer initializes the application logger"
     for path in (
         PROJECT_ROOT / "app" / "emergency_pending_merge.py",
         PROJECT_ROOT / "app" / "emergency_restore_probe.py",
@@ -22456,13 +22536,20 @@ def _check_pending_emergency_merge_startup_gate_exists(temp_root: str) -> tuple[
     _ = temp_root
     main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
     pending_text = (PROJECT_ROOT / "app" / "emergency_pending_merge.py").read_text(encoding="utf-8")
-    main_start = main_text.find("def _main_impl(")
-    main_end = main_text.find("\ndef ", main_start + 1)
-    main_body = main_text[main_start: main_end if main_end > main_start else len(main_text)]
-    guard_idx = main_body.find("_validate_compiled_startup_unless_runtime_preselected(")
+    tree = ast.parse(main_text)
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    guard_phase = functions.get("_prepare_runtime_context_for_startup")
+    if guard_phase is None:
+        return False, "startup runtime classification phase is missing"
+    guard_body = _cached_source_segment(main_text, guard_phase) or ""
+    guard_idx = guard_body.find("_validate_compiled_startup_unless_runtime_preselected(")
     if guard_idx < 0:
-        guard_idx = main_body.find("_validate_compiled_role_startup(")
-    pending_idx = main_body.find("_run_pending_emergency_merge_after_startup_guard(")
+        guard_idx = guard_body.find("_validate_compiled_role_startup(")
+    pending_idx = guard_body.find("_run_pending_emergency_merge_after_startup_guard(")
     main_required = (
         "_run_pending_emergency_merge_before_startup",
         "_run_pending_emergency_merge_after_startup_guard",

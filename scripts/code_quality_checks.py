@@ -38,9 +38,7 @@ SKIP_DIR_NAMES = {
 
 # Existing F-ranked blocks and their maximum accepted complexity. This allows
 # gradual cleanup while blocking both new F-ranked blocks and baseline growth.
-ALLOWED_F_BLOCKS = {
-    ("app/main.py", "_main_impl"): 63,
-}
+ALLOWED_F_BLOCKS = {}
 
 
 def _rel(path: Path) -> str:
