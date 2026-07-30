@@ -32,6 +32,7 @@ class HybridShiftTimePicker(QWidget):
         self._shift_date = shift_date
         self._time = "08:00"
         self._last_valid_time = "08:00"
+        self._offset_handler = None
         self._quick_actions = list(quick_actions or [
             ("Сейчас", None),
             ("-5 мин", -5),
@@ -190,6 +191,9 @@ class HybridShiftTimePicker(QWidget):
     def set_display_hint(self, hint: dict):
         self._display_hint = dict(hint or {})
 
+    def set_offset_handler(self, handler):
+        self._offset_handler = handler
+
     def setReadOnly(self, read_only: bool):
         self.input.setReadOnly(bool(read_only))
         for btn in self.findChildren(QPushButton):
@@ -240,7 +244,12 @@ class HybridShiftTimePicker(QWidget):
         self._focus_input()
 
     def _apply_offset(self, delta_minutes: int):
-        if self._time_service and self._shift_date and hasattr(self._time_service, "apply_offset"):
+        if self._offset_handler is not None:
+            target_time = self._offset_handler(self._time, int(delta_minutes))
+            if target_time is not None:
+                normalized = self._normalize(target_time, self._time)
+                self._set_time(normalized, emit_change=True)
+        elif self._time_service and self._shift_date and hasattr(self._time_service, "apply_offset"):
             self._set_time(self._time_service.apply_offset(self._time, self._shift_date, delta_minutes), emit_change=True)
         self._focus_input()
 

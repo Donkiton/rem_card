@@ -149,6 +149,11 @@ class ShiftService:
         return target_dt.strftime("%H:%M")
 
     @staticmethod
+    def current_shift_time(shift_date: datetime) -> str:
+        """Возвращает текущее время, ограниченное выбранной сменой."""
+        return ShiftService.now_time(datetime.now(), shift_date)
+
+    @staticmethod
     def next_full_hour(time: str, shift_date: datetime) -> str:
         """Округляет время вверх до следующего полного часа внутри смены."""
         normalized = ShiftService.normalize_time(time)
