@@ -993,12 +993,7 @@ class SettingsService:
         logger.info("Settings release snapshot result: %s", report)
         return report
 
-    def _repair_background_settings_from_rows(self) -> dict[str, Any] | None:
-        try:
-            from rem_card.ui.shared.background_settings import normalize_background_settings_payload
-        except Exception:
-            return None
-
+    def _read_background_repair_rows(self) -> tuple[Any, list[Any]]:
         with self.db.read_connection() as conn:
             app_row = conn.execute(
                 "SELECT * FROM app_settings WHERE scope = 'shared' AND key = 'background_settings'"
@@ -1011,20 +1006,28 @@ class SettingsService:
                 ORDER BY active DESC, background_key ASC
                 """
             ).fetchall()
+        return app_row, list(background_rows)
 
-        current_payload: dict[str, Any] = {}
+    @staticmethod
+    def _background_payload_from_row(app_row: Any) -> dict[str, Any]:
         if app_row and app_row["value_json"]:
             try:
                 raw_payload = json.loads(app_row["value_json"])
-                current_payload = raw_payload if isinstance(raw_payload, dict) else {}
+                return raw_payload if isinstance(raw_payload, dict) else {}
             except Exception:
-                current_payload = {}
-        current_normalized = normalize_background_settings_payload(current_payload)
+                pass
+        return {}
+
+    def _available_background_entries(
+        self,
+        current_normalized: dict[str, Any],
+        background_blob_by_key: dict[str, bool],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         background_blob_by_key = {
-            str(row["background_key"] or ""): bool(row["has_image_blob"])
-            for row in background_rows
+            str(key or ""): bool(value)
+            for key, value in background_blob_by_key.items()
         }
-        current_backgrounds = []
+        current_backgrounds: list[dict[str, Any]] = []
         pruned_entries: list[dict[str, Any]] = []
         for entry in list(current_normalized.get("backgrounds") or []):
             if not isinstance(entry, dict):
@@ -1037,8 +1040,13 @@ class SettingsService:
                 current_backgrounds.append(entry)
             else:
                 pruned_entries.append(entry)
-        current_ids = {str(item.get("id") or "") for item in current_backgrounds if isinstance(item, dict)}
+        return current_backgrounds, pruned_entries
 
+    def _restored_background_entries(
+        self,
+        background_rows: list[Any],
+        current_ids: set[str],
+    ) -> list[dict[str, Any]]:
         restored_entries: list[dict[str, Any]] = []
         for row in background_rows:
             background_key = str(row["background_key"] or "").strip()
@@ -1058,46 +1066,79 @@ class SettingsService:
                 continue
             restored_entries.append(entry)
             current_ids.add(entry["id"])
+        return restored_entries
 
+    @staticmethod
+    def _background_repair_pending_fields(
+        restored_entries: list[dict[str, Any]],
+        pruned_entries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
+            "restored_rows_pending": len(restored_entries),
+            "restored_ids": [str(item.get("id") or "") for item in restored_entries],
+            "pruned_rows_pending": len(pruned_entries),
+            "pruned_ids": [str(item.get("id") or "") for item in pruned_entries],
+        }
+
+    def _write_repaired_background_payload(self, repaired_payload: dict[str, Any]) -> None:
+        with self.db.transaction("settings_background_settings_repair") as cursor:
+            before = self._select_app_setting(cursor, "shared", "background_settings")
+            self._write_app_setting_in_tx(
+                cursor,
+                "shared",
+                "background_settings",
+                repaired_payload,
+                changed_by_role="repair",
+                catalog_key=BACKGROUND_SETTINGS_KEY,
+                log_change=False,
+            )
+            # ui_backgrounds already is the repair source here; syncing it back would
+            # re-read and rewrite background image blobs during startup.
+            self._bump_catalog_version(
+                cursor,
+                BACKGROUND_SETTINGS_KEY,
+                "background_settings",
+                "shared:background_settings",
+                "repair_missing_rows",
+                changed_by_role="repair",
+                before=before,
+                after=repaired_payload,
+            )
+
+    def _repair_background_settings_from_rows(self) -> dict[str, Any] | None:
+        try:
+            from rem_card.ui.shared.background_settings import normalize_background_settings_payload
+        except Exception:
+            return None
+
+        app_row, background_rows = self._read_background_repair_rows()
+        current_payload = self._background_payload_from_row(app_row)
+        current_normalized = normalize_background_settings_payload(current_payload)
+        background_blob_by_key = {
+            str(row["background_key"] or ""): bool(row["has_image_blob"])
+            for row in background_rows
+        }
+        current_backgrounds, pruned_entries = self._available_background_entries(
+            current_normalized,
+            background_blob_by_key,
+        )
+        current_ids = {str(item.get("id") or "") for item in current_backgrounds}
+        restored_entries = self._restored_background_entries(background_rows, current_ids)
         if not restored_entries and not pruned_entries:
             return None
 
         repaired_payload = normalize_background_settings_payload({"backgrounds": [*current_backgrounds, *restored_entries]})
+        pending_fields = self._background_repair_pending_fields(restored_entries, pruned_entries)
         lock_report = self._settings_startup_write_precheck_report(
             source="settings_background_settings_repair",
             operation_label="восстановление списка фоновых картинок",
             repaired=False,
-            restored_rows_pending=len(restored_entries),
-            restored_ids=[str(item.get("id") or "") for item in restored_entries],
-            pruned_rows_pending=len(pruned_entries),
-            pruned_ids=[str(item.get("id") or "") for item in pruned_entries],
+            **pending_fields,
         )
         if lock_report:
             return lock_report
         try:
-            with self.db.transaction("settings_background_settings_repair") as cursor:
-                before = self._select_app_setting(cursor, "shared", "background_settings")
-                self._write_app_setting_in_tx(
-                    cursor,
-                    "shared",
-                    "background_settings",
-                    repaired_payload,
-                    changed_by_role="repair",
-                    catalog_key=BACKGROUND_SETTINGS_KEY,
-                    log_change=False,
-                )
-                # ui_backgrounds already is the repair source here; syncing it back would
-                # re-read and rewrite background image blobs during startup.
-                self._bump_catalog_version(
-                    cursor,
-                    BACKGROUND_SETTINGS_KEY,
-                    "background_settings",
-                    "shared:background_settings",
-                    "repair_missing_rows",
-                    changed_by_role="repair",
-                    before=before,
-                    after=repaired_payload,
-                )
+            self._write_repaired_background_payload(repaired_payload)
         except Exception as exc:
             if self._is_settings_startup_write_busy(exc):
                 return self._settings_startup_write_skipped_report(
@@ -1105,18 +1146,15 @@ class SettingsService:
                     operation_label="восстановление списка фоновых картинок",
                     exc=exc,
                     repaired=False,
-                    restored_rows_pending=len(restored_entries),
-                    restored_ids=[str(item.get("id") or "") for item in restored_entries],
-                    pruned_rows_pending=len(pruned_entries),
-                    pruned_ids=[str(item.get("id") or "") for item in pruned_entries],
+                    **pending_fields,
                 )
             raise
         return {
             "repaired": True,
             "restored_rows": len(restored_entries),
-            "restored_ids": [str(item.get("id") or "") for item in restored_entries],
+            "restored_ids": pending_fields["restored_ids"],
             "pruned_rows": len(pruned_entries),
-            "pruned_ids": [str(item.get("id") or "") for item in pruned_entries],
+            "pruned_ids": pending_fields["pruned_ids"],
         }
 
     def _background_entry_has_available_image(self, entry: dict[str, Any], has_image_blob: bool) -> bool:

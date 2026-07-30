@@ -15472,7 +15472,7 @@ class OperBlockMainWidget(QWidget):
         match = re.search(r"(\d+)$", str(value or ""))
         return int(match.group(1)) if match else 0
 
-    def _build_timeline_events(self, rows) -> list[dict]:
+    def _timeline_order_events(self, rows) -> list[dict]:
         events: list[dict] = []
         for raw_row in rows or []:
             row = dict(raw_row or {})
@@ -15500,112 +15500,136 @@ class OperBlockMainWidget(QWidget):
                     "sort_id": _safe_int(row.get("id")) or 0,
                 }
             )
+        return events
 
-        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
-        for raw_interval in snapshot.get("infusion_intervals") or []:
-            interval = dict(raw_interval or {})
-            status = str(interval.get("status") or "")
-            if status not in {"active", "stopped"}:
+    def _timeline_infusion_change_events(
+        self,
+        interval: dict,
+        *,
+        start_dt: datetime,
+        drug_name: str,
+        is_oxygen: bool,
+    ) -> list[dict]:
+        events: list[dict] = []
+        if _is_gas_infusion(interval):
+            for index, change in enumerate(_gas_dose_events(interval)):
+                change_dt = _minute_floor_dt(_parse_datetime_value((change or {}).get("event_time")))
+                if change_dt is None or (index == 0 and change_dt == start_dt):
+                    continue
+                change_dose = str((change or {}).get("dose_text") or "").strip()
+                events.append(
+                    {
+                        "kind": "infusion",
+                        "role": "change",
+                        "time": change_dt,
+                        "drug": drug_name,
+                        "detail": (
+                            f"поток {change_dose}"
+                            if is_oxygen and change_dose
+                            else f"доза {change_dose}"
+                            if change_dose
+                            else "изменение потока"
+                            if is_oxygen
+                            else "изменение дозы"
+                        ),
+                        "badge": "Изм. поток" if is_oxygen else "Изм. доза",
+                        "interval": interval,
+                        "sort_id": self._timeline_event_numeric_id((change or {}).get("event_id")),
+                    }
+                )
+            return events
+
+        for index, change in enumerate(list(interval.get("rate_history") or [])):
+            change_dt = _minute_floor_dt(_parse_datetime_value((change or {}).get("event_time")))
+            if change_dt is None or (index == 0 and change_dt == start_dt):
                 continue
-            start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
-            if start_dt is None:
-                continue
-            drug_name = _infusion_display_drug_name(interval, "Дозатор")
-            rate = "" if _is_gas_infusion(interval) else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
-            declared_volume = _format_infusion_declared_volume(interval)
-            gas_dose = _gas_dose_text(interval) if _is_gas_infusion(interval) else ""
-            is_oxygen = _is_oxygen_infusion(interval)
-            is_rate_infusion = _infusion_has_rate(interval)
-            badge = "Кислород" if is_oxygen else "Газ" if gas_dose else "Дозатор" if is_rate_infusion else "Капельница"
-            detail = (
-                f"старт {rate}"
-                if rate
-                else f"старт поток {gas_dose}"
-                if is_oxygen and gas_dose
-                else f"старт {gas_dose}"
-                if gas_dose
-                else declared_volume or "старт"
-            )
-            start_event_id, _revision = self._infusion_identity(interval)
+            change_rate = _format_infusion_rate((change or {}).get("rate_value"), (change or {}).get("rate_unit"))
             events.append(
                 {
                     "kind": "infusion",
-                    "role": "start",
-                    "time": start_dt,
+                    "role": "change",
+                    "time": change_dt,
                     "drug": drug_name,
-                    "detail": detail,
-                    "badge": badge,
+                    "detail": f"скорость {change_rate}" if change_rate else "изменение скорости",
+                    "badge": "Изм. скорость",
+                    "interval": interval,
+                    "sort_id": self._timeline_event_numeric_id((change or {}).get("event_id")),
+                }
+            )
+        return events
+
+    def _timeline_events_for_infusion(self, raw_interval) -> list[dict]:
+        interval = dict(raw_interval or {})
+        status = str(interval.get("status") or "")
+        if status not in {"active", "stopped"}:
+            return []
+        start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+        if start_dt is None:
+            return []
+
+        is_gas = _is_gas_infusion(interval)
+        drug_name = _infusion_display_drug_name(interval, "Дозатор")
+        rate = (
+            ""
+            if is_gas
+            else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
+        )
+        declared_volume = _format_infusion_declared_volume(interval)
+        gas_dose = _gas_dose_text(interval) if is_gas else ""
+        is_oxygen = _is_oxygen_infusion(interval)
+        is_rate_infusion = _infusion_has_rate(interval)
+        badge = "Кислород" if is_oxygen else "Газ" if gas_dose else "Дозатор" if is_rate_infusion else "Капельница"
+        detail = (
+            f"старт {rate}"
+            if rate
+            else f"старт поток {gas_dose}"
+            if is_oxygen and gas_dose
+            else f"старт {gas_dose}"
+            if gas_dose
+            else declared_volume or "старт"
+        )
+        start_event_id, _revision = self._infusion_identity(interval)
+        events = [
+            {
+                "kind": "infusion",
+                "role": "start",
+                "time": start_dt,
+                "drug": drug_name,
+                "detail": detail,
+                "badge": badge,
+                "interval": interval,
+                "sort_id": start_event_id or 0,
+            }
+        ]
+        events.extend(
+            self._timeline_infusion_change_events(
+                interval,
+                start_dt=start_dt,
+                drug_name=drug_name,
+                is_oxygen=is_oxygen,
+            )
+        )
+        end_dt = _minute_floor_dt(_parse_datetime_value(interval.get("end_time")))
+        if end_dt is not None and status == "stopped":
+            events.append(
+                {
+                    "kind": "infusion",
+                    "role": "stop",
+                    "time": end_dt,
+                    "drug": drug_name,
+                    "detail": "стоп",
+                    "badge": "Стоп",
                     "interval": interval,
                     "sort_id": start_event_id or 0,
                 }
             )
+        return events
 
-            if _is_gas_infusion(interval):
-                dose_history = _gas_dose_events(interval)
-                for index, change in enumerate(dose_history):
-                    change_dt = _minute_floor_dt(_parse_datetime_value((change or {}).get("event_time")))
-                    if change_dt is None:
-                        continue
-                    if index == 0 and change_dt == start_dt:
-                        continue
-                    change_dose = str((change or {}).get("dose_text") or "").strip()
-                    events.append(
-                        {
-                            "kind": "infusion",
-                            "role": "change",
-                            "time": change_dt,
-                            "drug": drug_name,
-                            "detail": (
-                                f"поток {change_dose}"
-                                if is_oxygen and change_dose
-                                else f"доза {change_dose}"
-                                if change_dose
-                                else "изменение потока"
-                                if is_oxygen
-                                else "изменение дозы"
-                            ),
-                            "badge": "Изм. поток" if is_oxygen else "Изм. доза",
-                            "interval": interval,
-                            "sort_id": self._timeline_event_numeric_id((change or {}).get("event_id")),
-                        }
-                    )
-            else:
-                rate_history = list(interval.get("rate_history") or [])
-                for index, change in enumerate(rate_history):
-                    change_dt = _minute_floor_dt(_parse_datetime_value((change or {}).get("event_time")))
-                    if change_dt is None:
-                        continue
-                    if index == 0 and change_dt == start_dt:
-                        continue
-                    change_rate = _format_infusion_rate((change or {}).get("rate_value"), (change or {}).get("rate_unit"))
-                    events.append(
-                        {
-                            "kind": "infusion",
-                            "role": "change",
-                            "time": change_dt,
-                            "drug": drug_name,
-                            "detail": f"скорость {change_rate}" if change_rate else "изменение скорости",
-                            "badge": "Изм. скорость",
-                            "interval": interval,
-                            "sort_id": self._timeline_event_numeric_id((change or {}).get("event_id")),
-                        }
-                    )
-
-            end_dt = _minute_floor_dt(_parse_datetime_value(interval.get("end_time")))
-            if end_dt is not None and status == "stopped":
-                events.append(
-                    {
-                        "kind": "infusion",
-                        "role": "stop",
-                        "time": end_dt,
-                        "drug": drug_name,
-                        "detail": "стоп",
-                        "badge": "Стоп",
-                        "interval": interval,
-                        "sort_id": start_event_id or 0,
-                    }
-                )
-
+    def _build_timeline_events(self, rows) -> list[dict]:
+        events = self._timeline_order_events(rows)
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        for interval in snapshot.get("infusion_intervals") or []:
+            events.extend(self._timeline_events_for_infusion(interval))
         events.sort(
             key=lambda item: (
                 _minute_floor_dt(_parse_datetime_value(item.get("time"))) or datetime.min,

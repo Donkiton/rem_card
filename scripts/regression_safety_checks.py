@@ -6318,6 +6318,124 @@ def _assert_orders_same_cell_fast_click_guard(
     return True, "ok"
 
 
+def _check_doctor_order_mark_cycle(
+    doctor_widget,
+    doctor_model,
+    index,
+    committed_admin,
+    service,
+    *,
+    qt,
+    executed_mark: str,
+    not_executed_mark: str,
+) -> tuple[bool, str]:
+    committed_admin.comment = ""
+    doctor_model.admin_map[(1, doctor_model.time_slots[0].isoformat())] = committed_admin
+    doctor_widget._cached_has_drafts = False
+    doctor_model.has_any_draft = False
+    service.mark_calls.clear()
+    doctor_widget._handle_doctor_order_mark(index)
+    marked_admin = doctor_model.data(index, qt.UserRole)
+    if getattr(marked_admin, "comment", "") != executed_mark:
+        return False, "doctor right click did not mark cell as executed"
+    doctor_widget._handle_doctor_order_mark(index)
+    marked_admin = doctor_model.data(index, qt.UserRole)
+    if getattr(marked_admin, "comment", "") != not_executed_mark:
+        return False, "doctor right click did not switch executed mark to not executed"
+    doctor_widget._handle_doctor_order_mark(index)
+    marked_admin = doctor_model.data(index, qt.UserRole)
+    if getattr(marked_admin, "comment", ""):
+        return False, "doctor right click did not clear not executed mark"
+    expected_calls = [
+        ("set", 10, executed_mark),
+        ("set", 10, not_executed_mark),
+        ("cancel", 10, ""),
+    ]
+    if service.mark_calls != expected_calls:
+        return False, f"doctor right click service calls mismatch: {service.mark_calls}"
+    if doctor_widget.has_drafts():
+        return False, "doctor order mark must not create a prescription draft"
+    return True, "ok"
+
+
+def _check_doctor_long_infusion_pending(doctor_widget, doctor_model, order_dto_cls) -> tuple[bool, str]:
+    long_order = order_dto_cls(id=3, admission_id=1, latin="Long", is_committed=1, duration_min=180)
+    doctor_model.orders.append(long_order)
+    long_index = doctor_model.index(1, 1)
+    long_previous = doctor_widget._apply_optimistic_cell(
+        long_index,
+        long_order,
+        None,
+        doctor_model.time_slots[0],
+        "orders_left_click",
+    )
+    actual_roles = [
+        getattr(doctor_model.admin_map.get((3, doctor_model.time_slots[offset].isoformat())), "cell_role", None)
+        for offset in range(3)
+    ]
+    if actual_roles != ["start", "body", "end"]:
+        return False, f"long infusion optimistic roles mismatch: {actual_roles}"
+    if not all(
+        getattr(doctor_model.admin_map[(3, doctor_model.time_slots[offset].isoformat())], "_pending_cell_action", None)
+        for offset in range(3)
+    ):
+        return False, "long infusion optimistic cells did not keep pending markers"
+    doctor_widget._restore_admin_cells(long_previous)
+    if any(key[0] == 3 for key in doctor_model.admin_map):
+        return False, "long infusion optimistic state was not restored on error"
+    ok, details = _assert_committed_long_infusion_delete_marks_draft(
+        doctor_widget,
+        doctor_model,
+        long_index,
+        long_order,
+    )
+    doctor_model.orders.pop()
+    return (ok, details) if not ok else (True, "ok")
+
+
+def _check_nurse_pending_mark_cycle(
+    nurse_widget,
+    service,
+    *,
+    orders_model_cls,
+    order_dto_cls,
+    administration_dto_cls,
+    shift,
+    qt,
+    executed_mark: str,
+) -> tuple[bool, str]:
+    nurse_model = orders_model_cls(service, admission_id=1, shift_date=shift)
+    nurse_order = order_dto_cls(id=2, admission_id=1, latin="Nurse")
+    nurse_model.orders = [nurse_order]
+    nurse_slot = nurse_model.time_slots[0]
+    nurse_admin = administration_dto_cls(
+        id=20,
+        order_id=2,
+        planned_time=nurse_slot,
+        status="planned",
+        cell_role="single",
+        comment="",
+    )
+    nurse_model.admin_map[(2, nurse_slot.isoformat())] = nurse_admin
+    nurse_widget.model = nurse_model
+    nurse_index = nurse_model.index(0, 1)
+
+    nurse_widget._apply_pending_nurse_mark(nurse_index, nurse_admin, executed_mark)
+    pending_admin = nurse_model.data(nurse_index, qt.UserRole)
+    if getattr(pending_admin, "comment", ""):
+        return False, "nurse mark became final before commit"
+    if not hasattr(pending_admin, "_pending_mark"):
+        return False, "nurse mark did not enter pending state"
+
+    nurse_widget._apply_committed_nurse_mark(nurse_index, nurse_admin, executed_mark)
+    committed_admin = nurse_model.data(nurse_index, qt.UserRole)
+    if getattr(committed_admin, "comment", "") != executed_mark:
+        return False, "nurse mark did not become final after success"
+    if hasattr(committed_admin, "_pending_mark"):
+        return False, "nurse pending marker remained after success"
+    return True, "ok"
+
+
 def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
@@ -6504,97 +6622,35 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         if not any(left_col <= 0 <= right_col for _top, left_col, _bottom, right_col in snapshot_events):
             return False, f"admin-only draft-state change did not repaint order column: {snapshot_events}"
 
-        committed_admin.comment = ""
-        doctor_model.admin_map[(1, doctor_model.time_slots[0].isoformat())] = committed_admin
-        doctor_widget._cached_has_drafts = False
-        doctor_model.has_any_draft = False
-        service.mark_calls.clear()
-        doctor_widget._handle_doctor_order_mark(index)
-        marked_admin = doctor_model.data(index, Qt.UserRole)
-        if getattr(marked_admin, "comment", "") != NURSE_MARK_EXECUTED:
-            return False, "doctor right click did not mark cell as executed"
-        doctor_widget._handle_doctor_order_mark(index)
-        marked_admin = doctor_model.data(index, Qt.UserRole)
-        if getattr(marked_admin, "comment", "") != NURSE_MARK_NOT_EXECUTED:
-            return False, "doctor right click did not switch executed mark to not executed"
-        doctor_widget._handle_doctor_order_mark(index)
-        marked_admin = doctor_model.data(index, Qt.UserRole)
-        if getattr(marked_admin, "comment", ""):
-            return False, "doctor right click did not clear not executed mark"
-        if service.mark_calls != [
-            ("set", 10, NURSE_MARK_EXECUTED),
-            ("set", 10, NURSE_MARK_NOT_EXECUTED),
-            ("cancel", 10, ""),
-        ]:
-            return False, f"doctor right click service calls mismatch: {service.mark_calls}"
-        if doctor_widget.has_drafts():
-            return False, "doctor order mark must not create a prescription draft"
-
-        long_order = OrderDTO(id=3, admission_id=1, latin="Long", is_committed=1, duration_min=180)
-        doctor_model.orders.append(long_order)
-        long_index = doctor_model.index(1, 1)
-        long_previous = doctor_widget._apply_optimistic_cell(
-            long_index,
-            long_order,
-            None,
-            doctor_model.time_slots[0],
-            "orders_left_click",
-        )
-        expected_roles = ["start", "body", "end"]
-        actual_roles = [
-            getattr(doctor_model.admin_map.get((3, doctor_model.time_slots[offset].isoformat())), "cell_role", None)
-            for offset in range(3)
-        ]
-        if actual_roles != expected_roles:
-            return False, f"long infusion optimistic roles mismatch: {actual_roles}"
-        if not all(
-            getattr(doctor_model.admin_map[(3, doctor_model.time_slots[offset].isoformat())], "_pending_cell_action", None)
-            for offset in range(3)
-        ):
-            return False, "long infusion optimistic cells did not keep pending markers"
-        doctor_widget._restore_admin_cells(long_previous)
-        if any(key[0] == 3 for key in doctor_model.admin_map):
-            return False, "long infusion optimistic state was not restored on error"
-        ok, details = _assert_committed_long_infusion_delete_marks_draft(
+        ok, details = _check_doctor_order_mark_cycle(
             doctor_widget,
             doctor_model,
-            long_index,
-            long_order,
+            index,
+            committed_admin,
+            service,
+            qt=Qt,
+            executed_mark=NURSE_MARK_EXECUTED,
+            not_executed_mark=NURSE_MARK_NOT_EXECUTED,
         )
         if not ok:
             return False, details
-        doctor_model.orders.pop()
-
-        nurse_model = OrdersModel(service, admission_id=1, shift_date=shift)
-        nurse_order = OrderDTO(id=2, admission_id=1, latin="Nurse")
-        nurse_model.orders = [nurse_order]
-        nurse_slot = nurse_model.time_slots[0]
-        nurse_admin = AdministrationDTO(
-            id=20,
-            order_id=2,
-            planned_time=nurse_slot,
-            status="planned",
-            cell_role="single",
-            comment="",
+        ok, details = _check_doctor_long_infusion_pending(
+            doctor_widget,
+            doctor_model,
+            OrderDTO,
         )
-        nurse_model.admin_map[(2, nurse_slot.isoformat())] = nurse_admin
-        nurse_widget.model = nurse_model
-        nurse_index = nurse_model.index(0, 1)
-
-        nurse_widget._apply_pending_nurse_mark(nurse_index, nurse_admin, NURSE_MARK_EXECUTED)
-        pending_admin = nurse_model.data(nurse_index, Qt.UserRole)
-        if getattr(pending_admin, "comment", ""):
-            return False, "nurse mark became final before commit"
-        if not hasattr(pending_admin, "_pending_mark"):
-            return False, "nurse mark did not enter pending state"
-
-        nurse_widget._apply_committed_nurse_mark(nurse_index, nurse_admin, NURSE_MARK_EXECUTED)
-        committed_admin = nurse_model.data(nurse_index, Qt.UserRole)
-        if getattr(committed_admin, "comment", "") != NURSE_MARK_EXECUTED:
-            return False, "nurse mark did not become final after success"
-        if hasattr(committed_admin, "_pending_mark"):
-            return False, "nurse pending marker remained after success"
-        return True, "ok"
+        if not ok:
+            return False, details
+        return _check_nurse_pending_mark_cycle(
+            nurse_widget,
+            service,
+            orders_model_cls=OrdersModel,
+            order_dto_cls=OrderDTO,
+            administration_dto_cls=AdministrationDTO,
+            shift=shift,
+            qt=Qt,
+            executed_mark=NURSE_MARK_EXECUTED,
+        )
     finally:
         doctor_widget.close()
         nurse_widget.close()
@@ -12513,17 +12569,44 @@ def _check_shutdown_queue_db_ordering_guards(temp_root: str) -> tuple[bool, str]
     return True, "ok"
 
 
-def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str]:
-    _ = temp_root
-    root = Path(__file__).resolve().parents[1]
-    source_path = root / "ui/doctor_view/orders_widget.py"
+def _regression_class_methods(
+    root: Path,
+    relative_path: str,
+    class_name: str,
+) -> tuple[str, dict[str, ast.FunctionDef]]:
+    source_path = root / relative_path
     source_text = source_path.read_text(encoding="utf-8")
     tree = ast.parse(source_text)
-    class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "OrdersWidget"]
+    class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
     if not class_defs:
-        return False, "doctor: OrdersWidget class not found"
-
+        return source_text, {}
     methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+    return source_text, methods
+
+
+def _assert_no_viewport_update(
+    methods: dict[str, ast.FunctionDef],
+    source_text: str,
+    method_name: str,
+    label: str,
+) -> tuple[bool, str]:
+    method = methods.get(method_name)
+    if method is None:
+        return False, f"{label}: {method_name} not found"
+    method_source = _cached_source_segment(source_text, method) or ""
+    if ".viewport().update(" in method_source or "viewport().update()" in method_source:
+        return False, f"{label}: {method_name} must use targeted dataChanged, not full viewport repaint"
+    return True, "ok"
+
+
+def _check_doctor_fast_click_source(root: Path) -> tuple[bool, str]:
+    source_text, methods = _regression_class_methods(
+        root,
+        "ui/doctor_view/orders_widget.py",
+        "OrdersWidget",
+    )
+    if not methods:
+        return False, "doctor: OrdersWidget class not found"
     for method_name in ("_handle_cell_action", "_emit_admin_cell_changes"):
         if method_name not in methods:
             return False, f"doctor: {method_name} not found"
@@ -12542,36 +12625,26 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
     if ".viewport().update(" in emit_source or "viewport().update()" in emit_source:
         return False, "doctor: local cell changes must not repaint the whole orders viewport"
 
-    def assert_no_viewport_update(methods_map, text, method_name: str, label: str):
-        method = methods_map.get(method_name)
-        if method is None:
-            return False, f"{label}: {method_name} not found"
-        method_source = _cached_source_segment(text, method) or ""
-        if ".viewport().update(" in method_source or "viewport().update()" in method_source:
-            return False, f"{label}: {method_name} must use targeted dataChanged, not full viewport repaint"
-        return True, "ok"
-
     for guarded_method in (
         "_try_apply_admin_only_snapshot",
         "_mark_local_order_row_deleted",
         "_clear_local_order_row_pending_delete",
         "_replace_local_order_after_edit",
     ):
-        ok, details = assert_no_viewport_update(methods, source_text, guarded_method, "doctor")
+        ok, details = _assert_no_viewport_update(methods, source_text, guarded_method, "doctor")
         if not ok:
             return False, details
+    return True, "ok"
 
-    nurse_path = root / "ui/nurse_view/components/nurse_orders_widget.py"
-    nurse_text = nurse_path.read_text(encoding="utf-8")
-    nurse_tree = ast.parse(nurse_text)
-    nurse_classes = [
-        node
-        for node in nurse_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "NurseOrdersWidget"
-    ]
-    if not nurse_classes:
+
+def _check_nurse_fast_click_source(root: Path) -> tuple[bool, str]:
+    nurse_text, nurse_methods = _regression_class_methods(
+        root,
+        "ui/nurse_view/components/nurse_orders_widget.py",
+        "NurseOrdersWidget",
+    )
+    if not nurse_methods:
         return False, "nurse: NurseOrdersWidget class not found"
-    nurse_methods = {node.name: node for node in nurse_classes[0].body if isinstance(node, ast.FunctionDef)}
     for guarded_method in (
         "_try_apply_admin_only_snapshot",
         "_restore_admin_cell",
@@ -12580,63 +12653,68 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
         "_on_table_clicked",
         "_on_mark_updated",
     ):
-        ok, details = assert_no_viewport_update(nurse_methods, nurse_text, guarded_method, "nurse")
+        ok, details = _assert_no_viewport_update(nurse_methods, nurse_text, guarded_method, "nurse")
         if not ok:
             return False, details
+    return True, "ok"
 
-    model_path = root / "ui/shared/orders_model.py"
-    model_text = model_path.read_text(encoding="utf-8")
-    model_tree = ast.parse(model_text)
-    model_classes = [
-        node
-        for node in model_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "OrdersModel"
-    ]
-    if not model_classes:
+
+def _check_orders_model_fast_click_source(root: Path) -> tuple[bool, str]:
+    model_text, model_methods = _regression_class_methods(
+        root,
+        "ui/shared/orders_model.py",
+        "OrdersModel",
+    )
+    if not model_methods:
         return False, "shared: OrdersModel class not found"
-    model_methods = {node.name: node for node in model_classes[0].body if isinstance(node, ast.FunctionDef)}
     apply_admin_method = model_methods.get("apply_admin_rows_snapshot")
     if apply_admin_method is None:
         return False, "shared: OrdersModel.apply_admin_rows_snapshot not found"
     apply_admin_source = _cached_source_segment(model_text, apply_admin_method) or ""
     if "_set_has_any_draft(" not in apply_admin_source or "emit_order_column=True" not in apply_admin_source:
         return False, "shared: admin-only snapshot must repaint order column when draft state changes"
+    return True, "ok"
 
-    delegate_path = root / "ui/shared/orders_delegate.py"
-    delegate_text = delegate_path.read_text(encoding="utf-8")
-    delegate_tree = ast.parse(delegate_text)
-    delegate_classes = [
-        node
-        for node in delegate_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "OrdersDelegate"
-    ]
-    if not delegate_classes:
+
+def _check_orders_delegate_fast_click_source(root: Path) -> tuple[bool, str]:
+    delegate_text, delegate_methods = _regression_class_methods(
+        root,
+        "ui/shared/orders_delegate.py",
+        "OrdersDelegate",
+    )
+    if not delegate_methods:
         return False, "shared: OrdersDelegate class not found"
-    delegate_methods = {node.name: node for node in delegate_classes[0].body if isinstance(node, ast.FunctionDef)}
     if "_is_admin_pending" not in delegate_methods:
         return False, "shared: OrdersDelegate._is_admin_pending not found"
     pending_source = _cached_source_segment(delegate_text, delegate_methods["_is_admin_pending"]) or ""
     if "_pending_cell_action" in pending_source:
         return False, "shared: ordinary planned X must not be drawn as pending"
-
     return True, "ok"
 
 
-def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
+def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
+    for check in (
+        _check_doctor_fast_click_source,
+        _check_nurse_fast_click_source,
+        _check_orders_model_fast_click_source,
+        _check_orders_delegate_fast_click_source,
+    ):
+        ok, details = check(root)
+        if not ok:
+            return False, details
+    return True, "ok"
 
-    doctor_path = root / "ui/doctor_view/doctor_remcard_widget.py"
-    doctor_text = doctor_path.read_text(encoding="utf-8")
-    doctor_tree = ast.parse(doctor_text)
-    doctor_classes = [
-        node
-        for node in doctor_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "DoctorRemCardWidget"
-    ]
-    if not doctor_classes:
+
+def _check_doctor_performance_guards(root: Path) -> tuple[bool, str]:
+    doctor_text, doctor_methods = _regression_class_methods(
+        root,
+        "ui/doctor_view/doctor_remcard_widget.py",
+        "DoctorRemCardWidget",
+    )
+    if not doctor_methods:
         return False, "DoctorRemCardWidget class not found"
-    doctor_methods = {node.name: node for node in doctor_classes[0].body if isinstance(node, ast.FunctionDef)}
     readonly_method = doctor_methods.get("_apply_archive_read_only_state")
     if readonly_method is None:
         return False, "DoctorRemCardWidget._apply_archive_read_only_state not found"
@@ -12668,18 +12746,17 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
         return False, "doctor patient open clear_drafts must be guarded by orders_context_unchanged"
     if "orders_widget.has_drafts()" not in patient_open_orders_source or "CustomMessageBox.No" not in patient_open_orders_source:
         return False, "doctor patient switch must protect a local draft from silent discard"
+    return True, "ok"
 
-    orders_path = root / "ui/doctor_view/orders_widget.py"
-    orders_text = orders_path.read_text(encoding="utf-8")
-    orders_tree = ast.parse(orders_text)
-    orders_classes = [
-        node
-        for node in orders_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "OrdersWidget"
-    ]
-    if not orders_classes:
+
+def _check_orders_performance_guards(root: Path) -> tuple[bool, str]:
+    orders_text, orders_methods = _regression_class_methods(
+        root,
+        "ui/doctor_view/orders_widget.py",
+        "OrdersWidget",
+    )
+    if not orders_methods:
         return False, "OrdersWidget class not found"
-    orders_methods = {node.name: node for node in orders_classes[0].body if isinstance(node, ast.FunctionDef)}
     clear_method = orders_methods.get("clear_drafts")
     restore_method = orders_methods.get("_restore_local_draft_baseline")
     if restore_method is None or clear_method is None:
@@ -12692,22 +12769,34 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
     if "clear_order_drafts" in clear_source or "_enqueue_write" in clear_source:
         if "_legacy_central_draft_detected" not in clear_source or "orders_discard_legacy" not in clear_source:
             return False, "clear_drafts may write only for an explicitly detected legacy central draft"
+    return True, "ok"
 
-    diet_path = root / "ui/shared/components/diet_intake_widget.py"
-    diet_text = diet_path.read_text(encoding="utf-8")
-    diet_tree = ast.parse(diet_text)
-    diet_classes = [
-        node
-        for node in diet_tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "DietIntakeWidget"
-    ]
-    if not diet_classes:
+
+def _check_diet_performance_guards(root: Path) -> tuple[bool, str]:
+    diet_text, diet_methods = _regression_class_methods(
+        root,
+        "ui/shared/components/diet_intake_widget.py",
+        "DietIntakeWidget",
+    )
+    if not diet_methods:
         return False, "DietIntakeWidget class not found"
-    diet_methods = {node.name: node for node in diet_classes[0].body if isinstance(node, ast.FunctionDef)}
     set_read_only = _cached_source_segment(diet_text, diet_methods.get("set_read_only")) if diet_methods.get("set_read_only") else ""
     if "self.read_only == bool(read_only)" not in (set_read_only or ""):
         return False, "DietIntakeWidget.set_read_only must skip unchanged state"
+    return True, "ok"
 
+
+def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+    for check in (
+        _check_doctor_performance_guards,
+        _check_orders_performance_guards,
+        _check_diet_performance_guards,
+    ):
+        ok, details = check(root)
+        if not ok:
+            return False, details
     return True, "ok"
 
 
@@ -15292,13 +15381,7 @@ def _check_lazy_section_snapshot_caches(temp_root: str) -> tuple[bool, str]:
         ivl_widget.close()
 
 
-def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple[bool, str]:
-    _ = temp_root
-    from rem_card.services.sync_coordinator import SyncCoordinator
-
-    def actions(payload):
-        return SyncCoordinator.classify(payload)["sync_actions"]
-
+def _check_sync_entity_classifications(actions) -> tuple[bool, str]:
     orders = actions({
         "changed_entities": ["orders"],
         "changes": [{"entity_name": "orders", "admission_id": 1}],
@@ -15357,7 +15440,10 @@ def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple
         return False, f"status should not require full card snapshot: {status}"
     if not (status["status_refresh"] and status["vitals_snapshot_required"] and status["balance_refresh"]):
         return False, f"status classification mismatch: {status}"
+    return True, "ok"
 
+
+def _check_sync_forced_classifications(actions) -> tuple[bool, str]:
     local_force = actions({
         "forced": True,
         "force_source": "orders_left_click:1",
@@ -15399,7 +15485,20 @@ def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple
     empty_forced = actions({"forced": True, "force_source": "unknown_source"})
     if not (empty_forced["full_refresh_required"] and empty_forced["card_snapshot_required"]):
         return False, f"unknown forced refresh must be conservative: {empty_forced}"
+    return True, "ok"
 
+
+def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.services.sync_coordinator import SyncCoordinator
+
+    def actions(payload):
+        return SyncCoordinator.classify(payload)["sync_actions"]
+
+    for check in (_check_sync_entity_classifications, _check_sync_forced_classifications):
+        ok, details = check(actions)
+        if not ok:
+            return False, details
     return True, "ok"
 
 
@@ -24596,10 +24695,488 @@ def _check_operblock_medication_aliases_quick_search(temp_root: str) -> tuple[bo
     return True, "ok"
 
 
+def _prepare_operblock_operation_stage_case(context: dict[str, Any]) -> tuple[bool, str]:
+    from datetime import date, timedelta
+
+    service = context["service"]
+    vital_dto_cls = context["vital_dto_cls"]
+    widget_cls = context["widget_cls"]
+    no_vitals_case = service.create_operation_case(
+        {
+            "table_code": "planned",
+            "history_number": "REGSTAGE0",
+            "full_name": "Без Виталов",
+            "gender": "м",
+            "birth_date": date(1980, 1, 1),
+            "diagnosis_code": "K35",
+            "diagnosis_text": "Острый аппендицит",
+        }
+    )
+    no_vitals_case_id = int(no_vitals_case["operation_case_id"])
+    no_vitals_defaults = service.build_operblock_patient_header_snapshot(no_vitals_case_id)
+    no_vitals_started_at = datetime.fromisoformat(str(no_vitals_defaults["started_at"]).replace(" ", "T")).replace(
+        second=0,
+        microsecond=0,
+    )
+    no_vitals_anesthesia_time = no_vitals_started_at + timedelta(minutes=7)
+    try:
+        service.start_anesthesia(no_vitals_case_id, "ОА", event_time=no_vitals_anesthesia_time)
+    except ValueError as exc:
+        if "Перед началом пособия" not in str(exc):
+            return False, f"unexpected anesthesia without vitals error: {exc}"
+    else:
+        return False, "anesthesia was started without initial vitals"
+
+    case = service.create_operation_case(
+        {
+            "table_code": "emergency",
+            "history_number": "REGSTAGE1",
+            "full_name": "Тестов Пациент",
+            "gender": "м",
+            "birth_date": date(1980, 1, 1),
+            "diagnosis_code": "K35",
+            "diagnosis_text": "Острый аппендицит",
+        }
+    )
+    admission_id = int(case["admission_id"])
+    case_id = int(case["operation_case_id"])
+    case_defaults = service.build_operblock_patient_header_snapshot(case_id)
+    case_started_at = datetime.fromisoformat(str(case_defaults["started_at"]).replace(" ", "T")).replace(
+        second=0,
+        microsecond=0,
+    )
+    vital_time = case_started_at + timedelta(minutes=10)
+    service.add_vital_record(
+        vital_dto_cls(id=None, admission_id=admission_id, timestamp=vital_time, sys=120, dia=80, pulse=70, spo2=98)
+    )
+    default_widget = widget_cls.__new__(widget_cls)
+    default_widget.operblock_service = service
+    default_widget._current_operation_start = case_started_at
+    default_widget._current_protocol_date = case_started_at
+    default_anesthesia_time = widget_cls._default_anesthesia_start_datetime(default_widget, case_id)
+    if default_anesthesia_time != vital_time + timedelta(minutes=5):
+        return False, f"anesthesia default time is not latest vitals + 5 min: {default_anesthesia_time!r}"
+    default_widget._current_anesthesia_start = case_started_at
+    default_surgery_time = widget_cls._default_surgery_start_datetime(default_widget)
+    if default_surgery_time != case_started_at + timedelta(minutes=5):
+        return False, f"surgery default time is not anesthesia start + 5 min: {default_surgery_time!r}"
+    service.start_anesthesia(case_id, "ОА", event_time=case_started_at)
+    service.start_surgery(
+        case_id,
+        operation_name="Операция",
+        surgeons=["Хирург"],
+        event_time=default_surgery_time,
+    )
+    context.update(
+        {
+            "admission_id": admission_id,
+            "case_id": case_id,
+            "case_started_at": case_started_at,
+            "default_anesthesia_time": default_anesthesia_time,
+            "default_surgery_time": default_surgery_time,
+        }
+    )
+    return True, "ok"
+
+
+def _check_operblock_operation_stage_lifecycle(context: dict[str, Any]) -> tuple[bool, str]:
+    from datetime import timedelta
+
+    service = context["service"]
+    case_id = context["case_id"]
+    admission_id = context["admission_id"]
+    default_surgery_time = context["default_surgery_time"]
+    added = service.add_operation_stage(
+        case_id,
+        "Аппендэктомия",
+        event_time=default_surgery_time + timedelta(minutes=30),
+    )
+    if added.get("display_label") != "Аппендэктомия" or (added.get("payload") or {}).get("stage_kind") != "custom":
+        return False, f"custom stage insert returned unexpected payload: {added!r}"
+    snapshot_after_add = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
+    added_events = list(snapshot_after_add.get("operation_events") or [])
+    if [event.get("display_label") for event in added_events] != [
+        "Начало пособия",
+        "Начало операции",
+        "Аппендэктомия",
+    ]:
+        return False, f"operation stage order after add is wrong: {added_events!r}"
+
+    auto_event_id = int(added_events[0].get("source_id") or 0)
+    try:
+        service.update_operation_stage(
+            auto_event_id,
+            "Другое начало",
+            expected_revision=int(added_events[0].get("revision") or 0),
+        )
+    except ValueError as exc:
+        if "Автоматические этапы" not in str(exc):
+            return False, f"unexpected auto-stage edit error: {exc}"
+    else:
+        return False, "automatic operation stage was editable"
+
+    surgery_start_dt = datetime.fromisoformat(str(added_events[1].get("event_time")).replace(" ", "T"))
+    edited = service.update_operation_stage(
+        int(added["source_id"]),
+        "Лапароскопическая аппендэктомия",
+        expected_revision=int(added["revision"]),
+        event_time=surgery_start_dt + timedelta(minutes=60),
+    )
+    if int(edited.get("revision") or 0) != int(added.get("revision") or 0) + 1:
+        return False, f"custom stage revision did not increase: added={added!r}, edited={edited!r}"
+    second_moved_later = service.add_operation_stage(
+        case_id,
+        "Ревизия брюшной полости",
+        event_time=surgery_start_dt + timedelta(minutes=90),
+    )
+    if datetime.fromisoformat(str(second_moved_later.get("event_time")).replace(" ", "T")) != surgery_start_dt + timedelta(
+        minutes=90
+    ):
+        return False, f"custom stage insert ignored explicit event_time: {second_moved_later!r}"
+    snapshot_after_edit = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
+    edited_events = list(snapshot_after_edit.get("operation_events") or [])
+    labels_after_edit = [event.get("display_label") for event in edited_events]
+    if labels_after_edit != [
+        "Начало пособия",
+        "Начало операции",
+        "Лапароскопическая аппендэктомия",
+        "Ревизия брюшной полости",
+    ]:
+        return False, f"operation stage label was not updated in snapshot: {labels_after_edit!r}"
+
+    second_moved_earlier = service.update_operation_stage(
+        int(second_moved_later["source_id"]),
+        "Ревизия брюшной полости",
+        expected_revision=int(second_moved_later["revision"]),
+        event_time=surgery_start_dt + timedelta(minutes=59),
+    )
+    snapshot_after_reorder = service.build_operblock_timeline_snapshot(
+        admission_id,
+        operation_case_id=case_id,
+    ).to_dict()
+    reordered_labels = [event.get("display_label") for event in snapshot_after_reorder.get("operation_events") or []]
+    if reordered_labels != [
+        "Начало пособия",
+        "Начало операции",
+        "Ревизия брюшной полости",
+        "Лапароскопическая аппендэктомия",
+    ]:
+        return False, f"operation stage time edit did not reorder stages: {reordered_labels!r}"
+    second_moved_before_surgery = service.update_operation_stage(
+        int(second_moved_earlier["source_id"]),
+        "Ревизия брюшной полости",
+        expected_revision=int(second_moved_earlier["revision"]),
+        event_time=surgery_start_dt - timedelta(minutes=1),
+    )
+    snapshot_before_surgery = service.build_operblock_timeline_snapshot(
+        admission_id,
+        operation_case_id=case_id,
+    ).to_dict()
+    labels_before_surgery = [
+        event.get("display_label")
+        for event in snapshot_before_surgery.get("operation_events") or []
+    ]
+    if labels_before_surgery != [
+        "Начало пособия",
+        "Ревизия брюшной полости",
+        "Начало операции",
+        "Лапароскопическая аппендэктомия",
+    ]:
+        return False, f"before-surgery custom stage order is wrong: {labels_before_surgery!r}"
+    anesthesia_start_dt = datetime.fromisoformat(str(added_events[0].get("event_time")).replace(" ", "T"))
+    try:
+        service.update_operation_stage(
+            int(second_moved_before_surgery["source_id"]),
+            "Ревизия брюшной полости",
+            expected_revision=int(second_moved_before_surgery["revision"]),
+            event_time=anesthesia_start_dt - timedelta(minutes=1),
+        )
+    except ValueError as exc:
+        if "раньше начала пособия" not in str(exc) and "раньше поступления пациента" not in str(exc):
+            return False, f"unexpected before-anesthesia stage time error: {exc}"
+    else:
+        return False, "custom stage time was moved before anesthesia start"
+
+    context.update(
+        {
+            "added_events": added_events,
+            "surgery_start_dt": surgery_start_dt,
+            "edited": edited,
+            "second_moved_later": second_moved_later,
+            "second_moved_before_surgery": second_moved_before_surgery,
+            "snapshot_after_edit": snapshot_after_edit,
+            "edited_events": edited_events,
+            "labels_before_surgery": labels_before_surgery,
+        }
+    )
+    return True, "ok"
+
+
+def _check_operblock_stage_afternoon_dialog(context: dict[str, Any], app) -> tuple[bool, str]:
+    surgery_start_dt = context["surgery_start_dt"]
+    dialog = context["time_edit_dialog_cls"](
+        surgery_start_dt.replace(hour=17, minute=40),
+        min_datetime=surgery_start_dt.replace(hour=8, minute=0),
+        stage_label="Проверка даты этапа",
+    )
+    try:
+        dialog.time_input.setText("15:00")
+        afternoon_dt = datetime.fromisoformat(dialog.datetime_text())
+        if afternoon_dt.date() != surgery_start_dt.date() or afternoon_dt.hour != 15 or afternoon_dt.minute != 0:
+            return False, f"operation stage afternoon time was moved to wrong date: {afternoon_dt!r}"
+        return True, "ok"
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
+def _check_operblock_operation_stage_dialogs(context: dict[str, Any]) -> tuple[bool, str]:
+    from datetime import timedelta
+
+    surgery_start_dt = context["surgery_start_dt"]
+    edited = context["edited"]
+    second_moved_later = context["second_moved_later"]
+    second_moved_before_surgery = context["second_moved_before_surgery"]
+    added_events = context["added_events"]
+    app = context["application_cls"].instance() or context["application_cls"]([])
+    start_dialog = context["start_anesthesia_dialog_cls"](
+        [{"label": "ОА"}],
+        ["Анестезиолог"],
+        ["Анестезист"],
+        initial_start_datetime=context["default_anesthesia_time"],
+        min_start_datetime=context["case_started_at"],
+    )
+    try:
+        if start_dialog.time_input.text() != context["default_anesthesia_time"].strftime("%H:%M"):
+            return False, "start anesthesia dialog did not show default time"
+        edited_start_dt = context["default_anesthesia_time"] + timedelta(minutes=20)
+        start_dialog.time_input.setText(edited_start_dt.strftime("%H:%M"))
+        selected_start_dt = datetime.fromisoformat(start_dialog.start_datetime_text())
+        if selected_start_dt != edited_start_dt:
+            return False, f"start anesthesia dialog resolved edited time to wrong datetime: {selected_start_dt!r}"
+    finally:
+        start_dialog.close()
+        start_dialog.deleteLater()
+        app.processEvents()
+
+    start_surgery_dialog = context["start_surgery_dialog_cls"](
+        ["Хирург"],
+        ["Операционная медсестра"],
+        initial_operation_name="Операция",
+        initial_surgeons=["Хирург"],
+        initial_operating_nurse="Операционная медсестра",
+        initial_start_datetime=surgery_start_dt,
+        min_start_datetime=context["case_started_at"],
+    )
+    try:
+        if start_surgery_dialog.time_input.text() != surgery_start_dt.strftime("%H:%M"):
+            return False, "start surgery dialog did not show default time"
+        edited_surgery_dt = surgery_start_dt + timedelta(minutes=20)
+        start_surgery_dialog.time_input.setText(edited_surgery_dt.strftime("%H:%M"))
+        selected_surgery_dt = datetime.fromisoformat(start_surgery_dialog.start_datetime_text())
+        if selected_surgery_dt != edited_surgery_dt:
+            return False, f"start surgery dialog resolved edited time to wrong datetime: {selected_surgery_dt!r}"
+    finally:
+        start_surgery_dialog.close()
+        start_surgery_dialog.deleteLater()
+        app.processEvents()
+
+    dialog = context["operation_stages_dialog_cls"](
+        [
+            {
+                "kind": "anesthesia_start",
+                "label": "Начало пособия",
+                "event_id": int(added_events[0].get("source_id") or 0),
+                "event_time": added_events[0].get("event_time"),
+                "revision": int(added_events[0].get("revision") or 0),
+                "readonly": True,
+            },
+            {
+                "kind": "surgery_start",
+                "label": "Начало операции",
+                "event_id": int(added_events[1].get("source_id") or 0),
+                "event_time": added_events[1].get("event_time"),
+                "revision": int(added_events[1].get("revision") or 0),
+                "readonly": True,
+            },
+            {
+                "kind": "custom",
+                "label": "Лапароскопическая аппендэктомия",
+                "event_id": int(edited["source_id"]),
+                "event_time": edited.get("event_time"),
+                "revision": int(edited["revision"]),
+                "readonly": False,
+                "payload": {"stage_kind": "custom", "label": "Лапароскопическая аппендэктомия"},
+            },
+            {
+                "kind": "custom",
+                "label": "Ревизия брюшной полости",
+                "event_id": int(second_moved_before_surgery["source_id"]),
+                "event_time": second_moved_before_surgery.get("event_time"),
+                "revision": int(second_moved_before_surgery["revision"]),
+                "readonly": False,
+                "payload": {"stage_kind": "custom", "label": "Ревизия брюшной полости"},
+            },
+        ]
+    )
+    new_widgets = dialog._row_widgets.get("new") or {}
+    new_row = new_widgets.get("row") or {}
+    new_time_label = new_widgets.get("time_label")
+    if not str(new_row.get("event_time") or ""):
+        return False, "new operation stage row has no pending event_time"
+    if new_time_label is None or not re.fullmatch(r"\d{2}:\d{2}", str(new_time_label.text() or "")):
+        return False, "new operation stage row does not show editable current time"
+    pending_time = (surgery_start_dt + timedelta(minutes=120)).isoformat(timespec="seconds")
+    dialog.apply_pending_stage_time("new", pending_time)
+    if (dialog._row_widgets.get("new") or {}).get("row", {}).get("event_time") != pending_time:
+        return False, "new operation stage pending time was not updated in dialog row"
+    if str(new_time_label.text() or "") != (surgery_start_dt + timedelta(minutes=120)).strftime("%H:%M"):
+        return False, "new operation stage pending time label was not updated"
+
+    ok, details = _check_operblock_stage_afternoon_dialog(context, app)
+    if not ok:
+        return False, details
+
+    midnight_dialog = context["time_edit_dialog_cls"](
+        surgery_start_dt.replace(hour=23, minute=40),
+        min_datetime=surgery_start_dt.replace(hour=22, minute=0),
+        stage_label="Переход через полночь",
+    )
+    try:
+        midnight_dialog.time_input.setText("00:15")
+        midnight_dt = datetime.fromisoformat(midnight_dialog.datetime_text())
+        expected_midnight = (surgery_start_dt + timedelta(days=1)).date()
+        if midnight_dt.date() != expected_midnight or midnight_dt.hour != 0 or midnight_dt.minute != 15:
+            return False, f"operation stage midnight time did not resolve to next day: {midnight_dt!r}"
+    finally:
+        midnight_dialog.close()
+        midnight_dialog.deleteLater()
+        app.processEvents()
+
+    render_calls = 0
+    original_render_rows = dialog._render_rows
+
+    def _count_render_rows():
+        nonlocal render_calls
+        render_calls += 1
+        return original_render_rows()
+
+    dialog._render_rows = _count_render_rows
+    target_key = f"event:{int(edited['source_id'])}"
+    second_key = f"event:{int(second_moved_later['source_id'])}"
+    before_widget_ids = {
+        key: id(widgets.get("frame"))
+        for key, widgets in (dialog._row_widgets or {}).items()
+        if key in {target_key, second_key}
+    }
+    dialog.apply_saved_stage(
+        target_key,
+        {
+            "source_id": int(edited["source_id"]),
+            "display_label": "Переименованный этап",
+            "raw_text": "Переименованный этап",
+            "event_time": edited.get("event_time"),
+            "revision": int(edited["revision"]) + 1,
+            "payload": {"stage_kind": "custom", "label": "Переименованный этап"},
+        },
+    )
+    after_widget_ids = {
+        key: id(widgets.get("frame"))
+        for key, widgets in (dialog._row_widgets or {}).items()
+        if key in {target_key, second_key}
+    }
+    if render_calls:
+        return False, "operation stage rename rerendered all stage rows"
+    if before_widget_ids != after_widget_ids:
+        return False, "operation stage rename recreated unchanged row widgets"
+    target_edit = (dialog._row_widgets.get(target_key) or {}).get("edit")
+    second_edit = (dialog._row_widgets.get(second_key) or {}).get("edit")
+    if target_edit is None or target_edit.text() != "Переименованный этап":
+        return False, "operation stage rename did not update target row in place"
+    if second_edit is None or second_edit.text() != "Ревизия брюшной полости":
+        return False, "operation stage rename changed a different stage row"
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+    return True, "ok"
+
+
+def _check_operblock_operation_stage_ui(context: dict[str, Any]) -> tuple[bool, str]:
+    import weakref
+
+    widget_cls = context["widget_cls"]
+    surgery_start_dt = context["surgery_start_dt"]
+    second_moved_later = context["second_moved_later"]
+    second_moved_before_surgery = context["second_moved_before_surgery"]
+    snapshot_after_edit = context["snapshot_after_edit"]
+    edited_events = context["edited_events"]
+    labels_before_surgery = context["labels_before_surgery"]
+
+    widget = widget_cls.__new__(widget_cls)
+    widget._current_timeline_snapshot = dict(snapshot_after_edit)
+    if not widget_cls._patch_operation_stage_event_locally(widget, second_moved_before_surgery):
+        return False, "local UI stage patch returned false"
+    patched_events = list((widget._current_timeline_snapshot or {}).get("operation_events") or [])
+    patched_labels = [event.get("display_label") for event in patched_events]
+    if patched_labels != labels_before_surgery:
+        return False, f"local UI patch did not replace only target stage: {patched_labels!r}"
+    if len(patched_events) != len(edited_events):
+        return False, "local UI patch changed operation_events count"
+
+    class _StageDialogSpy:
+        def __init__(self):
+            self.saved: list[tuple[str, dict]] = []
+
+        def apply_saved_stage(self, row_key: str, stage: dict) -> None:
+            self.saved.append((row_key, dict(stage or {})))
+
+        def apply_save_error(self, row_key: str) -> None:
+            raise AssertionError(f"unexpected stage save error for {row_key}")
+
+    class _PatchOnlyChart:
+        def __init__(self):
+            self.start_time = surgery_start_dt
+            self.calls: list[dict] = []
+
+        def patch_operation_stage_marker(self, stage_event: dict, *, snapshot=None, start_time=None) -> bool:
+            self.calls.append({"stage_event": dict(stage_event or {}), "snapshot": snapshot, "start_time": start_time})
+            return True
+
+    def _unexpected_refresh(*args, **kwargs):
+        raise AssertionError("operation stage save caused full protocol/chart refresh")
+
+    save_widget = widget_cls.__new__(widget_cls)
+    save_widget._write_pending = True
+    save_widget._current_timeline_snapshot = dict(snapshot_after_edit)
+    save_widget._current_operation_start = surgery_start_dt
+    save_widget._current_protocol_date = surgery_start_dt
+    save_widget.vitals_chart = _PatchOnlyChart()
+    save_widget._apply_protocol_controls_state = lambda: None
+    save_widget.refresh_protocol = _unexpected_refresh
+    save_widget._update_vitals_chart_order_markers = _unexpected_refresh
+    dialog_spy = _StageDialogSpy()
+    try:
+        widget_cls._on_operation_stage_saved(
+            save_widget,
+            weakref.ref(dialog_spy),
+            f"event:{int(second_moved_later['source_id'])}",
+            second_moved_before_surgery,
+        )
+    except AssertionError as exc:
+        return False, str(exc)
+    if not dialog_spy.saved:
+        return False, "operation stage save did not update dialog locally"
+    if len(save_widget.vitals_chart.calls) != 1:
+        return False, f"single chart marker patch expected, got {len(save_widget.vitals_chart.calls)}"
+
+    return _check_operblock_operation_stage_dialogs(context)
+
+
 def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from datetime import date, timedelta
+    from datetime import timedelta
 
     from rem_card.app.operblock_schema import _apply_operblock_schema
     from rem_card.data.dao.db_manager import DatabaseManager
@@ -24613,398 +25190,40 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         OperationStagesDialog,
     )
     from PySide6.QtWidgets import QApplication
-    import weakref
 
     db_path = os.path.join(temp_root, "operblock_operation_stages.db")
     manager = DatabaseManager(db_path, db_path)
     try:
         manager.run_write_operation(_apply_operblock_schema, source="regression_operblock_schema")
         service = OperBlockService(manager)
-        no_vitals_case = service.create_operation_case(
+        context = {
+            "service": service,
+            "vital_dto_cls": VitalDTO,
+            "widget_cls": OperBlockMainWidget,
+        }
+        for check in (
+            _prepare_operblock_operation_stage_case,
+            _check_operblock_operation_stage_lifecycle,
+        ):
+            ok, details = check(context)
+            if not ok:
+                return False, details
+        case_id = context["case_id"]
+        surgery_start_dt = context["surgery_start_dt"]
+
+        context.update(
             {
-                "table_code": "planned",
-                "history_number": "REGSTAGE0",
-                "full_name": "Без Виталов",
-                "gender": "м",
-                "birth_date": date(1980, 1, 1),
-                "diagnosis_code": "K35",
-                "diagnosis_text": "Острый аппендицит",
+                "application_cls": QApplication,
+                "start_anesthesia_dialog_cls": StartAnesthesiaDialog,
+                "start_surgery_dialog_cls": StartSurgeryDialog,
+                "operation_stages_dialog_cls": OperationStagesDialog,
+                "time_edit_dialog_cls": OperationStageTimeEditDialog,
             }
         )
-        no_vitals_case_id = int(no_vitals_case["operation_case_id"])
-        no_vitals_defaults = service.build_operblock_patient_header_snapshot(no_vitals_case_id)
-        no_vitals_started_at = datetime.fromisoformat(str(no_vitals_defaults["started_at"]).replace(" ", "T")).replace(second=0, microsecond=0)
-        no_vitals_anesthesia_time = no_vitals_started_at + timedelta(minutes=7)
-        try:
-            service.start_anesthesia(no_vitals_case_id, "ОА", event_time=no_vitals_anesthesia_time)
-        except ValueError as exc:
-            if "Перед началом пособия" not in str(exc):
-                return False, f"unexpected anesthesia without vitals error: {exc}"
-        else:
-            return False, "anesthesia was started without initial vitals"
+        ok, details = _check_operblock_operation_stage_ui(context)
+        if not ok:
+            return False, details
 
-        case = service.create_operation_case(
-            {
-                "table_code": "emergency",
-                "history_number": "REGSTAGE1",
-                "full_name": "Тестов Пациент",
-                "gender": "м",
-                "birth_date": date(1980, 1, 1),
-                "diagnosis_code": "K35",
-                "diagnosis_text": "Острый аппендицит",
-            }
-        )
-        admission_id = int(case["admission_id"])
-        case_id = int(case["operation_case_id"])
-        case_defaults = service.build_operblock_patient_header_snapshot(case_id)
-        case_started_at = datetime.fromisoformat(str(case_defaults["started_at"]).replace(" ", "T")).replace(second=0, microsecond=0)
-        vital_time = case_started_at + timedelta(minutes=10)
-        service.add_vital_record(
-            VitalDTO(id=None, admission_id=admission_id, timestamp=vital_time, sys=120, dia=80, pulse=70, spo2=98)
-        )
-        default_widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
-        default_widget.operblock_service = service
-        default_widget._current_operation_start = case_started_at
-        default_widget._current_protocol_date = case_started_at
-        default_anesthesia_time = OperBlockMainWidget._default_anesthesia_start_datetime(default_widget, case_id)
-        if default_anesthesia_time != vital_time + timedelta(minutes=5):
-            return False, f"anesthesia default time is not latest vitals + 5 min: {default_anesthesia_time!r}"
-        default_widget._current_anesthesia_start = case_started_at
-        default_surgery_time = OperBlockMainWidget._default_surgery_start_datetime(default_widget)
-        if default_surgery_time != case_started_at + timedelta(minutes=5):
-            return False, f"surgery default time is not anesthesia start + 5 min: {default_surgery_time!r}"
-        service.start_anesthesia(case_id, "ОА", event_time=case_started_at)
-        service.start_surgery(
-            case_id,
-            operation_name="Операция",
-            surgeons=["Хирург"],
-            event_time=default_surgery_time,
-        )
-
-        added = service.add_operation_stage(
-            case_id,
-            "Аппендэктомия",
-            event_time=default_surgery_time + timedelta(minutes=30),
-        )
-        if added.get("display_label") != "Аппендэктомия" or (added.get("payload") or {}).get("stage_kind") != "custom":
-            return False, f"custom stage insert returned unexpected payload: {added!r}"
-        snapshot_after_add = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
-        added_events = list(snapshot_after_add.get("operation_events") or [])
-        if [event.get("display_label") for event in added_events] != ["Начало пособия", "Начало операции", "Аппендэктомия"]:
-            return False, f"operation stage order after add is wrong: {added_events!r}"
-
-        auto_event_id = int(added_events[0].get("source_id") or 0)
-        try:
-            service.update_operation_stage(auto_event_id, "Другое начало", expected_revision=int(added_events[0].get("revision") or 0))
-        except ValueError as exc:
-            if "Автоматические этапы" not in str(exc):
-                return False, f"unexpected auto-stage edit error: {exc}"
-        else:
-            return False, "automatic operation stage was editable"
-
-        surgery_start_dt = datetime.fromisoformat(str(added_events[1].get("event_time")).replace(" ", "T"))
-        first_stage_time = surgery_start_dt + timedelta(minutes=60)
-        second_stage_time = surgery_start_dt + timedelta(minutes=90)
-
-        edited = service.update_operation_stage(
-            int(added["source_id"]),
-            "Лапароскопическая аппендэктомия",
-            expected_revision=int(added["revision"]),
-            event_time=first_stage_time,
-        )
-        if int(edited.get("revision") or 0) != int(added.get("revision") or 0) + 1:
-            return False, f"custom stage revision did not increase: added={added!r}, edited={edited!r}"
-        second_moved_later = service.add_operation_stage(
-            case_id,
-            "Ревизия брюшной полости",
-            event_time=second_stage_time,
-        )
-        if datetime.fromisoformat(str(second_moved_later.get("event_time")).replace(" ", "T")) != second_stage_time:
-            return False, f"custom stage insert ignored explicit event_time: {second_moved_later!r}"
-        snapshot_after_edit = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
-        edited_events = list(snapshot_after_edit.get("operation_events") or [])
-        labels_after_edit = [event.get("display_label") for event in edited_events]
-        if labels_after_edit != [
-            "Начало пособия",
-            "Начало операции",
-            "Лапароскопическая аппендэктомия",
-            "Ревизия брюшной полости",
-        ]:
-            return False, f"operation stage label was not updated in snapshot: {labels_after_edit!r}"
-
-        second_moved_earlier = service.update_operation_stage(
-            int(second_moved_later["source_id"]),
-            "Ревизия брюшной полости",
-            expected_revision=int(second_moved_later["revision"]),
-            event_time=surgery_start_dt + timedelta(minutes=59),
-        )
-        snapshot_after_reorder = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
-        reordered_labels = [event.get("display_label") for event in snapshot_after_reorder.get("operation_events") or []]
-        if reordered_labels != [
-            "Начало пособия",
-            "Начало операции",
-            "Ревизия брюшной полости",
-            "Лапароскопическая аппендэктомия",
-        ]:
-            return False, f"operation stage time edit did not reorder stages: {reordered_labels!r}"
-        second_moved_before_surgery = service.update_operation_stage(
-            int(second_moved_earlier["source_id"]),
-            "Ревизия брюшной полости",
-            expected_revision=int(second_moved_earlier["revision"]),
-            event_time=surgery_start_dt - timedelta(minutes=1),
-        )
-        snapshot_before_surgery = service.build_operblock_timeline_snapshot(
-            admission_id,
-            operation_case_id=case_id,
-        ).to_dict()
-        labels_before_surgery = [
-            event.get("display_label")
-            for event in snapshot_before_surgery.get("operation_events") or []
-        ]
-        if labels_before_surgery != [
-            "Начало пособия",
-            "Ревизия брюшной полости",
-            "Начало операции",
-            "Лапароскопическая аппендэктомия",
-        ]:
-            return False, f"before-surgery custom stage order is wrong: {labels_before_surgery!r}"
-        anesthesia_start_dt = datetime.fromisoformat(str(added_events[0].get("event_time")).replace(" ", "T"))
-        try:
-            service.update_operation_stage(
-                int(second_moved_before_surgery["source_id"]),
-                "Ревизия брюшной полости",
-                expected_revision=int(second_moved_before_surgery["revision"]),
-                event_time=anesthesia_start_dt - timedelta(minutes=1),
-            )
-        except ValueError as exc:
-            if "раньше начала пособия" not in str(exc) and "раньше поступления пациента" not in str(exc):
-                return False, f"unexpected before-anesthesia stage time error: {exc}"
-        else:
-            return False, "custom stage time was moved before anesthesia start"
-
-        widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
-        widget._current_timeline_snapshot = dict(snapshot_after_edit)
-        if not OperBlockMainWidget._patch_operation_stage_event_locally(widget, second_moved_before_surgery):
-            return False, "local UI stage patch returned false"
-        patched_events = list((widget._current_timeline_snapshot or {}).get("operation_events") or [])
-        patched_labels = [event.get("display_label") for event in patched_events]
-        if patched_labels != labels_before_surgery:
-            return False, f"local UI patch did not replace only target stage: {patched_labels!r}"
-        if len(patched_events) != len(edited_events):
-            return False, "local UI patch changed operation_events count"
-
-        class _StageDialogSpy:
-            def __init__(self):
-                self.saved: list[tuple[str, dict]] = []
-
-            def apply_saved_stage(self, row_key: str, stage: dict) -> None:
-                self.saved.append((row_key, dict(stage or {})))
-
-            def apply_save_error(self, row_key: str) -> None:
-                raise AssertionError(f"unexpected stage save error for {row_key}")
-
-        class _PatchOnlyChart:
-            def __init__(self):
-                self.start_time = surgery_start_dt
-                self.calls: list[dict] = []
-
-            def patch_operation_stage_marker(self, stage_event: dict, *, snapshot=None, start_time=None) -> bool:
-                self.calls.append({"stage_event": dict(stage_event or {}), "snapshot": snapshot, "start_time": start_time})
-                return True
-
-        def _unexpected_refresh(*args, **kwargs):
-            raise AssertionError("operation stage save caused full protocol/chart refresh")
-
-        save_widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
-        save_widget._write_pending = True
-        save_widget._current_timeline_snapshot = dict(snapshot_after_edit)
-        save_widget._current_operation_start = surgery_start_dt
-        save_widget._current_protocol_date = surgery_start_dt
-        save_widget.vitals_chart = _PatchOnlyChart()
-        save_widget._apply_protocol_controls_state = lambda: None
-        save_widget.refresh_protocol = _unexpected_refresh
-        save_widget._update_vitals_chart_order_markers = _unexpected_refresh
-        dialog_spy = _StageDialogSpy()
-        try:
-            OperBlockMainWidget._on_operation_stage_saved(
-                save_widget,
-                weakref.ref(dialog_spy),
-                f"event:{int(second_moved_later['source_id'])}",
-                second_moved_before_surgery,
-            )
-        except AssertionError as exc:
-            return False, str(exc)
-        if not dialog_spy.saved:
-            return False, "operation stage save did not update dialog locally"
-        if len(save_widget.vitals_chart.calls) != 1:
-            return False, f"single chart marker patch expected, got {len(save_widget.vitals_chart.calls)}"
-
-        app = QApplication.instance() or QApplication([])
-        start_dialog = StartAnesthesiaDialog(
-            [{"label": "ОА"}],
-            ["Анестезиолог"],
-            ["Анестезист"],
-            initial_start_datetime=default_anesthesia_time,
-            min_start_datetime=case_started_at,
-        )
-        try:
-            if start_dialog.time_input.text() != default_anesthesia_time.strftime("%H:%M"):
-                return False, "start anesthesia dialog did not show default time"
-            edited_start_dt = default_anesthesia_time + timedelta(minutes=20)
-            start_dialog.time_input.setText(edited_start_dt.strftime("%H:%M"))
-            selected_start_dt = datetime.fromisoformat(start_dialog.start_datetime_text())
-            if selected_start_dt != edited_start_dt:
-                return False, f"start anesthesia dialog resolved edited time to wrong datetime: {selected_start_dt!r}"
-        finally:
-            start_dialog.close()
-            start_dialog.deleteLater()
-            app.processEvents()
-        start_surgery_dialog = StartSurgeryDialog(
-            ["Хирург"],
-            ["Операционная медсестра"],
-            initial_operation_name="Операция",
-            initial_surgeons=["Хирург"],
-            initial_operating_nurse="Операционная медсестра",
-            initial_start_datetime=surgery_start_dt,
-            min_start_datetime=case_started_at,
-        )
-        try:
-            if start_surgery_dialog.time_input.text() != surgery_start_dt.strftime("%H:%M"):
-                return False, "start surgery dialog did not show default time"
-            edited_surgery_dt = surgery_start_dt + timedelta(minutes=20)
-            start_surgery_dialog.time_input.setText(edited_surgery_dt.strftime("%H:%M"))
-            selected_surgery_dt = datetime.fromisoformat(start_surgery_dialog.start_datetime_text())
-            if selected_surgery_dt != edited_surgery_dt:
-                return False, f"start surgery dialog resolved edited time to wrong datetime: {selected_surgery_dt!r}"
-        finally:
-            start_surgery_dialog.close()
-            start_surgery_dialog.deleteLater()
-            app.processEvents()
-        dialog = OperationStagesDialog(
-            [
-                {
-                    "kind": "anesthesia_start",
-                    "label": "Начало пособия",
-                    "event_id": int(added_events[0].get("source_id") or 0),
-                    "event_time": added_events[0].get("event_time"),
-                    "revision": int(added_events[0].get("revision") or 0),
-                    "readonly": True,
-                },
-                {
-                    "kind": "surgery_start",
-                    "label": "Начало операции",
-                    "event_id": int(added_events[1].get("source_id") or 0),
-                    "event_time": added_events[1].get("event_time"),
-                    "revision": int(added_events[1].get("revision") or 0),
-                    "readonly": True,
-                },
-                {
-                    "kind": "custom",
-                    "label": "Лапароскопическая аппендэктомия",
-                    "event_id": int(edited["source_id"]),
-                    "event_time": edited.get("event_time"),
-                    "revision": int(edited["revision"]),
-                    "readonly": False,
-                    "payload": {"stage_kind": "custom", "label": "Лапароскопическая аппендэктомия"},
-                },
-                {
-                    "kind": "custom",
-                    "label": "Ревизия брюшной полости",
-                    "event_id": int(second_moved_before_surgery["source_id"]),
-                    "event_time": second_moved_before_surgery.get("event_time"),
-                    "revision": int(second_moved_before_surgery["revision"]),
-                    "readonly": False,
-                    "payload": {"stage_kind": "custom", "label": "Ревизия брюшной полости"},
-                },
-            ]
-        )
-        new_widgets = dialog._row_widgets.get("new") or {}
-        new_row = new_widgets.get("row") or {}
-        new_time_label = new_widgets.get("time_label")
-        if not str(new_row.get("event_time") or ""):
-            return False, "new operation stage row has no pending event_time"
-        if new_time_label is None or not re.fullmatch(r"\d{2}:\d{2}", str(new_time_label.text() or "")):
-            return False, "new operation stage row does not show editable current time"
-        pending_time = (surgery_start_dt + timedelta(minutes=120)).isoformat(timespec="seconds")
-        dialog.apply_pending_stage_time("new", pending_time)
-        if (dialog._row_widgets.get("new") or {}).get("row", {}).get("event_time") != pending_time:
-            return False, "new operation stage pending time was not updated in dialog row"
-        if str(new_time_label.text() or "") != (surgery_start_dt + timedelta(minutes=120)).strftime("%H:%M"):
-            return False, "new operation stage pending time label was not updated"
-        afternoon_dialog = OperationStageTimeEditDialog(
-            surgery_start_dt.replace(hour=17, minute=40),
-            min_datetime=surgery_start_dt.replace(hour=8, minute=0),
-            stage_label="Проверка даты этапа",
-        )
-        try:
-            afternoon_dialog.time_input.setText("15:00")
-            afternoon_dt = datetime.fromisoformat(afternoon_dialog.datetime_text())
-            if afternoon_dt.date() != surgery_start_dt.date() or afternoon_dt.hour != 15 or afternoon_dt.minute != 0:
-                return False, f"operation stage afternoon time was moved to wrong date: {afternoon_dt!r}"
-        finally:
-            afternoon_dialog.close()
-            afternoon_dialog.deleteLater()
-            app.processEvents()
-        midnight_dialog = OperationStageTimeEditDialog(
-            surgery_start_dt.replace(hour=23, minute=40),
-            min_datetime=surgery_start_dt.replace(hour=22, minute=0),
-            stage_label="Переход через полночь",
-        )
-        try:
-            midnight_dialog.time_input.setText("00:15")
-            midnight_dt = datetime.fromisoformat(midnight_dialog.datetime_text())
-            expected_midnight = (surgery_start_dt + timedelta(days=1)).date()
-            if midnight_dt.date() != expected_midnight or midnight_dt.hour != 0 or midnight_dt.minute != 15:
-                return False, f"operation stage midnight time did not resolve to next day: {midnight_dt!r}"
-        finally:
-            midnight_dialog.close()
-            midnight_dialog.deleteLater()
-            app.processEvents()
-        render_calls = 0
-        original_render_rows = dialog._render_rows
-
-        def _count_render_rows():
-            nonlocal render_calls
-            render_calls += 1
-            return original_render_rows()
-
-        dialog._render_rows = _count_render_rows
-        target_key = f"event:{int(edited['source_id'])}"
-        second_key = f"event:{int(second_moved_later['source_id'])}"
-        before_widget_ids = {
-            key: id(widgets.get("frame"))
-            for key, widgets in (dialog._row_widgets or {}).items()
-            if key in {target_key, second_key}
-        }
-        dialog.apply_saved_stage(
-            target_key,
-            {
-                "source_id": int(edited["source_id"]),
-                "display_label": "Переименованный этап",
-                "raw_text": "Переименованный этап",
-                "event_time": edited.get("event_time"),
-                "revision": int(edited["revision"]) + 1,
-                "payload": {"stage_kind": "custom", "label": "Переименованный этап"},
-            },
-        )
-        after_widget_ids = {
-            key: id(widgets.get("frame"))
-            for key, widgets in (dialog._row_widgets or {}).items()
-            if key in {target_key, second_key}
-        }
-        if render_calls:
-            return False, "operation stage rename rerendered all stage rows"
-        if before_widget_ids != after_widget_ids:
-            return False, "operation stage rename recreated unchanged row widgets"
-        target_edit = (dialog._row_widgets.get(target_key) or {}).get("edit")
-        second_edit = (dialog._row_widgets.get(second_key) or {}).get("edit")
-        if target_edit is None or target_edit.text() != "Переименованный этап":
-            return False, "operation stage rename did not update target row in place"
-        if second_edit is None or second_edit.text() != "Ревизия брюшной полости":
-            return False, "operation stage rename changed a different stage row"
-        dialog.close()
-        dialog.deleteLater()
-        app.processEvents()
 
         surgery_end_dt = surgery_start_dt + timedelta(minutes=180)
         after_surgery_stage_dt = surgery_end_dt + timedelta(minutes=1)
@@ -26301,6 +26520,80 @@ def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, 
     return True, "ok"
 
 
+def _check_operblock_icon_defaults(context: dict[str, Any]) -> tuple[bool, str]:
+    records = context["service"].list_operblock_icons()
+    remcard_records = context["service"].list_remcard_icons()
+    for definition in context["remcard_icon_definitions"]:
+        record = remcard_records.get(definition.icon_key)
+        if not record:
+            return False, f"иконка ремкарты {definition.icon_key} не получила стартовую запись"
+        source_path = os.path.join(context["icon_dir"], definition.source_file or definition.default_file)
+        if record.get("image_blob") != Path(source_path).read_bytes():
+            return False, f"иконка ремкарты {definition.icon_key} должна быть загружена из {os.path.basename(source_path)}"
+        if record.get("source") != "seed":
+            return False, f"иконка ремкарты {definition.icon_key} должна быть seed-строкой"
+
+    sevo_record = records.get("drug:manual:gas:sevoflurane")
+    if not sevo_record:
+        return False, "севофлюран не получил стартовую пользовательскую иконку"
+    if sevo_record.get("default_file") != "gas_izm.png":
+        return False, "севофлюран должен иметь стандартную иконку gas_izm.png"
+    if sevo_record.get("image_blob") != context["sevo_source_blob"]:
+        return False, "стартовая иконка севофлюрана должна быть sevodrag.png из БД"
+    if sevo_record.get("source") != "seed":
+        return False, "стартовая иконка севофлюрана должна быть seed-строкой"
+    if records.get("drug:manual:gas:desflurane") is not None:
+        return False, "десфлюран не должен наследовать пользовательскую иконку севофлюрана"
+    if context["default_drug_icon_file"]("gas") != "gas_izm.png":
+        return False, "стандартная иконка препарата-газа должна быть gas_izm.png"
+
+    type_key = context["type_icon_key"]("operation_stage")
+    edit_key = context["edit_icon_key"]("operation_stage")
+    if type_key != "type:operation_stage":
+        return False, f"неверный ключ иконки этапа операции: {type_key}"
+    if edit_key != "edit:operation_stage":
+        return False, f"неверный ключ иконки изменения этапа операции: {edit_key}"
+    if context["default_icon_file_for_key"](type_key) != "etap1.png":
+        return False, "иконка этапа операции по умолчанию должна быть etap1.png"
+    if context["default_icon_file_for_key"](edit_key) != "etap2.png":
+        return False, "иконка окна изменения этапа операции по умолчанию должна быть etap2.png"
+
+    definitions_by_key = context["definitions_by_key"]
+    male_key = context["male_key"]
+    female_key = context["female_key"]
+    for icon_key, message in (
+        (type_key, "иконка этапа операции не попала в список настраиваемых иконок"),
+        (edit_key, "иконка изменения этапа операции не попала в список настраиваемых иконок"),
+        (male_key, "фото пациента-мужчины оперблока не попало в список настраиваемых иконок"),
+        (female_key, "фото пациента-женщины оперблока не попало в список настраиваемых иконок"),
+    ):
+        if icon_key not in definitions_by_key:
+            return False, message
+    if context["default_icon_file_for_key"](male_key) != "man_in_oper_extr.png":
+        return False, "фото пациента-мужчины оперблока должно иметь fallback man_in_oper_extr.png"
+    if context["default_icon_file_for_key"](female_key) != "woman_in_oper_extr.png":
+        return False, "фото пациента-женщины оперблока должно иметь fallback woman_in_oper_extr.png"
+    if not os.path.isfile(os.path.join(context["icon_dir"], "etap1.png")):
+        return False, "файл стандартной иконки этапа операции etap1.png не найден"
+    if not os.path.isfile(os.path.join(context["icon_dir"], "etap2.png")):
+        return False, "файл стандартной иконки изменения этапа операции etap2.png не найден"
+
+    sevo_candidates = context["candidate_keys_from_payload"]({"kind": "gas"}, "Севофлюран")
+    if "drug:manual:gas:sevoflurane" not in sevo_candidates:
+        return False, "севофлюран без preset_id не ищет сохраненную иконку севофлюрана"
+    des_candidates = context["candidate_keys"](preset_id="manual:gas:desflurane", label="Desflurane")
+    if "drug:manual:gas:sevoflurane" in des_candidates:
+        return False, "десфлюран не должен искать иконку севофлюрана"
+    noisy_candidates = context["candidate_keys_from_payload"](
+        {"kind": "gas", "label": "Десфлюран", "display_name": "Десфлюран"},
+        "Десфлюран 0,7 МАК",
+    )
+    if "drug-label:десфлюран" not in noisy_candidates:
+        return False, "окно изменения газа должно искать иконку по чистому названию из payload"
+    context["noisy_des_candidates"] = noisy_candidates
+    return True, "ok"
+
+
 def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.paths import get_icon_dir
     from rem_card.data.settings.settings_db import SettingsDatabase
@@ -26354,70 +26647,25 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
     if catalog_row is None:
         return False, "settings schema did not create operblock_icons catalog version"
 
-    records = service.list_operblock_icons()
-    remcard_records = service.list_remcard_icons()
-    for definition in REMCARD_ICON_DEFINITIONS:
-        record = remcard_records.get(definition.icon_key)
-        if not record:
-            return False, f"иконка ремкарты {definition.icon_key} не получила стартовую запись"
-        source_path = os.path.join(icon_dir, definition.source_file or definition.default_file)
-        if record.get("image_blob") != Path(source_path).read_bytes():
-            return False, f"иконка ремкарты {definition.icon_key} должна быть загружена из {os.path.basename(source_path)}"
-        if record.get("source") != "seed":
-            return False, f"иконка ремкарты {definition.icon_key} должна быть seed-строкой"
-
-    sevo_record = records.get("drug:manual:gas:sevoflurane")
-    if not sevo_record:
-        return False, "севофлюран не получил стартовую пользовательскую иконку"
-    if sevo_record.get("default_file") != "gas_izm.png":
-        return False, "севофлюран должен иметь стандартную иконку gas_izm.png"
-    if sevo_record.get("image_blob") != sevo_source_blob:
-        return False, "стартовая иконка севофлюрана должна быть sevodrag.png из БД"
-    if sevo_record.get("source") != "seed":
-        return False, "стартовая иконка севофлюрана должна быть seed-строкой"
-    if records.get("drug:manual:gas:desflurane") is not None:
-        return False, "десфлюран не должен наследовать пользовательскую иконку севофлюрана"
-    if default_drug_icon_file("gas") != "gas_izm.png":
-        return False, "стандартная иконка препарата-газа должна быть gas_izm.png"
-    operation_stage_type_key = type_icon_key("operation_stage")
-    operation_stage_edit_key = edit_icon_key("operation_stage")
-    if operation_stage_type_key != "type:operation_stage":
-        return False, f"неверный ключ иконки этапа операции: {operation_stage_type_key}"
-    if operation_stage_edit_key != "edit:operation_stage":
-        return False, f"неверный ключ иконки изменения этапа операции: {operation_stage_edit_key}"
-    if default_icon_file_for_key(operation_stage_type_key) != "etap1.png":
-        return False, "иконка этапа операции по умолчанию должна быть etap1.png"
-    if default_icon_file_for_key(operation_stage_edit_key) != "etap2.png":
-        return False, "иконка окна изменения этапа операции по умолчанию должна быть etap2.png"
-    if operation_stage_type_key not in DEFAULT_ICON_DEFINITION_BY_KEY:
-        return False, "иконка этапа операции не попала в список настраиваемых иконок"
-    if operation_stage_edit_key not in DEFAULT_ICON_DEFINITION_BY_KEY:
-        return False, "иконка изменения этапа операции не попала в список настраиваемых иконок"
-    if OPERBLOCK_PATIENT_MALE_ICON_KEY not in DEFAULT_ICON_DEFINITION_BY_KEY:
-        return False, "фото пациента-мужчины оперблока не попало в список настраиваемых иконок"
-    if OPERBLOCK_PATIENT_FEMALE_ICON_KEY not in DEFAULT_ICON_DEFINITION_BY_KEY:
-        return False, "фото пациента-женщины оперблока не попало в список настраиваемых иконок"
-    if default_icon_file_for_key(OPERBLOCK_PATIENT_MALE_ICON_KEY) != "man_in_oper_extr.png":
-        return False, "фото пациента-мужчины оперблока должно иметь fallback man_in_oper_extr.png"
-    if default_icon_file_for_key(OPERBLOCK_PATIENT_FEMALE_ICON_KEY) != "woman_in_oper_extr.png":
-        return False, "фото пациента-женщины оперблока должно иметь fallback woman_in_oper_extr.png"
-    if not os.path.isfile(os.path.join(icon_dir, "etap1.png")):
-        return False, "файл стандартной иконки этапа операции etap1.png не найден"
-    if not os.path.isfile(os.path.join(icon_dir, "etap2.png")):
-        return False, "файл стандартной иконки изменения этапа операции etap2.png не найден"
-
-    sevo_candidates = drug_icon_candidate_keys_from_payload({"kind": "gas"}, "Севофлюран")
-    if "drug:manual:gas:sevoflurane" not in sevo_candidates:
-        return False, "севофлюран без preset_id не ищет сохраненную иконку севофлюрана"
-    des_candidates = drug_icon_candidate_keys(preset_id="manual:gas:desflurane", label="Desflurane")
-    if "drug:manual:gas:sevoflurane" in des_candidates:
-        return False, "десфлюран не должен искать иконку севофлюрана"
-    noisy_des_candidates = drug_icon_candidate_keys_from_payload(
-        {"kind": "gas", "label": "Десфлюран", "display_name": "Десфлюран"},
-        "Десфлюран 0,7 МАК",
-    )
-    if "drug-label:десфлюран" not in noisy_des_candidates:
-        return False, "окно изменения газа должно искать иконку по чистому названию из payload"
+    defaults_context = {
+        "service": service,
+        "icon_dir": icon_dir,
+        "sevo_source_blob": sevo_source_blob,
+        "remcard_icon_definitions": REMCARD_ICON_DEFINITIONS,
+        "definitions_by_key": DEFAULT_ICON_DEFINITION_BY_KEY,
+        "male_key": OPERBLOCK_PATIENT_MALE_ICON_KEY,
+        "female_key": OPERBLOCK_PATIENT_FEMALE_ICON_KEY,
+        "default_icon_file_for_key": default_icon_file_for_key,
+        "default_drug_icon_file": default_drug_icon_file,
+        "candidate_keys": drug_icon_candidate_keys,
+        "candidate_keys_from_payload": drug_icon_candidate_keys_from_payload,
+        "type_icon_key": type_icon_key,
+        "edit_icon_key": edit_icon_key,
+    }
+    ok, details = _check_operblock_icon_defaults(defaults_context)
+    if not ok:
+        return False, details
+    noisy_des_candidates = defaults_context["noisy_des_candidates"]
 
     before_version, before_hash = service.get_catalog_version(OPERBLOCK_ICONS_KEY)
     service.save_operblock_icon(
