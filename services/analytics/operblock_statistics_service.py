@@ -954,28 +954,26 @@ class OperBlockStatisticsReportBuilder:
         except (TypeError, ValueError):
             return default
 
-    def _calculate_statistics(self) -> dict[str, Any]:
-        if self.db_paths:
-            context = self._fetch_multi_db_context(self.db_paths, self.start_date_str, self.end_date_str)
-        else:
-            context = self._fetch_context(self.db_manager, self.start_date_str, self.end_date_str)
-        timeline_by_case: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        for row in context["timeline"]:
-            timeline_by_case[int(row.get("operation_case_id") or 0)].append(row)
+    @classmethod
+    def _group_statistics_rows(
+        cls,
+        rows: Iterable[Mapping[str, Any]],
+    ) -> dict[int, list[dict[str, Any]]]:
+        grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[cls._safe_int(row.get("operation_case_id"))].append(dict(row))
+        return grouped
 
-        orders_by_case: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        for row in context["orders"]:
-            orders_by_case[int(row.get("operation_case_id") or 0)].append(row)
-
-        vitals_by_case: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        for row in context["vitals"]:
-            vitals_by_case[int(row.get("operation_case_id") or 0)].append(row)
-
-        now = datetime.now().replace(second=0, microsecond=0)
-        period_days = max(1, (self._end_dt.date() - self._start_dt.date()).days + 1)
-        cases = []
-        for raw in context["cases"]:
-            case_id = int(raw.get("operation_case_id") or 0)
+    def _build_statistics_cases(
+        self,
+        raw_cases: Iterable[Mapping[str, Any]],
+        timeline_by_case: Mapping[int, list[dict[str, Any]]],
+        *,
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        cases: list[dict[str, Any]] = []
+        for raw in raw_cases:
+            case_id = self._safe_int(raw.get("operation_case_id"))
             started_at = self._parse_datetime(raw.get("started_at") or raw.get("created_at"))
             if started_at is None:
                 continue
@@ -1012,190 +1010,222 @@ class OperBlockStatisticsReportBuilder:
                 }
             )
             cases.append(case)
+        return cases
 
-        counted_cases = cases
-        total = len(counted_cases)
-        case_ids = {int(case["operation_case_id"]) for case in counted_cases}
+    @staticmethod
+    def _empty_case_statistics() -> dict[str, Any]:
+        return {
+            "room_durations": [],
+            "anesthesia_durations": [],
+            "surgery_durations": [],
+            "room_to_anesthesia": [],
+            "anesthesia_to_surgery": [],
+            "surgery_end_to_anesthesia_end": [],
+            "full_stage_count": 0,
+            "repeated_anesthesia": 0,
+            "repeated_surgery": 0,
+            "anesthesia_type_durations": defaultdict(list),
+            "anesthesiologist_durations": defaultdict(list),
+            "surgeon_durations": defaultdict(list),
+            "anesthesiologists": Counter(),
+            "anesthetists": Counter(),
+            "surgeons": Counter(),
+            "nurses": Counter(),
+            "anesthesia_pairs": Counter(),
+            "surgeon_anesthesia_pairs": Counter(),
+            "anesth_night": Counter(),
+            "anesth_emergency": Counter(),
+            "anesth_planned": Counter(),
+            "genders": Counter(),
+            "age_groups": Counter(),
+            "child_adult": Counter(),
+            "departments": Counter(),
+            "transfers": Counter(),
+            "diagnoses": Counter(),
+            "mkb_classes": Counter(),
+            "blood_groups": Counter(),
+            "blood_rh": Counter(),
+            "repeated_by_patient": Counter(),
+            "repeated_by_patient_day": Counter(),
+            "missing_operation_name": 0,
+            "missing_anesthesiologist": 0,
+            "missing_surgeon": 0,
+            "missing_anesthetist": 0,
+            "missing_transfer": 0,
+            "missing_height_weight": 0,
+            "missing_key_personnel": 0,
+        }
 
-        by_status = Counter(case["status_label"] for case in cases)
-        by_table = Counter(case["table_label"] for case in counted_cases)
-        by_date = Counter(case["started_dt"].strftime("%d.%m.%Y") for case in counted_cases)
-        by_weekday = Counter(self._weekday_name(case["started_dt"]) for case in counted_cases)
-        night_cases = [
-            case for case in counted_cases if case["started_dt"].hour >= 22 or case["started_dt"].hour < 6
-        ]
+    def _collect_case_timing_statistics(
+        self,
+        case: Mapping[str, Any],
+        stats: dict[str, Any],
+    ) -> None:
+        room_duration = self._duration_minutes(case["started_dt"], case["effective_end_dt"])
+        if room_duration is not None:
+            stats["room_durations"].append(room_duration)
 
-        room_durations = []
-        anesthesia_durations = []
-        surgery_durations = []
-        room_to_anesthesia = []
-        anesthesia_to_surgery = []
-        surgery_end_to_anesthesia_end = []
-        full_stage_count = 0
-        repeated_anesthesia = 0
-        repeated_surgery = 0
-        anesthesia_type_durations: dict[str, list[float]] = defaultdict(list)
-        anesthesiologist_durations: dict[str, list[float]] = defaultdict(list)
-        surgeon_durations: dict[str, list[float]] = defaultdict(list)
+        stage = case["stage_state"]
+        anesthesia_intervals = stage["anesthesia_intervals"]
+        surgery_intervals = stage["surgery_intervals"]
+        if len(anesthesia_intervals) > 1:
+            stats["repeated_anesthesia"] += 1
+        if len(surgery_intervals) > 1:
+            stats["repeated_surgery"] += 1
 
-        anesthesiologists = Counter()
-        anesthetists = Counter()
-        surgeons_counter = Counter()
-        nurses = Counter()
-        anesthesia_pairs = Counter()
-        surgeon_anesthesia_pairs = Counter()
-        anesth_night = Counter()
-        anesth_emergency = Counter()
-        anesth_planned = Counter()
-
-        genders = Counter()
-        age_groups = Counter()
-        child_adult = Counter()
-        departments = Counter()
-        transfers = Counter()
-        diagnoses = Counter()
-        mkb_classes = Counter()
-        blood_groups = Counter()
-        blood_rh = Counter()
-        repeated_by_patient = Counter()
-        repeated_by_patient_day = Counter()
-
-        missing_operation_name = 0
-        missing_anesthesiologist = 0
-        missing_surgeon = 0
-        missing_anesthetist = 0
-        missing_transfer = 0
-        missing_height_weight = 0
-        missing_key_personnel = 0
-
-        for case in counted_cases:
-            room_duration = self._duration_minutes(case["started_dt"], case["effective_end_dt"])
-            if room_duration is not None:
-                room_durations.append(room_duration)
-
-            stage = case["stage_state"]
-            anesthesia_intervals = stage["anesthesia_intervals"]
-            surgery_intervals = stage["surgery_intervals"]
-            if len(anesthesia_intervals) > 1:
-                repeated_anesthesia += 1
-            if len(surgery_intervals) > 1:
-                repeated_surgery += 1
-
-            case_anesthesia_minutes = sum(
-                duration
-                for duration in (
-                    self._duration_minutes(row.get("start"), row.get("end") or case["effective_end_dt"])
-                    for row in anesthesia_intervals
-                )
-                if duration is not None
+        case_anesthesia_minutes = sum(
+            duration
+            for duration in (
+                self._duration_minutes(row.get("start"), row.get("end") or case["effective_end_dt"])
+                for row in anesthesia_intervals
             )
-            case_surgery_minutes = sum(
-                duration
-                for duration in (
-                    self._duration_minutes(row.get("start"), row.get("end") or case["effective_end_dt"])
-                    for row in surgery_intervals
-                )
-                if duration is not None
+            if duration is not None
+        )
+        case_surgery_minutes = sum(
+            duration
+            for duration in (
+                self._duration_minutes(row.get("start"), row.get("end") or case["effective_end_dt"])
+                for row in surgery_intervals
             )
-            if case_anesthesia_minutes > 0:
-                anesthesia_durations.append(case_anesthesia_minutes)
-                anesthesia_type_durations[case["anesthesia_type"]].append(case_anesthesia_minutes)
-                if case["anesthesiologist"]:
-                    anesthesiologist_durations[case["anesthesiologist"]].append(case_anesthesia_minutes)
-            if case_surgery_minutes > 0:
-                surgery_durations.append(case_surgery_minutes)
-                for surgeon in case["surgeons"]:
-                    surgeon_durations[surgeon].append(case_surgery_minutes)
-
-            if (
-                stage["first_anesthesia_start"]
-                and stage["last_anesthesia_end"]
-                and stage["first_surgery_start"]
-                and stage["last_surgery_end"]
-            ):
-                full_stage_count += 1
-            value = self._duration_minutes(case["started_dt"], stage["first_anesthesia_start"])
-            if value is not None:
-                room_to_anesthesia.append(value)
-            value = self._duration_minutes(stage["first_anesthesia_start"], stage["first_surgery_start"])
-            if value is not None:
-                anesthesia_to_surgery.append(value)
-            value = self._duration_minutes(stage["last_surgery_end"], stage["last_anesthesia_end"])
-            if value is not None:
-                surgery_end_to_anesthesia_end.append(value)
-
+            if duration is not None
+        )
+        if case_anesthesia_minutes > 0:
+            stats["anesthesia_durations"].append(case_anesthesia_minutes)
+            stats["anesthesia_type_durations"][case["anesthesia_type"]].append(case_anesthesia_minutes)
             if case["anesthesiologist"]:
-                anesthesiologists[case["anesthesiologist"]] += 1
-                if case in night_cases:
-                    anesth_night[case["anesthesiologist"]] += 1
-                if case["table_label"] == "Экстренная":
-                    anesth_emergency[case["anesthesiologist"]] += 1
-                if case["table_label"] == "Плановая":
-                    anesth_planned[case["anesthesiologist"]] += 1
-            if case["anesthetist"]:
-                anesthetists[case["anesthetist"]] += 1
-            if case["operating_nurse"]:
-                nurses[case["operating_nurse"]] += 1
+                stats["anesthesiologist_durations"][case["anesthesiologist"]].append(
+                    case_anesthesia_minutes
+                )
+        if case_surgery_minutes > 0:
+            stats["surgery_durations"].append(case_surgery_minutes)
             for surgeon in case["surgeons"]:
-                surgeons_counter[surgeon] += 1
-                if case["anesthesiologist"]:
-                    surgeon_anesthesia_pairs[f"{surgeon} + {case['anesthesiologist']}"] += 1
-            if case["anesthesiologist"] and case["anesthetist"]:
-                anesthesia_pairs[f"{case['anesthesiologist']} + {case['anesthetist']}"] += 1
+                stats["surgeon_durations"][surgeon].append(case_surgery_minutes)
 
-            age_years = self._age_years(case, case["started_dt"])
-            genders[self._clean_text(case.get("patient_gender"))] += 1
-            age_groups[self._age_group(age_years)] += 1
-            if age_years is None:
-                child_adult["Возраст не указан"] += 1
-            elif age_years < 18:
-                child_adult["Дети"] += 1
-            else:
-                child_adult["Взрослые"] += 1
-            departments[self._clean_text(case.get("department_profile") or case.get("source_department"))] += 1
-            transfers[self._clean_text(case.get("transfer_target"))] += 1
-            diagnosis = self._clean_text(
-                f"{str(case.get('diagnosis_code') or '').strip()} {str(case.get('diagnosis_text') or '').strip()}".strip()
-            )
-            diagnoses[diagnosis] += 1
-            mkb_classes[self._mkb_class(case.get("diagnosis_code"))] += 1
-            blood_groups[self._clean_text(case.get("blood_group"))] += 1
-            blood_rh[self._clean_text(case.get("blood_rh"))] += 1
-            patient_key = str(case.get("patient_id") or case.get("history_number") or "")
-            if patient_key:
-                repeated_by_patient[patient_key] += 1
-                repeated_by_patient_day[f"{patient_key}:{case['started_dt'].date().isoformat()}"] += 1
+        if (
+            stage["first_anesthesia_start"]
+            and stage["last_anesthesia_end"]
+            and stage["first_surgery_start"]
+            and stage["last_surgery_end"]
+        ):
+            stats["full_stage_count"] += 1
+        offsets = (
+            ("room_to_anesthesia", case["started_dt"], stage["first_anesthesia_start"]),
+            (
+                "anesthesia_to_surgery",
+                stage["first_anesthesia_start"],
+                stage["first_surgery_start"],
+            ),
+            (
+                "surgery_end_to_anesthesia_end",
+                stage["last_surgery_end"],
+                stage["last_anesthesia_end"],
+            ),
+        )
+        for key, started_at, ended_at in offsets:
+            value = self._duration_minutes(started_at, ended_at)
+            if value is not None:
+                stats[key].append(value)
 
-            if not case["operation_name"]:
-                missing_operation_name += 1
-            if not case["anesthesiologist"]:
-                missing_anesthesiologist += 1
-            if not case["surgeons"]:
-                missing_surgeon += 1
-            if not case["anesthetist"]:
-                missing_anesthetist += 1
-            if not case["anesthesiologist"] or not case["surgeons"] or not case["anesthetist"]:
-                missing_key_personnel += 1
-            if not case["transfer_target"]:
-                missing_transfer += 1
-            if not case.get("height_cm") or not case.get("weight_kg"):
-                missing_height_weight += 1
+    @staticmethod
+    def _collect_case_personnel_statistics(
+        case: Mapping[str, Any],
+        stats: dict[str, Any],
+    ) -> None:
+        anesthesiologist = case["anesthesiologist"]
+        if anesthesiologist:
+            stats["anesthesiologists"][anesthesiologist] += 1
+            start_hour = case["started_dt"].hour
+            if start_hour >= 22 or start_hour < 6:
+                stats["anesth_night"][anesthesiologist] += 1
+            if case["table_label"] == "Экстренная":
+                stats["anesth_emergency"][anesthesiologist] += 1
+            if case["table_label"] == "Плановая":
+                stats["anesth_planned"][anesthesiologist] += 1
+        if case["anesthetist"]:
+            stats["anesthetists"][case["anesthetist"]] += 1
+        if case["operating_nurse"]:
+            stats["nurses"][case["operating_nurse"]] += 1
+        for surgeon in case["surgeons"]:
+            stats["surgeons"][surgeon] += 1
+            if anesthesiologist:
+                stats["surgeon_anesthesia_pairs"][f"{surgeon} + {anesthesiologist}"] += 1
+        if anesthesiologist and case["anesthetist"]:
+            stats["anesthesia_pairs"][f"{anesthesiologist} + {case['anesthetist']}"] += 1
 
-        bolus_count = 0
-        bolus_cases = set()
-        bolus_drugs = Counter()
-        bolus_routes = Counter()
-        bolus_volume_ml = Decimal("0")
+    def _collect_case_patient_statistics(
+        self,
+        case: Mapping[str, Any],
+        stats: dict[str, Any],
+    ) -> None:
+        age_years = self._age_years(case, case["started_dt"])
+        stats["genders"][self._clean_text(case.get("patient_gender"))] += 1
+        stats["age_groups"][self._age_group(age_years)] += 1
+        if age_years is None:
+            stats["child_adult"]["Возраст не указан"] += 1
+        elif age_years < 18:
+            stats["child_adult"]["Дети"] += 1
+        else:
+            stats["child_adult"]["Взрослые"] += 1
+        stats["departments"][
+            self._clean_text(case.get("department_profile") or case.get("source_department"))
+        ] += 1
+        stats["transfers"][self._clean_text(case.get("transfer_target"))] += 1
+        diagnosis_text = (
+            f"{str(case.get('diagnosis_code') or '').strip()} "
+            f"{str(case.get('diagnosis_text') or '').strip()}"
+        ).strip()
+        diagnosis = self._clean_text(diagnosis_text)
+        stats["diagnoses"][diagnosis] += 1
+        stats["mkb_classes"][self._mkb_class(case.get("diagnosis_code"))] += 1
+        stats["blood_groups"][self._clean_text(case.get("blood_group"))] += 1
+        stats["blood_rh"][self._clean_text(case.get("blood_rh"))] += 1
+        patient_key = str(case.get("patient_id") or case.get("history_number") or "")
+        if patient_key:
+            stats["repeated_by_patient"][patient_key] += 1
+            stats["repeated_by_patient_day"][
+                f"{patient_key}:{case['started_dt'].date().isoformat()}"
+            ] += 1
+
+        if not case["operation_name"]:
+            stats["missing_operation_name"] += 1
+        if not case["anesthesiologist"]:
+            stats["missing_anesthesiologist"] += 1
+        if not case["surgeons"]:
+            stats["missing_surgeon"] += 1
+        if not case["anesthetist"]:
+            stats["missing_anesthetist"] += 1
+        if not case["anesthesiologist"] or not case["surgeons"] or not case["anesthetist"]:
+            stats["missing_key_personnel"] += 1
+        if not case["transfer_target"]:
+            stats["missing_transfer"] += 1
+        if not case.get("height_cm") or not case.get("weight_kg"):
+            stats["missing_height_weight"] += 1
+
+    def _collect_case_statistics(
+        self,
+        cases: Iterable[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        stats = self._empty_case_statistics()
+        for case in cases:
+            self._collect_case_timing_statistics(case, stats)
+            self._collect_case_personnel_statistics(case, stats)
+            self._collect_case_patient_statistics(case, stats)
+        return stats
+
+    def _collect_vital_statistics(
+        self,
+        vitals_by_case: Mapping[int, list[dict[str, Any]]],
+        case_by_id: Mapping[int, Mapping[str, Any]],
+    ) -> dict[str, Any]:
         vitals_count_by_case = Counter()
-        vital_interval_values = []
-        min_spo2_values = []
-        cases_with_initial_vitals = set()
-        cases_with_vitals_after_anesthesia = set()
-        cases_spo2_low = set()
-        cases_sys_low = set()
-        cases_pulse_high = set()
+        vital_interval_values: list[float] = []
+        min_spo2_values: list[float] = []
+        cases_with_initial_vitals: set[int] = set()
+        cases_with_vitals_after_anesthesia: set[int] = set()
+        cases_spo2_low: set[int] = set()
+        cases_sys_low: set[int] = set()
+        cases_pulse_high: set[int] = set()
 
-        case_by_id = {int(case["operation_case_id"]): case for case in counted_cases}
         for case_id, vital_rows in vitals_by_case.items():
             case = case_by_id.get(case_id)
             if case is None:
@@ -1204,19 +1234,31 @@ class OperBlockStatisticsReportBuilder:
             rows = []
             for raw in vital_rows:
                 event_dt = self._parse_datetime(raw.get("datetime"))
-                if event_dt is None or event_dt < case["started_dt"] or event_dt > case["effective_end_dt"]:
+                if (
+                    event_dt is None
+                    or event_dt < case["started_dt"]
+                    or event_dt > case["effective_end_dt"]
+                ):
                     continue
                 rows.append((event_dt, raw))
             rows.sort(key=lambda item: item[0])
             if not rows:
                 continue
+
             vitals_count_by_case[case_id] = len(rows)
-            for index in range(1, len(rows)):
-                vital_interval_values.append((rows[index][0] - rows[index - 1][0]).total_seconds() / 60.0)
+            vital_interval_values.extend(
+                (rows[index][0] - rows[index - 1][0]).total_seconds() / 60.0
+                for index in range(1, len(rows))
+            )
             first_anesthesia_start = stage.get("first_anesthesia_start")
             if any(
                 value not in (None, "")
-                for value in (case.get("preop_sys"), case.get("preop_dia"), case.get("preop_pulse"), case.get("preop_spo2"))
+                for value in (
+                    case.get("preop_sys"),
+                    case.get("preop_dia"),
+                    case.get("preop_pulse"),
+                    case.get("preop_spo2"),
+                )
             ):
                 cases_with_initial_vitals.add(case_id)
             if first_anesthesia_start is not None:
@@ -1224,17 +1266,65 @@ class OperBlockStatisticsReportBuilder:
                     cases_with_initial_vitals.add(case_id)
                 if any(event_dt >= first_anesthesia_start for event_dt, _raw in rows):
                     cases_with_vitals_after_anesthesia.add(case_id)
-            spo2_values = [self._safe_float(raw.get("spo2"), default=-1.0) for _dt, raw in rows if raw.get("spo2") not in (None, "")]
+
+            spo2_values = [
+                self._safe_float(raw.get("spo2"), default=-1.0)
+                for _dt, raw in rows
+                if raw.get("spo2") not in (None, "")
+            ]
             if spo2_values:
                 min_spo2 = min(spo2_values)
                 min_spo2_values.append(min_spo2)
                 if min_spo2 < 90:
                     cases_spo2_low.add(case_id)
-            if any(raw.get("sys") not in (None, "") and self._safe_float(raw.get("sys")) < 90 for _dt, raw in rows):
+            if any(
+                raw.get("sys") not in (None, "") and self._safe_float(raw.get("sys")) < 90
+                for _dt, raw in rows
+            ):
                 cases_sys_low.add(case_id)
-            if any(raw.get("pulse") not in (None, "") and self._safe_float(raw.get("pulse")) > 120 for _dt, raw in rows):
+            if any(
+                raw.get("pulse") not in (None, "") and self._safe_float(raw.get("pulse")) > 120
+                for _dt, raw in rows
+            ):
                 cases_pulse_high.add(case_id)
 
+        return {
+            "vitals_by_case": vitals_count_by_case,
+            "vital_intervals": vital_interval_values,
+            "min_spo2_values": min_spo2_values,
+            "initial_vitals": len(cases_with_initial_vitals),
+            "vitals_after_anesthesia": len(cases_with_vitals_after_anesthesia),
+            "spo2_low_cases": len(cases_spo2_low),
+            "sys_low_cases": len(cases_sys_low),
+            "pulse_high_cases": len(cases_pulse_high),
+        }
+
+    @staticmethod
+    def _empty_medication_statistics() -> dict[str, Any]:
+        return {
+            "bolus_count": 0,
+            "bolus_cases": set(),
+            "bolus_drugs": Counter(),
+            "bolus_routes": Counter(),
+            "bolus_volume_ml": Decimal("0"),
+            "infusion_count": 0,
+            "infusion_cases": set(),
+            "open_infusions": 0,
+            "auto_stopped": 0,
+            "infusion_durations": [],
+            "infusion_drugs": Counter(),
+            "infusion_volume_ml": Decimal("0"),
+            "gas_starts": 0,
+            "oxygen_starts": 0,
+            "gas_changes": 0,
+        }
+
+    def _collect_order_bolus_statistics(
+        self,
+        orders_by_case: Mapping[int, list[dict[str, Any]]],
+        case_by_id: Mapping[int, Mapping[str, Any]],
+        stats: dict[str, Any],
+    ) -> None:
         for case_id, order_rows in orders_by_case.items():
             case = case_by_id.get(case_id)
             if case is None:
@@ -1251,157 +1341,223 @@ class OperBlockStatisticsReportBuilder:
                     continue
                 parsed = parse_operblock_medication_text(str(raw.get("text") or ""))
                 drug = self._clean_text(parsed.get("drug_label") or raw.get("text"))
-                route = self._clean_text(operblock_route_from_comment(raw.get("comment")), fallback="Не указан")
-                bolus_count += 1
-                bolus_cases.add(case_id)
-                bolus_drugs[drug] += 1
-                bolus_routes[route] += 1
+                route = self._clean_text(
+                    operblock_route_from_comment(raw.get("comment")),
+                    fallback="Не указан",
+                )
+                stats["bolus_count"] += 1
+                stats["bolus_cases"].add(case_id)
+                stats["bolus_drugs"][drug] += 1
+                stats["bolus_routes"][route] += 1
                 volume = self._decimal_ml(parsed.get("volume_ml"))
                 if volume is not None:
-                    bolus_volume_ml += volume
+                    stats["bolus_volume_ml"] += volume
 
-        timeline_children: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        for raw in context["timeline"]:
+    @staticmethod
+    def _timeline_children_by_parent(
+        timeline: Iterable[Mapping[str, Any]],
+    ) -> dict[int, list[dict[str, Any]]]:
+        children_by_parent: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for raw in timeline:
             parent_id = raw.get("parent_event_id")
             if parent_id not in (None, ""):
-                timeline_children[int(parent_id)].append(raw)
+                children_by_parent[int(parent_id)].append(dict(raw))
+        return children_by_parent
 
-        infusion_count = 0
-        infusion_cases = set()
-        open_infusions = 0
-        auto_stopped = 0
-        infusion_durations = []
-        infusion_drugs = Counter()
-        infusion_volume_ml = Decimal("0")
-        gas_starts = 0
-        oxygen_starts = 0
-        gas_changes = 0
+    def _collect_timeline_bolus_statistics(
+        self,
+        raw: Mapping[str, Any],
+        case_ids: set[int],
+        stats: dict[str, Any],
+    ) -> None:
+        case_id = self._safe_int(raw.get("operation_case_id"))
+        if case_id not in case_ids:
+            return
+        stats["bolus_count"] += 1
+        stats["bolus_cases"].add(case_id)
+        stats["bolus_drugs"][
+            self._clean_text(raw.get("drug_label") or raw.get("display_label"))
+        ] += 1
+        stats["bolus_routes"][self._clean_text(raw.get("route"), fallback="Не указан")] += 1
+        volume = self._decimal_ml(raw.get("volume_ml"))
+        if volume is not None:
+            stats["bolus_volume_ml"] += volume
 
-        for raw in context["timeline"]:
-            if str(raw.get("event_type") or "") == "bolus":
-                case_id = int(raw.get("operation_case_id") or 0)
-                if case_id in case_ids:
-                    bolus_count += 1
-                    bolus_cases.add(case_id)
-                    bolus_drugs[self._clean_text(raw.get("drug_label") or raw.get("display_label"))] += 1
-                    bolus_routes[self._clean_text(raw.get("route"), fallback="Не указан")] += 1
-                    volume = self._decimal_ml(raw.get("volume_ml"))
-                    if volume is not None:
-                        bolus_volume_ml += volume
-                continue
-
-            if str(raw.get("event_type") or "") != "infusion_start":
-                continue
-            case_id = int(raw.get("operation_case_id") or 0)
-            case = case_by_id.get(case_id)
-            if case is None:
-                continue
-            payload = self._json_dict(raw.get("payload_json"))
-            start_dt = self._parse_datetime(raw.get("event_time"))
-            if start_dt is None:
-                continue
-            children = sorted(
-                timeline_children.get(int(raw.get("id") or 0), []),
-                key=lambda item: self._parse_datetime(item.get("event_time")) or datetime.max,
+    def _collect_infusion_statistics(
+        self,
+        raw: Mapping[str, Any],
+        case_by_id: Mapping[int, Mapping[str, Any]],
+        timeline_children: Mapping[int, list[dict[str, Any]]],
+        stats: dict[str, Any],
+    ) -> None:
+        case_id = self._safe_int(raw.get("operation_case_id"))
+        case = case_by_id.get(case_id)
+        if case is None:
+            return
+        payload = self._json_dict(raw.get("payload_json"))
+        start_dt = self._parse_datetime(raw.get("event_time"))
+        if start_dt is None:
+            return
+        children = sorted(
+            timeline_children.get(self._safe_int(raw.get("id")), []),
+            key=lambda item: self._parse_datetime(item.get("event_time")) or datetime.max,
+        )
+        stop_row = next(
+            (
+                row
+                for row in reversed(children)
+                if str(row.get("event_type") or "") == "infusion_stop"
+            ),
+            None,
+        )
+        stop_dt = (
+            self._parse_datetime(stop_row.get("event_time"))
+            if stop_row
+            else self._parse_datetime(raw.get("end_time"))
+        )
+        effective_stop = stop_dt or case["effective_end_dt"]
+        duration = self._duration_minutes(start_dt, effective_stop)
+        is_gas = self._payload_is_gas(
+            payload,
+            raw.get("drug_label"),
+            raw.get("display_label"),
+        )
+        if is_gas:
+            stats["gas_starts"] += 1
+            stats["gas_changes"] += sum(
+                1 for row in children if str(row.get("event_type") or "") == "infusion_change"
             )
-            stop_row = next((row for row in reversed(children) if str(row.get("event_type") or "") == "infusion_stop"), None)
-            stop_dt = self._parse_datetime(stop_row.get("event_time")) if stop_row else self._parse_datetime(raw.get("end_time"))
-            effective_stop = stop_dt or case["effective_end_dt"]
-            duration = self._duration_minutes(start_dt, effective_stop)
-            is_gas = self._payload_is_gas(payload, raw.get("drug_label"), raw.get("display_label"))
-            if is_gas:
-                gas_starts += 1
-                gas_changes += sum(1 for row in children if str(row.get("event_type") or "") == "infusion_change")
-                if self._text_is_oxygen(raw.get("drug_label")) or self._text_is_oxygen(raw.get("display_label")):
-                    oxygen_starts += 1
-                continue
-            infusion_count += 1
-            infusion_cases.add(case_id)
-            infusion_drugs[self._clean_text(payload.get("display_name") or payload.get("label") or raw.get("drug_label"))] += 1
-            if duration is not None:
-                infusion_durations.append(duration)
-            if str(raw.get("status") or "").strip().lower() == "active" and stop_dt is None:
-                open_infusions += 1
-            stop_payload = self._json_dict(stop_row.get("payload_json")) if stop_row else {}
-            if str(stop_payload.get("auto_stopped_by") or "") == "anesthesia_end":
-                auto_stopped += 1
-            volume = self._decimal_ml(raw.get("volume_ml"), payload.get("declared_total_volume_ml"), payload.get("volume_ml"))
-            if volume is not None:
-                infusion_volume_ml += volume
+            if self._text_is_oxygen(raw.get("drug_label")) or self._text_is_oxygen(
+                raw.get("display_label")
+            ):
+                stats["oxygen_starts"] += 1
+            return
+
+        stats["infusion_count"] += 1
+        stats["infusion_cases"].add(case_id)
+        stats["infusion_drugs"][
+            self._clean_text(
+                payload.get("display_name") or payload.get("label") or raw.get("drug_label")
+            )
+        ] += 1
+        if duration is not None:
+            stats["infusion_durations"].append(duration)
+        if str(raw.get("status") or "").strip().lower() == "active" and stop_dt is None:
+            stats["open_infusions"] += 1
+        stop_payload = self._json_dict(stop_row.get("payload_json")) if stop_row else {}
+        if str(stop_payload.get("auto_stopped_by") or "") == "anesthesia_end":
+            stats["auto_stopped"] += 1
+        volume = self._decimal_ml(
+            raw.get("volume_ml"),
+            payload.get("declared_total_volume_ml"),
+            payload.get("volume_ml"),
+        )
+        if volume is not None:
+            stats["infusion_volume_ml"] += volume
+
+    def _collect_medication_statistics(
+        self,
+        orders_by_case: Mapping[int, list[dict[str, Any]]],
+        timeline: list[dict[str, Any]],
+        case_by_id: Mapping[int, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        stats = self._empty_medication_statistics()
+        self._collect_order_bolus_statistics(orders_by_case, case_by_id, stats)
+        case_ids = set(case_by_id)
+        timeline_children = self._timeline_children_by_parent(timeline)
+        for raw in timeline:
+            event_type = str(raw.get("event_type") or "")
+            if event_type == "bolus":
+                self._collect_timeline_bolus_statistics(raw, case_ids, stats)
+            elif event_type == "infusion_start":
+                self._collect_infusion_statistics(raw, case_by_id, timeline_children, stats)
+        return stats
+
+    @staticmethod
+    def _build_statistics_payload(
+        *,
+        period_days: int,
+        cases: list[dict[str, Any]],
+        by_status: Counter,
+        by_table: Counter,
+        by_date: Counter,
+        by_weekday: Counter,
+        night_count: int,
+        case_stats: dict[str, Any],
+        vital_stats: dict[str, Any],
+        medication_stats: dict[str, Any],
+    ) -> dict[str, Any]:
+        case_values = dict(case_stats)
+        repeated_by_patient = case_values.pop("repeated_by_patient")
+        repeated_by_patient_day = case_values.pop("repeated_by_patient_day")
+        case_values["room_hours"] = sum(case_values["room_durations"]) / 60.0
+
+        medication_values = dict(medication_stats)
+        medication_values["bolus_cases"] = len(medication_values["bolus_cases"])
+        medication_values["infusion_cases"] = len(medication_values["infusion_cases"])
 
         return {
             "period_days": period_days,
-            "total": total,
+            "total": len(cases),
             "by_status": by_status,
             "by_table": by_table,
             "by_date": by_date,
             "by_weekday": by_weekday,
-            "night_count": len(night_cases),
-            "room_durations": room_durations,
-            "room_hours": sum(room_durations) / 60.0,
-            "full_stage_count": full_stage_count,
-            "repeated_anesthesia": repeated_anesthesia,
-            "repeated_surgery": repeated_surgery,
-            "anesthesia_durations": anesthesia_durations,
-            "surgery_durations": surgery_durations,
-            "room_to_anesthesia": room_to_anesthesia,
-            "anesthesia_to_surgery": anesthesia_to_surgery,
-            "surgery_end_to_anesthesia_end": surgery_end_to_anesthesia_end,
-            "anesthesia_types": Counter(case["anesthesia_type"] for case in counted_cases),
-            "anesthesia_type_durations": anesthesia_type_durations,
-            "initial_vitals": len(cases_with_initial_vitals),
-            "vitals_by_case": vitals_count_by_case,
-            "vital_intervals": vital_interval_values,
-            "min_spo2_values": min_spo2_values,
-            "spo2_low_cases": len(cases_spo2_low),
-            "sys_low_cases": len(cases_sys_low),
-            "pulse_high_cases": len(cases_pulse_high),
-            "vitals_after_anesthesia": len(cases_with_vitals_after_anesthesia),
-            "bolus_count": bolus_count,
-            "bolus_cases": len(bolus_cases),
-            "bolus_drugs": bolus_drugs,
-            "bolus_routes": bolus_routes,
-            "bolus_volume_ml": bolus_volume_ml,
-            "infusion_count": infusion_count,
-            "infusion_cases": len(infusion_cases),
-            "open_infusions": open_infusions,
-            "auto_stopped": auto_stopped,
-            "infusion_durations": infusion_durations,
-            "infusion_drugs": infusion_drugs,
-            "infusion_volume_ml": infusion_volume_ml,
-            "gas_starts": gas_starts,
-            "oxygen_starts": oxygen_starts,
-            "gas_changes": gas_changes,
-            "anesthesiologists": anesthesiologists,
-            "anesthetists": anesthetists,
-            "surgeons": surgeons_counter,
-            "nurses": nurses,
-            "anesthesia_pairs": anesthesia_pairs,
-            "surgeon_anesthesia_pairs": surgeon_anesthesia_pairs,
-            "anesth_night": anesth_night,
-            "anesth_emergency": anesth_emergency,
-            "anesth_planned": anesth_planned,
-            "anesthesiologist_durations": anesthesiologist_durations,
-            "surgeon_durations": surgeon_durations,
-            "genders": genders,
-            "age_groups": age_groups,
-            "child_adult": child_adult,
-            "departments": departments,
-            "transfers": transfers,
-            "diagnoses": diagnoses,
-            "mkb_classes": mkb_classes,
+            "night_count": night_count,
+            **case_values,
+            "anesthesia_types": Counter(case["anesthesia_type"] for case in cases),
+            **vital_stats,
+            **medication_values,
             "repeated_patients": sum(1 for count in repeated_by_patient.values() if count > 1),
-            "same_day_repeats": sum(1 for count in repeated_by_patient_day.values() if count > 1),
-            "blood_groups": blood_groups,
-            "blood_rh": blood_rh,
-            "missing_operation_name": missing_operation_name,
-            "missing_anesthesiologist": missing_anesthesiologist,
-            "missing_surgeon": missing_surgeon,
-            "missing_anesthetist": missing_anesthetist,
-            "missing_key_personnel": missing_key_personnel,
-            "missing_transfer": missing_transfer,
-            "missing_height_weight": missing_height_weight,
+            "same_day_repeats": sum(
+                1 for count in repeated_by_patient_day.values() if count > 1
+            ),
         }
+
+    def _calculate_statistics(self) -> dict[str, Any]:
+        if self.db_paths:
+            context = self._fetch_multi_db_context(self.db_paths, self.start_date_str, self.end_date_str)
+        else:
+            context = self._fetch_context(self.db_manager, self.start_date_str, self.end_date_str)
+        timeline_by_case = self._group_statistics_rows(context["timeline"])
+        orders_by_case = self._group_statistics_rows(context["orders"])
+        vitals_by_case = self._group_statistics_rows(context["vitals"])
+
+        now = datetime.now().replace(second=0, microsecond=0)
+        period_days = max(1, (self._end_dt.date() - self._start_dt.date()).days + 1)
+        cases = self._build_statistics_cases(context["cases"], timeline_by_case, now=now)
+
+        counted_cases = cases
+
+        by_status = Counter(case["status_label"] for case in cases)
+        by_table = Counter(case["table_label"] for case in counted_cases)
+        by_date = Counter(case["started_dt"].strftime("%d.%m.%Y") for case in counted_cases)
+        by_weekday = Counter(self._weekday_name(case["started_dt"]) for case in counted_cases)
+        night_count = sum(
+            1 for case in counted_cases if case["started_dt"].hour >= 22 or case["started_dt"].hour < 6
+        )
+        case_stats = self._collect_case_statistics(counted_cases)
+
+        case_by_id = {int(case["operation_case_id"]): case for case in counted_cases}
+        vital_stats = self._collect_vital_statistics(vitals_by_case, case_by_id)
+        medication_stats = self._collect_medication_statistics(
+            orders_by_case,
+            context["timeline"],
+            case_by_id,
+        )
+
+        return self._build_statistics_payload(
+            period_days=period_days,
+            cases=counted_cases,
+            by_status=by_status,
+            by_table=by_table,
+            by_date=by_date,
+            by_weekday=by_weekday,
+            night_count=night_count,
+            case_stats=case_stats,
+            vital_stats=vital_stats,
+            medication_stats=medication_stats,
+        )
 
     def _section_rows(self, stats: dict[str, Any]) -> list[tuple[str, list[tuple[str, str, str]]]]:
         total = int(stats["total"] or 0)
