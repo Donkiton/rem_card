@@ -76,6 +76,7 @@ from rem_card.services.operblock_service import (
     OPERBLOCK_TABLES,
     OperBlockConflictError,
     OperBlockService,
+    OperBlockSourceMovementChangedError,
     normalize_operblock_transfer_department,
     is_complete_operblock_mkb_code,
     normalize_operblock_blood_group,
@@ -7871,7 +7872,9 @@ class OperBlockAdmissionTimeInput(QFrame):
         super().__init__(parent)
         initial = _minute_floor_dt(initial_datetime) or datetime.now().replace(second=0, microsecond=0)
         self._base_datetime = initial
+        self._min_datetime: datetime | None = None
         self._max_datetime = datetime.now().replace(second=0, microsecond=0)
+        self._max_datetime_fixed = False
         self._time_text_updating = False
         self._locked = False
         self._lock_reason = ""
@@ -8054,17 +8057,26 @@ class OperBlockAdmissionTimeInput(QFrame):
             datetime.combine(base.date() + timedelta(days=offset), datetime.min.time()).replace(hour=hour, minute=minute)
             for offset in (-1, 0, 1)
         ]
-        bounded = [item for item in candidates if self._max_datetime is None or item <= self._max_datetime]
+        bounded = [
+            item
+            for item in candidates
+            if (self._min_datetime is None or item >= self._min_datetime)
+            and (self._max_datetime is None or item <= self._max_datetime)
+        ]
         source = bounded or candidates
         return min(source, key=lambda item: abs((item - base).total_seconds()))
 
     def _coerce_datetime(self, value: datetime) -> datetime:
         selected = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
         current_minute = datetime.now().replace(second=0, microsecond=0)
-        if self._max_datetime is None or current_minute > self._max_datetime:
+        if not self._max_datetime_fixed and (
+            self._max_datetime is None or current_minute > self._max_datetime
+        ):
             self._max_datetime = current_minute
         if self._max_datetime is not None and selected > self._max_datetime:
-            return self._max_datetime
+            selected = self._max_datetime
+        if self._min_datetime is not None and selected < self._min_datetime:
+            selected = self._min_datetime
         return selected
 
     def _step_time(self, delta_minutes: int) -> None:
@@ -8090,9 +8102,26 @@ class OperBlockAdmissionTimeInput(QFrame):
 
     def set_datetime(self, value: datetime | str | None) -> None:
         parsed = _minute_floor_dt(_parse_datetime_value(value)) if not isinstance(value, datetime) else _minute_floor_dt(value)
-        selected = parsed or datetime.now().replace(second=0, microsecond=0)
+        selected = self._coerce_datetime(parsed or datetime.now().replace(second=0, microsecond=0))
         self._base_datetime = selected
         self._set_time_input_text(selected.strftime("%H:%M"), select_all=False)
+
+    def set_bounds(
+        self,
+        minimum: datetime | str | None = None,
+        maximum: datetime | str | None = None,
+    ) -> None:
+        self._min_datetime = _minute_floor_dt(_parse_datetime_value(minimum))
+        parsed_maximum = _minute_floor_dt(_parse_datetime_value(maximum))
+        self._max_datetime_fixed = parsed_maximum is not None
+        self._max_datetime = parsed_maximum or datetime.now().replace(second=0, microsecond=0)
+        if (
+            self._min_datetime is not None
+            and self._max_datetime is not None
+            and self._max_datetime < self._min_datetime
+        ):
+            self._max_datetime = self._min_datetime
+        self.set_datetime(self._base_datetime)
 
     def set_locked(self, locked: bool, reason: str = "") -> None:
         self._locked = bool(locked)
@@ -8113,6 +8142,17 @@ class OperBlockAdmissionTimeInput(QFrame):
         if self._locked:
             self.note_label.setText(
                 "Время поступления заблокировано. Отмените внесённые изменения в карте, чтобы снова изменить это время."
+            )
+        elif self._min_datetime is not None:
+            maximum_text = (
+                f" до {self._max_datetime.strftime('%H:%M')}"
+                if self._max_datetime is not None
+                else ""
+            )
+            self.note_label.setText(
+                "Время поступления можно указать с "
+                f"{self._min_datetime.strftime('%H:%M')} (время отправки из РАО)"
+                f"{maximum_text}."
             )
         else:
             self.note_label.setText(
@@ -9091,6 +9131,10 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             self.diagnosis_text_input.setText(diagnosis_text)
         self.operation_name_input.setText(str(payload.get("operation_name") or ""))
         started_at = _parse_datetime_value(payload.get("started_at"))
+        self.admission_time_input.set_bounds(
+            payload.get("started_at_min"),
+            payload.get("started_at_max"),
+        )
         if started_at is not None:
             self.admission_time_input.set_datetime(started_at)
         can_edit_started_at = bool(payload.get("can_edit_started_at", True))
@@ -20134,19 +20178,41 @@ class OperBlockMainWidget(QWidget):
             )
             if reply == CustomMessageBox.Yes:
                 handoff_id = int(candidate["id"])
+        self._enqueue_release_case(
+            int(operation_case_id),
+            handoff_id=handoff_id,
+        )
+
+    def _enqueue_release_case(
+        self,
+        operation_case_id: int,
+        *,
+        handoff_id: int | None,
+        preserve_source_movement: bool = False,
+    ) -> None:
         self._write_pending = True
 
         def operation():
             return self.operblock_service.release_operation_table(
                 operation_case_id,
                 handoff_id=handoff_id,
+                preserve_source_movement=preserve_source_movement,
             )
 
         self._enqueue_write(
-            f"operblock_release_operation_table:{operation_case_id}",
+            (
+                f"operblock_release_operation_table:{operation_case_id}:preserve_source"
+                if preserve_source_movement
+                else f"operblock_release_operation_table:{operation_case_id}"
+            ),
             operation,
             on_success=lambda _result: self._on_release_case_success(operation_case_id),
-            on_error=lambda exc: self._on_release_case_error(exc),
+            on_error=lambda exc: self._on_release_case_error(
+                operation_case_id,
+                handoff_id,
+                preserve_source_movement,
+                exc,
+            ),
         )
 
     def _on_release_case_success(self, operation_case_id: int):
@@ -20159,8 +20225,22 @@ class OperBlockMainWidget(QWidget):
         if callable(migrate):
             migrate()
 
-    def _on_release_case_error(self, exc: Exception):
+    def _on_release_case_error(
+        self,
+        operation_case_id: int,
+        handoff_id: int | None,
+        preserve_source_movement: bool,
+        exc: Exception,
+    ):
         self._write_pending = False
+        if isinstance(exc, OperBlockSourceMovementChangedError) and not preserve_source_movement:
+            CustomMessageBox.warning(self, "Освободить стол", str(exc))
+            self._enqueue_release_case(
+                int(operation_case_id),
+                handoff_id=handoff_id,
+                preserve_source_movement=True,
+            )
+            return
         CustomMessageBox.warning(self, "Освободить стол", str(exc))
         self.refresh_board(force=True)
         if self._current_operation_case_id:

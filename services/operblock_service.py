@@ -129,6 +129,10 @@ class OperBlockConflictError(RuntimeError):
     pass
 
 
+class OperBlockSourceMovementChangedError(OperBlockConflictError):
+    """The linked RAO movement changed before the operation table was released."""
+
+
 @dataclass(frozen=True)
 class OperBlockPatientInput:
     table_code: str
@@ -3517,6 +3521,50 @@ class OperBlockService:
             )
 
     @staticmethod
+    def _linked_handoff_dispatched_at(
+        cursor: sqlite3.Cursor,
+        case: Mapping[str, Any],
+        *,
+        required: bool = False,
+    ) -> datetime | None:
+        handoff_id = case.get("handoff_id")
+        if handoff_id in (None, ""):
+            return None
+        source_rao_admission_id = case.get("source_rao_admission_id")
+        row = cursor.execute(
+            """
+            SELECT dispatched_at
+            FROM operblock_handoffs
+            WHERE id = ?
+              AND (? IS NULL OR source_admission_id = ?)
+            LIMIT 1
+            """,
+            (
+                int(handoff_id),
+                source_rao_admission_id,
+                source_rao_admission_id,
+            ),
+        ).fetchone()
+        dispatched_at = _parse_dt(row["dispatched_at"]) if row else None
+        if required and dispatched_at is None:
+            raise OperBlockConflictError(
+                "Не удалось определить время отправки пациента из РАО. Обновите данные оперблока."
+            )
+        return _minute_floor(dispatched_at) if dispatched_at is not None else None
+
+    @staticmethod
+    def _validate_started_at_not_before_rao_dispatch(
+        started_at: datetime,
+        dispatched_at: datetime | None,
+    ) -> None:
+        if dispatched_at is None or _minute_floor(started_at) >= _minute_floor(dispatched_at):
+            return
+        raise ValueError(
+            "Время поступления в оперблок не может быть раньше времени отправки из РАО "
+            f"({dispatched_at.strftime('%H:%M')})."
+        )
+
+    @staticmethod
     def _set_stage_payload_text(payload: dict[str, Any], key: str, value: str) -> None:
         if value:
             payload[key] = value
@@ -3642,10 +3690,18 @@ class OperBlockService:
             "diagnosis_text": str(patient.get("diagnosis_text") or ""),
             "department_profile": str(patient.get("department_profile") or ""),
             "started_at": handoff.get("expected_arrival_at"),
-            "can_edit_started_at": False,
-            "started_at_edit_lock_reason": (
-                "Время поступления рассчитано как время отправки из РАО плюс 5 минут."
-            ),
+            "started_at_min": handoff.get("dispatched_at"),
+            "started_at_max": max(
+                filter(
+                    None,
+                    (
+                        _parse_dt(handoff.get("expected_arrival_at")),
+                        _minute_floor(datetime.now()),
+                    ),
+                )
+            ).isoformat(timespec="seconds"),
+            "can_edit_started_at": True,
+            "started_at_edit_lock_reason": "",
             "preop_sys": vitals.get("sys"),
             "preop_dia": vitals.get("dia"),
             "preop_pulse": vitals.get("pulse"),
@@ -3774,8 +3830,19 @@ class OperBlockService:
                 expected_arrival = _parse_dt(handoff["expected_arrival_at"])
                 if expected_arrival is None:
                     raise OperBlockConflictError("Не удалось определить время поступления из РАО.")
-                case_started_text = _minute_floor(expected_arrival).isoformat(timespec="seconds")
-                case_age = storage_age_from_birth_date(birth_date, expected_arrival)
+                dispatched_at = _parse_dt(handoff["dispatched_at"])
+                if dispatched_at is None:
+                    raise OperBlockConflictError("Не удалось определить время отправки пациента из РАО.")
+                dispatched_at = _minute_floor(dispatched_at)
+                self._validate_started_at_not_before_rao_dispatch(started_dt, dispatched_at)
+                latest_allowed = max(
+                    _minute_floor(expected_arrival),
+                    _minute_floor(datetime.now()) + timedelta(minutes=1),
+                )
+                if started_dt > latest_allowed:
+                    raise ValueError("Время поступления в оперблок не может быть позже текущего времени.")
+                case_started_text = started_text
+                case_age = storage_age_from_birth_date(birth_date, started_dt)
 
             existing = cursor.execute(
                 "SELECT id FROM operation_cases WHERE table_code = ? AND status = 'active' LIMIT 1",
@@ -3953,10 +4020,12 @@ class OperBlockService:
 
     def get_operation_case_form_data(self, operation_case_id: int) -> dict[str, Any]:
         validate_operblock_runtime_path(self.db)
+        handoff_expr = self._operation_case_column_expr("handoff_id")
+        source_rao_expr = self._operation_case_column_expr("source_rao_admission_id")
 
         def operation(cursor: sqlite3.Cursor):
             case = cursor.execute(
-                """
+                f"""
                 SELECT
                     oc.id AS operation_case_id,
                     oc.patient_id,
@@ -3965,6 +4034,8 @@ class OperBlockService:
                     oc.status AS case_status,
                     oc.started_at,
                     oc.ended_at,
+                    {handoff_expr},
+                    {source_rao_expr},
                     t.display_name AS table_display_name,
                     p.full_name,
                     p.birth_date,
@@ -4052,13 +4123,37 @@ class OperBlockService:
                 preop_spo2 = data.get("preop_spo2")
                 vitals_source = "case"
             started_at_edit_lock_reason = self._operation_started_at_edit_lock_reason(cursor, data)
+            started_at_min = self._linked_handoff_dispatched_at(cursor, data)
+            linked_started_at = started_at_min is not None
+            current_started_at = _parse_dt(data.get("started_at"))
+            started_at_max = None
+            if linked_started_at and current_started_at is not None:
+                if started_at_edit_lock_reason:
+                    started_at_max = _minute_floor(current_started_at)
+                else:
+                    started_at_max = max(
+                        _minute_floor(current_started_at),
+                        _minute_floor(datetime.now()),
+                    )
             return {
                 "operation_case_id": int(data.get("operation_case_id") or 0),
                 "table_code": data.get("table_code") or "",
                 "table_name": data.get("table_display_name") or "",
                 "started_at": data.get("started_at"),
-                "can_edit_started_at": not bool(started_at_edit_lock_reason),
-                "started_at_edit_lock_reason": started_at_edit_lock_reason,
+                "started_at_min": (
+                    started_at_min.isoformat(timespec="seconds")
+                    if started_at_min is not None
+                    else None
+                ),
+                "started_at_max": (
+                    started_at_max.isoformat(timespec="seconds")
+                    if started_at_max is not None
+                    else None
+                ),
+                "can_edit_started_at": linked_started_at or not bool(started_at_edit_lock_reason),
+                "started_at_edit_lock_reason": (
+                    "" if linked_started_at else started_at_edit_lock_reason
+                ),
                 "history_number": data.get("history_number") or "",
                 "full_name": data.get("full_name") or "",
                 "gender": data.get("patient_gender") or "",
@@ -4110,8 +4205,6 @@ class OperBlockService:
         last_name, first_name, middle_name = _split_name(full_name)
         now = _now_text()
         requested_started_at = _minute_floor(data.started_at) if data.started_at is not None else None
-        if requested_started_at is not None and requested_started_at > _minute_floor(datetime.now()) + timedelta(minutes=1):
-            raise ValueError("Время поступления в оперблок не может быть позже текущего времени.")
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
@@ -4122,9 +4215,27 @@ class OperBlockService:
                 raise OperBlockConflictError("У операции не задано время поступления. Обновите список оперблока.")
             effective_started_at = requested_started_at or _minute_floor(old_started_at)
             started_at_changed = _minute_floor(old_started_at) != effective_started_at
+            dispatched_at = self._linked_handoff_dispatched_at(
+                cursor,
+                case,
+                required=case.get("handoff_id") not in (None, ""),
+            )
+            self._validate_started_at_not_before_rao_dispatch(effective_started_at, dispatched_at)
+            if (
+                started_at_changed
+                and effective_started_at
+                > max(_minute_floor(old_started_at), _minute_floor(datetime.now()) + timedelta(minutes=1))
+            ):
+                raise ValueError("Время поступления в оперблок не может быть позже текущего времени.")
             initial_vital_to_move = None
+            moving_linked_case_earlier = False
             if started_at_changed:
-                self._assert_started_at_can_be_changed(cursor, case)
+                moving_linked_case_earlier = (
+                    dispatched_at is not None
+                    and effective_started_at < _minute_floor(old_started_at)
+                )
+                if not moving_linked_case_earlier:
+                    self._assert_started_at_can_be_changed(cursor, case)
                 initial_vital_to_move = self._editable_initial_vital_row_for_started_at(cursor, case)
             started_text = effective_started_at.isoformat(timespec="seconds")
             age = storage_age_from_birth_date(birth_date, effective_started_at)
@@ -4262,7 +4373,9 @@ class OperBlockService:
             case_for_vitals = dict(case)
             case_for_vitals["started_at"] = started_text
             case_for_vitals["ended_at"] = case.get("ended_at")
-            if _has_case_vitals(data):
+            if _has_case_vitals(data) and (
+                not moving_linked_case_earlier or initial_vital_to_move is not None
+            ):
                 self._upsert_initial_vitals_for_case(cursor, case_for_vitals, data)
             synced = self._sync_case_metadata_to_stage_payloads(
                 cursor,
@@ -4291,7 +4404,8 @@ class OperBlockService:
         operation_case_id: int,
         *,
         handoff_id: int | None = None,
-    ) -> dict[str, int]:
+        preserve_source_movement: bool = False,
+    ) -> dict[str, Any]:
         validate_operblock_runtime_path(self.db)
         released_dt = _minute_floor(datetime.now())
         now = released_dt.isoformat(timespec="seconds")
@@ -4338,6 +4452,8 @@ class OperBlockService:
             )
             effective_return_dt = released_dt + timedelta(minutes=5)
             effective_return_text = effective_return_dt.isoformat(timespec="seconds")
+            source_event = None
+            source_movement_preserved = False
             if return_to_rao:
                 source_event = cursor.execute(
                     """
@@ -4349,10 +4465,13 @@ class OperBlockService:
                     (source_rao_admission_id,),
                 ).fetchone()
                 if not source_event or str(source_event["status"] or "") != PatientStatus.OR.value:
-                    raise OperBlockConflictError(
-                        "Движение исходной карты РАО уже изменилось. "
-                        "Стол не освобождён; обновите данные пациента."
-                    )
+                    if not preserve_source_movement:
+                        raise OperBlockSourceMovementChangedError(
+                            "Движение пациента в исходной карте РАО уже изменено. "
+                            "Стол будет освобождён без изменения движения пациента "
+                            "в исходной карте."
+                        )
+                    source_movement_preserved = True
             cursor.execute(
                 """
                 UPDATE operation_cases
@@ -4406,39 +4525,46 @@ class OperBlockService:
             )
             if linked_handoff_id is not None and source_rao_admission_id is not None:
                 if return_to_rao:
-                    cursor.execute(
-                        """
-                        UPDATE patient_status_events
-                        SET end_time = ?,
-                            updated_at = ?,
-                            last_modified_by = 'operblock',
-                            revision = COALESCE(revision, 0) + 1
-                        WHERE admission_id = ?
-                          AND status = 'OR'
-                          AND end_time IS NULL
-                        """,
-                        (effective_return_text, now, source_rao_admission_id),
-                    )
-                    if cursor.rowcount != 1:
-                        raise OperBlockConflictError(
-                            "Движение исходной карты РАО изменилось другим пользователем."
+                    if source_movement_preserved:
+                        effective_return_text = (
+                            str(source_event["start_time"] or "") or None
+                            if source_event is not None
+                            else None
                         )
-                    cursor.execute(
-                        """
-                        INSERT INTO patient_status_events (
-                            admission_id, status, reason_type, reason_text, start_time,
-                            created_by, created_at, updated_at, last_modified_by
-                        ) VALUES (?, ?, 'operblock_return', ?, ?, 'operblock', ?, ?, 'operblock')
-                        """,
-                        (
-                            source_rao_admission_id,
-                            PatientStatus.ACTIVE.value,
-                            "Возврат из операционной",
-                            effective_return_text,
-                            now,
-                            now,
-                        ),
-                    )
+                    else:
+                        cursor.execute(
+                            """
+                            UPDATE patient_status_events
+                            SET end_time = ?,
+                                updated_at = ?,
+                                last_modified_by = 'operblock',
+                                revision = COALESCE(revision, 0) + 1
+                            WHERE admission_id = ?
+                              AND status = 'OR'
+                              AND end_time IS NULL
+                            """,
+                            (effective_return_text, now, source_rao_admission_id),
+                        )
+                        if cursor.rowcount != 1:
+                            raise OperBlockConflictError(
+                                "Движение исходной карты РАО изменилось другим пользователем."
+                            )
+                        cursor.execute(
+                            """
+                            INSERT INTO patient_status_events (
+                                admission_id, status, reason_type, reason_text, start_time,
+                                created_by, created_at, updated_at, last_modified_by
+                            ) VALUES (?, ?, 'operblock_return', ?, ?, 'operblock', ?, ?, 'operblock')
+                            """,
+                            (
+                                source_rao_admission_id,
+                                PatientStatus.ACTIVE.value,
+                                "Возврат из операционной",
+                                effective_return_text,
+                                now,
+                                now,
+                            ),
+                        )
                     cursor.execute(
                         """
                         UPDATE operation_cases
@@ -4459,6 +4585,7 @@ class OperBlockService:
                         transfer_department = ?,
                         released_at = ?,
                         effective_return_at = ?,
+                        source_movement_preserved = ?,
                         last_modified_by = 'operblock',
                         revision = COALESCE(revision, 0) + 1
                     WHERE id = ?
@@ -4470,6 +4597,7 @@ class OperBlockService:
                         transfer_department or None,
                         now,
                         effective_return_text if return_to_rao else None,
+                        1 if source_movement_preserved else 0,
                         linked_handoff_id,
                         int(operation_case_id),
                     ),
@@ -4478,7 +4606,11 @@ class OperBlockService:
                     raise OperBlockConflictError(
                         "Связь с исходной картой РАО уже изменена другим пользователем."
                     )
-            return {"operation_case_id": int(operation_case_id), "admission_id": admission_id}
+            return {
+                "operation_case_id": int(operation_case_id),
+                "admission_id": admission_id,
+                "source_movement_preserved": source_movement_preserved,
+            }
 
         return dict(self.db.run_write_operation(operation, source="operblock_release_operation_table"))
 

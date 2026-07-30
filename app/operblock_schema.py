@@ -15,7 +15,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1011
+OPERBLOCK_SCHEMA_VERSION = 1012
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -166,6 +166,9 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "revision",
         "parent_event_id",
     }.issubset(timeline_columns):
+        return False
+    handoff_columns = _columns(conn, "operblock_handoffs")
+    if "source_movement_preserved" not in handoff_columns:
         return False
     row = conn.execute(
         "SELECT COUNT(*) FROM operating_tables WHERE code IN ('emergency', 'planned')",
@@ -321,6 +324,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             transfer_department TEXT,
             released_at TEXT,
             effective_return_at TEXT,
+            source_movement_preserved INTEGER NOT NULL DEFAULT 0,
             created_by TEXT,
             created_by_client_id TEXT,
             created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
@@ -346,6 +350,13 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             FOREIGN KEY (accepted_table_code) REFERENCES operating_tables(code)
         )
         """
+    )
+    _ensure_column(
+        conn,
+        "operblock_handoffs",
+        "source_movement_preserved",
+        "INTEGER NOT NULL DEFAULT 0",
+        logger,
     )
     cursor.execute(
         """
@@ -615,7 +626,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     _mark_schema_migration(
         conn,
         OPERBLOCK_SCHEMA_VERSION,
-        "operblock RAO handoffs and soft admission merges",
+        "operblock RAO handoff source movement preservation",
     )
 
 
