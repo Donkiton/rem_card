@@ -10,7 +10,13 @@ from typing import Any, Mapping, Optional
 
 from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
 from rem_card.app.local_metrics import record_metric
-from rem_card.app.sqlite_shared import FileWriteLock, backup_connection, configure_connection, run_quick_check
+from rem_card.app.sqlite_shared import (
+    FileWriteLock,
+    backup_connection,
+    configure_connection,
+    describe_sqlite_lock_holder,
+    run_quick_check,
+)
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
@@ -20,6 +26,27 @@ ROTATION_BLOCKING_EMERGENCY_STATUSES = {"active", "merge_pending", "merging", "m
 MANUAL_ROTATION_UNDO_STATE_FILE = "manual_rotation_undo.json"
 MANUAL_ROTATION_UNDO_WINDOW = timedelta(hours=24)
 REPLICA_SNAPSHOT_WAIT_SEC = 20.0
+
+
+def _busy_lock_result(status: str, lock_path: str, logger: logging.Logger) -> dict[str, Any]:
+    owner = describe_sqlite_lock_holder(lock_path)
+    logger.warning(
+        "DB lifecycle lock is busy: status=%s path=%s holder_host=%s holder_pid=%s "
+        "holder_user_id=%s holder_source=%s readable=%s reason=%s",
+        status,
+        lock_path,
+        owner.get("holder_host"),
+        owner.get("holder_pid"),
+        owner.get("holder_user_id"),
+        owner.get("holder_source"),
+        owner.get("readable"),
+        owner.get("reason"),
+    )
+    return {
+        "status": status,
+        "lock_path": lock_path,
+        "lock_owner": owner,
+    }
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -961,7 +988,7 @@ def _run_rotation_under_lock(
         if db_lock_path:
             db_lock = FileWriteLock(db_lock_path, stale_timeout_sec=10 * 60, logger=logger)
             if not db_lock.acquire(owner_id=owner_id, source="db_rotation"):
-                return {"status": "db_lock_busy"}
+                return _busy_lock_result("db_lock_busy", db_lock_path, logger)
 
         failure, backup_path, fingerprint = _prepare_rotation_source(
             db_path=db_path,
@@ -1062,7 +1089,7 @@ def maybe_rotate_database_if_due(
     )
     owner_id = f"{socket.gethostname()}:{os.getpid()}:db_rotation"
     if not lock.acquire(owner_id=owner_id, source="db_rotation"):
-        return {"status": "rotation_lock_busy"}
+        return _busy_lock_result("rotation_lock_busy", rotation_lock_path, logger)
     record_metric(
         "db_rotation_lock_created",
         1,
@@ -1125,7 +1152,7 @@ def cancel_manual_rotation(
     )
     owner_id = f"{socket.gethostname()}:{os.getpid()}:db_rotation_undo"
     if not lock.acquire(owner_id=owner_id, source="db_rotation_undo"):
-        return {"status": "rotation_lock_busy"}
+        return _busy_lock_result("rotation_lock_busy", rotation_lock_path, logger)
     db_lock = None
     moved_new_path = ""
     try:
@@ -1141,7 +1168,7 @@ def cancel_manual_rotation(
         if db_lock_path:
             db_lock = FileWriteLock(db_lock_path, stale_timeout_sec=10 * 60, logger=logger)
             if not db_lock.acquire(owner_id=owner_id, source="db_rotation_undo"):
-                return {"status": "db_lock_busy"}
+                return _busy_lock_result("db_lock_busy", db_lock_path, logger)
         active_role_locks = find_active_rotation_role_locks(
             blocked_role_lock_paths,
             ignored_lock_nonces=ignored_lock_nonces,

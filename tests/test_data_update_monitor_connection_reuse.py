@@ -130,8 +130,16 @@ def test_database_rotation_is_blocked_by_doctor_session_lock(tmp_path):
 
     blockers = manager._rotation_blocking_role_lock_paths()
 
-    assert set(blockers) == {"doctor", "nurse", "nurse_emergency"}
+    assert set(blockers) == {
+        "doctor",
+        "nurse",
+        "nurse_emergency",
+        "operblock",
+        "operblock_emergency",
+        "operblock_planned",
+    }
     assert Path(blockers["doctor"]) == tmp_path / "session_locks" / "doctor.lock"
+    assert Path(blockers["operblock_planned"]) == tmp_path / "session_locks" / "operblock_planned.lock"
 
 
 def test_monitor_opens_and_closes_connection_in_its_own_thread():
@@ -150,3 +158,27 @@ def test_monitor_opens_and_closes_connection_in_its_own_thread():
     assert conn.closed is True
     assert conn.open_thread_id == conn.close_thread_id
     assert conn.open_thread_id != threading.get_ident()
+
+
+def test_rotation_pause_waits_until_monitor_connection_is_closed():
+    db = _Db()
+    service = _DataService(db)
+    monitor = DataUpdateMonitor(service, poll_interval_sec=0.5, enabled=True)
+    monitor.start()
+    deadline = time.monotonic() + 2.0
+    while db.open_count == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert monitor.pause_and_wait(2.0) is True
+    first = db.connections[0]
+    assert first.closed is True
+    assert first.open_thread_id == first.close_thread_id
+
+    monitor.set_enabled(True)
+    deadline = time.monotonic() + 2.0
+    while db.open_count < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    monitor.stop()
+    assert monitor.wait(2000)
+
+    assert db.open_count == 2

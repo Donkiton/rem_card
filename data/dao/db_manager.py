@@ -102,6 +102,7 @@ RUNTIME_BACKUP_MAX_TOTAL_BYTES = max(
 )
 RUNTIME_BACKUP_RETENTION_DAYS = max(3, int(os.environ.get("REMCARD_RUNTIME_BACKUP_RETENTION_DAYS", "21")))
 PERIODIC_BACKUP_INTERVAL_SEC = 10 * 60
+AUTO_ROTATION_DB_LOCK_RETRY_DELAYS_SEC = (0.5, 1.5)
 RUNTIME_AUTO_BACKUPS_ENABLED = os.environ.get("REMCARD_RUNTIME_AUTO_BACKUPS", "").strip().lower() in {
     "1",
     "true",
@@ -376,6 +377,8 @@ class DatabaseManager:
         self._active_write_count = 0
         self._last_write_activity_ts = 0.0
         self._write_queue_idle_probe: Optional[Callable[[], bool]] = None
+        self._rotation_quiesce_begin: Optional[Callable[[], dict[str, Any]]] = None
+        self._rotation_quiesce_end: Optional[Callable[[dict[str, Any]], None]] = None
         self._close_state_lock = threading.Lock()
         self._closing = False
         self._startup_quickcheck_next_allowed_ts = 0.0
@@ -437,6 +440,40 @@ class DatabaseManager:
 
     def set_write_queue_idle_probe(self, probe: Optional[Callable[[], bool]]):
         self._write_queue_idle_probe = probe
+
+    def set_rotation_quiesce_hooks(
+        self,
+        begin: Optional[Callable[[], dict[str, Any]]],
+        end: Optional[Callable[[dict[str, Any]], None]],
+    ) -> None:
+        self._rotation_quiesce_begin = begin
+        self._rotation_quiesce_end = end
+
+    def _begin_rotation_quiesce(self) -> dict[str, Any]:
+        begin = getattr(self, "_rotation_quiesce_begin", None)
+        if not callable(begin):
+            return {"ok": True}
+        try:
+            result = dict(begin() or {})
+        except Exception as exc:
+            logger.error("Failed to quiesce DataService for database rotation: %s", exc, exc_info=True)
+            return {
+                "ok": False,
+                "reason": "quiesce_hook_failed",
+                "error": str(exc),
+            }
+        if not result.get("ok"):
+            logger.warning("Database rotation quiesce rejected: %s", result)
+        return result
+
+    def _end_rotation_quiesce(self, token: dict[str, Any]) -> None:
+        end = getattr(self, "_rotation_quiesce_end", None)
+        if not callable(end):
+            return
+        try:
+            end(dict(token or {}))
+        except Exception as exc:
+            logger.error("Failed to resume DataService after database rotation: %s", exc, exc_info=True)
 
     @contextmanager
     def _mark_write_activity(self):
@@ -731,6 +768,9 @@ class DatabaseManager:
             "doctor": os.path.join(session_locks_dir, "doctor.lock"),
             "nurse": os.path.join(session_locks_dir, "nurse.lock"),
             "nurse_emergency": os.path.join(session_locks_dir, "nurse_emergency.lock"),
+            "operblock": os.path.join(session_locks_dir, "operblock.lock"),
+            "operblock_emergency": os.path.join(session_locks_dir, "operblock_emergency.lock"),
+            "operblock_planned": os.path.join(session_locks_dir, "operblock_planned.lock"),
         }
 
     def _rotation_blocking_emergency_roots(self) -> list[str]:
@@ -779,20 +819,40 @@ class DatabaseManager:
         )
 
     def _maybe_rotate_db_lifecycle(self, *, source: str = "auto_rotation") -> dict:
-        result = maybe_rotate_database_if_due(
-            db_path=self.db_path,
-            archive_dir=os.path.dirname(self.db_path),
-            rotation_lock_path=getattr(self, "medical_db_rotation_lock_path", DB_ROTATION_LOCK_PATH),
-            db_lock_path=getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
-            logger=logger,
-            max_age_days=180,
-            backup_dir=getattr(self, "medical_backups_valid_dir", BACKUPS_VALID_DIR),
-            invalid_dir=getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR),
-            runtime_mode=getattr(self.runtime_context, "mode", "network"),
-            source=source,
-            blocked_role_lock_paths=self._rotation_blocking_role_lock_paths(),
-            blocked_emergency_roots=self._rotation_blocking_emergency_roots(),
-        )
+        result: dict[str, Any] = {}
+        retry_delays = tuple(AUTO_ROTATION_DB_LOCK_RETRY_DELAYS_SEC)
+        for attempt in range(len(retry_delays) + 1):
+            result = maybe_rotate_database_if_due(
+                db_path=self.db_path,
+                archive_dir=os.path.dirname(self.db_path),
+                rotation_lock_path=getattr(self, "medical_db_rotation_lock_path", DB_ROTATION_LOCK_PATH),
+                db_lock_path=getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
+                logger=logger,
+                max_age_days=180,
+                backup_dir=getattr(self, "medical_backups_valid_dir", BACKUPS_VALID_DIR),
+                invalid_dir=getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR),
+                runtime_mode=getattr(self.runtime_context, "mode", "network"),
+                source=source,
+                blocked_role_lock_paths=self._rotation_blocking_role_lock_paths(),
+                blocked_emergency_roots=self._rotation_blocking_emergency_roots(),
+            )
+            if result.get("status") != "db_lock_busy":
+                break
+            result = {**result, "attempts": attempt + 1}
+            if attempt >= len(retry_delays):
+                break
+            owner = dict(result.get("lock_owner") or {})
+            delay_sec = float(retry_delays[attempt])
+            logger.warning(
+                "Automatic DB rotation will retry after db_lock_busy: "
+                "attempt=%s delay_sec=%.1f holder=%s:%s source=%s",
+                attempt + 1,
+                delay_sec,
+                owner.get("holder_host") or "unknown",
+                owner.get("holder_pid") or "unknown",
+                owner.get("holder_source") or "unknown",
+            )
+            time.sleep(delay_sec)
         status = result.get("status")
         if status in (
             "rotated",
@@ -844,6 +904,13 @@ class DatabaseManager:
                 "blocked_emergency_sessions": active_emergency_sessions,
             }
 
+        quiesce_token = self._begin_rotation_quiesce()
+        if not quiesce_token.get("ok"):
+            return {
+                "status": "rotation_quiesce_failed",
+                **quiesce_token,
+            }
+
         restart_local_replica = bool(self._local_replica)
         if restart_local_replica:
             self._stop_local_replica_sync()
@@ -883,6 +950,7 @@ class DatabaseManager:
         finally:
             if restart_local_replica and not self._closed:
                 self._start_local_replica_sync()
+            self._end_rotation_quiesce(quiesce_token)
 
     def cancel_manual_rotation(self, rotation_owner_context: Optional[dict[str, str]] = None) -> dict:
         active_role_locks = self.active_rotation_role_locks(rotation_owner_context)
@@ -893,6 +961,12 @@ class DatabaseManager:
             return {
                 "status": "deferred_active_emergency_session",
                 "blocked_emergency_sessions": active_emergency_sessions,
+            }
+        quiesce_token = self._begin_rotation_quiesce()
+        if not quiesce_token.get("ok"):
+            return {
+                "status": "rotation_quiesce_failed",
+                **quiesce_token,
             }
         restart_local_replica = bool(self._local_replica)
         if restart_local_replica:
@@ -922,6 +996,7 @@ class DatabaseManager:
         finally:
             if restart_local_replica and not self._closed:
                 self._start_local_replica_sync()
+            self._end_rotation_quiesce(quiesce_token)
 
     def _init_connections(self):
         logger.info("Initializing unified DB connection at %s", self.db_path)

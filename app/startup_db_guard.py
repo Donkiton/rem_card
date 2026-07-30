@@ -26,6 +26,7 @@ from rem_card.app.sqlite_shared import (
     NETWORK_SAFE_DB_PROFILE,
     FileWriteLock,
     configure_connection,
+    describe_sqlite_lock_holder,
     run_quick_check,
     validate_sqlite_file,
 )
@@ -751,6 +752,26 @@ def _read_lock_json(path: str):
         return {"unreadable": True}
 
 
+def _lock_owner_text(holder: dict[str, Any] | None) -> str:
+    data = dict(holder or {})
+    if not data.get("readable"):
+        return "владелец не определён"
+    host = str(data.get("holder_host") or "").strip()
+    pid = data.get("holder_pid")
+    source = str(data.get("holder_source") or "").strip()
+    user_id = str(data.get("holder_user_id") or "").strip()
+    parts = []
+    if host:
+        parts.append(f"компьютер {host}")
+    if pid not in (None, ""):
+        parts.append(f"PID {pid}")
+    if source:
+        parts.append(f"операция {source}")
+    if user_id and user_id not in {host, str(pid or "")}:
+        parts.append(f"владелец {user_id}")
+    return ", ".join(parts) or "владелец не определён"
+
+
 def _host_aliases() -> set[str]:
     aliases: set[str] = set()
     for value in (socket.gethostname(), socket.getfqdn(), os.environ.get("COMPUTERNAME"), os.environ.get("HOSTNAME")):
@@ -1149,6 +1170,66 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
 
     owner_id = f"{socket.gethostname()}:{os.getpid()}:startup_db_guard"
     db_path = get_journal_db_path(baza_dir)
+    rotation_lock_path = os.path.join(os.path.dirname(db_path), "db_rotation.lock")
+    rotation_gate = FileWriteLock(
+        rotation_lock_path,
+        stale_timeout_sec=60.0,
+        logger=None,
+        allow_expired_lease_cleanup=True,
+        allow_legacy_replica_cleanup=True,
+        allow_malformed_cleanup=True,
+        malformed_quarantine_dir=os.path.join(baza_dir, "quarantine", "locks"),
+    )
+    if not rotation_gate.acquire(
+        owner_id=owner_id,
+        source="startup_db_guard_rotation_probe",
+    ):
+        rotation_owner = describe_sqlite_lock_holder(rotation_lock_path)
+        owner_text = _lock_owner_text(rotation_owner)
+        technical_reason = (
+            f"database rotation lock is active: {rotation_lock_path}; "
+            f"owner={owner_text}; read_reason={rotation_owner.get('reason')}"
+        )
+        write_audit_event(
+            "db_guard_blocked_rotation",
+            baza_dir=baza_dir,
+            role=role,
+            details={
+                "db_path": db_path,
+                "rotation_lock_path": rotation_lock_path,
+                "lock_owner": rotation_owner,
+            },
+        )
+        return StartupGuardResult(
+            ok=False,
+            user_message=(
+                "База данных сейчас обслуживается: выполняется ротация. "
+                "Закройте этот запуск и повторите попытку после завершения.\n\n"
+                f"Блокировка: {owner_text}."
+            ),
+            technical_reason=technical_reason,
+            baza_dir=baza_dir,
+        )
+    if not rotation_gate.release():
+        technical_reason = f"failed to release startup rotation probe: {rotation_lock_path}"
+        write_audit_event(
+            "db_guard_failed",
+            baza_dir=baza_dir,
+            role=role,
+            details={
+                "stage": "rotation_probe_release",
+                "rotation_lock_path": rotation_lock_path,
+            },
+        )
+        return StartupGuardResult(
+            ok=False,
+            user_message=(
+                "Не удалось освободить защитную блокировку базы после проверки. "
+                "Повторите запуск; если ошибка повторится, сообщите ответственному."
+            ),
+            technical_reason=technical_reason,
+            baza_dir=baza_dir,
+        )
     try:
         ok, result, confirmed_corruption = _check_quick_with_retries(
             db_path,

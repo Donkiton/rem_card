@@ -188,6 +188,11 @@ class Container:
             logger.info("[OPERBLOCK DB] background change monitor disabled for writer role")
         if hasattr(self.db_manager, "set_write_queue_idle_probe"):
             self.db_manager.set_write_queue_idle_probe(self.data_service.is_write_queue_idle)
+        if hasattr(self.db_manager, "set_rotation_quiesce_hooks"):
+            self.db_manager.set_rotation_quiesce_hooks(
+                self.data_service.pause_for_database_rotation,
+                self.data_service.resume_after_database_rotation,
+            )
         self.emergency_standby_scheduler = self._create_emergency_standby_scheduler(role)
         self.emergency_restore_probe_scheduler = self._create_emergency_restore_probe_scheduler(role)
 
