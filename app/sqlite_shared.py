@@ -1595,6 +1595,22 @@ class FileWriteLock:
             return False
 
 
+@dataclass
+class _WriteTransactionState:
+    source: str
+    options: dict[str, Any]
+    lock_wait_started: float
+    thread_id: int
+    is_interactive_write: bool
+    timeout_ms: int
+    deadline: float | None
+    metric_context: dict[str, Any]
+    attempt: int = 0
+    last_exc: Exception | None = None
+    lock_acquired: bool = False
+    lock_held_started: float | None = None
+
+
 class SQLiteWriteController:
     def __init__(
         self,
@@ -1716,6 +1732,492 @@ class SQLiteWriteController:
             foreground_lease_id=str(options.get("foreground_lease_id") or ""),
         ) from exc
 
+    def _make_write_transaction_state(
+        self,
+        source: str,
+        write_options: Optional[dict[str, Any]],
+    ) -> _WriteTransactionState:
+        lock_wait_started = time.perf_counter()
+        options = dict(write_options or {})
+        role = str(options.get("role") or "").strip().lower()
+        metadata_source = str(options.get("source") or "")
+        interactive = bool(options.get("interactive"))
+        is_interactive_opblock = interactive and role.startswith("operblock")
+        is_interactive_clinical_write = interactive and (
+            (role == "doctor" and metadata_source.startswith("ivl_"))
+            or (
+                role == "nurse"
+                and metadata_source.startswith("nurse_order_mark:")
+            )
+        )
+        is_interactive_write = (
+            is_interactive_opblock or is_interactive_clinical_write
+        )
+        timeout_ms = (
+            _bounded_opblock_interactive_timeout_ms(options.get("timeout_ms"))
+            if is_interactive_write
+            else SQLITE_BUSY_TIMEOUT_MS
+        )
+        deadline = (
+            lock_wait_started + (timeout_ms / 1000.0)
+            if is_interactive_write
+            else None
+        )
+        return _WriteTransactionState(
+            source=source,
+            options=options,
+            lock_wait_started=lock_wait_started,
+            thread_id=threading.get_ident(),
+            is_interactive_write=is_interactive_write,
+            timeout_ms=timeout_ms,
+            deadline=deadline,
+            metric_context=self._write_metric_context(
+                options,
+                interactive=is_interactive_write,
+            ),
+        )
+
+    def _override_interactive_busy_timeout(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+    ) -> tuple[int | None, bool]:
+        if not state.is_interactive_write:
+            return None, False
+        try:
+            row = conn.execute("PRAGMA busy_timeout").fetchone()
+            original_busy_timeout_ms = int(row[0]) if row else SQLITE_BUSY_TIMEOUT_MS
+        except Exception:
+            original_busy_timeout_ms = SQLITE_BUSY_TIMEOUT_MS
+        begin_busy_timeout_ms = min(
+            max(100, int(self.retry_delay_sec * 1000.0)),
+            state.timeout_ms,
+        )
+        conn.execute(f"PRAGMA busy_timeout = {begin_busy_timeout_ms}")
+        return original_busy_timeout_ms, True
+
+    def _restore_busy_timeout(
+        self,
+        conn: sqlite3.Connection,
+        original_busy_timeout_ms: int | None,
+        busy_timeout_overridden: bool,
+    ) -> None:
+        if not busy_timeout_overridden or original_busy_timeout_ms is None:
+            return
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {int(original_busy_timeout_ms)}")
+        except Exception:
+            pass
+
+    def _raise_if_interactive_deadline_expired(
+        self,
+        state: _WriteTransactionState,
+    ) -> None:
+        if (
+            not state.is_interactive_write
+            or self._remaining_ms(state.deadline) > 0
+        ):
+            return
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        phase = (
+            "begin_immediate_timeout"
+            if state.last_exc is not None and self._is_retryable(state.last_exc)
+            else "file_lock_timeout"
+        )
+        self._raise_interactive_timeout(
+            source=state.source,
+            timeout_ms=state.timeout_ms,
+            lock_wait_started=state.lock_wait_started,
+            thread_id=state.thread_id,
+            attempt=state.attempt,
+            phase=phase,
+            holder=holder,
+            metric_context=state.metric_context,
+            options=state.options,
+            exc=state.last_exc,
+        )
+
+    def _record_lock_wait_started(
+        self,
+        state: _WriteTransactionState,
+    ) -> tuple[dict[str, Any], float]:
+        total_wait_ms = round(
+            (time.perf_counter() - state.lock_wait_started) * 1000.0,
+            3,
+        )
+        active_payload = {
+            "operation_name": state.source,
+            "source": state.source,
+            "status": "waiting_for_file_lock",
+            "db_path": self.db_path,
+            "lock_path": self.lock_path,
+            "attempt": state.attempt,
+            "started_monotonic": state.lock_wait_started,
+            "thread": state.thread_id,
+            **state.metric_context,
+        }
+        _set_active_sqlite_operation(state.thread_id, active_payload)
+        record_metric(
+            "sqlite_write_lock_wait_started",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            db_path=self.db_path,
+            lock_path=self.lock_path,
+            pid=os.getpid(),
+            thread=state.thread_id,
+            attempt=state.attempt,
+            timeout_ms=state.timeout_ms,
+            timestamp_ms=_timestamp_ms(),
+            **state.metric_context,
+        )
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        if holder.get("readable"):
+            active_payload["lock_holder"] = holder
+            _set_active_sqlite_operation(state.thread_id, active_payload)
+        holder_age_ms = (
+            holder.get("holder_age_ms") if isinstance(holder, dict) else None
+        )
+        if (
+            isinstance(holder_age_ms, (int, float))
+            and holder_age_ms >= self.lock.stale_timeout_sec * 1000.0
+        ):
+            record_metric(
+                "sqlite_write_lock_stale_observed",
+                1,
+                lock_path=self.lock_path,
+                holder_pid=holder.get("holder_pid"),
+                holder_host=holder.get("holder_host"),
+                holder_source=holder.get("holder_source"),
+                holder_age_ms=holder_age_ms,
+                current_pid=os.getpid(),
+                current_host=socket.gethostname(),
+                decision="no_cleanup_in_stage3",
+            )
+        return active_payload, total_wait_ms
+
+    def _retry_wait_ms(self, state: _WriteTransactionState) -> float:
+        if state.is_interactive_write:
+            return round(
+                min(
+                    self.retry_delay_sec * 1000.0,
+                    self._remaining_ms(state.deadline),
+                ),
+                3,
+            )
+        return round(self.retry_delay_sec * 1000.0, 3)
+
+    def _try_acquire_file_lock(
+        self,
+        state: _WriteTransactionState,
+    ) -> dict[str, Any] | None:
+        active_payload, total_wait_ms = self._record_lock_wait_started(state)
+        if self.lock.acquire(
+            self.owner_id,
+            state.source,
+            metric_context=state.metric_context,
+        ):
+            state.lock_acquired = True
+            state.lock_held_started = time.perf_counter()
+            record_metric(
+                "db_lock_wait_ms",
+                round(
+                    (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                    3,
+                ),
+                source=state.source,
+                attempt=state.attempt,
+            )
+            return active_payload
+
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        active_payload["lock_holder"] = holder
+        _set_active_sqlite_operation(state.thread_id, active_payload)
+        record_metric(
+            "sqlite_write_lock_wait_retry",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            attempt=state.attempt,
+            wait_ms=self._retry_wait_ms(state),
+            total_wait_ms=total_wait_ms,
+            timeout_ms=state.timeout_ms,
+            phase="file_lock",
+            **state.metric_context,
+            **_lock_holder_metric_fields(holder),
+        )
+        if (
+            state.is_interactive_write
+            and self._remaining_ms(state.deadline) <= 0
+        ):
+            self._raise_interactive_timeout(
+                source=state.source,
+                timeout_ms=state.timeout_ms,
+                lock_wait_started=state.lock_wait_started,
+                thread_id=state.thread_id,
+                attempt=state.attempt,
+                phase="file_lock_timeout",
+                holder=holder,
+                metric_context=state.metric_context,
+                options=state.options,
+                exc=state.last_exc,
+            )
+        self._sleep_before_retry(state.deadline)
+        return None
+
+    def _release_failed_begin_lock(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+    ) -> None:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        record_metric(
+            "sqlite_write_lock_released",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            held_ms=(
+                None
+                if state.lock_held_started is None
+                else round(
+                    (time.perf_counter() - state.lock_held_started) * 1000.0,
+                    3,
+                )
+            ),
+            committed=False,
+            timeout_ms=state.timeout_ms,
+            **state.metric_context,
+        )
+        self.lock.release()
+        state.lock_acquired = False
+        state.lock_held_started = None
+
+    def _record_begin_retry(
+        self,
+        state: _WriteTransactionState,
+        exc: sqlite3.OperationalError,
+    ) -> dict[str, Any]:
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        record_metric(
+            "sqlite_write_lock_wait_retry",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            attempt=state.attempt,
+            wait_ms=self._retry_wait_ms(state),
+            total_wait_ms=round(
+                (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                3,
+            ),
+            timeout_ms=state.timeout_ms,
+            phase="begin_immediate",
+            sqlite_error_class=type(exc).__name__,
+            sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
+            **state.metric_context,
+            **_lock_holder_metric_fields(holder),
+        )
+        return holder
+
+    def _try_begin_immediate(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+        active_payload: dict[str, Any],
+        before_begin: Optional[Callable[[], None]],
+    ) -> sqlite3.Cursor | None:
+        try:
+            active_payload["status"] = "begin_immediate"
+            _set_active_sqlite_operation(state.thread_id, active_payload)
+            if before_begin is not None:
+                before_begin()
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            record_metric(
+                "sqlite_write_lock_acquired",
+                1,
+                operation_name=state.source,
+                source=state.source,
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                pid=os.getpid(),
+                thread=state.thread_id,
+                total_wait_ms=round(
+                    (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                    3,
+                ),
+                attempts=state.attempt,
+                timeout_ms=state.timeout_ms,
+                **state.metric_context,
+            )
+            active_payload["status"] = "transaction_active"
+            _set_active_sqlite_operation(state.thread_id, active_payload)
+            return cursor
+        except sqlite3.OperationalError as exc:
+            state.last_exc = exc
+            retryable = self._is_retryable(exc)
+            if retryable:
+                record_metric(
+                    "sqlite_locked_count",
+                    1,
+                    source=state.source,
+                    phase="begin_immediate",
+                )
+            self._release_failed_begin_lock(conn, state)
+            if retryable and (
+                state.is_interactive_write or state.attempt < self.max_retries
+            ):
+                holder = self._record_begin_retry(state, exc)
+                if (
+                    state.is_interactive_write
+                    and self._remaining_ms(state.deadline) <= 0
+                ):
+                    self._raise_interactive_timeout(
+                        source=state.source,
+                        timeout_ms=state.timeout_ms,
+                        lock_wait_started=state.lock_wait_started,
+                        thread_id=state.thread_id,
+                        attempt=state.attempt,
+                        phase="begin_immediate_timeout",
+                        holder=holder,
+                        metric_context=state.metric_context,
+                        options=state.options,
+                        exc=exc,
+                    )
+                self._sleep_before_retry(state.deadline)
+                return None
+            if state.is_interactive_write and retryable:
+                holder = describe_sqlite_lock_holder(self.lock_path)
+                self._raise_interactive_timeout(
+                    source=state.source,
+                    timeout_ms=state.timeout_ms,
+                    lock_wait_started=state.lock_wait_started,
+                    thread_id=state.thread_id,
+                    attempt=state.attempt,
+                    phase="begin_immediate_timeout",
+                    holder=holder,
+                    metric_context=state.metric_context,
+                    options=state.options,
+                    exc=exc,
+                )
+            record_metric(
+                "sqlite_write_lock_timeout",
+                1,
+                operation_name=state.source,
+                source=state.source,
+                total_wait_ms=round(
+                    (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                    3,
+                ),
+                timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+                sqlite_error_class=type(exc).__name__,
+                sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
+                **_lock_holder_metric_fields(None),
+            )
+            raise
+
+    def _raise_transaction_lock_exhausted(
+        self,
+        state: _WriteTransactionState,
+    ) -> None:
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        if state.is_interactive_write:
+            phase = (
+                "begin_immediate_timeout"
+                if state.last_exc is not None and self._is_retryable(state.last_exc)
+                else "file_lock_timeout"
+            )
+            self._raise_interactive_timeout(
+                source=state.source,
+                timeout_ms=state.timeout_ms,
+                lock_wait_started=state.lock_wait_started,
+                thread_id=state.thread_id,
+                attempt=state.attempt,
+                phase=phase,
+                holder=holder,
+                metric_context=state.metric_context,
+                options=state.options,
+                exc=state.last_exc,
+            )
+        record_metric(
+            "sqlite_write_lock_timeout",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            total_wait_ms=round(
+                (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                3,
+            ),
+            timeout_ms=round(
+                self.max_retries * self.retry_delay_sec * 1000.0,
+                3,
+            ),
+            sqlite_error_class=type(state.last_exc).__name__ if state.last_exc else "",
+            sqlite_error_message_sanitized=_sanitize_sqlite_error_message(
+                state.last_exc or "sequential write lock unavailable"
+            ),
+            **_lock_holder_metric_fields(holder),
+        )
+        if state.last_exc:
+            raise state.last_exc
+        raise sqlite3.OperationalError(
+            "Could not acquire sequential write lock for SQLite"
+        )
+
+    def _acquire_transaction_cursor(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+        before_begin: Optional[Callable[[], None]],
+    ) -> sqlite3.Cursor:
+        while True:
+            state.attempt += 1
+            if (
+                not state.is_interactive_write
+                and state.attempt > self.max_retries
+            ):
+                break
+            self._raise_if_interactive_deadline_expired(state)
+            active_payload = self._try_acquire_file_lock(state)
+            if active_payload is None:
+                continue
+            cursor = self._try_begin_immediate(
+                conn,
+                state,
+                active_payload,
+                before_begin,
+            )
+            if cursor is not None:
+                return cursor
+        self._raise_transaction_lock_exhausted(state)
+
+    def _record_transaction_lock_released(
+        self,
+        state: _WriteTransactionState,
+        *,
+        committed: bool,
+    ) -> None:
+        if not state.lock_acquired:
+            return
+        record_metric(
+            "sqlite_write_lock_released",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            held_ms=(
+                None
+                if state.lock_held_started is None
+                else round(
+                    (time.perf_counter() - state.lock_held_started) * 1000.0,
+                    3,
+                )
+            ),
+            committed=bool(committed),
+            timeout_ms=state.timeout_ms,
+            **state.metric_context,
+        )
+        self.lock.release()
+
     @contextmanager
     def transaction(
         self,
@@ -1744,295 +2246,21 @@ class SQLiteWriteController:
                         nested=True,
                     )
 
-            cursor = None
-            lock_acquired = False
-            last_exc = None
-            lock_wait_started = time.perf_counter()
-            lock_held_started: float | None = None
+            state = self._make_write_transaction_state(source, write_options)
             committed = False
-            thread_id = threading.get_ident()
-            options = dict(write_options or {})
-            role = str(options.get("role") or "").strip().lower()
-            metadata_source = str(options.get("source") or "")
-            is_interactive_opblock = bool(options.get("interactive")) and role.startswith(
-                "operblock"
-            )
-            is_interactive_clinical_write = bool(options.get("interactive")) and (
-                (
-                    role == "doctor"
-                    and metadata_source.startswith("ivl_")
-                )
-                or (
-                    role == "nurse"
-                    and metadata_source.startswith("nurse_order_mark:")
-                )
-            )
-            is_interactive_write = (
-                is_interactive_opblock or is_interactive_clinical_write
-            )
-            timeout_ms = _bounded_opblock_interactive_timeout_ms(options.get("timeout_ms")) if is_interactive_write else SQLITE_BUSY_TIMEOUT_MS
-            deadline = lock_wait_started + (timeout_ms / 1000.0) if is_interactive_write else None
             original_busy_timeout_ms = None
             busy_timeout_overridden = False
-            metric_context = self._write_metric_context(options, interactive=is_interactive_write)
 
             try:
-                if is_interactive_write:
-                    try:
-                        row = conn.execute("PRAGMA busy_timeout").fetchone()
-                        original_busy_timeout_ms = int(row[0]) if row else SQLITE_BUSY_TIMEOUT_MS
-                    except Exception:
-                        original_busy_timeout_ms = SQLITE_BUSY_TIMEOUT_MS
-                    begin_busy_timeout_ms = min(max(100, int(self.retry_delay_sec * 1000.0)), timeout_ms)
-                    conn.execute(f"PRAGMA busy_timeout = {begin_busy_timeout_ms}")
-                    busy_timeout_overridden = True
-
-                attempt = 0
-                while True:
-                    attempt += 1
-                    if not is_interactive_write and attempt > self.max_retries:
-                        break
-                    if is_interactive_write and self._remaining_ms(deadline) <= 0:
-                        holder = describe_sqlite_lock_holder(self.lock_path)
-                        phase = "begin_immediate_timeout" if last_exc is not None and self._is_retryable(last_exc) else "file_lock_timeout"
-                        self._raise_interactive_timeout(
-                            source=source,
-                            timeout_ms=timeout_ms,
-                            lock_wait_started=lock_wait_started,
-                            thread_id=thread_id,
-                            attempt=attempt,
-                            phase=phase,
-                            holder=holder,
-                            metric_context=metric_context,
-                            options=options,
-                            exc=last_exc,
-                        )
-
-                    total_wait_ms = round((time.perf_counter() - lock_wait_started) * 1000.0, 3)
-                    active_payload = {
-                        "operation_name": source,
-                        "source": source,
-                        "status": "waiting_for_file_lock",
-                        "db_path": self.db_path,
-                        "lock_path": self.lock_path,
-                        "attempt": attempt,
-                        "started_monotonic": lock_wait_started,
-                        "thread": thread_id,
-                        **metric_context,
-                    }
-                    _set_active_sqlite_operation(thread_id, active_payload)
-                    record_metric(
-                        "sqlite_write_lock_wait_started",
-                        1,
-                        operation_name=source,
-                        source=source,
-                        db_path=self.db_path,
-                        lock_path=self.lock_path,
-                        pid=os.getpid(),
-                        thread=thread_id,
-                        attempt=attempt,
-                        timeout_ms=timeout_ms,
-                        timestamp_ms=_timestamp_ms(),
-                        **metric_context,
-                    )
-                    holder = describe_sqlite_lock_holder(self.lock_path)
-                    if holder.get("readable"):
-                        active_payload["lock_holder"] = holder
-                        _set_active_sqlite_operation(thread_id, active_payload)
-                    holder_age_ms = holder.get("holder_age_ms") if isinstance(holder, dict) else None
-                    if isinstance(holder_age_ms, (int, float)) and holder_age_ms >= self.lock.stale_timeout_sec * 1000.0:
-                        record_metric(
-                            "sqlite_write_lock_stale_observed",
-                            1,
-                            lock_path=self.lock_path,
-                            holder_pid=holder.get("holder_pid"),
-                            holder_host=holder.get("holder_host"),
-                            holder_source=holder.get("holder_source"),
-                            holder_age_ms=holder_age_ms,
-                            current_pid=os.getpid(),
-                            current_host=socket.gethostname(),
-                            decision="no_cleanup_in_stage3",
-                        )
-                    if not self.lock.acquire(self.owner_id, source, metric_context=metric_context):
-                        holder = describe_sqlite_lock_holder(self.lock_path)
-                        active_payload["lock_holder"] = holder
-                        _set_active_sqlite_operation(thread_id, active_payload)
-                        retry_wait_ms = round(min(self.retry_delay_sec * 1000.0, self._remaining_ms(deadline)), 3) if is_interactive_write else round(self.retry_delay_sec * 1000.0, 3)
-                        record_metric(
-                            "sqlite_write_lock_wait_retry",
-                            1,
-                            operation_name=source,
-                            source=source,
-                            attempt=attempt,
-                            wait_ms=retry_wait_ms,
-                            total_wait_ms=total_wait_ms,
-                            timeout_ms=timeout_ms,
-                            phase="file_lock",
-                            **metric_context,
-                            **_lock_holder_metric_fields(holder),
-                        )
-                        if is_interactive_write and self._remaining_ms(deadline) <= 0:
-                            self._raise_interactive_timeout(
-                                source=source,
-                                timeout_ms=timeout_ms,
-                                lock_wait_started=lock_wait_started,
-                                thread_id=thread_id,
-                                attempt=attempt,
-                                phase="file_lock_timeout",
-                                holder=holder,
-                                metric_context=metric_context,
-                                options=options,
-                                exc=last_exc,
-                            )
-                        self._sleep_before_retry(deadline)
-                        continue
-
-                    lock_acquired = True
-                    lock_held_started = time.perf_counter()
-                    record_metric(
-                        "db_lock_wait_ms",
-                        round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
-                        source=source,
-                        attempt=attempt,
-                    )
-                    try:
-                        active_payload["status"] = "begin_immediate"
-                        _set_active_sqlite_operation(thread_id, active_payload)
-                        if before_begin is not None:
-                            before_begin()
-                        conn.execute("BEGIN IMMEDIATE")
-                        cursor = conn.cursor()
-                        record_metric(
-                            "sqlite_write_lock_acquired",
-                            1,
-                            operation_name=source,
-                            source=source,
-                            db_path=self.db_path,
-                            lock_path=self.lock_path,
-                            pid=os.getpid(),
-                            thread=thread_id,
-                            total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
-                            attempts=attempt,
-                            timeout_ms=timeout_ms,
-                            **metric_context,
-                        )
-                        active_payload["status"] = "transaction_active"
-                        _set_active_sqlite_operation(thread_id, active_payload)
-                        break
-                    except sqlite3.OperationalError as exc:
-                        last_exc = exc
-                        retryable = self._is_retryable(exc)
-                        if retryable:
-                            record_metric("sqlite_locked_count", 1, source=source, phase="begin_immediate")
-                        if conn.in_transaction:
-                            conn.execute("ROLLBACK")
-                        record_metric(
-                            "sqlite_write_lock_released",
-                            1,
-                            operation_name=source,
-                            source=source,
-                            held_ms=(
-                                None
-                                if lock_held_started is None
-                                else round((time.perf_counter() - lock_held_started) * 1000.0, 3)
-                            ),
-                            committed=False,
-                            timeout_ms=timeout_ms,
-                            **metric_context,
-                        )
-                        self.lock.release()
-                        lock_acquired = False
-                        lock_held_started = None
-                        if retryable and (is_interactive_write or attempt < self.max_retries):
-                            holder = describe_sqlite_lock_holder(self.lock_path)
-                            record_metric(
-                                "sqlite_write_lock_wait_retry",
-                                1,
-                                operation_name=source,
-                                source=source,
-                                attempt=attempt,
-                                wait_ms=round(min(self.retry_delay_sec * 1000.0, self._remaining_ms(deadline)), 3) if is_interactive_write else round(self.retry_delay_sec * 1000.0, 3),
-                                total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
-                                timeout_ms=timeout_ms,
-                                phase="begin_immediate",
-                                sqlite_error_class=type(exc).__name__,
-                                sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
-                                **metric_context,
-                                **_lock_holder_metric_fields(holder),
-                            )
-                            if is_interactive_write and self._remaining_ms(deadline) <= 0:
-                                self._raise_interactive_timeout(
-                                    source=source,
-                                    timeout_ms=timeout_ms,
-                                    lock_wait_started=lock_wait_started,
-                                    thread_id=thread_id,
-                                    attempt=attempt,
-                                    phase="begin_immediate_timeout",
-                                    holder=holder,
-                                    metric_context=metric_context,
-                                    options=options,
-                                    exc=exc,
-                                )
-                            self._sleep_before_retry(deadline)
-                            continue
-                        if is_interactive_write and retryable:
-                            holder = describe_sqlite_lock_holder(self.lock_path)
-                            self._raise_interactive_timeout(
-                                source=source,
-                                timeout_ms=timeout_ms,
-                                lock_wait_started=lock_wait_started,
-                                thread_id=thread_id,
-                                attempt=attempt,
-                                phase="begin_immediate_timeout",
-                                holder=holder,
-                                metric_context=metric_context,
-                                options=options,
-                                exc=exc,
-                            )
-                        record_metric(
-                            "sqlite_write_lock_timeout",
-                            1,
-                            operation_name=source,
-                            source=source,
-                            total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
-                            timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
-                            sqlite_error_class=type(exc).__name__,
-                            sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
-                            **_lock_holder_metric_fields(None),
-                        )
-                        raise
-
-                if cursor is None:
-                    holder = describe_sqlite_lock_holder(self.lock_path)
-                    if is_interactive_write:
-                        phase = "begin_immediate_timeout" if last_exc is not None and self._is_retryable(last_exc) else "file_lock_timeout"
-                        self._raise_interactive_timeout(
-                            source=source,
-                            timeout_ms=timeout_ms,
-                            lock_wait_started=lock_wait_started,
-                            thread_id=thread_id,
-                            attempt=attempt,
-                            phase=phase,
-                            holder=holder,
-                            metric_context=metric_context,
-                            options=options,
-                            exc=last_exc,
-                        )
-                    record_metric(
-                        "sqlite_write_lock_timeout",
-                        1,
-                        operation_name=source,
-                        source=source,
-                        total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
-                        timeout_ms=round(self.max_retries * self.retry_delay_sec * 1000.0, 3),
-                        sqlite_error_class=type(last_exc).__name__ if last_exc else "",
-                        sqlite_error_message_sanitized=_sanitize_sqlite_error_message(last_exc or "sequential write lock unavailable"),
-                        **_lock_holder_metric_fields(holder),
-                    )
-                    if last_exc:
-                        raise last_exc
-                    raise sqlite3.OperationalError("Could not acquire sequential write lock for SQLite")
-
+                (
+                    original_busy_timeout_ms,
+                    busy_timeout_overridden,
+                ) = self._override_interactive_busy_timeout(conn, state)
+                cursor = self._acquire_transaction_cursor(
+                    conn,
+                    state,
+                    before_begin,
+                )
                 yield cursor
                 conn.execute("COMMIT")
                 status = "ok"
@@ -2042,11 +2270,11 @@ class SQLiteWriteController:
                     conn.execute("ROLLBACK")
                 raise
             finally:
-                if busy_timeout_overridden and original_busy_timeout_ms is not None:
-                    try:
-                        conn.execute(f"PRAGMA busy_timeout = {int(original_busy_timeout_ms)}")
-                    except Exception:
-                        pass
+                self._restore_busy_timeout(
+                    conn,
+                    original_busy_timeout_ms,
+                    busy_timeout_overridden,
+                )
                 record_metric(
                     "write_duration_ms",
                     round((time.perf_counter() - started) * 1000.0, 3),
@@ -2054,23 +2282,11 @@ class SQLiteWriteController:
                     status=status,
                     nested=False,
                 )
-                if lock_acquired:
-                    record_metric(
-                        "sqlite_write_lock_released",
-                        1,
-                        operation_name=source,
-                        source=source,
-                        held_ms=(
-                            None
-                            if lock_held_started is None
-                            else round((time.perf_counter() - lock_held_started) * 1000.0, 3)
-                        ),
-                        committed=bool(committed),
-                        timeout_ms=timeout_ms,
-                        **metric_context,
-                    )
-                    self.lock.release()
-                _clear_active_sqlite_operation(thread_id)
+                self._record_transaction_lock_released(
+                    state,
+                    committed=committed,
+                )
+                _clear_active_sqlite_operation(state.thread_id)
 
     def execute(self, conn: sqlite3.Connection, query: str, params: tuple = (), source: str = "unknown"):
         with self.transaction(conn, source=source) as cursor:
