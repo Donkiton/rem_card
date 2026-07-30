@@ -79,11 +79,15 @@ class DataUpdateMonitor(QThread):
         self._last_observed_refresh_seq: int = 0
         self._state_epoch: int = 0
         self._paused = not bool(enabled)
+        self._paused_ack_evt = threading.Event()
+        if self._paused:
+            self._paused_ack_evt.set()
         self._persistent_read_conn = None
 
     def set_enabled(self, enabled: bool) -> None:
         with self._state_lock:
             self._paused = not bool(enabled)
+            self._paused_ack_evt.clear()
             if self._paused:
                 self._force_emit = False
                 self._force_sources = []
@@ -93,6 +97,13 @@ class DataUpdateMonitor(QThread):
     def is_enabled(self) -> bool:
         with self._state_lock:
             return not bool(self._paused)
+
+    def pause_and_wait(self, timeout_sec: float = 5.0) -> bool:
+        """Pause polling and wait until its thread closes the readonly handle."""
+        self.set_enabled(False)
+        if not self.isRunning():
+            return self._persistent_read_conn is None
+        return bool(self._paused_ack_evt.wait(max(0.0, float(timeout_sec or 0.0))))
 
     def request_refresh(self, *, force_emit: bool = False, source: str = ""):
         with self._state_lock:
@@ -209,10 +220,16 @@ class DataUpdateMonitor(QThread):
 
                 if paused:
                     self._close_persistent_read_connection()
-                    self._wake_evt.wait()
-                    self._wake_evt.clear()
+                    with self._state_lock:
+                        still_paused = bool(self._paused)
+                        if still_paused:
+                            self._paused_ack_evt.set()
+                    if still_paused:
+                        self._wake_evt.wait()
+                        self._wake_evt.clear()
                     continue
 
+                self._paused_ack_evt.clear()
                 try:
                     run_maintenance = getattr(self._data_service, "run_poll_maintenance_tasks", None)
                     if callable(run_maintenance):
@@ -237,6 +254,7 @@ class DataUpdateMonitor(QThread):
                     self._wake_evt.clear()
         finally:
             self._close_persistent_read_connection()
+            self._paused_ack_evt.set()
 
     def _poll_once(self, *, force_emit: bool, force_sources: list[str], run_maintenance: bool = True):
         if run_maintenance:

@@ -9,7 +9,7 @@ import unittest
 import logging
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -113,6 +113,43 @@ class StartupPathValidationTest(unittest.TestCase):
 
             self.assertTrue(matched)
             self.assertLess(float(age_sec or 0.0), 1.0)
+
+    def test_guard_blocks_startup_before_sqlite_open_during_rotation(self):
+        root = os.path.abspath(os.path.join("X:\\", "Baza"))
+        db_path = os.path.join(root, "archiv", "rao_journal.db")
+        lock_path = os.path.join(root, "archiv", "db_rotation.lock")
+        owner = {
+            "lock_path": lock_path,
+            "readable": True,
+            "reason": "ok",
+            "holder_host": "RAO-PC",
+            "holder_pid": 314,
+            "holder_user_id": "RAO-PC:314:db_rotation",
+            "holder_source": "db_rotation",
+        }
+        rotation_gate = Mock()
+        rotation_gate.acquire.return_value = False
+        with (
+            patch.object(startup_db_guard, "resolve_baza_dir", return_value=root),
+            patch.object(startup_db_guard.os.path, "isdir", return_value=True),
+            patch.object(startup_db_guard, "_ensure_guard_dirs"),
+            patch.object(startup_db_guard, "_load_or_create_client_policy"),
+            patch.object(startup_db_guard, "get_journal_db_path", return_value=db_path),
+            patch.object(startup_db_guard, "FileWriteLock", return_value=rotation_gate),
+            patch.object(startup_db_guard, "describe_sqlite_lock_holder", return_value=owner),
+            patch.object(startup_db_guard, "_check_quick_with_retries") as quick_check,
+            patch.object(startup_db_guard, "write_audit_event") as audit,
+        ):
+            result = startup_db_guard.run_startup_db_guard(role="doctor")
+
+        self.assertFalse(result.ok)
+        self.assertIn("выполняется ротация", result.user_message)
+        self.assertIn("RAO-PC", result.user_message)
+        rotation_gate.release.assert_not_called()
+        quick_check.assert_not_called()
+        self.assertTrue(
+            any(item.args and item.args[0] == "db_guard_blocked_rotation" for item in audit.call_args_list)
+        )
 
     def test_ensure_directories_skips_only_shared_sweep_and_always_creates_local_dirs(self):
         with (

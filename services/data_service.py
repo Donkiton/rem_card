@@ -153,6 +153,44 @@ class DataService(QObject):
             return bool(self._monitor.is_enabled())
         return bool(self._monitor_enabled)
 
+    def pause_for_database_rotation(self, timeout_sec: float = 5.0) -> dict[str, Any]:
+        if self._shutting_down:
+            return {
+                "ok": False,
+                "reason": "data_service_shutting_down",
+            }
+        if not self.is_write_queue_idle():
+            return {
+                "ok": False,
+                "reason": "write_queue_busy",
+                "write_queue": self.get_write_queue_state(),
+            }
+
+        monitor_was_enabled = self.is_change_monitor_enabled()
+        if monitor_was_enabled and self._monitor:
+            paused = self._monitor.pause_and_wait(timeout_sec)
+            if not paused:
+                self.set_change_monitor_enabled(True)
+                return {
+                    "ok": False,
+                    "reason": "monitor_pause_timeout",
+                    "timeout_sec": float(timeout_sec),
+                }
+        return {
+            "ok": True,
+            "monitor_was_enabled": bool(monitor_was_enabled),
+        }
+
+    def resume_after_database_rotation(self, token: dict[str, Any] | None = None) -> None:
+        if self._shutting_down or self._network_outage_detected:
+            return
+        if bool(dict(token or {}).get("monitor_was_enabled")):
+            self.set_change_monitor_enabled(True)
+            self.request_immediate_refresh(
+                force_emit=True,
+                source="database_rotation_resume",
+            )
+
     def is_network_outage_detected(self) -> bool:
         return bool(self._network_outage_detected)
 

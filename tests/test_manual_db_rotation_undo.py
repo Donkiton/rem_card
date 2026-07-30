@@ -6,7 +6,11 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from rem_card.data.dao import db_manager as db_manager_module
+from rem_card.data.dao.db_manager import DatabaseManager
 from rem_card.app.db_lifecycle import (
     cancel_manual_rotation,
     find_active_rotation_role_locks,
@@ -167,3 +171,98 @@ def test_not_due_auto_rotation_does_not_create_rotation_lock(tmp_path):
 
     assert result["status"] == "not_due"
     assert not rotation_lock_path.exists()
+
+
+def test_busy_db_lock_reports_owner(tmp_path):
+    archive_dir = tmp_path / "archiv"
+    db_path = archive_dir / "rao_journal.db"
+    db_lock_path = archive_dir / "db.lock"
+    _create_db(str(db_path))
+    lock = FileWriteLock(str(db_lock_path))
+    assert lock.acquire("test-owner", "test_write")
+    try:
+        result = _rotate(str(db_path), str(archive_dir))
+    finally:
+        lock.release()
+
+    assert result["status"] == "db_lock_busy"
+    assert result["lock_path"] == str(db_lock_path)
+    assert result["lock_owner"]["readable"] is True
+    assert result["lock_owner"]["holder_user_id"] == "test-owner"
+    assert result["lock_owner"]["holder_source"] == "test_write"
+
+
+def test_automatic_rotation_retries_only_db_lock_busy(tmp_path):
+    manager = object.__new__(DatabaseManager)
+    manager.db_path = str(tmp_path / "archiv" / "rao_journal.db")
+    manager.medical_db_rotation_lock_path = str(tmp_path / "archiv" / "db_rotation.lock")
+    manager.medical_db_lock_path = str(tmp_path / "archiv" / "db.lock")
+    manager.medical_backups_valid_dir = str(tmp_path / "backups" / "valid")
+    manager.medical_invalid_backups_dir = str(tmp_path / "backup_health" / "invalid_backups")
+    manager.baza_dir = str(tmp_path)
+    manager.runtime_context = SimpleNamespace(mode="network")
+    manager._startup_pre_connect_fingerprint = {}
+    outcomes = [
+        {
+            "status": "db_lock_busy",
+            "lock_owner": {"holder_host": "WS-01", "holder_pid": 101, "holder_source": "write"},
+        },
+        {
+            "status": "db_lock_busy",
+            "lock_owner": {"holder_host": "WS-01", "holder_pid": 101, "holder_source": "write"},
+        },
+        {"status": "not_due"},
+    ]
+
+    with (
+        patch.object(db_manager_module, "AUTO_ROTATION_DB_LOCK_RETRY_DELAYS_SEC", (0.0, 0.0)),
+        patch.object(db_manager_module, "maybe_rotate_database_if_due", side_effect=outcomes) as rotate,
+        patch.object(db_manager_module.time, "sleep") as sleep,
+    ):
+        result = manager.maybe_rotate_database_after_doctor_exit()
+
+    assert result["status"] == "not_due"
+    assert rotate.call_count == 3
+    assert sleep.call_count == 2
+
+
+def test_manual_rotation_does_not_retry_db_lock_busy_and_resumes_service(tmp_path):
+    manager = object.__new__(DatabaseManager)
+    manager.db_path = str(tmp_path / "archiv" / "rao_journal.db")
+    manager.medical_db_rotation_lock_path = str(tmp_path / "archiv" / "db_rotation.lock")
+    manager.medical_db_lock_path = str(tmp_path / "archiv" / "db.lock")
+    manager.medical_backups_valid_dir = str(tmp_path / "backups" / "valid")
+    manager.medical_invalid_backups_dir = str(tmp_path / "backup_health" / "invalid_backups")
+    manager.baza_dir = str(tmp_path)
+    manager.runtime_context = SimpleNamespace(mode="network")
+    manager._local_replica = None
+    manager._closed = False
+    manager._central_io_lock = threading.RLock()
+    manager._remcard_conn = None
+    manager._journal_conn = None
+    manager._startup_pre_connect_fingerprint = {}
+    manager.active_rotation_role_locks = lambda _context=None: []
+    manager.active_rotation_emergency_sessions = lambda: []
+    manager._rotation_blocking_role_lock_paths = lambda: {}
+    manager._rotation_blocking_emergency_roots = lambda: []
+    manager._close_central_read_connection = lambda: None
+    manager._init_connections = lambda: None
+    events = []
+    manager.set_rotation_quiesce_hooks(
+        lambda: events.append("paused") or {"ok": True, "monitor_was_enabled": True},
+        lambda _token: events.append("resumed"),
+    )
+
+    with patch.object(
+        db_manager_module,
+        "rotate_database_now",
+        return_value={
+            "status": "db_lock_busy",
+            "lock_owner": {"holder_host": "WS-02", "holder_pid": 202},
+        },
+    ) as rotate:
+        result = manager.rotate_database_manually()
+
+    assert result["status"] == "db_lock_busy"
+    rotate.assert_called_once()
+    assert events == ["paused", "resumed"]

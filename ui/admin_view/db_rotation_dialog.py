@@ -388,7 +388,7 @@ class DbRotationDialog(BaseStyledDialog):
 
     @staticmethod
     def _undo_status_message(status: dict) -> str:
-        reason = str(status.get("reason") or "")
+        reason = str(status.get("reason") or status.get("status") or "")
         mapping = {
             "not_available": "Для этой базы нет доступной ручной ротации для отмены.",
             "expired": "Отмена ручной ротации доступна только в течение 24 часов после её выполнения.",
@@ -402,8 +402,12 @@ class DbRotationDialog(BaseStyledDialog):
             "undo_validation_failed": "Отмена невозможна: одна из БД не прошла проверку доступности.",
             "deferred_active_role_lock": "Отмена невозможна: есть активная рабочая сессия.",
             "deferred_active_emergency_session": "Отмена невозможна: есть активная аварийная сессия медсестры.",
+            "rotation_quiesce_failed": "Отмена невозможна: не удалось безопасно остановить фоновые обращения к БД.",
         }
-        return mapping.get(reason, "Не удалось отменить ручную ротацию БД.")
+        message = mapping.get(reason, "Не удалось отменить ручную ротацию БД.")
+        if reason in {"rotation_lock_busy", "db_lock_busy"}:
+            message += DbRotationDialog._lock_owner_suffix(status)
+        return message
 
     def _selected_info(self) -> DbCycleInfo | None:
         return self._info_at(self.list_widget.currentRow())
@@ -511,6 +515,12 @@ class DbRotationDialog(BaseStyledDialog):
                 role_text = "медсестра"
             elif role == "nurse_emergency":
                 role_text = "аварийная медсестра"
+            elif role == "operblock":
+                role_text = "оперблок"
+            elif role == "operblock_emergency":
+                role_text = "аварийный оперблок"
+            elif role == "operblock_planned":
+                role_text = "плановый оперблок"
             else:
                 role_text = role or "роль"
             holder = str(item.get("holder") or "").strip()
@@ -554,9 +564,22 @@ class DbRotationDialog(BaseStyledDialog):
         if status == "source_changed_after_backup":
             return "Ротация отменена: БД изменилась после создания backup. Повторите операцию."
         if status == "db_lock_busy":
-            return "Ротация невозможна: БД сейчас занята другой операцией."
+            return (
+                "Ротация невозможна: БД сейчас занята другой операцией."
+                + DbRotationDialog._lock_owner_suffix(result)
+            )
         if status == "rotation_lock_busy":
-            return "Ротация уже выполняется на другом рабочем месте."
+            return (
+                "Ротация уже выполняется на другом рабочем месте."
+                + DbRotationDialog._lock_owner_suffix(result)
+            )
+        if status == "rotation_quiesce_failed":
+            reason = str(result.get("reason") or "")
+            if reason == "write_queue_busy":
+                return "Ротация отменена: не завершена запись данных. Дождитесь её окончания и повторите."
+            if reason == "monitor_pause_timeout":
+                return "Ротация отменена: фоновое соединение с БД не успело закрыться."
+            return "Ротация отменена: не удалось безопасно остановить фоновые обращения к БД."
         if status == "replica_snapshot_busy":
             return "Ротация отложена: не завершился фоновый снимок локальной реплики. Повторите действие через несколько секунд."
         if status == "new_db_failed":
@@ -570,6 +593,26 @@ class DbRotationDialog(BaseStyledDialog):
                 "Не закрывайте приложение и проверьте журнал ошибок."
             )
         return f"Ротация не выполнена: {status or 'неизвестная ошибка'}"
+
+    @staticmethod
+    def _lock_owner_suffix(result: dict) -> str:
+        owner = dict(result.get("lock_owner") or {})
+        if not owner.get("readable"):
+            return "\n\nВладелец блокировки: определить не удалось."
+        host = str(owner.get("holder_host") or "").strip()
+        pid = owner.get("holder_pid")
+        source = str(owner.get("holder_source") or "").strip()
+        user_id = str(owner.get("holder_user_id") or "").strip()
+        parts = []
+        if host:
+            parts.append(f"компьютер {host}")
+        if pid not in (None, ""):
+            parts.append(f"PID {pid}")
+        if source:
+            parts.append(f"операция {source}")
+        if user_id and user_id not in {host, str(pid or "")}:
+            parts.append(f"владелец {user_id}")
+        return "\n\nВладелец блокировки: " + (", ".join(parts) or "не определён") + "."
 
 
 def _fmt_dt(value: datetime | None) -> str:

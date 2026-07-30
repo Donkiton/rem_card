@@ -39,3 +39,36 @@ def test_undo_button_uses_rotation_style_when_disabled(tmp_path):
     finally:
         dialog.close()
         app.processEvents()
+
+
+def test_rotation_busy_message_reports_lock_owner():
+    result = {
+        "status": "db_lock_busy",
+        "lock_owner": {
+            "readable": True,
+            "holder_host": "RAO-PC",
+            "holder_pid": 314,
+            "holder_user_id": "RAO-PC:314:write",
+            "holder_source": "patient_save",
+        },
+    }
+
+    message = DbRotationDialog._rotation_status_message(result)
+
+    assert "RAO-PC" in message
+    assert "PID 314" in message
+    assert "patient_save" in message
+
+
+def test_rotation_role_message_translates_operblock_roles():
+    message = DbRotationDialog._format_role_lock_message(
+        [
+            {"role": "operblock", "holder": "WS-01"},
+            {"role": "operblock_emergency", "holder": "WS-02"},
+            {"role": "operblock_planned", "holder": "WS-03"},
+        ]
+    )
+
+    assert "оперблок: WS-01" in message
+    assert "аварийный оперблок: WS-02" in message
+    assert "плановый оперблок: WS-03" in message
