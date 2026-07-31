@@ -8,52 +8,58 @@
 
 Слово `PATCH` здесь обозначает только уровень номера версии. Отдельных patch-пакетов обновления в проекте больше нет: версия любого уровня распространяется полной сборкой.
 
-## Обычная релизная команда
+## Подготовка версии
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\build_release.py
+.\.venv\Scripts\python.exe scripts\bump_version.py patch "Исправлена печать карты"
 ```
 
-Обычная release-сборка всегда выполняется с чистыми каталогами `build` и
-`dist` и удаляет их после завершения или ошибки. Повторное использование
-промежуточного кеша PyInstaller намеренно отключено. Принятый пакет сохраняется
-отдельно в локальном `UPD\releases\<версия>`.
-
-Скрипт автоматически:
-
-- берёт git-коммиты после прошлого изменения `VERSION`;
-- формирует русский раздел `CHANGELOG.md`;
-- поднимает версию;
-- обновляет `app/release_info.json`;
-- создаёт release-коммит `Релиз 1.2.3`;
-- запускает обязательные architecture, fast regression и F821-проверки;
-- собирает пакет, проверяет manifest/inventory/settings snapshot и smoke всех шести compiled EXE;
-- обязательно делает `git push` точного release-коммита и сверяет удалённую ветку;
-- после успешного push атомарно публикует локальный full-релиз.
-
-Если любой обязательный gate не пройден, push и локальная публикация останавливаются. Обходить проверку и переносить такую сборку в production вручную нельзя.
-
-Пункты changelog должны содержать русский текст. Если сообщение рабочего коммита написано без кириллицы, release-скрипт остановится до изменения версии. Переименуйте commit или добавьте точный перевод в `CHANGELOG_SUBJECT_TRANSLATIONS` внутри `scripts\build_release.py`.
-
-## Выбор уровня версии
-
-По умолчанию уровень определяется по сообщениям коммитов. Его можно указать явно:
+Уровень версии задаётся при подготовке изменений:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\build_release.py patch
-.\.venv\Scripts\python.exe scripts\build_release.py minor
-.\.venv\Scripts\python.exe scripts\build_release.py major
+.\.venv\Scripts\python.exe scripts\bump_version.py patch "Описание исправления"
+.\.venv\Scripts\python.exe scripts\bump_version.py minor "Описание возможности"
+.\.venv\Scripts\python.exe scripts\bump_version.py major "Описание большого обновления"
 ```
 
-Все три команды создают одинаковый по формату полный пакет; меняется только номер версии.
-
-Ручной пункт changelog:
+Точную версию можно указать явно:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\build_release.py --change "Исправлена печать карты"
+.\.venv\Scripts\python.exe scripts\bump_version.py --set 4.1.0 "Описание релиза"
 ```
 
-`scripts\bump_version.py` остаётся низкоуровневым вспомогательным скриптом. Для рабочего релиза не запускайте напрямую `pyinstaller RemCard.spec`: он проверит возможность сборки, но не создаст версию, release-коммит, обязательный push и готовый пакет в локальном `UPD`.
+Команда одновременно обновляет `VERSION`, русский раздел `CHANGELOG.md` и
+`app/release_info.json`. Эти файлы должны попасть в обычный pull request и быть
+слиты в GitHub `main` до production-сборки.
+
+## Production-сборка
+
+Менеджер релизов получает точные версию и коммит из настроенного
+GitHub-репозитория, безопасно обновляет чистую локальную ветку `main` и запускает:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_release.py `
+  --expected-version 4.1.0 `
+  --expected-commit <40-символьный-коммит>
+```
+
+`build_release.py` не меняет исходники, не создаёт коммиты и не выполняет
+`git push`. Он проверяет соответствие `VERSION`, changelog и release-info
+указанному коммиту, запускает обязательные architecture, fast regression и
+F821-проверки, собирает все EXE, проверяет manifest/inventory/settings snapshot,
+выполняет compiled smoke и создаёт локальный full-релиз.
+
+Сборка всегда начинается с чистых `build` и `dist`; временные каталоги удаляются
+после завершения или ошибки. Если любой gate не пройден, локальный релиз не
+создаётся.
+
+Для непубликуемой сборки текущего рабочего дерева используется:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_release.py --test-worktree
+```
+
+Такой пакет получает marker `TEST_WORKTREE_ONLY.txt` и не может быть опубликован.
 
 ## Результат
 

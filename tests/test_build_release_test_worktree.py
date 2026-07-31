@@ -85,10 +85,6 @@ def _mock_successful_test_worktree(monkeypatch, root: Path) -> tuple[Path, list[
 
     for name in (
         "ensure_clean_tree",
-        "update_release_files",
-        "sync_current_release_info",
-        "commit_release",
-        "push_current_branch",
         "publish_built_release",
         "publish_local_release",
     ):
@@ -100,14 +96,8 @@ def _mock_successful_test_worktree(monkeypatch, root: Path) -> tuple[Path, list[
 @pytest.mark.parametrize(
     "argv",
     (
-        ["auto", "--test-worktree"],
-        ["patch", "--test-worktree"],
-        ["--test-worktree", "--no-commit"],
-        ["--test-worktree", "--skip-build"],
-        ["--test-worktree", "--push"],
-        ["--test-worktree", "--set", "4.0.0"],
-        ["--test-worktree", "--change", "Тест"],
-        ["--test-worktree", "--allow-empty"],
+        ["--test-worktree", "--expected-version", "4.0.0"],
+        ["--test-worktree", "--expected-commit", "a" * 40],
     ),
 )
 def test_test_worktree_rejects_release_arguments(argv: list[str]) -> None:
@@ -117,13 +107,20 @@ def test_test_worktree_rejects_release_arguments(argv: list[str]) -> None:
         build_release.validate_cli_args(args)
 
 
-def test_test_worktree_accepts_default_auto_and_progress_json() -> None:
+def test_test_worktree_accepts_progress_json() -> None:
     args = build_release.parse_args(["--test-worktree", "--progress-json"])
 
     build_release.validate_cli_args(args)
 
-    assert args.level == "auto"
-    assert args.level_was_explicit is False
+    assert args.test_worktree is True
+    assert args.progress_json is True
+
+
+def test_production_build_requires_expected_github_source() -> None:
+    args = build_release.parse_args(["--progress-json"])
+
+    with pytest.raises(SystemExit, match="--expected-version, --expected-commit"):
+        build_release.validate_cli_args(args)
 
 
 def test_test_worktree_keeps_metadata_and_dist_without_ready(
@@ -312,23 +309,12 @@ def test_regular_release_emits_progress_for_all_pipeline_stages(
     published_dir = tmp_path / "UPD" / "releases" / "3.15.0"
     source_commit = "c" * 40
 
-    monkeypatch.setattr(
-        build_release,
-        "has_staged_or_unstaged_release_file_changes",
-        lambda _root: False,
-    )
     monkeypatch.setattr(build_release, "ensure_clean_tree", lambda _root: None)
     monkeypatch.setattr(build_release, "head_commit", lambda _root: source_commit)
     monkeypatch.setattr(build_release, "run_release_checks", lambda _root: None)
     monkeypatch.setattr(build_release, "run_build", lambda _root: package_dir)
     monkeypatch.setattr(build_release, "validate_full_package", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(build_release, "run_compiled_smoke", lambda _package: None)
-    monkeypatch.setattr(
-        build_release,
-        "ensure_release_branch_pushable",
-        lambda _root, *, phase: ("main15.07", source_commit),
-    )
-    monkeypatch.setattr(build_release, "push_current_branch", lambda _root: source_commit)
     monkeypatch.setattr(
         build_release,
         "publish_built_release",
@@ -352,7 +338,6 @@ def test_regular_release_emits_progress_for_all_pipeline_stages(
         "build",
         "validate",
         "smoke",
-        "push",
         "publish",
         "cleanup",
     ]
@@ -365,83 +350,63 @@ def test_regular_release_emits_progress_for_all_pipeline_stages(
     assert publish_completed["path"] == str(published_dir.resolve())
 
 
-def test_release_preflight_accepts_when_remote_is_local_ancestor(
+def test_release_source_identity_accepts_expected_github_version_and_commit(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    local_commit = "b" * 40
-    remote_commit = "a" * 40
-    monkeypatch.setattr(build_release, "current_branch", lambda _root: "main15.07")
-    monkeypatch.setattr(build_release, "head_commit", lambda _root: local_commit)
-    monkeypatch.setattr(
-        build_release,
-        "fetch_origin_branch_head",
-        lambda _root, _branch: remote_commit,
+    commit = "b" * 40
+    release_files = _prepare_release_files(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Изменения\n\n## 3.15.0 - 2026-07-31\n\n- Подготовлен релиз\n",
+        encoding="utf-8",
     )
-    monkeypatch.setattr(
-        build_release,
-        "commit_is_ancestor",
-        lambda _root, ancestor, descendant: (ancestor, descendant) == (remote_commit, local_commit),
+    (tmp_path / "app" / "release_info.json").write_text(
+        '{"schema_version":1,"version":"3.15.0","date":"2026-07-31",'
+        '"changes":["Подготовлен релиз"]}\n',
+        encoding="utf-8",
     )
+    monkeypatch.setattr(build_release, "head_commit", lambda _root: commit)
 
-    assert build_release.ensure_release_branch_pushable(
+    assert build_release.validate_release_source_identity(
         tmp_path,
-        phase="до начала release-сборки",
-    ) == ("main15.07", local_commit)
+        expected_version="3.15.0",
+        expected_commit=commit,
+    ) == ("3.15.0", commit)
+    assert all(path.is_file() for path in release_files)
 
 
-def test_release_preflight_rejects_remote_changes_before_long_build(
+@pytest.mark.parametrize(
+    ("expected_version", "expected_commit", "message"),
+    (
+        ("3.15.1", "a" * 40, "менеджер ожидает GitHub-версию"),
+        ("3.15.0", "b" * 40, "не совпадает с выбранным GitHub-коммитом"),
+    ),
+)
+def test_release_source_identity_rejects_mismatch(
     tmp_path: Path,
     monkeypatch,
+    expected_version: str,
+    expected_commit: str,
+    message: str,
 ) -> None:
-    local_commit = "a" * 40
-    remote_commit = "b" * 40
-    monkeypatch.setattr(build_release, "current_branch", lambda _root: "main15.07")
-    monkeypatch.setattr(build_release, "head_commit", lambda _root: local_commit)
-    monkeypatch.setattr(
-        build_release,
-        "fetch_origin_branch_head",
-        lambda _root, _branch: remote_commit,
+    _prepare_release_files(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Изменения\n\n## 3.15.0 - 2026-07-31\n\n- Подготовлен релиз\n",
+        encoding="utf-8",
     )
-    monkeypatch.setattr(build_release, "commit_is_ancestor", lambda *_args: False)
+    (tmp_path / "app" / "release_info.json").write_text(
+        '{"schema_version":1,"version":"3.15.0","date":"2026-07-31",'
+        '"changes":["Подготовлен релиз"]}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(build_release, "head_commit", lambda _root: "a" * 40)
 
-    with pytest.raises(RuntimeError, match="origin/main15.07 изменился") as exc_info:
-        build_release.ensure_release_branch_pushable(
+    with pytest.raises(RuntimeError, match=message):
+        build_release.validate_release_source_identity(
             tmp_path,
-            phase="до начала release-сборки",
+            expected_version=expected_version,
+            expected_commit=expected_commit,
         )
-
-    message = str(exc_info.value)
-    assert remote_commit[:12] in message
-    assert local_commit[:12] in message
-    assert "git pull --rebase origin main15.07" in message
-    assert "повторно запустите полную сборку" in message
-
-
-def test_push_reports_github_rejection_without_raw_called_process_error(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    local_commit = "c" * 40
-    monkeypatch.setattr(
-        build_release,
-        "ensure_release_branch_pushable",
-        lambda _root, *, phase: ("main15.07", local_commit),
-    )
-
-    def reject_push(*_args, **_kwargs):
-        raise build_release.subprocess.CalledProcessError(
-            1,
-            ["git", "push", "origin", "main15.07"],
-            stderr="remote: branch protection rejected the push",
-        )
-
-    monkeypatch.setattr(build_release, "run", reject_push)
-
-    with pytest.raises(RuntimeError, match="GitHub отклонил push") as exc_info:
-        build_release.push_current_branch(tmp_path)
-
-    assert "branch protection rejected the push" in str(exc_info.value)
 
 
 def test_release_gate_failure_includes_child_output(
