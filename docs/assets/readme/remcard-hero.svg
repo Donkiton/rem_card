@@ -1,70 +1,57 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="410" viewBox="0 0 1200 410" role="img" aria-labelledby="title desc">
-  <title id="title">Рем Карта — цифровой рабочий контур реанимации</title>
-  <desc id="desc">Заголовок проекта с клинической картой смены, демонстрационными витальными показателями и кардиолиниями.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-labelledby="title desc">
+  <title id="title">Рем Карта — единая карта пациента и смены</title>
+  <desc id="desc">Спокойная титульная иллюстрация проекта с крупным названием, ролями и суточной клинической шкалой.</desc>
 
   <defs>
-    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#162033"/>
-      <stop offset="1" stop-color="#101827"/>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#101B2D"/>
     </linearGradient>
-    <clipPath id="monitor-clip">
-      <rect x="756" y="177" width="340" height="119" rx="12"/>
+    <linearGradient id="trace" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F45B69"/>
+      <stop offset="1" stop-color="#D7263D"/>
+    </linearGradient>
+    <clipPath id="timeline-clip">
+      <rect x="742" y="76" width="394" height="228" rx="24"/>
     </clipPath>
   </defs>
 
-  <rect width="1200" height="410" rx="28" fill="#0B1220"/>
-  <path d="M0 342 H1200" stroke="#243147" stroke-width="1"/>
-  <path d="M58 342 H516 L538 342 L553 310 L573 375 L596 263 L620 342 H696" fill="none" stroke="#D7263D" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect width="1200" height="380" rx="28" fill="url(#background)"/>
+  <circle cx="1120" cy="28" r="176" fill="#14243B" opacity="0.55"/>
+  <circle cx="1048" cy="344" r="132" fill="#162338" opacity="0.72"/>
 
-  <g id="title-block" transform="translate(64 52)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-    <g transform="translate(0 0)">
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g transform="translate(62 52)">
       <circle cx="18" cy="18" r="18" fill="#D7263D"/>
-      <path d="M8 18 H14 L18 10 L23 27 L27 18 H31" fill="none" stroke="#FFFFFF" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="52" y="24" fill="#9FB0C8" font-size="18" font-weight="700" letter-spacing="2.4">WINDOWS • ОРИТ • PYTHON</text>
+      <path d="M8 18h6l4-8 5 17 4-9h4" fill="none" stroke="#FFFFFF" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="52" y="25" fill="#AFC0D6" font-size="19" font-weight="700" letter-spacing="2.5">WINDOWS · ОРИТ</text>
     </g>
 
-    <text x="0" y="116" fill="#F8FAFC" font-size="76" font-weight="760" letter-spacing="-2">Рем Карта</text>
-    <text x="0" y="166" fill="#D9E2EF" font-size="27" font-weight="520">Единая карта пациента и смены</text>
-    <text x="0" y="204" fill="#D9E2EF" font-size="27" font-weight="520">для реанимации и оперблока</text>
+    <text x="62" y="166" fill="#F8FAFC" font-size="82" font-weight="760" letter-spacing="-2.5">Рем Карта</text>
+    <text x="64" y="215" fill="#D9E2EF" font-size="28" font-weight="520">Единая карта пациента и смены</text>
+    <text x="64" y="252" fill="#D9E2EF" font-size="28" font-weight="520">для реанимации и оперблока</text>
 
-    <g transform="translate(0 244)" font-size="20" font-weight="650">
-      <rect width="130" height="42" rx="12" fill="#162C3B" stroke="#35C975"/>
-      <text x="65" y="27" text-anchor="middle" fill="#8FE7B0">ВРАЧ</text>
-      <rect x="142" width="170" height="42" rx="12" fill="#16283F" stroke="#4CA4FF"/>
-      <text x="227" y="27" text-anchor="middle" fill="#93C8FF">МЕДСЕСТРА</text>
-      <rect x="324" width="180" height="42" rx="12" fill="#39232A" stroke="#F45B69"/>
-      <text x="414" y="27" text-anchor="middle" fill="#FF9CA6">ОПЕРБЛОК</text>
-    </g>
-  </g>
-
-  <g id="patient-card" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-    <rect x="720" y="45" width="424" height="286" rx="22" fill="url(#panel)" stroke="#34445D" stroke-width="2"/>
-    <text x="756" y="82" fill="#8EA2BD" font-size="18" font-weight="700" letter-spacing="2">КАРТА СМЕНЫ • ДЕМО</text>
-    <text x="756" y="116" fill="#F8FAFC" font-size="25" font-weight="720">Витальные функции</text>
-
-    <g transform="translate(756 134)" font-size="18" font-weight="700">
-      <rect width="102" height="34" rx="10" fill="#153326" stroke="#35C975"/>
-      <text x="51" y="23" text-anchor="middle" fill="#9BE9B7">T 36.9°</text>
-      <rect x="112" width="116" height="34" rx="10" fill="#3A2027" stroke="#F45B69"/>
-      <text x="170" y="23" text-anchor="middle" fill="#FFABB3">АД 127/78</text>
-      <rect x="238" width="102" height="34" rx="10" fill="#1D294B" stroke="#5576FF"/>
-      <text x="289" y="23" text-anchor="middle" fill="#AFBEFF">ЧСС 89</text>
+    <g transform="translate(64 304)" font-size="21" font-weight="700">
+      <circle cx="8" cy="8" r="8" fill="#35C975"/>
+      <text x="28" y="15" fill="#B8EFCB">Врач</text>
+      <circle cx="142" cy="8" r="8" fill="#4CA4FF"/>
+      <text x="162" y="15" fill="#B9DDFF">Медсестра</text>
+      <circle cx="342" cy="8" r="8" fill="#F45B69"/>
+      <text x="362" y="15" fill="#FFC2C8">Оперблок</text>
     </g>
 
-    <g clip-path="url(#monitor-clip)">
-      <rect x="756" y="177" width="340" height="119" rx="12" fill="#0D1625"/>
-      <path d="M756 207 H1096 M756 237 H1096 M756 267 H1096" stroke="#26354A"/>
-      <path d="M800 177 V296 M844 177 V296 M888 177 V296 M932 177 V296 M976 177 V296 M1020 177 V296 M1064 177 V296" stroke="#202E42"/>
-      <path d="M756 245 C789 234 810 224 839 228 C869 232 879 250 909 249 C943 248 953 221 987 224 C1019 227 1034 244 1065 239 C1079 237 1088 233 1096 230" fill="none" stroke="#5276FF" stroke-width="4" stroke-linecap="round"/>
-      <path d="M756 260 C790 255 810 250 834 251 L852 251 L862 240 L872 277 L884 206 L899 251 C928 251 946 254 970 250 C1004 244 1021 247 1048 253 C1063 256 1081 256 1096 251" fill="none" stroke="#F04455" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <g clip-path="url(#timeline-clip)">
+      <rect x="742" y="76" width="394" height="228" rx="24" fill="#0C1626" stroke="#34445D" stroke-width="2"/>
+      <path d="M742 132h394M742 190h394M742 248h394" stroke="#213047" stroke-width="1"/>
+      <path d="M808 76v228M874 76v228M940 76v228M1006 76v228M1072 76v228" stroke="#1D2B40" stroke-width="1"/>
+      <path d="M742 220c34-4 52-11 78-9 23 2 39 10 61 8 26-2 43-18 71-14 24 3 40 15 66 12 31-4 50-20 79-15 16 2 28 7 39 10" fill="none" stroke="#4CA4FF" stroke-width="4" stroke-linecap="round"/>
+      <path d="M742 240h72l14-15 15 44 20-96 22 67h62l15-14 14 37 19-77 19 54h122" fill="none" stroke="url(#trace)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
     </g>
+    <rect x="742" y="76" width="394" height="228" rx="24" fill="none" stroke="#34445D" stroke-width="2"/>
 
-    <circle cx="1116" cy="74" r="8" fill="#35C975"/>
-    <text x="1116" y="310" text-anchor="end" fill="#768BA8" font-size="17" font-weight="650">24 ЧАСА • ОДНА ЗАПИСЬ</text>
-  </g>
-
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#8092AA">
-    <text x="64" y="382">REM_CARD / DESKTOP CLINICAL WORKFLOW</text>
-    <text x="1136" y="382" text-anchor="end">PySide6 • SQLite</text>
+    <text x="778" y="116" fill="#AFC0D6" font-size="18" font-weight="700" letter-spacing="2.5">КАРТА СМЕНЫ</text>
+    <text x="778" y="168" fill="#F8FAFC" font-size="42" font-weight="750">24 часа</text>
+    <circle cx="1100" cy="108" r="7" fill="#35C975"/>
+    <text x="1100" y="278" text-anchor="end" fill="#91A7C3" font-size="18" font-weight="650">ОДНА ХРОНОЛОГИЯ</text>
   </g>
 </svg>
