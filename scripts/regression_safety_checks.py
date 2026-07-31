@@ -1302,9 +1302,9 @@ def _check_build_release_cleanup_behavior(temp_root: str, build_release: Any) ->
     return True, "ok"
 
 
-def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, str]:
-    _ = temp_root
-    text = Path(PROJECT_ROOT, "scripts", "build_release.py").read_text(encoding="utf-8")
+def _check_build_release_static_contract(
+    text: str,
+) -> tuple[bool, str]:
     required_tokens = (
         'run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)',
         "package_dir = run_build(root)",
@@ -1380,7 +1380,10 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
     publisher_missing = [token for token in publisher_tokens if token not in publisher_text]
     if publisher_missing:
         return False, f"resumable production publisher token missing: {publisher_missing}"
+    return True, "ok"
 
+
+def _import_build_release_for_contract() -> Any:
     scripts_path = str(Path(PROJECT_ROOT, "scripts"))
     added_scripts_path = scripts_path not in sys.path
     if added_scripts_path:
@@ -1390,7 +1393,13 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
     finally:
         if added_scripts_path:
             sys.path.remove(scripts_path)
+    return build_release
 
+
+def _check_build_release_runtime_contract(
+    temp_root: str,
+    build_release: Any,
+) -> tuple[bool, str]:
     package_dir = Path(temp_root, "overlap", "dist", "Prog")
     nested_releases = package_dir / "UPD" / "releases"
     separate_releases = Path(temp_root, "separate", "UPD", "releases")
@@ -1421,7 +1430,13 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
             os.environ.pop("REMCARD_SKIP_SETTINGS_RELEASE_EXPORT", None)
         else:
             os.environ["REMCARD_SKIP_SETTINGS_RELEASE_EXPORT"] = saved_skip
+    return True, "ok"
 
+
+def _check_build_release_gate_contract(
+    temp_root: str,
+    build_release: Any,
+) -> tuple[bool, str]:
     original_run = build_release.run
     gate_calls: list[list[str]] = []
 
@@ -1436,15 +1451,21 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
     finally:
         build_release.run = original_run
     if len(gate_calls) != 3:
-        return False, f"expected three mandatory pre-push gates, got: {gate_calls}"
+        return False, f"expected three mandatory release gates, got: {gate_calls}"
     joined_gate_calls = [" ".join(call) for call in gate_calls]
     if not any("architecture_safety_check.py" in call for call in joined_gate_calls):
-        return False, "architecture gate is missing before release push"
+        return False, "architecture gate is missing before release build"
     if not any("regression_safety_checks.py" in call and "--profile fast" in call for call in joined_gate_calls):
-        return False, "fast regression gate is missing before release push"
+        return False, "fast regression gate is missing before release build"
     if not any("--select=F821" in call for call in joined_gate_calls):
-        return False, "F821 gate is missing before release push"
+        return False, "F821 gate is missing before release build"
+    return True, "ok"
 
+
+def _check_build_release_smoke_contract(
+    temp_root: str,
+    build_release: Any,
+) -> tuple[bool, str]:
     original_subprocess_run = build_release.subprocess.run
     smoke_calls: list[list[str]] = []
 
@@ -1463,6 +1484,24 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
     ]
     if smoke_calls != expected_smoke:
         return False, f"compiled smoke did not cover all release EXEs exactly once: {smoke_calls}"
+    return True, "ok"
+
+
+def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, str]:
+    text = Path(PROJECT_ROOT, "scripts", "build_release.py").read_text(encoding="utf-8")
+    static_result = _check_build_release_static_contract(text)
+    if not static_result[0]:
+        return static_result
+
+    build_release = _import_build_release_for_contract()
+    for check in (
+        _check_build_release_runtime_contract,
+        _check_build_release_gate_contract,
+        _check_build_release_smoke_contract,
+    ):
+        result = check(temp_root, build_release)
+        if not result[0]:
+            return result
     return True, "ok"
 
 
