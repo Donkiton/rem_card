@@ -55,7 +55,7 @@
 
 Дополнительно приложение содержит аналитику и графики, печатные формы, МКБ, темы интерфейса, пользовательские обращения с диагностическими логами и ограниченный локальный режим оперблока при проблемах с сетью.
 
-## Как проходит запись данных
+## Как устроен общий контур
 
 <p align="center">
   <img src="docs/assets/readme/remcard-workflow.svg" width="100%" alt="Рабочие места врача, медсестры и оперблока записывают данные в общую папку с медицинской БД, настройками, резервными копиями и обновлениями">
@@ -183,7 +183,7 @@ python -m pytest -q
 python -m compileall app data services ui scripts
 python scripts\code_quality_checks.py
 python scripts\architecture_safety_check.py
-python scripts\regression_safety_checks.py
+python scripts\regression_safety_checks.py --profile fast --jobs 4
 git diff --check
 ```
 

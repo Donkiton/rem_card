@@ -1,72 +1,64 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
-  <title id="title">Рабочий контур Рем Карты</title>
-  <desc id="desc">Рабочие места врача, медсестры и двух операционных используют общую папку данных с медицинской базой, настройками, резервными копиями и обновлениями.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="470" viewBox="0 0 1200 470" role="img" aria-labelledby="title desc">
+  <title id="title">Общий рабочий контур Рем Карты</title>
+  <desc id="desc">Рабочие места врача, медсестры и оперблока связаны с общей папкой данных, медицинской базой, настройками и резервными копиями.</desc>
 
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M0 0 L10 5 L0 10 Z" fill="#6F86A6"/>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0 0l10 5-10 5z" fill="#6F86A6"/>
     </marker>
   </defs>
 
-  <rect width="1200" height="540" rx="28" fill="#0B1220"/>
+  <rect width="1200" height="470" rx="28" fill="#0B1220"/>
+
   <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-    <text x="58" y="58" fill="#8EA2BD" font-size="18" font-weight="700" letter-spacing="2">РАБОЧИЙ КОНТУР</text>
-    <text x="58" y="99" fill="#F8FAFC" font-size="38" font-weight="740">Несколько ролей — одна папка данных</text>
+    <text x="58" y="56" fill="#91A7C3" font-size="18" font-weight="700" letter-spacing="2.5">РАБОЧИЙ КОНТУР</text>
+    <text x="58" y="101" fill="#F8FAFC" font-size="40" font-weight="750">Три роли. Одна точка данных.</text>
 
-    <g id="connections" fill="none" stroke="#6F86A6" stroke-width="3" marker-end="url(#arrow)">
-      <path d="M288 175 C360 175 375 242 442 242"/>
-      <path d="M288 263 C360 263 375 263 442 263"/>
-      <path d="M288 351 C360 351 375 284 442 284"/>
-      <path d="M758 263 H858"/>
+    <g fill="none" stroke="#6F86A6" stroke-width="3" marker-end="url(#arrow)">
+      <path d="M206 216v40c0 18 14 32 32 32h92"/>
+      <path d="M600 216v62"/>
+      <path d="M994 216v40c0 18-14 32-32 32h-92"/>
     </g>
 
-    <g id="workstations" font-size="21" font-weight="700">
-      <rect x="58" y="142" width="230" height="66" rx="14" fill="#142C25" stroke="#35C975" stroke-width="2"/>
-      <circle cx="89" cy="175" r="9" fill="#35C975"/>
-      <text x="111" y="170" fill="#DDF7E7">Врач</text>
-      <text x="111" y="193" fill="#91A7C3" font-size="18" font-weight="550">койки / карта / назначения</text>
+    <g>
+      <rect x="58" y="132" width="296" height="84" rx="18" fill="#122B24" stroke="#35C975" stroke-width="2"/>
+      <circle cx="92" cy="174" r="10" fill="#35C975"/>
+      <text x="118" y="183" fill="#E2F8EA" font-size="27" font-weight="730">Врач</text>
 
-      <rect x="58" y="230" width="230" height="66" rx="14" fill="#15263A" stroke="#4CA4FF" stroke-width="2"/>
-      <circle cx="89" cy="263" r="9" fill="#4CA4FF"/>
-      <text x="111" y="258" fill="#E0F0FF">Медсестра</text>
-      <text x="111" y="281" fill="#91A7C3" font-size="18" font-weight="550">выполнение / динамика</text>
+      <rect x="452" y="132" width="296" height="84" rx="18" fill="#14263B" stroke="#4CA4FF" stroke-width="2"/>
+      <circle cx="486" cy="174" r="10" fill="#4CA4FF"/>
+      <text x="512" y="183" fill="#E3F2FF" font-size="27" font-weight="730">Медсестра</text>
 
-      <rect x="58" y="318" width="230" height="66" rx="14" fill="#382128" stroke="#F45B69" stroke-width="2"/>
-      <circle cx="89" cy="351" r="9" fill="#F45B69"/>
-      <text x="111" y="344" fill="#FFE2E5">Оперблок</text>
-      <text x="111" y="370" fill="#AFC0D6" font-size="18" font-weight="550">экстренный / плановый</text>
+      <rect x="846" y="132" width="296" height="84" rx="18" fill="#352028" stroke="#F45B69" stroke-width="2"/>
+      <circle cx="880" cy="174" r="10" fill="#F45B69"/>
+      <text x="906" y="183" fill="#FFE5E8" font-size="27" font-weight="730">Оперблок</text>
     </g>
 
-    <g id="shared-data">
-      <rect x="442" y="164" width="316" height="198" rx="22" fill="#172236" stroke="#D7263D" stroke-width="3"/>
-      <circle cx="490" cy="211" r="24" fill="#D7263D"/>
-      <path d="M476 211 H484 L490 199 L498 224 L504 211 H512" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="530" y="208" fill="#F8FAFC" font-size="25" font-weight="740">Общая папка данных</text>
-      <text x="530" y="237" fill="#9FB0C8" font-size="18">выбирается при первом запуске</text>
-      <path d="M478 265 H722" stroke="#34445D"/>
-      <text x="478" y="299" fill="#D9E2EF" font-size="20" font-weight="650">Запись → блокировка → транзакция</text>
-      <text x="478" y="331" fill="#9FB0C8" font-size="18">изменения передаются через change_log</text>
+    <g>
+      <rect x="330" y="264" width="540" height="92" rx="22" fill="#172338" stroke="#D7263D" stroke-width="3"/>
+      <circle cx="382" cy="310" r="23" fill="#D7263D"/>
+      <path d="M369 310h8l5-11 7 24 6-13h8" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="424" y="319" fill="#F8FAFC" font-size="31" font-weight="750">Общая папка данных</text>
     </g>
 
-    <g id="storage" font-size="20">
-      <rect x="858" y="142" width="284" height="242" rx="20" fill="#111B2B" stroke="#34445D" stroke-width="2"/>
-      <text x="892" y="182" fill="#F8FAFC" font-size="24" font-weight="730">Хранилище и сервисы</text>
-
-      <circle cx="899" cy="225" r="7" fill="#D7263D"/>
-      <text x="920" y="232" fill="#D9E2EF" font-weight="650">Медицинская SQLite-БД</text>
-      <text x="920" y="257" fill="#8296B2" font-size="18">archiv/rao_journal.db</text>
-
-      <circle cx="899" cy="293" r="7" fill="#4CA4FF"/>
-      <text x="920" y="300" fill="#D9E2EF" font-weight="650">Настройки и справочники</text>
-      <text x="920" y="325" fill="#8296B2" font-size="18">settings/remcard_settings.db</text>
-
-      <circle cx="899" cy="359" r="7" fill="#35C975"/>
-      <text x="920" y="366" fill="#D9E2EF" font-weight="650">Backups • logs • updates</text>
+    <g fill="none" stroke="#526984" stroke-width="2">
+      <path d="M600 356v24H190v18"/>
+      <path d="M600 356v42"/>
+      <path d="M600 380h410v18"/>
     </g>
 
-    <g transform="translate(58 436)">
-      <path d="M0 26 H258 L271 26 L280 10 L291 48 L304 0 L320 26 H404" fill="none" stroke="#D7263D" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="446" y="33" fill="#9FB0C8" font-size="20" font-weight="650">Подтверждение сохранения — только после успешной записи в БД</text>
+    <g font-size="21" font-weight="650">
+      <rect x="58" y="398" width="264" height="44" rx="13" fill="#111C2C" stroke="#34445D"/>
+      <circle cx="84" cy="420" r="6" fill="#D7263D"/>
+      <text x="102" y="427" fill="#D9E2EF">Медицинская БД</text>
+
+      <rect x="468" y="398" width="264" height="44" rx="13" fill="#111C2C" stroke="#34445D"/>
+      <circle cx="494" cy="420" r="6" fill="#4CA4FF"/>
+      <text x="512" y="427" fill="#D9E2EF">Настройки</text>
+
+      <rect x="878" y="398" width="264" height="44" rx="13" fill="#111C2C" stroke="#34445D"/>
+      <circle cx="904" cy="420" r="6" fill="#35C975"/>
+      <text x="922" y="427" fill="#D9E2EF">Резервные копии</text>
     </g>
   </g>
 </svg>
