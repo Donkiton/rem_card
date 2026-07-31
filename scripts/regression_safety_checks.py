@@ -1298,7 +1298,7 @@ def _check_build_release_cleanup_behavior(temp_root: str, build_release: Any) ->
     (cleanup_root / "build" / "temporary").mkdir(parents=True, exist_ok=True)
     build_release.cleanup_build_artifacts(cleanup_root, remove_dist=False)
     if (cleanup_root / "build").exists() or not preserved_dist.is_dir():
-        return False, "--no-commit cleanup did not preserve dist while removing build"
+        return False, "test-worktree cleanup did not preserve dist while removing build"
     return True, "ok"
 
 
@@ -1308,7 +1308,6 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
     required_tokens = (
         'run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)',
         "package_dir = run_build(root)",
-        "pushed_commit = push_current_branch(root)",
         "publish_built_release(",
         "write_staged_full_manifest(",
         "staging_dir.rename(final_dir)",
@@ -1338,11 +1337,20 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
         gate_position,
         build_position,
         smoke_position,
-        finish_source.find("pushed_commit = push_current_branch(root)", smoke_position),
         finish_source.find("publish_built_release(", smoke_position),
     ]
     if any(position < 0 for position in positions) or positions != sorted(positions):
-        return False, f"required release order checks -> build -> smoke -> push -> publish is broken: {positions}"
+        return False, (
+            "required immutable release order checks -> build -> smoke -> publish "
+            f"is broken: {positions}"
+        )
+    forbidden = ("push_current_branch(", "commit_release(", "update_release_files(")
+    present_forbidden = [token for token in forbidden if token in text]
+    if present_forbidden:
+        return False, (
+            "immutable release pipeline still mutates or pushes source: "
+            f"{present_forbidden}"
+        )
     cleanup_source_ok, cleanup_source_detail = _check_build_release_cleanup_source_contract(
         text,
         functions,
@@ -14468,20 +14476,21 @@ def _check_outcome_rollback_restores_released_w1_bed(temp_root: str) -> tuple[bo
             os.environ["REMCARD_LOCAL_FIRST_SYNC"] = saved_local_first
 
 
-def _check_build_release_reuses_prepared_version(temp_root: str) -> tuple[bool, str]:
+def _check_build_release_uses_published_version(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
     source = (root / "scripts" / "build_release.py").read_text(encoding="utf-8")
     required = [
-        "release_files_already_prepared",
-        "previous_release_commit == current_head",
-        "версия уже подготовлена",
-        "собираю текущий релиз без поднятия версии",
-        "push_current_branch(root)",
+        "validate_release_source_identity(",
+        "expected_version=args.expected_version",
+        "expected_commit=args.expected_commit",
+        "find_changelog_entry(root, version)",
+        'root / "app" / "release_info.json"',
+        "finish_release(root, version, args)",
     ]
     missing = [item for item in required if item not in source]
     if missing:
-        return False, f"build_release prepared-version flow missing {missing}"
+        return False, f"build_release published-version flow missing {missing}"
     return True, "ok"
 
 
@@ -28720,7 +28729,7 @@ def main(argv: list[str] | None = None):
         ("w1_outcome_release_runs_from_change_monitor", _check_w1_outcome_release_runs_from_change_monitor),
         ("data_update_monitor_suppresses_shutdown_db_closed", _check_data_update_monitor_suppresses_shutdown_db_closed),
         ("outcome_rollback_restores_released_w1_bed", _check_outcome_rollback_restores_released_w1_bed),
-        ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
+        ("build_release_uses_published_version", _check_build_release_uses_published_version),
         ("pyinstaller_settings_release_snapshot_source", _check_pyinstaller_settings_release_snapshot_source),
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
         ("patient_open_cached_card_always_rehydrates", _check_patient_open_cached_card_always_rehydrates),

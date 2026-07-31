@@ -10,17 +10,19 @@
 - Updater получает фактическую папку от запущенного EXE и не угадывает путь.
 - `remcard_data_path.json` рядом с EXE указывает на выбранную общую папку данных с произвольным именем.
 - Релизы находятся в `<папка данных>\UPD\releases\<version>`.
-- Git push точного release-коммита обязателен до любой готовой публикации.
+- Версия и точный исходный коммит должны заранее находиться в GitHub `main`.
+- Production-сборка не изменяет исходники и не выполняет `git push`.
 - Production `ready.ok` создаётся последним и сразу открывает релиз всем клиентам этой базы.
 - Каталог опубликованной версии неизменяем; исправление выпускается только новой версией выше.
 
 ## Этап 1. Подготовить локальный релиз
 
-1. Завершить изменения, сделать рабочий commit и оставить git-worktree чистым.
-2. Запустить `.\.venv\Scripts\python.exe scripts\build_release.py`.
-3. Дождаться обязательных architecture, fast regression и F821-проверок.
-4. Дождаться PyInstaller-сборки, проверки manifest/inventory/settings snapshot и compiled smoke всех шести EXE.
-5. Убедиться, что release-коммит отправлен в `origin` и локальный пакет появился в `C:\Project\RemCardTestData\UPD\releases\<версия>`.
+1. Подготовить `VERSION`, changelog и release-info, отправить их через PR в GitHub `main`.
+2. В менеджере релизов проверить настроенный GitHub-репозиторий и считанную версию.
+3. Нажать «Собрать проект»; менеджер безопасно обновит чистую локальную ветку `main`.
+4. Дождаться обязательных architecture, fast regression и F821-проверок.
+5. Дождаться PyInstaller-сборки, проверки manifest/inventory/settings snapshot и compiled smoke всех шести EXE.
+6. Убедиться, что локальный пакет появился в `C:\Project\RemCardTestData\UPD\releases\<версия>` и его `source_commit` совпадает с GitHub `main`.
 
 Если любой gate завершился ошибкой, релиз остановлен. Переходить к production-публикации запрещено.
 

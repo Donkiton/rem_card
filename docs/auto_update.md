@@ -52,20 +52,23 @@ UPD\
 
 ## Локальная сборка и обязательные проверки
 
-Из чистого git-репозитория выполняется:
+Production-сборка запускается менеджером релизов из чистой локальной ветки
+`main`, синхронизированной с настроенным GitHub-репозиторием:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\build_release.py
+.\.venv\Scripts\python.exe scripts\build_release.py `
+  --expected-version <версия GitHub> `
+  --expected-commit <коммит GitHub>
 ```
 
 Release-скрипт:
 
-1. Подготавливает версию, changelog и release-коммит.
-2. Запускает обязательные `architecture_safety_check`, fast regression и `flake8 F821`.
-3. Собирает полную PyInstaller-папку и проверяет manifest, inventory и release snapshot настроек.
-4. Запускает compiled smoke для всех шести EXE.
-5. Обязательно отправляет точный release-коммит в `origin` и проверяет удалённую ветку.
-6. Только после успешного push публикует готовый пакет в локальный тестовый `UPD`:
+1. Проверяет, что `HEAD`, `VERSION`, changelog и release-info уже подготовлены в GitHub.
+2. Не изменяет исходники, не создаёт release-коммит и не выполняет `git push`.
+3. Запускает обязательные `architecture_safety_check`, fast regression и `flake8 F821`.
+4. Собирает полную PyInstaller-папку и проверяет manifest, inventory и release snapshot настроек.
+5. Запускает compiled smoke для всех шести EXE.
+6. Публикует готовый пакет в локальный тестовый `UPD`:
 
 ```text
 C:\Project\RemCardTestData\UPD\releases\<версия>
@@ -73,7 +76,9 @@ C:\Project\RemCardTestData\UPD\releases\<версия>
 
 Путь можно изменить переменной `REMCARD_BUILD_TARGET_DIR`, но он должен оставаться локальным. Release-сборка не публикует файлы напрямую в сетевую production-базу.
 
-Если любая проверка, сборка, smoke или push завершается ошибкой, публикация останавливается. Исправьте причину и повторите release-команду; вручную обходить gate нельзя.
+Если любая проверка, сборка или smoke завершается ошибкой, локальная публикация
+останавливается. Исправьте причину в исходниках, отправьте изменения в GitHub и
+повторите полную сборку; вручную обходить gate нельзя.
 
 ## Обязательная приёмка до production
 

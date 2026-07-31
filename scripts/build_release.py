@@ -24,19 +24,12 @@ from app.full_update_manifest import (
 )
 from app.runtime_paths import DEFAULT_DEV_DATA_ROOT_NAME, get_dev_baza_dir
 from bump_version import (
-    BUMP_LEVELS,
-    bump_version,
     find_changelog_entry,
     parse_version,
     read_version,
-    update_changelog,
-    version_path,
-    write_release_info,
 )
 
 
-RELEASE_LEVELS = ("auto", *BUMP_LEVELS)
-VERSIONED_FILES = ("VERSION", "CHANGELOG.md", "app/release_info.json")
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 MANIFEST_FILE_NAME = "manifest.json"
 READY_FILE_NAME = "ready.ok"
@@ -56,6 +49,7 @@ SETTINGS_RELEASE_DIR = Path("_internal") / "rem_card" / "settings_release"
 SETTINGS_RELEASE_SNAPSHOT_FILE = "settings_release_snapshot.json"
 SETTINGS_RELEASE_MANIFEST_FILE = "settings_release_manifest.json"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 COMPILED_SMOKE_TIMEOUT_SECONDS = 30
 BUILD_ARTIFACT_DIR_NAMES = ("build", "dist")
 BUILD_ARTIFACT_CLEANUP_DELAYS = (0.0, 0.25, 0.75)
@@ -64,8 +58,6 @@ BUILD_ARTIFACT_CLEANUP_DELAYS = (0.0, 0.25, 0.75)
 def _progress_mode(args: argparse.Namespace) -> str:
     if bool(getattr(args, "test_worktree", False)):
         return "test_worktree"
-    if bool(getattr(args, "no_commit", False)):
-        return "no_commit"
     return "release"
 
 
@@ -117,28 +109,6 @@ def emit_progress(
     else:
         print(line, end="", flush=True)
 
-CHANGELOG_SUBJECT_TRANSLATIONS = {
-    "Optimize cached vitals card reopen": (
-        "Ускорено повторное открытие карты пациента за счет кеша графика витальных функций"
-    ),
-    "Validate and invalidate vitals snapshot cache": (
-        "Кеш графика витальных функций теперь проверяется на актуальность и сбрасывается при изменениях"
-    ),
-    "fix: stabilize Qt worker shutdown": (
-        "Стабилизировано завершение фоновых Qt-воркеров при закрытии приложения"
-    ),
-    "fix: preserve patient card cache fast path": (
-        "Сохранено быстрое повторное открытие карты пациента через кеш"
-    ),
-    "fix: stabilize end-of-day infusion clicks": (
-        "Стабилизированы клики по длительной инфузии до конца суток"
-    ),
-    "Optimize PDF report generation": (
-        "Оптимизировано формирование PDF-отчетов"
-    ),
-}
-
-
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -185,178 +155,11 @@ def ensure_clean_tree(root: Path) -> None:
         )
 
 
-def latest_version_commit(root: Path) -> str:
-    commit = git_output(root, ["log", "-1", "--format=%H", "--", "VERSION"])
-    if not commit:
-        raise RuntimeError("Не удалось найти последний коммит, где менялся VERSION.")
-    return commit
-
-
 def head_commit(root: Path) -> str:
     commit = git_output(root, ["rev-parse", "HEAD"])
     if not commit:
         raise RuntimeError("Не удалось определить текущий git-коммит.")
     return commit
-
-
-def current_branch(root: Path) -> str:
-    branch = git_output(root, ["branch", "--show-current"])
-    if not branch:
-        raise RuntimeError("Не удалось определить текущую git-ветку.")
-    return branch
-
-
-def fetch_origin_branch_head(root: Path, branch: str) -> str:
-    remote_ref = f"refs/heads/{branch}"
-    result = run(
-        ["git", "ls-remote", "--heads", "origin", remote_ref],
-        cwd=root,
-        check=False,
-        capture=True,
-    )
-    if result.returncode != 0:
-        details = "\n".join(
-            value.strip()
-            for value in (str(result.stdout or ""), str(result.stderr or ""))
-            if value and value.strip()
-        )
-        suffix = f"\n{details}" if details else ""
-        raise RuntimeError(f"Не удалось проверить origin/{branch}.{suffix}")
-
-    remote_commit = ""
-    for line in str(result.stdout or "").splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[1] == remote_ref:
-            remote_commit = parts[0]
-            break
-    if not remote_commit:
-        return ""
-
-    fetch_result = run(
-        [
-            "git",
-            "fetch",
-            "--quiet",
-            "origin",
-            f"+{remote_ref}:refs/remotes/origin/{branch}",
-        ],
-        cwd=root,
-        check=False,
-        capture=True,
-    )
-    if fetch_result.returncode != 0:
-        details = "\n".join(
-            value.strip()
-            for value in (str(fetch_result.stdout or ""), str(fetch_result.stderr or ""))
-            if value and value.strip()
-        )
-        suffix = f"\n{details}" if details else ""
-        raise RuntimeError(f"Не удалось обновить origin/{branch}.{suffix}")
-    return git_output(root, ["rev-parse", f"refs/remotes/origin/{branch}"])
-
-
-def commit_is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
-    result = run(
-        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
-        cwd=root,
-        check=False,
-        capture=True,
-    )
-    return result.returncode == 0
-
-
-def ensure_release_branch_pushable(root: Path, *, phase: str) -> tuple[str, str]:
-    branch = current_branch(root)
-    local_commit = head_commit(root)
-    remote_commit = fetch_origin_branch_head(root, branch)
-    if not remote_commit or commit_is_ancestor(root, remote_commit, local_commit):
-        return branch, local_commit
-
-    raise RuntimeError(
-        f"origin/{branch} изменился {phase}: удалённый коммит "
-        f"{remote_commit[:12]} отсутствует в локальном HEAD {local_commit[:12]}. "
-        "Публиковать уже собранные EXE нельзя, потому что они не соответствовали бы git-коммиту. "
-        f"Выполните `git pull --rebase origin {branch}` и повторно запустите полную сборку."
-    )
-
-
-def collect_commit_subjects(root: Path, since_commit: str) -> list[str]:
-    raw = git_output(root, ["log", "--reverse", "--format=%s", f"{since_commit}..HEAD"])
-    subjects: list[str] = []
-    seen: set[str] = set()
-    for line in raw.splitlines():
-        subject = normalize_subject(line)
-        if not subject:
-            continue
-        key = subject.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        subjects.append(subject)
-    return subjects
-
-
-def normalize_subject(value: str) -> str:
-    subject = str(value or "").strip()
-    if not subject:
-        return ""
-    if subject.lower().startswith("merge "):
-        return ""
-    if re.match(
-        r"^(release|version|bump version|релиз|версия|поднятие версии)(\b|:)",
-        subject,
-        flags=re.IGNORECASE,
-    ):
-        return ""
-    return subject
-
-
-def detect_level(subjects: list[str]) -> str:
-    joined = "\n".join(subjects).casefold()
-    if re.search(r"(^|\W)(breaking|major|несовмест|ломающ)", joined):
-        return "major"
-
-    minor_patterns = (
-        r"^feat(\(.+?\))?!?:",
-        r"^feature(\(.+?\))?!?:",
-        r"^add\b",
-        r"^implement\b",
-        r"^introduce\b",
-        r"^добав",
-        r"^реализ",
-        r"^нов",
-    )
-    for subject in subjects:
-        text = subject.casefold()
-        if any(re.search(pattern, text) for pattern in minor_patterns):
-            return "minor"
-    return "patch"
-
-
-def build_changelog_changes(subjects: list[str], manual_changes: list[str]) -> list[str]:
-    changes: list[str] = []
-    seen: set[str] = set()
-    for item in subjects:
-        add_changelog_change(changes, seen, translate_subject_for_changelog(item))
-    for item in manual_changes:
-        add_changelog_change(changes, seen, item)
-    return changes
-
-
-def translate_subject_for_changelog(subject: str) -> str:
-    text = str(subject or "").strip()
-    return CHANGELOG_SUBJECT_TRANSLATIONS.get(text, text)
-
-
-def add_changelog_change(changes: list[str], seen: set[str], value: str) -> None:
-    text = str(value or "").strip().lstrip("-").strip()
-    if not text:
-        return
-    key = text.casefold()
-    if key in seen:
-        return
-    seen.add(key)
-    changes.append(text)
 
 
 def ensure_russian_changelog(changes: list[str]) -> None:
@@ -376,35 +179,8 @@ def ensure_russian_changelog(changes: list[str]) -> None:
         "Релизный changelog должен быть на русском языке. "
         "Найдены пункты без кириллицы:\n"
         f"{examples}{suffix}\n\n"
-        "Переименуйте рабочие коммиты на русском или добавьте точный перевод "
-        "в CHANGELOG_SUBJECT_TRANSLATIONS в scripts/build_release.py."
+        "Исправьте текущую запись CHANGELOG.md до отправки версии в GitHub."
     )
-
-
-def update_release_files(root: Path, level: str, changes: list[str], set_version: str | None = None) -> tuple[str, str]:
-    current = read_version(root)
-    if set_version:
-        parse_version(set_version)
-        next_version = set_version
-    else:
-        next_version = bump_version(current, level)
-
-    date_text = datetime.now().strftime("%Y-%m-%d")
-    version_path(root).write_text(next_version + "\n", encoding="utf-8")
-    update_changelog(root, next_version, date_text, changes)
-    write_release_info(root, next_version, date_text, changes)
-    return current, next_version
-
-
-def sync_current_release_info(root: Path, version: str) -> None:
-    date_text, changes = find_changelog_entry(root, version)
-    ensure_russian_changelog(changes)
-    write_release_info(root, version, date_text, changes)
-
-
-def has_staged_or_unstaged_release_file_changes(root: Path) -> bool:
-    status = git_output(root, ["status", "--porcelain", "--", *VERSIONED_FILES])
-    return bool(status)
 
 
 def _remove_build_artifact(path: Path) -> None:
@@ -460,7 +236,7 @@ def run_build(root: Path) -> Path:
 
 
 def run_release_checks(root: Path) -> None:
-    """Run the mandatory gates for the exact commit that is about to be pushed."""
+    """Run mandatory gates for the exact immutable source commit."""
     checks = (
         (
             "architecture safety",
@@ -491,7 +267,7 @@ def run_release_checks(root: Path) -> None:
         ),
     )
     for name, command in checks:
-        print(f"Обязательная проверка перед push: {name}...")
+        print(f"Обязательная release-проверка: {name}...")
         result = run(command, cwd=root, check=False, capture=True)
         if result.returncode != 0:
             details = "\n".join(
@@ -501,10 +277,10 @@ def run_release_checks(root: Path) -> None:
             )
             suffix = f"\n\n{details}" if details else ""
             raise RuntimeError(
-                f"Проверка перед push не пройдена ({name}), код {result.returncode}. "
-                f"Git push и публикация остановлены.{suffix}"
+                f"Обязательная release-проверка не пройдена ({name}), код {result.returncode}. "
+                f"Сборка и публикация остановлены.{suffix}"
             )
-    print("Все обязательные проверки перед push пройдены.")
+    print("Все обязательные release-проверки пройдены.")
 
 
 def run_compiled_smoke(package_dir: Path) -> None:
@@ -524,7 +300,7 @@ def run_compiled_smoke(package_dir: Path) -> None:
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
                 f"Smoke-тест {exe_name} не завершился за "
-                f"{COMPILED_SMOKE_TIMEOUT_SECONDS} секунд. Git push остановлен."
+                f"{COMPILED_SMOKE_TIMEOUT_SECONDS} секунд. Сборка остановлена."
             ) from exc
         except OSError as exc:
             raise RuntimeError(f"Не удалось запустить smoke-тест {exe_name}: {exc}") from exc
@@ -535,53 +311,9 @@ def run_compiled_smoke(package_dir: Path) -> None:
             suffix = f"\n{details}" if details else ""
             raise RuntimeError(
                 f"Smoke-тест {exe_name} завершился с кодом {result.returncode}. "
-                f"Git push остановлен.{suffix}"
+                f"Сборка остановлена.{suffix}"
             )
     print("Smoke-тест всех шести EXE пройден.")
-
-
-def commit_release(root: Path, version: str) -> None:
-    run(["git", "add", *VERSIONED_FILES], cwd=root)
-    run(["git", "commit", "-m", f"Релиз {version}"], cwd=root)
-
-
-def push_current_branch(root: Path) -> str:
-    branch, local_commit = ensure_release_branch_pushable(
-        root,
-        phase="во время release-сборки",
-    )
-    try:
-        run(["git", "push", "origin", branch], cwd=root, capture=True)
-    except subprocess.CalledProcessError as exc:
-        try:
-            ensure_release_branch_pushable(root, phase="непосредственно перед git push")
-        except RuntimeError as remote_exc:
-            raise remote_exc from exc
-        details = "\n".join(
-            value.strip()
-            for value in (str(exc.stdout or ""), str(exc.stderr or ""))
-            if value and value.strip()
-        )
-        suffix = f"\n{details}" if details else ""
-        raise RuntimeError(
-            f"GitHub отклонил push в origin/{branch}. Проверьте права доступа и правила ветки.{suffix}"
-        ) from exc
-    remote_ref = f"refs/heads/{branch}"
-    raw_remote = git_output(root, ["ls-remote", "--heads", "origin", remote_ref])
-    remote_commit = ""
-    for line in raw_remote.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[1] == remote_ref:
-            remote_commit = parts[0]
-            break
-    if remote_commit != local_commit:
-        raise RuntimeError(
-            "Push не подтверждён: origin/"
-            f"{branch} указывает не на текущий коммит {local_commit}. "
-            "Локальный update-пакет не будет опубликован."
-        )
-    print(f"Git push подтверждён: origin/{branch} = {local_commit}")
-    return local_commit
 
 
 def _read_json_object(path: Path) -> dict:
@@ -1208,103 +940,13 @@ def build_test_worktree(root: Path, args: argparse.Namespace) -> Path:
 
 
 def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
-    if args.no_commit:
-        no_commit_completed = False
-        try:
-            if not args.skip_build:
-                emit_progress(
-                    args,
-                    stage="build",
-                    status="started",
-                    progress=15,
-                    message="Запуск тестовой PyInstaller-сборки без release-коммита.",
-                )
-                package_dir = run_build(root)
-                emit_progress(
-                    args,
-                    stage="build",
-                    status="completed",
-                    progress=60,
-                    message="PyInstaller завершил сборку.",
-                    path=package_dir,
-                )
-                source_commit = head_commit(root)
-                emit_progress(
-                    args,
-                    stage="validate",
-                    status="started",
-                    progress=60,
-                    message="Проверка полного пакета.",
-                )
-                validate_full_package(
-                    package_dir,
-                    version=version,
-                    source_commit=source_commit,
-                )
-                emit_progress(
-                    args,
-                    stage="validate",
-                    status="completed",
-                    progress=72,
-                    message="Полный пакет проверен.",
-                )
-                emit_progress(
-                    args,
-                    stage="smoke",
-                    status="started",
-                    progress=72,
-                    message="Запуск smoke-тестов собранных EXE.",
-                )
-                run_compiled_smoke(package_dir)
-                emit_progress(
-                    args,
-                    stage="smoke",
-                    status="completed",
-                    progress=95,
-                    message="Smoke-тесты пройдены.",
-                )
-                print(
-                    f"Тестовая сборка без release-коммита создана только в {package_dir}. "
-                    f"В UPD она не публикуется и {READY_FILE_NAME} не создаётся."
-                )
-            else:
-                print("Файлы релиза не закоммичены; сборка и публикация пропущены.")
-            no_commit_completed = True
-        finally:
-            # A completed --no-commit build leaves dist\Prog for inspection;
-            # --skip-build has no newly built output worth preserving.
-            cleanup_progress = 95 if no_commit_completed else _current_progress(args)
-            emit_progress(
-                args,
-                stage="cleanup",
-                status="started",
-                progress=cleanup_progress,
-                message="Очистка временных артефактов сборки.",
-            )
-            cleanup_build_artifacts(root, remove_dist=bool(args.skip_build))
-            emit_progress(
-                args,
-                stage="cleanup",
-                status="completed",
-                progress=99 if no_commit_completed else cleanup_progress,
-                message="Очистка временных артефактов завершена.",
-            )
-        return
-
     release_completed = False
     try:
-        if has_staged_or_unstaged_release_file_changes(root):
-            commit_release(root, version)
         ensure_clean_tree(root)
         source_commit = head_commit(root)
-        if args.skip_build:
-            raise RuntimeError(
-                "--skip-build запрещён для release-коммита: перед обязательным push "
-                "нужно собрать и smoke-проверить все шесть EXE."
-            )
 
-        # First prove that the exact release commit can produce a complete package.
-        # Only a successful build may be pushed and made visible in the local UPD.
+        # Production-сборка является чистой функцией уже опубликованного исходного
+        # коммита: она не меняет release-файлы и не выполняет commit/push.
         emit_progress(
             args,
             stage="checks",
@@ -1321,11 +963,6 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
             message="Обязательные проверки пройдены.",
         )
         ensure_clean_tree(root)
-        if not args.test_worktree and not args.no_commit:
-            ensure_release_branch_pushable(
-                root,
-                phase="до начала release-сборки",
-            )
         emit_progress(
             args,
             stage="build",
@@ -1369,27 +1006,10 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
             args,
             stage="smoke",
             status="completed",
-            progress=78,
+            progress=88,
             message="Smoke-тесты пройдены.",
         )
         ensure_clean_tree(root)
-        emit_progress(
-            args,
-            stage="push",
-            status="started",
-            progress=78,
-            message="Отправка release-коммита в GitHub.",
-        )
-        pushed_commit = push_current_branch(root)
-        if pushed_commit != source_commit:
-            raise RuntimeError("Во время release-сборки изменился git HEAD; публикация остановлена.")
-        emit_progress(
-            args,
-            stage="push",
-            status="completed",
-            progress=88,
-            message="Git push подтверждён.",
-        )
         emit_progress(
             args,
             stage="publish",
@@ -1434,40 +1054,18 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Автоматически поднимает версию, собирает CHANGELOG.md из git-коммитов "
-            "после прошлого релиза и запускает PyInstaller."
+            "Собирает неизменяемый production-релиз из уже подготовленного git-коммита. "
+            "VERSION, changelog и release-info во время сборки не изменяются."
         )
     )
     parser.add_argument(
-        "level",
-        nargs="?",
-        choices=RELEASE_LEVELS,
-        default=None,
-        help="auto, patch, minor или major. По умолчанию auto.",
-    )
-    parser.add_argument("--set", dest="set_version", help="Задать точную версию MAJOR.MINOR.PATCH")
-    parser.add_argument(
-        "--change",
-        action="append",
-        default=[],
-        help="Добавить пункт в changelog вручную. Можно указать несколько раз.",
+        "--expected-version",
+        help="Ожидаемая версия GitHub в формате MAJOR.MINOR.PATCH.",
     )
     parser.add_argument(
-        "--skip-build",
-        action="store_true",
-        help="Допустим только с --no-commit: не запускать тестовую PyInstaller-сборку.",
+        "--expected-commit",
+        help="Ожидаемый 40-символьный git-коммит GitHub.",
     )
-    parser.add_argument(
-        "--no-commit",
-        action="store_true",
-        help="Собрать только dist\\Prog без release-коммита, push и публикации в UPD.",
-    )
-    parser.add_argument(
-        "--push",
-        action="store_true",
-        help="Совместимый флаг: push теперь всегда обязателен перед публикацией full-релиза.",
-    )
-    parser.add_argument("--allow-empty", action="store_true", help="Разрешить релиз без новых git-коммитов.")
     parser.add_argument(
         "--test-worktree",
         action="store_true",
@@ -1484,87 +1082,99 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             f"{PROGRESS_JSON_PREFIX}"
         ),
     )
-    args = parser.parse_args(argv)
-    args.level_was_explicit = args.level is not None
-    if args.level is None:
-        args.level = "auto"
-    return args
+    return parser.parse_args(argv)
 
 
 def validate_cli_args(args: argparse.Namespace) -> None:
     if args.test_worktree:
-        conflicts: list[str] = []
-        if bool(getattr(args, "level_was_explicit", False)):
-            conflicts.append("позиционный level")
-        if args.no_commit:
-            conflicts.append("--no-commit")
-        if args.skip_build:
-            conflicts.append("--skip-build")
-        if args.push:
-            conflicts.append("--push")
-        if args.set_version:
-            conflicts.append("--set")
-        if args.change:
-            conflicts.append("--change")
-        if args.allow_empty:
-            conflicts.append("--allow-empty")
+        conflicts = [
+            name
+            for name, value in (
+                ("--expected-version", args.expected_version),
+                ("--expected-commit", args.expected_commit),
+            )
+            if value
+        ]
         if conflicts:
             raise SystemExit(
                 "--test-worktree нельзя сочетать со следующими аргументами: "
                 + ", ".join(conflicts)
             )
-    if args.push and args.no_commit:
-        raise SystemExit("--push нельзя использовать вместе с --no-commit")
-    if args.skip_build and not args.no_commit:
-        raise SystemExit(
-            "--skip-build разрешён только вместе с --no-commit; "
-            "production-релиз обязан пройти сборку и smoke-тест всех EXE."
+        return
+    missing = [
+        name
+        for name, value in (
+            ("--expected-version", args.expected_version),
+            ("--expected-commit", args.expected_commit),
         )
+        if not value
+    ]
+    if missing:
+        raise SystemExit(
+            "Production-сборка требует точный GitHub-источник: "
+            + ", ".join(missing)
+        )
+
+
+def validate_release_source_identity(
+    root: Path,
+    *,
+    expected_version: str | None,
+    expected_commit: str | None,
+) -> tuple[str, str]:
+    version = read_version(root)
+    commit = head_commit(root)
+    if expected_version:
+        parse_version(expected_version)
+        if version != expected_version:
+            raise RuntimeError(
+                f"VERSION выбранного коммита равен {version}, "
+                f"но менеджер ожидает GitHub-версию {expected_version}."
+            )
+    if expected_commit:
+        normalized_commit = expected_commit.strip().lower()
+        if not COMMIT_RE.fullmatch(normalized_commit):
+            raise RuntimeError("Ожидаемый GitHub-коммит должен содержать 40 hex-символов.")
+        if commit != normalized_commit:
+            raise RuntimeError(
+                f"Локальный HEAD {commit[:12]} не совпадает с выбранным "
+                f"GitHub-коммитом {normalized_commit[:12]}."
+            )
+
+    date_text, changes = find_changelog_entry(root, version)
+    ensure_russian_changelog(changes)
+    release_info = _read_json_object(root / "app" / "release_info.json")
+    if str(release_info.get("version") or "").strip() != version:
+        raise RuntimeError(
+            "app/release_info.json не соответствует VERSION. "
+            "Подготовьте версию до отправки изменений в GitHub."
+        )
+    if str(release_info.get("date") or "").strip() != date_text:
+        raise RuntimeError(
+            "Дата app/release_info.json не соответствует записи текущей версии в CHANGELOG.md."
+        )
+    if release_info.get("changes") != changes:
+        raise RuntimeError(
+            "Список изменений app/release_info.json не соответствует текущей записи CHANGELOG.md."
+        )
+    return version, commit
 
 
 def _run_release_main(root: Path, args: argparse.Namespace) -> int:
-    previous_release_commit = latest_version_commit(root)
-    current_head = head_commit(root)
-    subjects = collect_commit_subjects(root, previous_release_commit)
-    changes = build_changelog_changes(subjects, args.change)
-    current_version = read_version(root)
-    release_files_already_prepared = (
-        not changes
-        and not args.allow_empty
-        and not args.set_version
-        and previous_release_commit == current_head
+    version, commit = validate_release_source_identity(
+        root,
+        expected_version=args.expected_version,
+        expected_commit=args.expected_commit,
     )
-    if release_files_already_prepared:
-        sync_current_release_info(root, current_version)
-        print(
-            f"Новых коммитов после версии {current_version} нет: "
-            "версия уже подготовлена, собираю текущий релиз без поднятия версии."
-        )
-        finish_release(root, current_version, args)
-        print("Релизная сборка завершена.")
-        return 0
-
-    if not changes and not args.allow_empty:
-        print(
-            f"Новых коммитов после версии {current_version} нет: "
-            "собираю текущий релиз без поднятия версии."
-        )
-        finish_release(root, current_version, args)
-        print("Релизная сборка завершена.")
-        return 0
-    if not changes:
-        changes = ["Техническая пересборка без изменений в коде"]
-    ensure_russian_changelog(changes)
-
-    level = detect_level(changes) if args.level == "auto" else args.level
-    current, next_version = update_release_files(root, level, changes, set_version=args.set_version)
-    print(f"Версия обновлена: {current} -> {next_version} ({level})")
-    print("Журнал изменений:")
-    for change in changes:
-        print(f"  - {change}")
-
-    finish_release(root, next_version, args)
-
+    print(f"Сборка GitHub-источника: версия {version}, коммит {commit}.")
+    emit_progress(
+        args,
+        stage="prepare",
+        status="completed",
+        progress=10,
+        message="GitHub-коммит, версия и рабочее дерево проверены.",
+    )
+    finish_release(root, version, args)
     print("Релизная сборка завершена.")
     return 0
 
@@ -1590,21 +1200,8 @@ def main(argv: list[str] | None = None) -> int:
             build_test_worktree(root, args)
             return 0
 
-        if not args.no_commit:
-            cleanup_build_artifacts(root)
+        cleanup_build_artifacts(root)
         ensure_clean_tree(root)
-        if not args.no_commit:
-            ensure_release_branch_pushable(
-                root,
-                phase="до подготовки release-коммита",
-            )
-        emit_progress(
-            args,
-            stage="prepare",
-            status="completed",
-            progress=10,
-            message="Git-репозиторий и рабочее дерево проверены.",
-        )
         result = _run_release_main(root, args)
     except Exception as exc:
         emit_progress(
