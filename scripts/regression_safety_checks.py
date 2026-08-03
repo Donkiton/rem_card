@@ -16307,7 +16307,7 @@ def _check_emergency_password_doctor_settings_ui(temp_root: str) -> tuple[bool, 
     saved_info = dialog_module.CustomMessageBox.__dict__["information"]
     saved_passwords: list[str] = []
     try:
-        dialog_module.get_emergency_password = lambda: "2u1x8dxgeD"
+        dialog_module.get_emergency_password = lambda: "123456"
         dialog_module.set_emergency_password = lambda value, **kwargs: saved_passwords.append(str(value))
         dialog_module.CustomMessageBox.information = staticmethod(lambda *args, **kwargs: None)
         widget = AdminMainWidget(role="doctor")
