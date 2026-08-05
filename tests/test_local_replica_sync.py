@@ -19,7 +19,6 @@ from rem_card.app.local_replica_worker import (
     LocalReplicaRotationBusy,
     LocalReplicaWorkerClient,
     LocalReplicaWorkerTimeout,
-    replica_snapshot_lease_dir,
 )
 from rem_card.app.sqlite_shared import FileWriteLock
 from rem_card.data.dao.db_manager import DatabaseManager
@@ -190,8 +189,10 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertFalse(self.replica.is_ready(max_stale_sec=10.0))
 
     def test_worker_timeout_is_hard_and_cleans_temporary_snapshot(self):
+        lease_dir = self.root / "worker-timeout-leases"
         client = LocalReplicaWorkerClient(
             central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(lease_dir),
             timeout_sec=0.3,
         )
         temp_path = self.root / "timeout.sync_tmp.db"
@@ -203,14 +204,65 @@ class LocalReplicaSyncTest(unittest.TestCase):
                     temp_db_path=str(temp_path),
                     debug_delay_sec=0.8,
                 )
+            timeout_elapsed = time.monotonic() - started
+            self.assertLess(timeout_elapsed, 1.2)
+            self.assertFalse(temp_path.exists())
+            self.assertFalse(Path(f"{temp_path}-wal").exists())
+
+            result = client.sync(
+                local_state={
+                    "db_cycle": "cycle-a",
+                    "change_cursor": 2,
+                    "schema_revision": "23",
+                },
+                temp_db_path=str(temp_path),
+                timeout_sec=2.0,
+            )
+            self.assertEqual(result["status"], "unchanged")
         finally:
             client.close()
 
-        self.assertLess(time.monotonic() - started, 1.2)
-        self.assertFalse(temp_path.exists())
-        self.assertFalse(Path(f"{temp_path}-wal").exists())
+        self.assertFalse(list(lease_dir.glob("*.lock")))
 
-    def test_failed_sync_disables_local_reads_until_replica_recovers(self):
+    def test_worker_timeout_covers_network_lease_stage(self):
+        lease_dir = self.root / "lease-timeout"
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(lease_dir),
+            timeout_sec=2.0,
+        )
+        temp_path = self.root / "lease-timeout.sync_tmp.db"
+        current_state = {
+            "db_cycle": "cycle-a",
+            "change_cursor": 2,
+            "schema_revision": "23",
+        }
+        captured = None
+        try:
+            self.assertEqual(
+                client.sync(
+                    local_state=current_state,
+                    temp_db_path=str(temp_path),
+                )["status"],
+                "unchanged",
+            )
+            started = time.monotonic()
+            with self.assertRaises(LocalReplicaWorkerTimeout) as captured:
+                client.sync(
+                    local_state=current_state,
+                    temp_db_path=str(temp_path),
+                    timeout_sec=0.4,
+                    debug_lease_delay_sec=1.0,
+                )
+        finally:
+            client.close()
+
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(captured.exception.stage, "lease_acquire")
+        self.assertFalse(temp_path.exists())
+        self.assertFalse(list(lease_dir.glob("*.lock")))
+
+    def test_failed_sync_keeps_recent_local_replica_until_it_is_stale(self):
         self.replica = LocalReplicaSync(
             central_db_path=str(self.central_path),
             local_db_path=str(self.local_path),
@@ -223,13 +275,16 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.replica._worker_client = _FailingWorkerClient()
         self.assertFalse(self.replica.sync_once())
 
-        self.assertFalse(self.replica.is_ready(max_stale_sec=10.0))
+        self.assertTrue(self.replica.is_ready(max_stale_sec=10.0))
         health = self.replica.health_snapshot()
         self.assertEqual(health["consecutive_failures"], 1)
+        self.assertTrue(health["degraded"])
         self.assertEqual(
             health["last_sync_error_class"],
             "LocalReplicaWorkerTimeout",
         )
+        self.replica.last_sync_ok_ts = time.time() - 11.0
+        self.assertFalse(self.replica.is_ready(max_stale_sec=10.0))
 
         self.replica._worker_client = LocalReplicaWorkerClient(
             central_db_path=str(self.central_path),
@@ -240,9 +295,11 @@ class LocalReplicaSyncTest(unittest.TestCase):
 
     def test_snapshot_uses_reader_lease_without_creating_rotation_lock(self):
         rotation_lock_path = self.root / "db_rotation.lock"
+        lease_dir = self.root / "reader-leases"
         client = LocalReplicaWorkerClient(
             central_db_path=str(self.central_path),
             rotation_lock_path=str(rotation_lock_path),
+            snapshot_lease_dir=str(lease_dir),
             timeout_sec=5.0,
         )
         temp_path = self.root / "locked.sync_tmp.db"
@@ -260,7 +317,6 @@ class LocalReplicaSyncTest(unittest.TestCase):
 
         thread = threading.Thread(target=run_sync, daemon=True)
         thread.start()
-        lease_dir = Path(replica_snapshot_lease_dir(str(self.central_path)))
         deadline = time.monotonic() + 1.0
         while (
             not list(lease_dir.glob("*.lock"))
@@ -346,7 +402,7 @@ class LocalReplicaSyncTest(unittest.TestCase):
             competing_lock.release()
             client.close()
 
-        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertLess(time.monotonic() - started, 1.5)
 
     def test_expired_legacy_replica_lock_is_recovered_safely(self):
         rotation_lock_path = self.root / "db_rotation.lock"

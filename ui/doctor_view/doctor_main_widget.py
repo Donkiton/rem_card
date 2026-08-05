@@ -109,7 +109,14 @@ class DoctorMainWidget(QWidget):
             self._refresh_beds_if_available()
             self._refresh_w1a()
         if data_service:
-            data_service.request_immediate_refresh(force_emit=force)
+            data_service.request_immediate_refresh(
+                force_emit=force,
+                source=(
+                    "manual_refresh:doctor_auto"
+                    if force
+                    else "doctor_auto_refresh"
+                ),
+            )
 
     def stop_auto_refresh(self):
         data_service = self._get_data_service()

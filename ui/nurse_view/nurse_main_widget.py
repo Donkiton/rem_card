@@ -233,7 +233,10 @@ class NurseMainWidget(QWidget):
         data_service = self._get_data_service()
         if data_service:
             try:
-                data_service.request_immediate_refresh(force_emit=True)
+                data_service.request_immediate_refresh(
+                    force_emit=True,
+                    source="archive_journal_exit:nurse",
+                )
             except Exception as exc:
                 logger.warning("Failed to wake monitor after journal exit (nurse): %s", exc)
 
@@ -614,7 +617,10 @@ class NurseMainWidget(QWidget):
 
         data_service = self._get_data_service()
         if data_service:
-            data_service.request_immediate_refresh(force_emit=force_emit)
+            data_service.request_immediate_refresh(
+                force_emit=force_emit,
+                source="card_snapshot:nurse",
+            )
 
     def _schedule_card_hydration_snapshot(
         self,
@@ -2367,13 +2373,23 @@ class NurseMainWidget(QWidget):
         if force:
             self.force_refresh_everywhere()
         if data_service:
-            data_service.request_immediate_refresh(force_emit=force)
+            data_service.request_immediate_refresh(
+                force_emit=force,
+                source=(
+                    "manual_refresh:nurse_auto"
+                    if force
+                    else "nurse_auto_refresh"
+                ),
+            )
 
     def force_refresh_everywhere(self):
         """Принудительное обновление всех доступных представлений (кнопка 'Обновить')."""
         data_service = self._get_data_service()
         if data_service:
-            data_service.request_immediate_refresh(force_emit=True)
+            data_service.request_immediate_refresh(
+                force_emit=True,
+                source="manual_refresh:nurse",
+            )
 
         try:
             if hasattr(self.layout_manager, 'beds_selection_widget') and self.layout_manager.beds_selection_widget:

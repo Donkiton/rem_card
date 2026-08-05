@@ -924,7 +924,10 @@ class AdminMainWidget(QWidget):
     def _on_db_rotated(self):
         data_service = getattr(self.service, "data_service", None)
         if data_service and hasattr(data_service, "request_immediate_refresh"):
-            data_service.request_immediate_refresh(force_emit=True)
+            data_service.request_immediate_refresh(
+                force_emit=True,
+                source="database_rotation:admin",
+            )
 
     def set_print_context(self, service, admission_id, date):
         self.service = service
