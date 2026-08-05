@@ -12,6 +12,11 @@ class SyncCoordinator:
         "manual_refresh",
     }
 
+    FULL_REFRESH_SOURCE_PREFIXES = (
+        "manual_refresh:",
+        "database_rotation",
+    )
+
     ENTITY_SCOPES = {
         "orders": {"orders", "balance"},
         "administrations": {"orders", "administrations", "balance"},
@@ -95,13 +100,15 @@ class SyncCoordinator:
         reason = str(result.get("reason") or "")
         gap_detected = bool(result.get("gap_detected"))
         forced = bool(result.get("forced"))
-        has_changes = bool(result.get("changes"))
-        has_scope = bool(scopes)
+        explicit_full_refresh_source = any(
+            source.startswith(cls.FULL_REFRESH_SOURCE_PREFIXES)
+            for source in force_sources
+        )
 
         full_refresh_required = (
             gap_detected
             or reason in cls.FULL_REFRESH_REASONS
-            or (forced and not has_changes and not has_scope)
+            or (forced and explicit_full_refresh_source)
         )
         vitals_snapshot_required = full_refresh_required or bool(scopes.intersection(cls.VITALS_SNAPSHOT_SCOPES))
         card_snapshot_required = full_refresh_required

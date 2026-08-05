@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
@@ -25,11 +26,13 @@ class LocalReplicaWorkerError(RuntimeError):
 
 
 class LocalReplicaWorkerTimeout(LocalReplicaWorkerError):
-    def __init__(self, timeout_sec: float):
+    def __init__(self, timeout_sec: float, *, stage: str = ""):
         self.timeout_sec = float(timeout_sec)
+        self.stage = str(stage or "")
+        stage_suffix = f" Этап: {self.stage}." if self.stage else ""
         super().__init__(
             f"Обновление локальной реплики превысило безопасный тайм-аут "
-            f"{self.timeout_sec:.1f} с."
+            f"{self.timeout_sec:.1f} с.{stage_suffix}"
         )
 
 
@@ -194,6 +197,96 @@ def _sync_snapshot(message: dict[str, Any]) -> dict[str, Any]:
                 pass
 
 
+def _sync_snapshot_with_network_lease(
+    message: dict[str, Any],
+    *,
+    progress_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    """Run every potentially blocking network operation inside the worker.
+
+    Windows SMB filesystem calls are not reliably bounded by SQLite timeouts.
+    Keeping rotation checks, lease I/O and the database snapshot in this
+    process lets the parent enforce one hard deadline for the complete sync.
+    """
+    raw_rotation_lock_path = str(message.get("rotation_lock_path") or "")
+    rotation_lock_path = (
+        os.path.abspath(raw_rotation_lock_path)
+        if raw_rotation_lock_path
+        else ""
+    )
+    snapshot_lease_path = os.path.abspath(
+        str(message.get("snapshot_lease_path") or "")
+    )
+    malformed_quarantine_dir = os.path.abspath(
+        str(message.get("malformed_quarantine_dir") or "")
+    )
+    lease_duration_sec = max(
+        15.0,
+        float(message.get("lease_duration_sec") or 15.0),
+    )
+    debug_lease_delay_sec = max(
+        0.0,
+        float(message.get("debug_lease_delay_sec") or 0.0),
+    )
+    rotation_gate = (
+        FileWriteLock(
+            rotation_lock_path,
+            stale_timeout_sec=60.0,
+            allow_expired_lease_cleanup=True,
+            allow_legacy_replica_cleanup=True,
+            allow_malformed_cleanup=True,
+            malformed_quarantine_dir=malformed_quarantine_dir,
+        )
+        if rotation_lock_path
+        else None
+    )
+    snapshot_lease = FileWriteLock(
+        snapshot_lease_path,
+        stale_timeout_sec=60.0,
+        lease_duration_sec=lease_duration_sec,
+        allow_expired_lease_cleanup=True,
+        allow_legacy_replica_cleanup=True,
+        allow_malformed_cleanup=True,
+        malformed_quarantine_dir=malformed_quarantine_dir,
+    )
+    snapshot_lease_acquired = False
+    try:
+        if progress_callback is not None:
+            progress_callback("lease_acquire")
+        if debug_lease_delay_sec:
+            time.sleep(debug_lease_delay_sec)
+        if rotation_gate is not None and os.path.exists(rotation_lock_path):
+            rotation_gate.cleanup_abandoned(
+                source="local_replica_rotation_gate",
+            )
+            if os.path.exists(rotation_lock_path):
+                raise LocalReplicaRotationBusy()
+
+        owner_id = (
+            f"{socket.gethostname()}:{os.getpid()}:local_replica_snapshot"
+        )
+        if not snapshot_lease.acquire(
+            owner_id=owner_id,
+            source="local_replica_snapshot",
+        ):
+            raise LocalReplicaRotationBusy()
+        snapshot_lease_acquired = True
+
+        # Close the race where rotation starts after the first check but before
+        # this client publishes its reader lease.
+        if rotation_gate is not None and os.path.exists(rotation_lock_path):
+            raise LocalReplicaRotationBusy()
+        if progress_callback is not None:
+            progress_callback("snapshot")
+        result = _sync_snapshot(message)
+        return result
+    finally:
+        if snapshot_lease_acquired:
+            if progress_callback is not None:
+                progress_callback("lease_release")
+            snapshot_lease.release()
+
+
 def _send_error(pipe, exc: Exception) -> None:
     try:
         pipe.send(
@@ -220,7 +313,17 @@ def _worker_main(pipe) -> None:
             _send_error(pipe, ValueError(f"Unsupported local replica command: {command}"))
             continue
         try:
-            pipe.send({"ok": True, **_sync_snapshot(message)})
+            pipe.send(
+                {
+                    "ok": True,
+                    **_sync_snapshot_with_network_lease(
+                        message,
+                        progress_callback=lambda stage: pipe.send(
+                            {"progress": str(stage or "")}
+                        ),
+                    ),
+                }
+            )
         except Exception as exc:
             _send_error(pipe, exc)
 
@@ -313,6 +416,7 @@ class LocalReplicaWorkerClient:
         temp_db_path: str,
         timeout_sec: float | None = None,
         debug_delay_sec: float = 0.0,
+        debug_lease_delay_sec: float = 0.0,
     ) -> dict[str, Any]:
         effective_timeout = max(
             0.2,
@@ -320,55 +424,8 @@ class LocalReplicaWorkerClient:
         )
         deadline = time.monotonic() + effective_timeout
         with self._mutex:
-            rotation_gate = (
-                FileWriteLock(
-                    self.rotation_lock_path,
-                    stale_timeout_sec=60.0,
-                    allow_expired_lease_cleanup=True,
-                    allow_legacy_replica_cleanup=True,
-                    allow_malformed_cleanup=True,
-                    malformed_quarantine_dir=self.malformed_quarantine_dir,
-                )
-                if self.rotation_lock_path
-                else None
-            )
-            snapshot_lease = FileWriteLock(
-                self.snapshot_lease_path,
-                stale_timeout_sec=60.0,
-                lease_duration_sec=max(15.0, effective_timeout * 2.0 + 3.0),
-                allow_expired_lease_cleanup=True,
-                allow_legacy_replica_cleanup=True,
-                allow_malformed_cleanup=True,
-                malformed_quarantine_dir=self.malformed_quarantine_dir,
-            )
-            snapshot_lease_acquired = False
+            last_stage = "worker_start"
             try:
-                if rotation_gate is not None and os.path.exists(
-                    self.rotation_lock_path
-                ):
-                    rotation_gate.cleanup_abandoned(
-                        source="local_replica_rotation_gate",
-                    )
-                    if os.path.exists(self.rotation_lock_path):
-                        raise LocalReplicaRotationBusy()
-
-                owner_id = (
-                    f"{socket.gethostname()}:{os.getpid()}:"
-                    "local_replica_snapshot"
-                )
-                if not snapshot_lease.acquire(
-                    owner_id=owner_id,
-                    source="local_replica_snapshot",
-                ):
-                    raise LocalReplicaRotationBusy()
-                snapshot_lease_acquired = True
-
-                # Close the race where rotation starts after the first check but
-                # before this client publishes its reader lease.
-                if rotation_gate is not None and os.path.exists(
-                    self.rotation_lock_path
-                ):
-                    raise LocalReplicaRotationBusy()
                 self._ensure_started()
                 self._pipe.send(
                     {
@@ -377,12 +434,32 @@ class LocalReplicaWorkerClient:
                         "temp_db_path": os.path.abspath(temp_db_path),
                         "local_state": dict(local_state or {}),
                         "debug_delay_sec": max(0.0, float(debug_delay_sec)),
+                        "debug_lease_delay_sec": max(
+                            0.0,
+                            float(debug_lease_delay_sec),
+                        ),
+                        "rotation_lock_path": self.rotation_lock_path,
+                        "snapshot_lease_path": self.snapshot_lease_path,
+                        "malformed_quarantine_dir": self.malformed_quarantine_dir,
+                        "lease_duration_sec": max(
+                            15.0,
+                            effective_timeout * 2.0 + 3.0,
+                        ),
                     }
                 )
-                remaining = max(0.0, deadline - time.monotonic())
-                if not self._pipe.poll(remaining):
-                    raise LocalReplicaWorkerTimeout(effective_timeout)
-                response = self._pipe.recv()
+                while True:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if not self._pipe.poll(remaining):
+                        raise LocalReplicaWorkerTimeout(
+                            effective_timeout,
+                            stage=last_stage,
+                        )
+                    response = self._pipe.recv()
+                    progress = str(response.get("progress") or "")
+                    if progress:
+                        last_stage = progress
+                        continue
+                    break
             except LocalReplicaWorkerTimeout:
                 self._terminate()
                 _remove_with_sidecars(temp_db_path)
@@ -393,15 +470,15 @@ class LocalReplicaWorkerClient:
                 raise LocalReplicaWorkerError(
                     f"Процесс локальной реплики завершился без результата: {exc}"
                 ) from exc
-            finally:
-                if snapshot_lease_acquired:
-                    snapshot_lease.release()
 
             if not response.get("ok"):
                 _remove_with_sidecars(temp_db_path)
+                remote_error_class = str(response.get("error_class") or "")
+                if remote_error_class == LocalReplicaRotationBusy.__name__:
+                    raise LocalReplicaRotationBusy()
                 raise LocalReplicaWorkerError(
                     str(response.get("error") or "Ошибка процесса локальной реплики"),
-                    remote_error_class=str(response.get("error_class") or ""),
+                    remote_error_class=remote_error_class,
                 )
             return dict(response)
 
