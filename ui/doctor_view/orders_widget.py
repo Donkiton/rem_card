@@ -2687,6 +2687,7 @@ class OrdersWidget(QWidget):
         block_ui: bool = True,
         show_error: bool = True,
         perf_click_id: int | None = None,
+        pass_result_to_success: bool = False,
     ):
         if self._is_closing or not self.service:
             return
@@ -2701,7 +2702,7 @@ class OrdersWidget(QWidget):
         if block_ui and hasattr(self, "frame_container"):
             self.frame_container.setEnabled(False)
 
-        def _on_success(_):
+        def _on_success(result):
             if block_ui and hasattr(self, "frame_container"):
                 self.frame_container.setEnabled(True)
             logger.info(
@@ -2712,7 +2713,10 @@ class OrdersWidget(QWidget):
             )
             self._perf_mark_click(perf_click_id, "write_ok")
             if on_success:
-                on_success()
+                if pass_result_to_success:
+                    on_success(result)
+                else:
+                    on_success()
 
         def _on_error(exc):
             if block_ui and hasattr(self, "frame_container"):
@@ -3467,7 +3471,7 @@ class OrdersWidget(QWidget):
         if not payload:
             return
 
-        def after_success():
+        def after_success(result):
             self._local_draft_save_pending = False
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
@@ -3475,14 +3479,57 @@ class OrdersWidget(QWidget):
             logger.info(f"Карта назначений для ID {target_admission_id} успешно сохранена")
             self._reset_local_draft_tracking(clear_baseline=True)
             self._cached_has_drafts = False
-            if self.model is not None:
-                self.model._set_has_any_draft(False, emit_order_column=True)
             self._discard_deferred_forced_reload_after_guard(discard_reason="post_finalize")
             self._clear_local_cell_draft_guard()
             self._admin_only_snapshot_until = 0.0
             self._clear_pending_reorder()
             self._post_finalize_retry_count = 0
-            self._refresh_model(source="post_finalize")
+            self._last_applied_snapshot_signature = None
+
+            snapshot = result.get("snapshot") if isinstance(result, dict) else None
+            snapshot_applied = False
+            if isinstance(snapshot, dict):
+                snapshot_admission_id = int(snapshot.get("admission_id") or 0)
+                snapshot_shift_date = snapshot.get("shift_date")
+                if (
+                    snapshot_admission_id == int(target_admission_id)
+                    and snapshot_shift_date == target_shift_date
+                    and bool(snapshot.get("only_committed", False))
+                ):
+                    try:
+                        snapshot_applied = self._apply_snapshot_data(
+                            snapshot=snapshot,
+                            admission_id=target_admission_id,
+                            shift_date=target_shift_date,
+                            context_key=self._current_context_key(),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[OrdersWidget] committed snapshot apply failed admission_id=%s",
+                            target_admission_id,
+                        )
+
+            if snapshot_applied:
+                record_metric(
+                    "orders_post_finalize_snapshot_apply",
+                    1,
+                    admission_id=target_admission_id,
+                    source="post_finalize",
+                    result="success",
+                    path="write_result",
+                )
+            else:
+                if self.model is not None:
+                    self.model._set_has_any_draft(False, emit_order_column=True)
+                record_metric(
+                    "orders_post_finalize_snapshot_apply",
+                    1,
+                    admission_id=target_admission_id,
+                    source="post_finalize",
+                    result="fallback",
+                    path="async_refresh",
+                )
+                self._refresh_model(source="post_finalize")
             self.localDraftResolutionFinished.emit(True)
 
         def after_error(_exc):
@@ -3506,6 +3553,7 @@ class OrdersWidget(QWidget):
                 ),
                 on_success=after_success,
                 on_error=after_error,
+                pass_result_to_success=True,
             )
         except Exception:
             self._local_draft_save_pending = False

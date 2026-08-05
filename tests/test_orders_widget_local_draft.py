@@ -23,6 +23,7 @@ class FakeOrdersService:
         self.commit_calls = 0
         self.commit_payloads = []
         self.write_descriptions = []
+        self.commit_result = None
         self.vital_settings = {"ad": 1, "pulse": 1, "temp": 1, "spo2": 1, "rr": 0, "cvp": 0}
 
     @staticmethod
@@ -39,6 +40,7 @@ class FakeOrdersService:
     def commit_local_order_draft(self, *_args, **_kwargs):
         self.commit_calls += 1
         self.commit_payloads.append(_kwargs)
+        return self.commit_result
 
     def get_vital_settings_cached(self, *_args, **_kwargs):
         return dict(self.vital_settings)
@@ -92,6 +94,44 @@ def _make_widget():
     widget.model.apply_snapshot(snapshot)
     widget._capture_local_draft_baseline(snapshot)
     return widget, service
+
+
+def _committed_snapshot_for_current_mark(widget, *, change_id=5):
+    order = deepcopy(widget.model.orders[0])
+    order.is_committed = 1
+    admin = next(iter(widget.model.admin_map.values()))
+    return {
+        "admission_id": widget.admission_id,
+        "shift_date": widget.shift_date,
+        "only_committed": True,
+        "orders": [order],
+        "admin_rows": [
+            {
+                "id": 101,
+                "order_id": order.id,
+                "chain_id": admin.chain_id,
+                "big_chain_id": admin.big_chain_id,
+                "cell_role": admin.cell_role,
+                "planned_time": admin.planned_time.isoformat(),
+                "actual_time": None,
+                "performer_id": None,
+                "status": admin.status,
+                "version": 1,
+                "is_committed": 1,
+                "comment": admin.comment,
+                "volume_ml": admin.volume_ml,
+                "updated_at": "2026-07-13T08:01:00",
+                "last_modified_by": None,
+            }
+        ],
+        "has_any_draft": False,
+        "has_any_orders": True,
+        "has_any_administrations": True,
+        "change_id": change_id,
+        "version": change_id,
+        "source": "post_finalize",
+        "load_trace_id": "test-write-result",
+    }
 
 
 def test_cell_click_is_local_and_toggle_back_collapses_to_noop():
@@ -249,6 +289,55 @@ def test_24_hour_chain_is_built_entirely_in_memory():
         assert roles[0] == "start"
         assert roles[-1] == "end"
         assert set(roles[1:-1]) == {"body"}
+    finally:
+        widget.shutdown()
+
+
+def test_save_applies_snapshot_from_write_result_without_async_refresh():
+    widget, service = _make_widget()
+    try:
+        widget._handle_cell_action(
+            widget.model.index(0, 1),
+            "orders_left_click",
+            service.forbidden_cell_write,
+        )
+        service.commit_result = {
+            "order_id_map": {},
+            "snapshot": _committed_snapshot_for_current_mark(widget),
+        }
+        refresh_sources = []
+        widget._refresh_model = lambda *, source="refresh": refresh_sources.append(source)
+
+        widget.finalize_card()
+
+        assert service.commit_calls == 1
+        assert refresh_sources == []
+        assert not widget.has_drafts()
+        assert len(widget.model.admin_map) == 1
+        committed_admin = next(iter(widget.model.admin_map.values()))
+        assert committed_admin.id == 101
+        assert committed_admin.is_committed == 1
+    finally:
+        widget.shutdown()
+
+
+def test_save_falls_back_to_async_refresh_when_write_snapshot_is_missing():
+    widget, service = _make_widget()
+    try:
+        widget._handle_cell_action(
+            widget.model.index(0, 1),
+            "orders_left_click",
+            service.forbidden_cell_write,
+        )
+        service.commit_result = {"order_id_map": {}, "snapshot": None}
+        refresh_sources = []
+        widget._refresh_model = lambda *, source="refresh": refresh_sources.append(source)
+
+        widget.finalize_card()
+
+        assert service.commit_calls == 1
+        assert refresh_sources == ["post_finalize"]
+        assert not widget.has_drafts()
     finally:
         widget.shutdown()
 
