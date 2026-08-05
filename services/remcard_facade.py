@@ -920,7 +920,7 @@ class RemCardService(QObject):
 
             return _check_cancelled
 
-        if caller != "read_coordinator":
+        if caller not in {"read_coordinator", "orders_commit_local_draft"}:
             _LEGACY_ORDERS_ACCESS_COUNT += 1
             warn_key = (caller, int(admission_id), shift_date.isoformat(), context_hash)
             if warn_key not in _DIRECT_ORDERS_BUILD_WARNED:
@@ -1706,7 +1706,7 @@ class RemCardService(QObject):
         expected_revisions=None,
         expected_active_order_ids=None,
     ):
-        return self._orders.commit_local_draft(
+        order_id_map = self._orders.commit_local_draft(
             admission_id,
             shift_date,
             orders=orders,
@@ -1716,6 +1716,57 @@ class RemCardService(QObject):
             expected_revisions=expected_revisions,
             expected_active_order_ids=expected_active_order_ids,
         )
+        snapshot = None
+        snapshot_started = time.perf_counter()
+        context_hash = hashlib.sha256(
+            f"{int(admission_id)}|{shift_date.isoformat()}|committed".encode("utf-8")
+        ).hexdigest()[:16]
+        try:
+            with orders_snapshot_caller(
+                "orders_commit_local_draft",
+                context_hash=context_hash,
+                request_source="post_finalize",
+            ):
+                snapshot = self.build_orders_snapshot(
+                    admission_id,
+                    shift_date,
+                    only_committed=True,
+                    include_change_cursor=True,
+                )
+            snapshot = dict(snapshot)
+            snapshot["source"] = "post_finalize"
+            snapshot["load_strategy"] = "commit_snapshot"
+            snapshot["load_trace_id"] = f"orders-commit-{time.time_ns()}"
+            snapshot["context_hash"] = context_hash
+            snapshot["version"] = int(snapshot.get("change_id") or 0)
+            snapshot["last_change_id"] = int(snapshot.get("change_id") or 0)
+        except Exception as exc:
+            logger.exception(
+                "[RemCardService] committed orders snapshot build failed admission_id=%s; UI refresh fallback required",
+                admission_id,
+            )
+            record_metric(
+                "orders_commit_snapshot_build",
+                round((time.perf_counter() - snapshot_started) * 1000.0, 3),
+                admission_id=admission_id,
+                source="post_finalize",
+                result="error",
+                error_type=type(exc).__name__,
+            )
+        else:
+            record_metric(
+                "orders_commit_snapshot_build",
+                round((time.perf_counter() - snapshot_started) * 1000.0, 3),
+                admission_id=admission_id,
+                source="post_finalize",
+                result="success",
+                orders_count=len(snapshot.get("orders") or ()),
+                admin_rows_count=len(snapshot.get("admin_rows") or ()),
+            )
+        return {
+            "order_id_map": order_id_map,
+            "snapshot": snapshot,
+        }
 
     def save_order_draft_sort(self, admission_id: int, shift_date: datetime, ordered_order_ids, expected_revisions=None):
         self._orders.save_draft_order_sort(
