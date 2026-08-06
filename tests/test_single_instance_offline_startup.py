@@ -122,7 +122,11 @@ def test_single_instance_server_is_acquired_before_database_guard(monkeypatch):
         lambda _role, *, active_local_case: (None, ""),
     )
     monkeypatch.setattr(app_main, "_show_update_in_progress_if_needed", lambda: False)
-    monkeypatch.setattr(app_main, "_launch_regular_startup_update_if_needed", lambda _role: False)
+    monkeypatch.setattr(
+        app_main,
+        "_launch_regular_startup_update_if_needed",
+        lambda _role: events.append("update") or False,
+    )
     monkeypatch.setattr(app_main, "_sync_release_settings_if_needed", lambda: None)
     monkeypatch.setattr(
         app_main,
@@ -148,7 +152,7 @@ def test_single_instance_server_is_acquired_before_database_guard(monkeypatch):
     with pytest.raises(GuardReached):
         app_main._main_impl(forced_role="operblock_planned")
 
-    assert events == ["remove_stale", "listen", "guard"]
+    assert events == ["remove_stale", "listen", "update", "guard"]
 
 
 def test_unresponsive_probe_does_not_replace_existing_server(monkeypatch):
@@ -187,8 +191,20 @@ def test_existing_instance_is_handled_before_offline_guard(monkeypatch):
     monkeypatch.setattr(app_main, "_configure_dev_runtime_baza_pin", lambda: None)
     monkeypatch.setattr(app_main, "_configure_operblock_startup_path", lambda _role, path_setup: path_setup)
     monkeypatch.setattr(app_main, "_has_active_local_operblock_case_before_network_probe", lambda _role: True)
-    monkeypatch.setattr(app_main, "_show_update_in_progress_if_needed", lambda: False)
-    monkeypatch.setattr(app_main, "_launch_regular_startup_update_if_needed", lambda _role: False)
+    monkeypatch.setattr(
+        app_main,
+        "_show_update_in_progress_if_needed",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("update locks must not be checked before existing-instance handling")
+        ),
+    )
+    monkeypatch.setattr(
+        app_main,
+        "_launch_regular_startup_update_if_needed",
+        lambda _role: (_ for _ in ()).throw(
+            AssertionError("updater must not launch while the role is already running")
+        ),
+    )
     monkeypatch.setattr(app_main, "_sync_release_settings_if_needed", lambda: None)
     monkeypatch.setattr(
         app_main,

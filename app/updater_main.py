@@ -1,5 +1,6 @@
 import argparse
 import ctypes
+from ctypes import wintypes
 import json
 import os
 import shutil
@@ -113,6 +114,7 @@ MANIFEST_FILE_NAME = "manifest.json"
 LOCK_STALE_SEC = 30 * 60
 ROLE_LOCK_STALE_SEC = 90
 WAIT_ACTIVE_SESSIONS_TIMEOUT_SEC = 30 * 60
+WAIT_TARGET_PROCESSES_TIMEOUT_SEC = 30 * 60
 REQUIRED_EXES = (
     "RemCardDoctor.exe",
     "RemCardNurse.exe",
@@ -135,6 +137,9 @@ MANAGED_ROOT_FILES = (
     "manifest.json",
 )
 MANAGED_ROOT_DIRS = ("_internal",)
+MANAGED_EXE_NAMES = frozenset(
+    name.casefold() for name in MANAGED_ROOT_FILES if name.casefold().endswith(".exe")
+)
 UPDATE_DIR_NAME = "UPD"
 DIRECT_TARGET_DIR_ENV = "REMCARD_UPDATE_TARGET_DIR"
 UPDATE_TEMP_DIR_PREFIXES = ("__upd_old_", "__upd_new_")
@@ -440,6 +445,117 @@ def _wait_for_parent(pid: int, status: Callable[[str, int], None]):
         time.sleep(0.5)
 
 
+def _query_process_executable_path(pid: int) -> str:
+    if os.name != "nt" or pid <= 0:
+        return ""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        capacity = 32768
+        buffer = ctypes.create_unicode_buffer(capacity)
+        size = wintypes.DWORD(capacity)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+            return ""
+        return str(buffer.value or "")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _iter_running_processes() -> list[tuple[int, str, str]]:
+    if os.name != "nt":
+        return []
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32FirstW.restype = wintypes.BOOL
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel32.Process32NextW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == INVALID_HANDLE_VALUE:
+        raise RuntimeError("Не удалось проверить локальные процессы перед обновлением.")
+
+    processes: list[tuple[int, str, str]] = []
+    entry = PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+    try:
+        has_entry = bool(kernel32.Process32FirstW(snapshot, ctypes.byref(entry)))
+        while has_entry:
+            pid = int(entry.th32ProcessID)
+            exe_name = str(entry.szExeFile or "")
+            processes.append((pid, exe_name, _query_process_executable_path(pid)))
+            has_entry = bool(kernel32.Process32NextW(snapshot, ctypes.byref(entry)))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return processes
+
+
+def _find_running_target_processes(target_dir: str) -> list[tuple[int, str]]:
+    target = _canonical_real_path(target_dir)
+    active: list[tuple[int, str]] = []
+    for pid, exe_name, exe_path in _iter_running_processes():
+        if pid <= 0 or pid == os.getpid() or exe_name.casefold() not in MANAGED_EXE_NAMES:
+            continue
+        if not exe_path:
+            # Failing closed is safer than replacing DLLs while a matching
+            # process cannot be inspected because of Windows permissions.
+            active.append((pid, exe_name))
+            continue
+        if _canonical_real_path(os.path.dirname(exe_path)) == target:
+            active.append((pid, exe_name))
+    return active
+
+
+def _wait_for_target_processes(target_dir: str, status: Callable[[str, int], None]):
+    deadline = time.time() + WAIT_TARGET_PROCESSES_TIMEOUT_SEC
+    while True:
+        active = _find_running_target_processes(target_dir)
+        if not active:
+            return
+        labels = ", ".join(f"{name} (PID {pid})" for pid, name in active)
+        if time.time() >= deadline:
+            raise RuntimeError(
+                "Не удалось начать обновление: программы из обновляемой папки не закрыты: "
+                + labels
+            )
+        status("Ожидание закрытия работающей РЕМКАРТА: " + labels, 10)
+        time.sleep(1.0)
+
+
 def _read_json(path: str) -> Optional[dict[str, Any]]:
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -740,6 +856,35 @@ def _retry(action: Callable[[], None], description: str, attempts: int = 50, del
     raise RuntimeError(f"{description}: {last_exc}") from last_exc
 
 
+def _rename_path_with_retry(
+    source: str,
+    destination: str,
+    description: str,
+    *,
+    attempts: int = 50,
+    delay_sec: float = 0.5,
+) -> None:
+    """Rename on the same volume without shutil.move's copy/delete fallback."""
+    if os.path.lexists(destination):
+        raise RuntimeError(f"{description}: путь назначения уже существует: {destination}")
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            os.rename(source, destination)
+            return
+        except Exception as exc:
+            last_exc = exc
+            if os.path.lexists(destination):
+                raise RuntimeError(
+                    f"{description}: после неудачного переименования появился путь назначения: "
+                    f"{destination}"
+                ) from exc
+            if attempt < attempts - 1:
+                time.sleep(delay_sec)
+    raise RuntimeError(f"{description}: {last_exc}") from last_exc
+
+
 def _log_phase_duration(
     log: Optional[Callable[[str], None]],
     phase: str,
@@ -869,16 +1014,18 @@ def _replace_program_dir(
             for name in MANAGED_ROOT_FILES:
                 current = os.path.join(target, name)
                 if os.path.isfile(current):
-                    _retry(
-                        lambda current=current, name=name: shutil.move(current, os.path.join(backup, name)),
+                    _rename_path_with_retry(
+                        current,
+                        os.path.join(backup, name),
                         f"Не удалось зарезервировать {name}",
                     )
 
             for name in MANAGED_ROOT_DIRS:
                 current = os.path.join(target, name)
                 if os.path.isdir(current):
-                    _retry(
-                        lambda current=current, name=name: shutil.move(current, os.path.join(backup, name)),
+                    _rename_path_with_retry(
+                        current,
+                        os.path.join(backup, name),
                         f"Не удалось зарезервировать {name}",
                     )
         finally:
@@ -892,8 +1039,9 @@ def _replace_program_dir(
                 if not os.path.isfile(source_path):
                     continue
                 target_path = os.path.join(target, name)
-                _retry(
-                    lambda source_path=source_path, target_path=target_path: shutil.move(source_path, target_path),
+                _rename_path_with_retry(
+                    source_path,
+                    target_path,
                     f"Не удалось установить {name}",
                 )
                 installed_paths.append(target_path)
@@ -903,8 +1051,9 @@ def _replace_program_dir(
                 if not os.path.isdir(source_path):
                     continue
                 target_path = os.path.join(target, name)
-                _retry(
-                    lambda source_path=source_path, target_path=target_path: shutil.move(source_path, target_path),
+                _rename_path_with_retry(
+                    source_path,
+                    target_path,
                     f"Не удалось установить {name}",
                 )
                 installed_paths.append(target_path)
@@ -942,7 +1091,11 @@ def _replace_program_dir(
             if os.path.isfile(saved):
                 try:
                     _remove_path(os.path.join(target, name))
-                    shutil.move(saved, os.path.join(target, name))
+                    _rename_path_with_retry(
+                        saved,
+                        os.path.join(target, name),
+                        f"Не удалось восстановить {name}",
+                    )
                 except Exception as exc:
                     rollback_errors.append(f"не удалось восстановить {name}: {exc}")
         for name in MANAGED_ROOT_DIRS:
@@ -950,7 +1103,11 @@ def _replace_program_dir(
             if os.path.isdir(saved):
                 try:
                     _remove_path(os.path.join(target, name))
-                    shutil.move(saved, os.path.join(target, name))
+                    _rename_path_with_retry(
+                        saved,
+                        os.path.join(target, name),
+                        f"Не удалось восстановить {name}",
+                    )
                 except Exception as exc:
                     rollback_errors.append(f"не удалось восстановить {name}: {exc}")
         try:
@@ -1019,12 +1176,14 @@ class UpdateWorker(QObject):
             self._status("Получение блокировки обновления...", 5)
             lock.acquire()
             _remove_file_quietly(str(self.args.starting_lock or ""))
+            _remove_file_quietly(str(self.args.local_starting_lock or ""))
             _write_log(
                 baza_dir,
                 f"update started source={source} target={target} version={payload['target_version']}",
             )
 
             _wait_for_parent(int(self.args.parent_pid or 0), self._status)
+            _wait_for_target_processes(target, self._status)
             _wait_for_active_sessions(baza_dir, self._status)
             _replace_program_dir(
                 source_dir=source,
@@ -1087,6 +1246,7 @@ class UpdateWorker(QObject):
             self.failed.emit(str(exc))
         finally:
             _remove_file_quietly(str(self.args.starting_lock or ""))
+            _remove_file_quietly(str(self.args.local_starting_lock or ""))
             if lock:
                 try:
                     lock.release(completed=replacement_completed)
@@ -1517,6 +1677,7 @@ def _build_direct_update_args(executable_dir: Optional[str] = None) -> Optional[
         baza_dir=baza_dir,
         lock=get_update_lock_path(baza_dir, target_dir=target_dir),
         starting_lock="",
+        local_starting_lock="",
         parent_pid="0",
         current_version=_read_version_from_dir(target_dir),
         target_version=target_version,
@@ -1564,6 +1725,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--baza-dir", required=True)
     parser.add_argument("--lock", required=True)
     parser.add_argument("--starting-lock", default="")
+    parser.add_argument("--local-starting-lock", default="")
     parser.add_argument("--parent-pid", default="0")
     # Старые full-only launcher-сборки передают этот аргумент. Он намеренно
     # принимается для совместимости, но больше не влияет на установку.
