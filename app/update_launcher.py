@@ -1,3 +1,4 @@
+import ctypes
 import json
 import os
 import socket
@@ -22,6 +23,7 @@ UPDATE_LOCK_STALE_SEC = 30 * 60
 UPDATE_STARTING_LOCK_STALE_SEC = 5 * 60
 LEGACY_STARTING_LOCK_STALE_SEC = 15
 UPDATER_EXE_NAME = "RemCardUpdater.exe"
+LOCAL_UPDATE_STARTING_LOCK_NAME = ".remcard_update_starting.lock"
 
 
 def _read_lock_payload(lock_path: str) -> Optional[dict[str, Any]]:
@@ -58,6 +60,20 @@ def _is_pid_alive(pid: Any) -> bool:
         return False
     if value == os.getpid():
         return True
+    if os.name == "nt":
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, value)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return True
+            return int(exit_code.value) == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(value, 0)
         return True
@@ -148,12 +164,20 @@ def _is_lock_active(path: str, stale_sec: int, *, target_dir: Optional[str] = No
 
 
 def _default_lock_paths(target_dir: str) -> list[tuple[str, int]]:
-    paths = [
-        (get_update_lock_path(target_dir=target_dir), UPDATE_LOCK_STALE_SEC),
-        (get_update_starting_lock_path(target_dir=target_dir), UPDATE_STARTING_LOCK_STALE_SEC),
-        (get_update_lock_path(), UPDATE_LOCK_STALE_SEC),
-        (get_update_starting_lock_path(), UPDATE_STARTING_LOCK_STALE_SEC),
-    ]
+    paths = [(get_local_update_starting_lock_path(target_dir), UPDATE_STARTING_LOCK_STALE_SEC)]
+    try:
+        paths.extend(
+            [
+                (get_update_lock_path(target_dir=target_dir), UPDATE_LOCK_STALE_SEC),
+                (get_update_starting_lock_path(target_dir=target_dir), UPDATE_STARTING_LOCK_STALE_SEC),
+                (get_update_lock_path(), UPDATE_LOCK_STALE_SEC),
+                (get_update_starting_lock_path(), UPDATE_STARTING_LOCK_STALE_SEC),
+            ]
+        )
+    except Exception:
+        # The host-local lock remains authoritative for launches targeting this
+        # installation even during a transient SMB failure.
+        pass
     result: list[tuple[str, int]] = []
     seen: set[str] = set()
     for path, stale_sec in paths:
@@ -209,6 +233,10 @@ def describe_update_lock(lock_path: Optional[str] = None, *, target_dir: Optiona
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_local_update_starting_lock_path(target_dir: str) -> str:
+    return os.path.join(os.path.abspath(target_dir), LOCAL_UPDATE_STARTING_LOCK_NAME)
 
 
 def _write_starting_lock(path: str, candidate: UpdateCandidate, target_dir: str) -> bool:
@@ -276,6 +304,7 @@ def launch_update(
         target_dir = get_executable_dir()
         lock_path = get_update_lock_path(baza_dir, target_dir=target_dir)
         starting_lock_path = get_update_starting_lock_path(baza_dir, target_dir=target_dir)
+        local_starting_lock_path = get_local_update_starting_lock_path(target_dir)
     except Exception:
         return False
 
@@ -283,11 +312,12 @@ def launch_update(
     if not updater_path or not os.path.isfile(updater_path):
         return False
 
-    if is_update_in_progress(target_dir=target_dir) or not _write_starting_lock(
-        starting_lock_path,
-        candidate,
-        target_dir,
-    ):
+    if is_update_in_progress(target_dir=target_dir):
+        return False
+    if not _write_starting_lock(local_starting_lock_path, candidate, target_dir):
+        return False
+    if not _write_starting_lock(starting_lock_path, candidate, target_dir):
+        _remove_lock_quietly(local_starting_lock_path)
         return False
 
     args = [
@@ -302,6 +332,8 @@ def launch_update(
         lock_path,
         "--starting-lock",
         starting_lock_path,
+        "--local-starting-lock",
+        local_starting_lock_path,
         "--parent-pid",
         str(os.getpid() if wait_for_parent else 0),
         "--target-version",
@@ -315,15 +347,18 @@ def launch_update(
     try:
         process = popen_hidden(args, cwd=os.path.dirname(os.path.abspath(updater_path)))
         _mark_starting_lock_updater_pid(starting_lock_path, getattr(process, "pid", 0))
+        _mark_starting_lock_updater_pid(local_starting_lock_path, getattr(process, "pid", 0))
         poll = getattr(process, "poll", None)
         if callable(poll):
             time.sleep(0.2)
             if poll() is not None:
                 _remove_lock_quietly(starting_lock_path)
+                _remove_lock_quietly(local_starting_lock_path)
                 return False
         return True
     except Exception:
         _remove_lock_quietly(starting_lock_path)
+        _remove_lock_quietly(local_starting_lock_path)
         return False
 
 

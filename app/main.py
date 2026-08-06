@@ -2169,24 +2169,35 @@ def _prepare_startup_before_qt(
     os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
     path_setup = _configure_operblock_startup_path(args.role, path_setup)
     active_local_operblock_case = _has_active_local_operblock_case_before_network_probe(args.role)
-    preselected_runtime_context = (
-        _PENDING_OPERBLOCK_OFFLINE_RUNTIME if active_local_operblock_case else None
-    )
-
-    # An active local operblock case must reach its offline UI without touching
-    # the unavailable network Baza/UPD or its lock files.
-    if preselected_runtime_context is None:
-        if _show_update_in_progress_if_needed():
-            sys.exit(0)
-
-        if _launch_regular_startup_update_if_needed(args.role):
-            sys.exit(0)
-
     _sync_release_settings_if_needed()
 
     if path_setup:
         sys.exit(_run_path_setup())
     return active_local_operblock_case
+
+
+def _launch_startup_update_after_single_instance(
+    role: Optional[str],
+    *,
+    active_local_operblock_case: bool,
+) -> bool:
+    """Check updates only after this process owns the local role instance."""
+    # An active local operblock case must reach its offline UI without touching
+    # the unavailable network Baza/UPD or its lock files.
+    if active_local_operblock_case:
+        return False
+    if _show_update_in_progress_if_needed():
+        return True
+    return _launch_regular_startup_update_if_needed(role)
+
+
+def _close_single_instance_server(server, server_listening: bool, QLocalServer, server_name: str) -> None:
+    try:
+        if server is not None and server_listening:
+            server.close()
+            QLocalServer.removeServer(server_name)
+    except Exception:
+        pass
 
 
 def _acquire_single_instance_for_startup(
@@ -2708,6 +2719,13 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         QLocalServer,
         splash_controller,
     )
+    if _launch_startup_update_after_single_instance(
+        args.role,
+        active_local_operblock_case=active_local_operblock_case,
+    ):
+        splash_controller.close()
+        _close_single_instance_server(server, server_listening, QLocalServer, server_name)
+        return
     (
         emergency_runtime_context,
         preselected_runtime_reason,

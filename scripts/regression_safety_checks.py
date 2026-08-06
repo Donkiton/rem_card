@@ -710,6 +710,7 @@ def _check_compiled_startup_and_exit_full_update_checks(temp_root: str) -> tuple
     required = (
         "_main_impl",
         "_prepare_startup_before_qt",
+        "_launch_startup_update_after_single_instance",
         "_finalize_startup_application",
         "_launch_regular_startup_update_if_needed",
         "_launch_startup_update",
@@ -720,25 +721,28 @@ def _check_compiled_startup_and_exit_full_update_checks(temp_root: str) -> tuple
         return False, f"update lifecycle helpers are missing: {missing}"
 
     main_source = _cached_source_segment(source, functions["_main_impl"]) or ""
-    startup_source = _cached_source_segment(
+    startup_gate_source = _cached_source_segment(
         source,
-        functions["_prepare_startup_before_qt"],
+        functions["_launch_startup_update_after_single_instance"],
     ) or ""
     order = [
-        startup_source.find("_show_update_in_progress_if_needed()"),
-        startup_source.find("_launch_regular_startup_update_if_needed(args.role)"),
-        startup_source.find("_sync_release_settings_if_needed()"),
+        main_source.find("_acquire_single_instance_for_startup("),
+        main_source.find("_launch_startup_update_after_single_instance("),
+        main_source.find("_prepare_runtime_context_for_startup("),
     ]
     if any(position < 0 for position in order) or order != sorted(order):
-        return False, f"compiled startup full-update check is missing or ordered after UI setup: {order}"
-    if not re.search(
-        r"if _launch_regular_startup_update_if_needed\(args\.role\):\s+"
-        r"(?:sys\.exit\(0\)|close_startup_splash\(\)\s+return 0)",
-        startup_source,
-    ):
+        return False, f"startup updater must run after single-instance and before runtime startup: {order}"
+    gate_tokens = (
+        "if active_local_operblock_case:",
+        "_show_update_in_progress_if_needed()",
+        "_launch_regular_startup_update_if_needed(role)",
+    )
+    if any(token not in startup_gate_source for token in gate_tokens):
+        return False, "post-single-instance update gate lost its offline or update checks"
+    if not re.search(r"if _launch_startup_update_after_single_instance\([\s\S]+?\):[\s\S]+?return", main_source):
         return False, "old compiled process does not stop after launching the startup updater"
     if "_prepare_startup_before_qt(" not in main_source:
-        return False, "main startup coordinator does not call the pre-Qt update gate"
+        return False, "main startup coordinator lost pre-Qt preparation"
 
     regular_source = _cached_source_segment(
         source,
@@ -790,7 +794,7 @@ def _check_preselected_offline_skips_updater_network_probes(temp_root: str) -> t
         for node in main_tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    startup_gate = functions.get("_prepare_startup_before_qt")
+    startup_gate = functions.get("_launch_startup_update_after_single_instance")
     finder = functions.get("_find_startup_update_candidate")
     if startup_gate is None or finder is None:
         return False, "startup update functions are missing"
@@ -798,41 +802,25 @@ def _check_preselected_offline_skips_updater_network_probes(temp_root: str) -> t
     def called_name(node: ast.Call) -> str:
         return node.func.id if isinstance(node.func, ast.Name) else ""
 
-    guarded_if = None
-    for node in ast.walk(startup_gate):
-        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
-            continue
-        test = node.test
-        if (
-            isinstance(test.left, ast.Name)
-            and test.left.id == "preselected_runtime_context"
-            and len(test.ops) == 1
-            and isinstance(test.ops[0], ast.Is)
-            and len(test.comparators) == 1
-            and isinstance(test.comparators[0], ast.Constant)
-            and test.comparators[0].value is None
-        ):
-            guarded_if = node
-            break
-    if guarded_if is None:
-        return False, "preselected offline runtime does not guard startup updater probes"
-
     network_probe_calls = {
         "_show_update_in_progress_if_needed",
         "_launch_regular_startup_update_if_needed",
     }
-    guarded_node_ids = {id(node) for node in ast.walk(guarded_if)}
-    guarded_calls = {
+    gate_calls = {
         called_name(node)
-        for node in ast.walk(guarded_if)
+        for node in ast.walk(startup_gate)
         if isinstance(node, ast.Call)
     }
-    if not network_probe_calls.issubset(guarded_calls):
-        return False, f"offline guard misses updater calls: {sorted(network_probe_calls - guarded_calls)}"
-    for node in ast.walk(startup_gate):
-        if isinstance(node, ast.Call) and called_name(node) in network_probe_calls:
-            if id(node) not in guarded_node_ids:
-                return False, f"startup updater probe remains outside offline guard: {called_name(node)}"
+    if not network_probe_calls.issubset(gate_calls):
+        return False, f"offline gate misses updater calls: {sorted(network_probe_calls - gate_calls)}"
+    gate_source = _cached_source_segment(main_source, startup_gate) or ""
+    guard_position = gate_source.find("if active_local_operblock_case:")
+    return_position = gate_source.find("return False", guard_position)
+    first_probe = min(gate_source.find(call) for call in network_probe_calls)
+    if min(guard_position, return_position, first_probe) < 0 or not (
+        guard_position < return_position < first_probe
+    ):
+        return False, "preselected offline runtime does not return before updater network probes"
 
     finder_source = _cached_source_segment(main_source, finder) or ""
     if "is_update_in_progress" in finder_source:
@@ -1681,7 +1669,7 @@ def _check_updater_direct_launch_uses_explicit_target(temp_root: str) -> tuple[b
         }
         if actual != expected:
             return False, f"direct updater args mismatch: {actual}"
-        if args.parent_pid != "0" or args.starting_lock != "":
+        if args.parent_pid != "0" or args.starting_lock != "" or args.local_starting_lock != "":
             return False, f"unexpected direct launcher synchronization args: {args}"
         return True, "ok"
     finally:
@@ -1690,6 +1678,68 @@ def _check_updater_direct_launch_uses_explicit_target(temp_root: str) -> tuple[b
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _check_updater_process_gate_and_rename_only(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    updater_source = Path(PROJECT_ROOT, "app", "updater_main.py").read_text(encoding="utf-8")
+    updater_tree = ast.parse(updater_source)
+    updater_functions = {
+        node.name: node
+        for node in updater_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    required = ("_wait_for_target_processes", "_rename_path_with_retry", "_replace_program_dir")
+    missing = [name for name in required if name not in updater_functions]
+    if missing:
+        return False, f"updater safety helpers are missing: {missing}"
+
+    replace_source = _cached_source_segment(
+        updater_source,
+        updater_functions["_replace_program_dir"],
+    ) or ""
+    if "shutil.move(" in replace_source:
+        return False, "program replacement still permits shutil.move copy/delete fallback"
+    if "_rename_path_with_retry(" not in replace_source:
+        return False, "program replacement does not use rename-only moves"
+
+    worker = next(
+        (node for node in updater_tree.body if isinstance(node, ast.ClassDef) and node.name == "UpdateWorker"),
+        None,
+    )
+    run_method = next(
+        (node for node in (worker.body if worker else []) if isinstance(node, ast.FunctionDef) and node.name == "run"),
+        None,
+    )
+    run_source = _cached_source_segment(updater_source, run_method) if run_method else ""
+    order = [
+        (run_source or "").find("_wait_for_parent("),
+        (run_source or "").find("_wait_for_target_processes("),
+        (run_source or "").find("_wait_for_active_sessions("),
+        (run_source or "").find("_replace_program_dir("),
+    ]
+    if any(position < 0 for position in order) or order != sorted(order):
+        return False, f"target process gate is missing or ordered after replacement: {order}"
+
+    launcher_source = Path(PROJECT_ROOT, "app", "update_launcher.py").read_text(encoding="utf-8")
+    launcher_tree = ast.parse(launcher_source)
+    launcher_function = next(
+        (
+            node
+            for node in launcher_tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "launch_update"
+        ),
+        None,
+    )
+    launch_source = _cached_source_segment(launcher_source, launcher_function) if launcher_function else ""
+    launcher_tokens = (
+        "get_local_update_starting_lock_path(target_dir)",
+        "_write_starting_lock(local_starting_lock_path",
+        '"--local-starting-lock"',
+    )
+    if any(token not in (launch_source or "") for token in launcher_tokens):
+        return False, "launcher does not hold a host-local per-install starting lock"
+    return True, "ok"
 
 
 def _check_updater_cleanup_retries_old_backup(temp_root: str) -> tuple[bool, str]:
@@ -1771,9 +1821,7 @@ def _check_full_update_rolls_back_on_install_failure(temp_root: str) -> tuple[bo
     Path(target_dir, "_internal").mkdir(parents=True, exist_ok=True)
     Path(target_dir, "_internal", "old.txt").write_text("old internal", encoding="utf-8")
 
-    original_retry = updater_main._retry
-    original_move = updater_main.shutil.move
-    original_copytree = updater_main.shutil.copytree
+    original_rename = updater_main._rename_path_with_retry
     state = {"failed": False}
 
     def is_staged_internal(source_path, target_path) -> bool:
@@ -1785,22 +1833,14 @@ def _check_full_update_rolls_back_on_install_failure(temp_root: str) -> tuple[bo
             and os.path.normcase(target_abs) == os.path.normcase(os.path.join(target_dir, "_internal"))
         )
 
-    def fail_staged_move(source_path, target_path, *args, **kwargs):
+    def fail_staged_move(source_path, target_path, description, *args, **kwargs):
         if is_staged_internal(source_path, target_path):
             state["failed"] = True
             raise PermissionError("simulated full update install failure")
-        return original_move(source_path, target_path, *args, **kwargs)
-
-    def fail_staged_copytree(source_path, target_path, *args, **kwargs):
-        if is_staged_internal(source_path, target_path):
-            state["failed"] = True
-            raise PermissionError("simulated full update install failure")
-        return original_copytree(source_path, target_path, *args, **kwargs)
+        return original_rename(source_path, target_path, description, *args, **kwargs)
 
     try:
-        updater_main._retry = lambda action, _description, *args, **kwargs: action()
-        updater_main.shutil.move = fail_staged_move
-        updater_main.shutil.copytree = fail_staged_copytree
+        updater_main._rename_path_with_retry = fail_staged_move
         try:
             updater_main._replace_program_dir(
                 source_dir=source_dir,
@@ -1812,9 +1852,7 @@ def _check_full_update_rolls_back_on_install_failure(temp_root: str) -> tuple[bo
         else:
             return False, "full update unexpectedly succeeded after simulated install failure"
     finally:
-        updater_main._retry = original_retry
-        updater_main.shutil.move = original_move
-        updater_main.shutil.copytree = original_copytree
+        updater_main._rename_path_with_retry = original_rename
 
     if not state["failed"]:
         return False, "full update failure point was not exercised"
@@ -1843,11 +1881,10 @@ def _check_full_update_reports_and_preserves_failed_rollback(temp_root: str) -> 
     Path(target_dir, "_internal").mkdir(parents=True, exist_ok=True)
     Path(target_dir, "_internal", "old.txt").write_text("old internal", encoding="utf-8")
 
-    original_retry = updater_main._retry
-    original_move = updater_main.shutil.move
+    original_rename = updater_main._rename_path_with_retry
     state = {"install_failed": False, "restore_failed": False}
 
-    def fail_install_and_one_restore(source_path, target_path, *args, **kwargs):
+    def fail_install_and_one_restore(source_path, target_path, description, *args, **kwargs):
         source_abs = os.path.abspath(str(source_path))
         source_name = os.path.basename(source_abs)
         source_parent = os.path.basename(os.path.dirname(source_abs))
@@ -1857,12 +1894,11 @@ def _check_full_update_reports_and_preserves_failed_rollback(temp_root: str) -> 
         if source_name == "VERSION" and source_parent.startswith("__upd_old_"):
             state["restore_failed"] = True
             raise PermissionError("simulated rollback failure")
-        return original_move(source_path, target_path, *args, **kwargs)
+        return original_rename(source_path, target_path, description, *args, **kwargs)
 
     error_message = ""
     try:
-        updater_main._retry = lambda action, _description, *args, **kwargs: action()
-        updater_main.shutil.move = fail_install_and_one_restore
+        updater_main._rename_path_with_retry = fail_install_and_one_restore
         try:
             updater_main._replace_program_dir(
                 source_dir=source_dir,
@@ -1874,8 +1910,7 @@ def _check_full_update_reports_and_preserves_failed_rollback(temp_root: str) -> 
         else:
             return False, "update unexpectedly succeeded after install and rollback failures"
     finally:
-        updater_main._retry = original_retry
-        updater_main.shutil.move = original_move
+        updater_main._rename_path_with_retry = original_rename
 
     if not state["install_failed"] or not state["restore_failed"]:
         return False, f"failed rollback scenario was not exercised: {state}"
@@ -1965,6 +2000,7 @@ def _check_updater_releases_lock_before_restart(temp_root: str) -> tuple[bool, s
             launcher_host="test",
             lock=str(baza_dir / "locks" / "update.lock"),
             starting_lock="",
+            local_starting_lock="",
             parent_pid="0",
             restart_exe="RemCardDoctor.exe",
         )
@@ -2055,6 +2091,7 @@ def _check_restart_failure_after_success_is_warning(temp_root: str) -> tuple[boo
             launcher_host="test",
             lock=str(baza_dir / "locks" / "update.lock"),
             starting_lock="",
+            local_starting_lock="",
             parent_pid="0",
             restart_exe="RemCardDoctor.exe",
         )
@@ -2332,7 +2369,9 @@ def _check_update_starting_lock_dead_pid_clears(temp_root: str) -> tuple[bool, s
 def _check_full_launcher_removes_starting_lock_when_updater_exits_immediately(
     temp_root: str,
 ) -> tuple[bool, str]:
-    launched, message, _args, lock_path, _update_root, _target_dir = _capture_full_update_launch(
+    from rem_card.app.update_launcher import get_local_update_starting_lock_path
+
+    launched, message, _args, lock_path, _update_root, target_dir = _capture_full_update_launch(
         temp_root,
         suffix="immediate_exit",
         exit_code=1,
@@ -2343,6 +2382,9 @@ def _check_full_launcher_removes_starting_lock_when_updater_exits_immediately(
         return False, "launch_update must fail when the full updater exits immediately"
     if os.path.exists(lock_path):
         return False, "starting lock was not removed after immediate updater exit"
+    local_lock_path = get_local_update_starting_lock_path(target_dir)
+    if os.path.exists(local_lock_path):
+        return False, "local starting lock was not removed after immediate updater exit"
     return True, "ok"
 
 
@@ -28634,6 +28676,7 @@ def main(argv: list[str] | None = None):
         ("updater_target_uses_executable_dir", _check_updater_target_uses_executable_dir),
         ("role_exe_names_preserved", _check_role_exe_names_preserved),
         ("updater_direct_launch_uses_explicit_target", _check_updater_direct_launch_uses_explicit_target),
+        ("updater_process_gate_and_rename_only", _check_updater_process_gate_and_rename_only),
         ("updater_cleanup_retries_old_backup", _check_updater_cleanup_retries_old_backup),
         ("full_update_rolls_back_on_install_failure", _check_full_update_rolls_back_on_install_failure),
         ("full_update_reports_and_preserves_failed_rollback", _check_full_update_reports_and_preserves_failed_rollback),
