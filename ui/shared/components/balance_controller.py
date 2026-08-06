@@ -461,6 +461,11 @@ class BalanceController(QObject):
         data = self.get_cumulative_data_to_now()
         return sum(int(v) for v in data.values())
 
+    def get_total_out_current_hour(self) -> int:
+        """Рассчитывает сумму выведения только за текущий календарный час."""
+        data = self.hourly_cache.get(datetime.now().hour, {})
+        return sum(int(value) for value in data.values())
+
     def get_total_out_daily(self) -> int:
         """Рассчитывает сумму всего выведения за полные сутки (24 часа)."""
         data = self.get_cumulative_data_daily()

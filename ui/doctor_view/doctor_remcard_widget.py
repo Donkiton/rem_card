@@ -3276,10 +3276,12 @@ class DoctorRemCardWidget(QWidget):
         total_in_cur, total_in_day = cur["total"] + oral_cur, day["total"] + oral_day
         total_out_cur = 0
         total_out_day = 0
+        total_out_current_hour = 0
         
         if hasattr(self, 'balance_controller'): 
             total_out_cur = self.balance_controller.get_total_out_to_now()
             total_out_day = self.balance_controller.get_total_out_daily()
+            total_out_current_hour = self.balance_controller.get_total_out_current_hour()
             
         sector_2b_g = getattr(self.layout_manager, 'sector_2b_g', None)
         if sector_2b_g is not None:
@@ -3290,7 +3292,13 @@ class DoctorRemCardWidget(QWidget):
             )
         sector_2b_v = getattr(self.layout_manager, 'sector_2b_v', None)
         if sector_2b_v is not None:
-            sector_2b_v.update_balance(total_in_cur, total_out_cur, total_in_daily=total_in_day, total_out_daily=total_out_day)
+            sector_2b_v.update_balance(
+                total_in_cur,
+                total_out_cur,
+                total_in_daily=total_in_day,
+                total_out_daily=total_out_day,
+                total_out_current_hour=total_out_current_hour,
+            )
         sector_3a = getattr(self.layout_manager, 'sector_3a', None)
         if sector_3a is not None:
             sector_3a.update_values(
