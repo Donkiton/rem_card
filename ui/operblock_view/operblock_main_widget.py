@@ -47,6 +47,8 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QStyle,
+    QStyleOptionViewItem,
     QHeaderView,
     QStyledItemDelegate,
     QTableWidget,
@@ -2178,6 +2180,9 @@ class OperBlockClickableLabel(QLabel):
 
 
 class OperBlockStyledDialog(SavedFramelessDialogMixin, QDialog):
+    embedded_accept_requested = Signal()
+    embedded_reject_requested = Signal()
+
     def __init__(
         self,
         title: str,
@@ -2251,6 +2256,18 @@ class OperBlockStyledDialog(SavedFramelessDialogMixin, QDialog):
     def _finalize_dialog_chrome(self):
         self._restore_saved_geometry()
 
+    def accept(self) -> None:
+        if bool(self.property("settingsEmbedded")):
+            self.embedded_accept_requested.emit()
+            return
+        super().accept()
+
+    def reject(self) -> None:
+        if bool(self.property("settingsEmbedded")):
+            self.embedded_reject_requested.emit()
+            return
+        super().reject()
+
     def _configure_enter_accept_button(self, cancel_button: QPushButton, save_button: QPushButton) -> None:
         cancel_button.setAutoDefault(False)
         cancel_button.setDefault(False)
@@ -2300,6 +2317,15 @@ class OperBlockSettingsDialog(OperBlockStyledDialog):
         return button
 
 
+class _OperBlockNoFocusRectDelegate(QStyledItemDelegate):
+    """Paint selected cells without the native dotted current-item frame."""
+
+    def paint(self, painter, option, index) -> None:
+        clean_option = QStyleOptionViewItem(option)
+        clean_option.state &= ~QStyle.State_HasFocus
+        super().paint(painter, clean_option, index)
+
+
 class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
     def __init__(self, items: list[dict], parent=None):
         self._working_items = [dict(item or {}) for item in (items or [])]
@@ -2325,6 +2351,7 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setItemDelegate(_OperBlockNoFocusRectDelegate(self.table))
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -2337,9 +2364,14 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
                 gridline-color: #cbd5e1;
                 selection-background-color: #dbeafe;
                 selection-color: #172033;
+                outline: 0;
             }
             QTableWidget#OperBlockAnesthesiaTypesTable::item {
                 padding: 5px 7px;
+            }
+            QTableWidget#OperBlockAnesthesiaTypesTable::item:focus {
+                border: none;
+                outline: none;
             }
             QHeaderView::section {
                 background-color: #d9e2ec;
@@ -2564,6 +2596,7 @@ class OperBlockTeamDialog(OperBlockStyledDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setItemDelegate(_OperBlockNoFocusRectDelegate(self.table))
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -2576,9 +2609,14 @@ class OperBlockTeamDialog(OperBlockStyledDialog):
                 gridline-color: #cbd5e1;
                 selection-background-color: #dbeafe;
                 selection-color: #172033;
+                outline: 0;
             }
             QTableWidget#OperBlockTeamTable::item {
                 padding: 5px 7px;
+            }
+            QTableWidget#OperBlockTeamTable::item:focus {
+                border: none;
+                outline: none;
             }
             QHeaderView::section {
                 background-color: #d9e2ec;
@@ -5455,6 +5493,8 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         favorite = bool((preset or {}).get("favorite")) and enabled
         button = QPushButton()
         button.setObjectName("OperBlockFavoritePresetButton")
+        button.setProperty("settingsSurfaceSkip", True)
+        button.setFocusPolicy(Qt.NoFocus)
         button.setFixedSize(26, 24)
         button.setIcon(self._favorite_icon(favorite))
         button.setIconSize(QSize(18, 18))

@@ -221,7 +221,11 @@ class LightweightW1Shell(QWidget):
                 "Открытие настроек...",
                 key=f"w1-shell:{id(self)}",
                 auto_hide_ms=8000,
-                process_events=True,
+                # Do not enter a nested event loop here. During dev startup it
+                # could run the full-layout prewarm timer midway through this
+                # transition, retire this shell, and make the first click open
+                # settings on the already-detached shell.
+                process_events=False,
             )
             try:
                 if self._ensure_admin_widget() is None:

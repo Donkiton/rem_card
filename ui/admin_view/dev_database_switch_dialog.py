@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -33,6 +33,8 @@ from .settings_import_dialog import SettingsImportFolderDialog
 class DevDatabaseSwitchDialog(BaseStyledDialog):
     """Developer-only selector for the database used on the next process start."""
 
+    applied = Signal()
+
     def __init__(self, parent=None):
         super().__init__("Смена базы", parent)
         self.selected_path = ""
@@ -42,15 +44,10 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
         initial_config = read_dev_database_config()
         self._initial_config_load_error = str(initial_config.get("load_error") or "")
         runtime_path_is_pinned = os.environ.get(DEV_RUNTIME_BAZA_PIN_ENV) == str(os.getpid())
-        self.environment_override = (
-            ""
-            if runtime_path_is_pinned
-            else str(
-                os.environ.get("REMCARD_BAZA_DIR")
-                or os.environ.get(DEV_BAZA_DIR_ENV)
-                or ""
-            ).strip()
-        )
+        configured_environment_path = os.environ.get("REMCARD_BAZA_DIR")
+        if not configured_environment_path:
+            configured_environment_path = os.environ.get(DEV_BAZA_DIR_ENV, "")
+        self.environment_override = "" if runtime_path_is_pinned else str(configured_environment_path).strip()
         if runtime_path_is_pinned and os.environ.get(DEV_BAZA_DIR_ENV):
             self.environment_override = str(os.environ[DEV_BAZA_DIR_ENV]).strip()
         self.current_path = self._normalize(resolve_baza_dir())
@@ -153,8 +150,8 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
         root.addLayout(footer)
 
         self.setStyleSheet(
-            self.styleSheet()
-            + """
+            f"{self.styleSheet()}\n"
+            """
             QLabel#DevDatabaseCurrentPath {
                 background: #eef4f8;
                 border: 1px solid #c7d1da;
@@ -355,11 +352,17 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
 
         self.selected_path = candidate
         self.active_changed = not self._same_path(candidate, self.current_path)
-        self.accept()
+        if bool(self.property("settingsEmbedded")):
+            self.applied.emit()
+        else:
+            self.accept()
 
-    def reject(self) -> None:
+    def cancel_pending_validation(self) -> None:
         self._validation_cancelled = True
         worker = self._validation_worker
         if worker is not None:
             worker.quit()
+
+    def reject(self) -> None:
+        self.cancel_pending_validation()
         super().reject()

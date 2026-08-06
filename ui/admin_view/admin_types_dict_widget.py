@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 from rem_card.services.prescription_engine import engine
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.admin_view.dictionary_page_chrome import apply_dictionary_page_chrome
 
 class AdminTypeDialog(BaseStyledDialog):
     def __init__(self, key="", data=None, parent=None):
@@ -95,6 +96,22 @@ class AdminTypesDictWidget(QWidget):
         layout.addWidget(self.btn_back)
 
         main_layout.addWidget(self.frame)
+
+        apply_dictionary_page_chrome(
+            self,
+            frame=self.frame,
+            header_label=header,
+            table=self.table,
+            back_button=self.btn_back,
+            title="Пути введения",
+            description=(
+                "Способы введения лекарственных средств, доступные "
+                "в назначениях RemCard."
+            ),
+            primary_buttons=(self.btn_add,),
+            secondary_buttons=(self.btn_edit,),
+            danger_buttons=(self.btn_delete,),
+        )
         
         self.btn_add.clicked.connect(self.add_item)
         self.btn_edit.clicked.connect(self.edit_item)

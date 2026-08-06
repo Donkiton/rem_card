@@ -5,7 +5,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -173,6 +173,33 @@ class W1LayoutHandoffTest(unittest.TestCase):
         self.assertIs(shell.sector_w1a.parentWidget(), shell.sector_1a_stack)
 
         layout.deleteLater()
+        shell.shutdown()
+        shell.deleteLater()
+        self.app.processEvents()
+
+    def test_first_settings_transition_does_not_run_startup_timers_reentrantly(self):
+        patient_service, remcard_service = self._services()
+        shell = LightweightW1Shell(
+            role="doctor",
+            patient_service=patient_service,
+            remcard_service=remcard_service,
+        )
+
+        with (
+            patch(
+                "rem_card.ui.shared.lightweight_w1_shell.show_app_loading",
+                return_value="settings-loading",
+            ) as show_loading,
+            patch("rem_card.ui.shared.lightweight_w1_shell.hide_app_loading") as hide_loading,
+            patch.object(shell, "_ensure_admin_widget", return_value=object()),
+        ):
+            shell.set_patient_selection_mode("admin")
+
+        self.assertFalse(show_loading.call_args.kwargs["process_events"])
+        self.assertEqual(shell.current_mode, "admin")
+        self.assertIs(shell.selection_stack.currentWidget(), shell.admin_view)
+        hide_loading.assert_called_once_with(shell, "settings-loading", delay_ms=350)
+
         shell.shutdown()
         shell.deleteLater()
         self.app.processEvents()

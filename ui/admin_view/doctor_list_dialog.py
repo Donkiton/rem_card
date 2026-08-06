@@ -6,6 +6,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
 )
@@ -13,6 +16,13 @@ from PySide6.QtWidgets import (
 from rem_card.services.doctor_list_service import DoctorListStore
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+
+class _DoctorListNoFocusRectDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index) -> None:
+        clean_option = QStyleOptionViewItem(option)
+        clean_option.state &= ~QStyle.State_HasFocus
+        super().paint(painter, clean_option, index)
 
 
 class DoctorListDialog(BaseStyledDialog):
@@ -35,6 +45,7 @@ class DoctorListDialog(BaseStyledDialog):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setItemDelegate(_DoctorListNoFocusRectDelegate(self.table))
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -189,4 +200,5 @@ class DoctorListDialog(BaseStyledDialog):
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить список врачей: {exc}")
             return
         CustomMessageBox.information(self, "Список врачей", "Список врачей сохранен.")
-        self.accept()
+        if not bool(self.property("settingsEmbedded")):
+            self.accept()

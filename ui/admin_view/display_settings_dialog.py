@@ -32,6 +32,50 @@ from rem_card.ui.shared.display_settings_storage import (
     role_display_settings_from_payload,
     sector8_button_options,
 )
+from rem_card.ui.styles.theme_manager import get_theme_manager
+from rem_card.ui.styles.theme_tokens import token
+
+
+def _display_list_style() -> str:
+    tokens = get_theme_manager().current_tokens()
+
+    def t(key: str, default: str = "") -> str:
+        return token(tokens, key, default)
+
+    return f"""
+        QScrollArea#DisplaySettingsListScroll {{
+            background-color: {t("surface.card")};
+            border: 1px solid {t("border.subtle")};
+            border-radius: 10px;
+        }}
+        QWidget#DisplaySettingsRowsWidget {{
+            background-color: {t("surface.card")};
+        }}
+        QFrame#DisplaySettingsRow {{
+            border: none;
+            border-bottom: 1px solid {t("border.subtle")};
+            background-color: {t("surface.card")};
+        }}
+        QFrame#DisplaySettingsRow[firstRow="true"] {{
+            border-top-left-radius: 9px;
+            border-top-right-radius: 9px;
+        }}
+        QFrame#DisplaySettingsRow[lastRow="true"] {{
+            border-bottom: none;
+            border-bottom-left-radius: 9px;
+            border-bottom-right-radius: 9px;
+        }}
+        QFrame#DisplaySettingsRow[zebra="odd"] {{
+            background-color: {t("surface.panel")};
+        }}
+        QFrame#DisplaySettingsRow:hover {{
+            background-color: {t("surface.hover")};
+        }}
+        QLabel#DisplaySettingsDragHandle {{
+            color: {t("text.secondary")};
+            font-weight: bold;
+        }}
+    """
 
 
 class OrderedVisibilityList(QWidget):
@@ -96,44 +140,7 @@ class OrderedVisibilityList(QWidget):
         self.rows_layout.setSpacing(0)
         self.scroll.setWidget(self.rows_widget)
         root_layout.addWidget(self.scroll)
-        self.setStyleSheet(
-            """
-            QScrollArea#DisplaySettingsListScroll {
-                background-color: #ffffff;
-                border: 1px solid #c7d1da;
-                border-radius: 6px;
-            }
-            QWidget#DisplaySettingsRowsWidget {
-                background-color: #ffffff;
-            }
-            QFrame#DisplaySettingsRow {
-                border-left: 1px solid #d7dfe7;
-                border-right: 1px solid #d7dfe7;
-                border-bottom: 1px solid #d7dfe7;
-                background-color: #ffffff;
-            }
-            QFrame#DisplaySettingsRow[firstRow="true"] {
-                border-top: 1px solid #d7dfe7;
-                border-top-left-radius: 5px;
-                border-top-right-radius: 5px;
-            }
-            QFrame#DisplaySettingsRow[lastRow="true"] {
-                border-bottom-left-radius: 5px;
-                border-bottom-right-radius: 5px;
-            }
-            QFrame#DisplaySettingsRow[zebra="odd"] {
-                background-color: #f5f8fb;
-            }
-            QFrame#DisplaySettingsRow:hover {
-                background-color: #eef6fc;
-                border-color: #9fb8d0;
-            }
-            QLabel#DisplaySettingsDragHandle {
-                color: #6c7a89;
-                font-weight: bold;
-            }
-            """
-        )
+        self.setStyleSheet(_display_list_style())
 
     def _clear_rows(self):
         self._row_widgets = {}
@@ -686,26 +693,7 @@ class DisplaySettingsDialog(BaseStyledDialog):
         footer.addWidget(cancel_btn)
         footer.addWidget(self.save_btn)
         main_layout.addLayout(footer)
-        self.setStyleSheet(
-            self.styleSheet()
-            + """
-            QLabel#DisplaySettingsSectionTitle {
-                font-weight: bold;
-                color: #2c3e50;
-                padding: 0 0 4px 0;
-            }
-            QLabel#DisplaySettingsSideTitle {
-                font-weight: bold;
-                color: #2c3e50;
-                padding: 0 0 2px 0;
-            }
-            QFrame#DisplaySettingsOptionCard {
-                background-color: #ffffff;
-                border: 1px solid #c7d1da;
-                border-radius: 6px;
-            }
-            """
-        )
+        self.setStyleSheet(f"{self.styleSheet()}\n{_display_list_style()}")
 
     def _clear_container(self, layout: QVBoxLayout):
         while layout.count():
@@ -715,11 +703,14 @@ class DisplaySettingsDialog(BaseStyledDialog):
                 widget.deleteLater()
 
     def _collect_current_role(self):
-        if (
-            self.sector8_list is None
-            or self.tabs_list is None
-            or self.w1a_switch is None
-            or self.w1b_switch is None
+        if any(
+            widget is None
+            for widget in (
+                self.sector8_list,
+                self.tabs_list,
+                self.w1a_switch,
+                self.w1b_switch,
+            )
         ):
             return
         self.role_drafts[self.current_role] = normalize_role_display_settings(

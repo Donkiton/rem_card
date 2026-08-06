@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <code>Версия 4.1.5</code> · <code>Windows</code> · <code>Python 3.11</code> · <code>PySide6</code> · <code>SQLite</code> · <code>MIT</code> · <code>Экспериментальный проект</code>
+  <code>Версия 4.1.6</code> · <code>Windows</code> · <code>Python 3.11</code> · <code>PySide6</code> · <code>SQLite</code> · <code>MIT</code> · <code>Экспериментальный проект</code>
 </p>
 
 <p align="center">

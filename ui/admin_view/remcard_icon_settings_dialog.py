@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from rem_card.services.remcard_icon_defaults import REMCARD_ICON_DEFINITIONS, RemCardIconDefinition
 from rem_card.services.settings.settings_service import get_settings_service
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.styles.settings_surface import prepare_settings_file_dialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.remcard_icon_settings import (
     current_remcard_icon_source,
@@ -309,6 +310,7 @@ class RemCardIconSettingsDialog(BaseStyledDialog):
 
     def _choose_image_file(self) -> str | None:
         dialog = QFileDialog(self, "Выбрать иконку")
+        prepare_settings_file_dialog(dialog)
         dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         dialog.setNameFilter("Изображения (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.svg)")
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)

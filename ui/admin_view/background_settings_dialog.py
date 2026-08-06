@@ -34,6 +34,7 @@ from rem_card.ui.shared.background_settings import (
     normalize_month_day,
 )
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.styles.settings_surface import prepare_settings_file_dialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 
@@ -425,6 +426,7 @@ class BackgroundSettingsDialog(BaseStyledDialog):
 
     def _choose_image_file(self) -> str | None:
         dialog = QFileDialog(self, "Загрузить фон")
+        prepare_settings_file_dialog(dialog)
         dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         dialog.setNameFilter("Изображения (*.png *.jpg *.jpeg *.bmp *.gif *.webp)")
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptOpen)

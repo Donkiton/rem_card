@@ -14,16 +14,16 @@ from rem_card.ui.shared.components.vital_settings_dialog import ToggleSwitch
 
 
 REPORT_SECTIONS = [
-    ("vitals", "Витальные функции", True),
-    ("prescriptions", "Назначения", True),
-    ("balance", "Баланс", True),
-    ("events", "Движение", True),
-    ("ventilation", "ИВЛ", True),
-    ("death_outcome", "Отчет о смерти", True),
-    ("death_protocol", "Протокол смерти", True),
-    ("transfusion_registration", "Лист регистрации трансфузий", True),
-    ("transfusion_protocols", "Протоколы гемотрансфузии", True),
-    ("outcome_report_reminder", "Напоминать о печати отчета при исходе", True),
+    ("vitals", "Витальные функции", "Температура, давление, пульс и другие показатели наблюдения.", True),
+    ("prescriptions", "Назначения", "Лекарственные назначения и отметки об их выполнении.", True),
+    ("balance", "Баланс", "Введённые и выведенные объёмы за выбранный период.", True),
+    ("events", "Движение", "Переводы, исходы и ключевые события госпитализации.", True),
+    ("ventilation", "ИВЛ", "Параметры вентиляции и история респираторной поддержки.", True),
+    ("death_outcome", "Отчёт о смерти", "Включать форму итогового отчёта о смерти пациента.", True),
+    ("death_protocol", "Протокол смерти", "Добавлять протокол установления смерти в комплект документов.", True),
+    ("transfusion_registration", "Лист регистрации трансфузий", "Печатать сводный лист регистрации трансфузий.", True),
+    ("transfusion_protocols", "Протоколы гемотрансфузии", "Добавлять отдельные протоколы проведённых гемотрансфузий.", True),
+    ("outcome_report_reminder", "Напоминание при исходе", "Предлагать печать отчёта после сохранения финального исхода.", True),
 ]
 
 
@@ -46,59 +46,54 @@ class PrintSettingsWidget(QWidget):
 
         list_frame = QFrame()
         list_frame.setObjectName("PrintSettingsList")
-        list_frame.setStyleSheet(
-            """
-            QFrame#PrintSettingsList {
-                background-color: #ffffff;
-                border: 1px solid #dee2e6;
-                border-radius: 5px;
-            }
-            """
-        )
+        list_frame.setProperty("settingsSurfacePanel", True)
         list_layout = QVBoxLayout(list_frame)
         list_layout.setContentsMargins(10, 6, 10, 6)
         list_layout.setSpacing(0)
 
-        for index, (key, label, enabled) in enumerate(REPORT_SECTIONS):
-            row = self._create_switch_row(key, label, enabled)
+        for index, (key, label, description, enabled) in enumerate(REPORT_SECTIONS):
+            row = self._create_switch_row(key, label, description, enabled)
             list_layout.addWidget(row)
             if index < len(REPORT_SECTIONS) - 1:
                 divider = QFrame()
+                divider.setObjectName("SettingsSurfaceDivider")
                 divider.setFixedHeight(1)
-                divider.setStyleSheet("background-color: #edf0f2; border: none;")
                 list_layout.addWidget(divider)
 
         main_layout.addWidget(list_frame)
 
         self.status_label = QLabel("")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet(
-            "color: #7f8c8d; font-style: italic; background: transparent;"
-        )
+        self.status_label.setProperty("settingsSurfaceMuted", True)
         main_layout.addWidget(self.status_label)
 
-    def _create_switch_row(self, key, label_text, enabled):
+    def _create_switch_row(self, key, label_text, description_text, enabled):
         row = QWidget()
-        row.setFixedHeight(38)
+        row.setFixedHeight(58)
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         layout = QHBoxLayout(row)
         layout.setContentsMargins(2, 0, 2, 0)
         layout.setSpacing(12)
 
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 7, 0, 7)
+        text_layout.setSpacing(2)
         label = QLabel(label_text)
-        label.setStyleSheet(
-            "font-size: 13px; font-weight: 600; color: #2c3e50; background: transparent;"
-            if enabled
-            else "font-size: 13px; font-weight: 600; color: #adb5bd; background: transparent;"
-        )
+        label.setProperty("settingsSurfaceLabel", True)
+        label.setProperty("settingsSurfaceDisabled", not enabled)
+        description = QLabel(description_text)
+        description.setProperty("settingsSurfaceDescription", True)
+        description.setProperty("settingsSurfaceDisabled", not enabled)
+        text_layout.addWidget(label)
+        text_layout.addWidget(description)
 
         switch = ToggleSwitch()
         switch.setEnabled(enabled)
         switch.setToolTip("" if enabled else "Раздел пока недоступен")
         switch.stateChanged.connect(lambda _state, section_key=key: self.on_switch_changed(section_key))
 
-        layout.addWidget(label)
+        layout.addLayout(text_layout)
         layout.addStretch()
         layout.addWidget(switch, 0, Qt.AlignRight)
         self.switches[key] = switch
@@ -106,7 +101,7 @@ class PrintSettingsWidget(QWidget):
 
     def _config_from_switches(self):
         values = {}
-        for key, _label, enabled in REPORT_SECTIONS:
+        for key, _label, _description, enabled in REPORT_SECTIONS:
             values[key] = self.switches[key].isChecked() if enabled else False
         return values
 
@@ -122,7 +117,7 @@ class PrintSettingsWidget(QWidget):
 
     def load_settings(self):
         cfg = self.config.load()
-        for key, _label, enabled in REPORT_SECTIONS:
+        for key, _label, _description, enabled in REPORT_SECTIONS:
             switch = self.switches[key]
             checked = bool(cfg.get(key, False)) if enabled else False
             switch.blockSignals(True)

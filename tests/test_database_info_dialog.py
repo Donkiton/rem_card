@@ -200,7 +200,11 @@ def test_admin_maintenance_has_database_info_button():
     widget = AdminMainWidget(role="admin")
 
     assert widget.btn_database_info.text() == "Информация о БД"
-    assert widget.btn_database_info.isVisibleTo(widget.menu_widget)
+    assert any(
+        entry["button"] is widget.btn_database_info
+        for entry in widget.settings_action_cards
+    )
+    assert not widget.btn_database_info.isHidden()
     widget.deleteLater()
     app.processEvents()
 

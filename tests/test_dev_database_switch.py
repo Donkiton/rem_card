@@ -567,13 +567,21 @@ def test_admin_settings_show_database_switch_only_in_dev(monkeypatch):
     monkeypatch.setattr(runtime_paths, "is_compiled", lambda: False)
     dev_widget = AdminMainWidget(role="admin")
     assert dev_widget.btn_switch_database.text() == "Смена базы"
-    assert dev_widget.btn_switch_database.isVisibleTo(dev_widget.menu_widget)
+    assert any(
+        entry["button"] is dev_widget.btn_switch_database
+        for entry in dev_widget.settings_action_cards
+    )
+    assert not dev_widget.btn_switch_database.isHidden()
     dev_widget.deleteLater()
     app.processEvents()
 
     monkeypatch.setattr(runtime_paths, "is_compiled", lambda: True)
     compiled_widget = AdminMainWidget(role="admin")
     assert compiled_widget.btn_switch_database.text() == "Смена базы"
-    assert not compiled_widget.btn_switch_database.isVisibleTo(compiled_widget.menu_widget)
+    assert not any(
+        entry["button"] is compiled_widget.btn_switch_database
+        for entry in compiled_widget.settings_action_cards
+    )
+    assert compiled_widget.btn_switch_database.isHidden()
     compiled_widget.deleteLater()
     app.processEvents()
