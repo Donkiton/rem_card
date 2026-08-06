@@ -457,25 +457,6 @@ class NurseOrdersWidget(QWidget):
             if hasattr(self, "table_view"):
                 self.table_view.setModel(self.model)
 
-    def _apply_cached_snapshot_if_available(self, context=None) -> bool:
-        coordinator = self._get_read_coordinator()
-        if coordinator is None:
-            return False
-        try:
-            target_context = context or self._build_orders_context()
-        except Exception as exc:
-            logger.warning("[NurseOrdersWidget] Failed to build context for cache lookup: %s", exc, exc_info=True)
-            return False
-        snapshot = coordinator.get_cached_tab(target_context)
-        if snapshot is None:
-            return False
-        return self._apply_snapshot_data(
-            snapshot=snapshot,
-            admission_id=target_context.admission_id,
-            shift_date=target_context.shift_date,
-            context_key=target_context.cache_key(),
-        )
-
     def _warn_legacy_direct_snapshot_path(self):
         if self._legacy_direct_snapshot_warned:
             return
@@ -1613,13 +1594,12 @@ class NurseOrdersWidget(QWidget):
             self._reset_cached_state()
             self._restore_highlight()
             self._apply_table_header_layout()
-            if not self._apply_cached_snapshot_if_available():
-                self._request_snapshot(
-                    force=False,
-                    source="user",
-                    priority="HIGH",
-                    invalidate_reason=None,
-                )
+            self._request_snapshot(
+                force=False,
+                source="user",
+                priority="HIGH",
+                invalidate_reason=None,
+            )
         else:
             self._reset_change_cursor()
             self._reset_cached_state()
@@ -1723,8 +1703,6 @@ class NurseOrdersWidget(QWidget):
             return
 
         if not self.model.orders:
-            if self._apply_cached_snapshot_if_available():
-                return
             self._request_snapshot(
                 force=False,
                 source="user",
