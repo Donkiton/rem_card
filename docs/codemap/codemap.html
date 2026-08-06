@@ -1,0 +1,1390 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>remcard · интерактивная карта кода</title>
+<style>
+:root{color-scheme:dark;--bg:#070b14;--panel:#0d1626;--line:#2a3955;--text:#edf3fb;--muted:#91a1ba;--up:#fb7185;--down:#5eead4;--flow:#fbbf24}*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:13px/1.45 "Segoe UI",system-ui,sans-serif;overflow:hidden}body{display:grid;grid-template-rows:auto auto 1fr}header{display:flex;gap:20px;align-items:flex-start;padding:15px 19px 11px;background:linear-gradient(#111a2c,#0a111e);border-bottom:1px solid #1e2b43}h1{font-size:20px;margin:0 0 5px}.meta{color:var(--muted);font-size:12px}.meta code{color:#cbd5e1}.stats{margin-left:auto;display:flex;gap:7px}.pill{padding:4px 9px;border:1px solid #344663;border-radius:999px;color:#bdcbe0;background:#111b2d}.toolbar{display:flex;gap:7px;align-items:center;padding:8px 11px;background:#0b1220;border-bottom:1px solid #1e2b43;overflow-x:auto}.toolbar input,.toolbar select,.toolbar button{height:32px;border:1px solid #334564;border-radius:7px;background:#111b2d;color:var(--text);padding:0 10px}.toolbar input{width:235px}.toolbar button{cursor:pointer;font-weight:600}.toolbar button:hover{background:#182640}.types{display:flex;gap:5px}.types button{--c:#94a3b8}.types button:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--c)}.types button.off{opacity:.35;text-decoration:line-through}.work{display:grid;grid-template-columns:minmax(0,1fr) 330px;min-height:0}.stage{position:relative;min-width:0;background:radial-gradient(circle at 50% 18%,#14233e,#090f1b 50%,#070b14)}svg{display:block;width:100%;height:100%;touch-action:none;cursor:grab}svg.pan{cursor:grabbing}.hint{position:absolute;left:11px;bottom:9px;padding:5px 8px;border:1px solid #263650;border-radius:7px;background:#08101ddd;color:#7184a0;pointer-events:none}aside{overflow:auto;padding:15px;border-left:1px solid #253550;background:linear-gradient(#0e1727,#09101c)}aside h2{font-size:17px;margin:0 0 3px}aside h3{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#8193ae;margin:15px 0 6px}aside p{margin:0;color:#c7d3e4}aside ul{padding-left:18px;margin:4px 0;color:#bac8da}aside code{color:#7dd3fc;word-break:break-word}.empty{text-align:center;color:var(--muted);padding:28px 6px}.kind{display:inline-block;margin:6px 0 11px;padding:2px 8px;border:1px solid #405474;border-radius:999px}.ev{margin:5px 0;padding:7px 8px;border:1px solid #263853;border-radius:6px;background:#091321}.flow-card{margin:6px 0;padding:7px 9px;border-left:3px solid var(--flow);background:#181a22}.flow-card b{display:block;color:#fde68a}.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:12px;text-align:left;font-size:11px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}.boundary{fill:#0b1424;stroke:#324360;stroke-width:1.2;stroke-dasharray:7 5}.boundary-title{fill:#8294af;font-size:12px;font-weight:700;letter-spacing:.1em}.edge{fill:none;stroke:#52627e;stroke-width:1.4;opacity:.52;marker-end:url(#arrow)}.edge.dim{opacity:.06}.edge.up{stroke:var(--up);stroke-width:2.5;opacity:1}.edge.down{stroke:var(--down);stroke-width:2.5;opacity:1}.edge.flow{stroke:var(--flow);stroke-width:3;opacity:1}.edge.hide,.node.hide{display:none}.hit{fill:none;stroke:transparent;stroke-width:12;cursor:pointer}.node{cursor:pointer;filter:drop-shadow(0 6px 9px #0008)}.node.dim{opacity:.14}.node .card{fill:#121d30;stroke:var(--c);stroke-width:1.5;rx:10}.node .band{fill:var(--c);opacity:.18;rx:10}.node .badge{fill:var(--c);font-size:9px;font-weight:700}.node .title{fill:#f4f7fb;font-size:13px;font-weight:700}.node .path{fill:#94a6c0;font-size:10px}.node .tests{fill:#687b98;font-size:9px}.node.selected .card{stroke:#fff;stroke-width:3}.node.upstream .card{stroke:var(--up);stroke-width:2.7}.node.downstream .card{stroke:var(--down);stroke-width:2.7}.node.in-flow .card{stroke:var(--flow);stroke-width:3}.node.search .card{stroke:#c084fc;stroke-width:3}@media(max-width:850px){.work{grid-template-columns:1fr}aside{position:absolute;right:0;top:112px;bottom:0;width:min(88vw,330px);z-index:5}.stats{display:none}}
+</style>
+</head>
+<body>
+<header><div><h1>remcard · интерактивная карта кода</h1><div class="meta">Сформировано <code id="generated"></code> из коммита <code id="commit"></code></div></div><div class="stats"><span class="pill" id="nc"></span><span class="pill" id="ec"></span><span class="pill" id="fc"></span><span class="pill">только подтверждённые связи</span></div></header>
+<div class="toolbar"><input id="search" type="search" placeholder="Поиск модуля, пути или роли…"><select id="flow"><option value="">Все потоки</option></select><button id="fit">Вписать</button><button id="zin" title="Увеличить">＋</button><button id="zout" title="Уменьшить">−</button><button id="reset">Сбросить</button><div class="types" id="types"></div></div>
+<main class="work"><section class="stage"><svg id="map" viewBox="0 0 1320 860" aria-label="Интерактивный граф архитектуры"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0 0L0 6L7 3z" fill="#7487a6"/></marker></defs><g id="view"><g id="bounds"></g><g id="edges"></g><g id="nodes"></g></g></svg><div class="hint">Колесо: масштаб · фон: перемещение · модуль: перетаскивание · щелчок: трассировка зависимостей</div></section><aside id="details"></aside></main>
+<script id="codemap-data" type="application/json">
+{
+  "generated_at": "2026-08-06T09:18:11Z",
+  "generated_from_commit": "edf53f65f90d7d66a195e922b7a8de70348ae2d5",
+  "scope": [
+    "launcher.py",
+    "run_*.py",
+    "app/",
+    "data/dao/",
+    "data/settings/",
+    "services/",
+    "ui/",
+    "requirements.txt",
+    "tests/"
+  ],
+  "nodes": [
+    {
+      "id": "entrypoints",
+      "label": "Точки запуска ролей",
+      "type": "entry",
+      "boundary": "client",
+      "path": "launcher.py",
+      "role": "Подготавливает локальный пакет и запускает процесс по умолчанию, врача, медсестры, операционного блока, настройки пути или обновлятора.",
+      "entrypoints": [
+        "launcher.py#run_rem_card",
+        "run_doctor.py#__main__",
+        "run_nurse.py#__main__",
+        "run_operblock.py#__main__",
+        "run_updater.py#__main__"
+      ],
+      "tests": [
+        "tests/test_checkout_name_independence.py",
+        "tests/test_compiled_first_run_path.py"
+      ],
+      "constraints": [
+        "Точки запуска вызывают bootstrap_local_rem_card до импорта модулей rem_card."
+      ],
+      "evidence": [
+        {
+          "path": "launcher.py",
+          "symbol": "run_rem_card"
+        },
+        {
+          "path": "run_doctor.py",
+          "symbol": "main(forced_role=\"doctor\")"
+        },
+        {
+          "path": "run_nurse.py",
+          "symbol": "main(forced_role=\"nurse\")"
+        },
+        {
+          "path": "run_operblock.py",
+          "symbol": "main(forced_role=\"operblock\")"
+        },
+        {
+          "path": "run_updater.py",
+          "symbol": "sys.exit(main())"
+        }
+      ]
+    },
+    {
+      "id": "startup_runtime",
+      "label": "Запуск и среда выполнения",
+      "type": "orchestration",
+      "boundary": "application",
+      "path": "app/main.py",
+      "role": "Разбирает аргументы роли и пути, применяет ограничения единственного экземпляра и проверки БД, выбирает сетевую, автономную или аварийную среду, запускает обновления и владеет циклом событий Qt.",
+      "entrypoints": [
+        "app/main.py#main",
+        "app/main.py#_main_impl"
+      ],
+      "tests": [
+        "tests/test_startup_path_validation.py",
+        "tests/test_single_instance_offline_startup.py",
+        "tests/test_dev_role_lock_bypass.py"
+      ],
+      "constraints": [
+        "Проверка сети и блокировка роли выполняются до создания контейнера.",
+        "Необработанные ошибки запуска фиксируются до завершения процесса."
+      ],
+      "evidence": [
+        {
+          "path": "app/main.py",
+          "symbol": "main"
+        },
+        {
+          "path": "app/main.py",
+          "symbol": "_main_impl"
+        },
+        {
+          "path": "app/main.py",
+          "symbol": "_prepare_runtime_context_for_startup"
+        },
+        {
+          "path": "app/main.py",
+          "symbol": "_run_startup_application"
+        }
+      ]
+    },
+    {
+      "id": "container",
+      "label": "Контейнер зависимостей",
+      "type": "orchestration",
+      "boundary": "application",
+      "path": "app/bootstrap.py",
+      "role": "Создаёт DatabaseManager, настройки, DAO, клинические сервисы, мониторинг изменений данных и ленивые сервисы для отдельных ролей.",
+      "entrypoints": [
+        "app/bootstrap.py#bootstrap",
+        "app/bootstrap.py#Container.__init__"
+      ],
+      "tests": [
+        "tests/test_lazy_operblock_service_proxy.py",
+        "tests/test_lazy_startup_services.py"
+      ],
+      "constraints": [
+        "Для ролей операционного блока OperBlockService разрешается сразу, а полный клинический фасад остаётся ленивым.",
+        "Для ролей врача и медсестры включается фоновый монитор изменений."
+      ],
+      "evidence": [
+        {
+          "path": "app/bootstrap.py",
+          "symbol": "Container"
+        },
+        {
+          "path": "app/bootstrap.py",
+          "symbol": "bootstrap"
+        },
+        {
+          "path": "app/bootstrap.py",
+          "symbol": "create_lazy_operblock_service"
+        }
+      ]
+    },
+    {
+      "id": "ui_shell",
+      "label": "Главное окно и маршрутизация ролей",
+      "type": "ui",
+      "boundary": "client",
+      "path": "ui/main_window.py",
+      "role": "Управляет верхнеуровневым окном Qt, активирует контейнеры и экраны ролей, обрабатывает переходы при потере сети и координирует завершение работы.",
+      "entrypoints": [
+        "ui/main_window.py#MainWindow",
+        "ui/main_window.py#MainWindow.init_with_role"
+      ],
+      "tests": [
+        "tests/test_dev_database_switch.py",
+        "tests/test_manual_db_rotation_undo.py",
+        "tests/test_ui_hang_watchdog.py"
+      ],
+      "constraints": [
+        "При запуске подготавливается только один начальный интерфейс роли.",
+        "Блокировки сессии роли освобождаются при смене роли и завершении работы."
+      ],
+      "evidence": [
+        {
+          "path": "ui/main_window.py",
+          "symbol": "MainWindow"
+        },
+        {
+          "path": "ui/main_window.py",
+          "symbol": "_activate_initial_doctor_role"
+        },
+        {
+          "path": "ui/main_window.py",
+          "symbol": "_activate_initial_nurse_role"
+        },
+        {
+          "path": "ui/main_window.py",
+          "symbol": "_activate_initial_operblock_role"
+        }
+      ]
+    },
+    {
+      "id": "doctor_ui",
+      "label": "Рабочее место врача",
+      "type": "ui",
+      "boundary": "client",
+      "path": "ui/doctor_view",
+      "role": "Доска коек врача, карта пациента, назначения, архив, администрирование и обработка обновлений со стороны врача.",
+      "entrypoints": [
+        "ui/doctor_view/doctor_main_widget.py#DoctorMainWidget"
+      ],
+      "tests": [
+        "tests/test_administration_dialog_form_restore.py",
+        "tests/test_orders_widget_local_draft.py",
+        "tests/test_orders_close_guard.py"
+      ],
+      "constraints": [
+        "Интерфейс обновляется по сообщениям DataService только для затронутых госпитализаций."
+      ],
+      "evidence": [
+        {
+          "path": "ui/doctor_view/doctor_main_widget.py",
+          "symbol": "DoctorMainWidget"
+        },
+        {
+          "path": "ui/doctor_view/doctor_main_widget.py",
+          "symbol": "_on_data_changes"
+        },
+        {
+          "path": "ui/doctor_view/doctor_remcard_widget.py",
+          "symbol": "DoctorRemCardWidget"
+        }
+      ]
+    },
+    {
+      "id": "nurse_ui",
+      "label": "Рабочее место медсестры",
+      "type": "ui",
+      "boundary": "client",
+      "path": "ui/nurse_view",
+      "role": "Доска коек медсестры, выполнение текущих назначений, показатели, баланс, карты пациентов, отчёты и частичные проекции обновлений.",
+      "entrypoints": [
+        "ui/nurse_view/nurse_main_widget.py#NurseMainWidget"
+      ],
+      "tests": [
+        "tests/test_nurse_orders_refresh_reliability.py",
+        "tests/test_nurse_snapshot_shutdown.py",
+        "tests/test_nurse_order_card_cvp_display.py"
+      ],
+      "constraints": [
+        "Гидратация карты и тяжёлые виджеты создаются лениво и допускают отмену.",
+        "Обновления после записи сохраняют локальные проекции назначений."
+      ],
+      "evidence": [
+        {
+          "path": "ui/nurse_view/nurse_main_widget.py",
+          "symbol": "NurseMainWidget"
+        },
+        {
+          "path": "ui/nurse_view/nurse_main_widget.py",
+          "symbol": "load_patient_card"
+        },
+        {
+          "path": "ui/nurse_view/nurse_main_widget.py",
+          "symbol": "_on_data_changes"
+        }
+      ]
+    },
+    {
+      "id": "operblock_ui",
+      "label": "Рабочее место операционного блока",
+      "type": "ui",
+      "boundary": "client",
+      "path": "ui/operblock_view",
+      "role": "Доска операционного блока и интерфейс протокола для случаев, этапов, показателей, препаратов, инфузий, передачи пациента, архива и PDF-отчётов.",
+      "entrypoints": [
+        "ui/operblock_view/operblock_main_widget.py#OperBlockMainWidget"
+      ],
+      "tests": [
+        "tests/test_operblock_ui_latency.py",
+        "tests/test_operblock_static_theme.py",
+        "tests/test_operblock_started_at.py"
+      ],
+      "constraints": [
+        "Интерактивные записи используют короткий тайм-аут занятости и диагностируемые очереди обратных вызовов.",
+        "Тяжёлый модуль графика предварительно загружается лениво."
+      ],
+      "evidence": [
+        {
+          "path": "ui/operblock_view/operblock_main_widget.py",
+          "symbol": "OperBlockMainWidget"
+        },
+        {
+          "path": "ui/operblock_view/operblock_main_widget.py",
+          "symbol": "_enqueue_write"
+        },
+        {
+          "path": "ui/operblock_view/operblock_main_widget.py",
+          "symbol": "_start_anesthesia"
+        }
+      ]
+    },
+    {
+      "id": "clinical_ui",
+      "label": "Общий интерфейс клинической карты",
+      "type": "ui",
+      "boundary": "client",
+      "path": "ui/rem_card_sectors",
+      "role": "Общие секции карты пациента для показателей, ИВЛ, жидкостей, назначений, событий, лаборатории, процедур, баланса и печати.",
+      "entrypoints": [
+        "ui/shared/remcard_layout.py#RemCardLayout",
+        "ui/rem_card_sectors/lab_analysis_dialog.py#LabAnalysisDialog"
+      ],
+      "tests": [
+        "tests/test_sector_ivl_mode_parameter_layout.py",
+        "tests/test_vital_settings_dialog_cvp_button.py",
+        "tests/test_report_vitals_slotting.py"
+      ],
+      "constraints": [
+        "Клинические виджеты обращаются к фасаду, а не открывают соединения SQLite напрямую."
+      ],
+      "evidence": [
+        {
+          "path": "ui/shared/remcard_layout.py",
+          "symbol": "RemCardLayout"
+        },
+        {
+          "path": "ui/rem_card_sectors/lab_analysis_dialog.py",
+          "symbol": "LabAnalysisDialog"
+        },
+        {
+          "path": "ui/rem_card_sectors/s_print/builder.py",
+          "symbol": "ReportBuilder"
+        }
+      ]
+    },
+    {
+      "id": "clinical_services",
+      "label": "Фасад клинических сервисов",
+      "type": "service",
+      "boundary": "application",
+      "path": "services/remcard_facade.py",
+      "role": "Объединяет сервисы пациентов, статусов, показателей, жидкостей, диеты, назначений, ИВЛ, лаборатории, процедур, координации чтения и снимков.",
+      "entrypoints": [
+        "services/remcard_facade.py#RemCardService",
+        "services/patient_service.py#PatientService"
+      ],
+      "tests": [
+        "tests/test_remcard_commit_snapshot.py",
+        "tests/test_read_coordinator_cache_epoch.py",
+        "tests/test_order_service_cvp_quick_order.py"
+      ],
+      "constraints": [
+        "При наличии DataService записи проходят через него; прямой вызов DatabaseManager используется как резервный путь.",
+        "Инвалидация кэша подписана на классифицированные сообщения об изменениях."
+      ],
+      "evidence": [
+        {
+          "path": "services/remcard_facade.py",
+          "symbol": "RemCardService"
+        },
+        {
+          "path": "services/remcard_facade.py",
+          "symbol": "build_card_snapshot"
+        },
+        {
+          "path": "services/patient_service.py",
+          "symbol": "PatientService"
+        },
+        {
+          "path": "services/read_coordinator.py",
+          "symbol": "ReadCoordinator"
+        }
+      ]
+    },
+    {
+      "id": "operblock_domain",
+      "label": "Домен операционного блока",
+      "type": "service",
+      "boundary": "application",
+      "path": "services/operblock_service.py",
+      "role": "Транзакционный доменный сервис операционного блока для столов, случаев, этапов, показателей, временной шкалы препаратов, архива, передачи в пробуждение и проверок конфликтов.",
+      "entrypoints": [
+        "services/operblock_service.py#OperBlockService"
+      ],
+      "tests": [
+        "tests/test_operblock_controlled_prescriptions.py",
+        "tests/test_operblock_archive_pagination_delete.py",
+        "tests/test_rao_operblock_handoff.py"
+      ],
+      "constraints": [
+        "Изменения выполняются через DatabaseManager.run_write_operation.",
+        "Конфликты ревизий и занятости порождают специализированные доменные ошибки."
+      ],
+      "evidence": [
+        {
+          "path": "services/operblock_service.py",
+          "symbol": "OperBlockService"
+        },
+        {
+          "path": "services/operblock_service.py",
+          "symbol": "create_operation_case"
+        },
+        {
+          "path": "services/operblock_service.py",
+          "symbol": "start_anesthesia"
+        }
+      ]
+    },
+    {
+      "id": "analytics_reports",
+      "label": "Аналитика и отчёты",
+      "type": "service",
+      "boundary": "application",
+      "path": "services/analytics",
+      "role": "Статистика медицинских данных и операционного блока только для чтения, агрегация нескольких БД, графики, HTML-отчёты и формирование PDF.",
+      "entrypoints": [
+        "services/analytics/detailed_statistics_service.py#build_detailed_statistics_report_html",
+        "services/analytics/operblock_statistics_service.py#build_operblock_statistics_report_html",
+        "services/analytics/graphs_service.py#build_graphs_pdf"
+      ],
+      "tests": [
+        "tests/test_analytics_half_open_ranges.py",
+        "tests/test_archive_query_optimizations.py"
+      ],
+      "constraints": [
+        "Архивные базы данных открываются только для чтения.",
+        "Тяжёлая аналитика выполняется вне потока интерфейса."
+      ],
+      "evidence": [
+        {
+          "path": "services/analytics/detailed_statistics_service.py",
+          "symbol": "build_detailed_statistics_report_html"
+        },
+        {
+          "path": "services/analytics/multi_db_analytics.py",
+          "symbol": "create_readonly_analytics_manager"
+        },
+        {
+          "path": "services/analytics/graphs_service.py",
+          "symbol": "build_graphs_pdf"
+        }
+      ]
+    },
+    {
+      "id": "settings_store",
+      "label": "Сервис настроек и БД",
+      "type": "database",
+      "boundary": "persistence",
+      "path": "data/settings",
+      "role": "Отдельная SQLite-база настроек, схемы, снимки релиза, импорт устаревших данных, вынос медиафайлов, каталоги и резервные копии.",
+      "entrypoints": [
+        "services/settings/settings_service.py#SettingsService",
+        "data/settings/settings_db.py#SettingsDatabase"
+      ],
+      "tests": [
+        "tests/test_settings_import.py",
+        "tests/test_settings_media_storage.py",
+        "tests/test_settings_startup_writes.py",
+        "tests/test_settings_release_snapshot.py"
+      ],
+      "constraints": [
+        "Контексты среды только для чтения отклоняют изменения настроек.",
+        "SettingsDatabase применяет правила резервного копирования при запуске и перед записью."
+      ],
+      "evidence": [
+        {
+          "path": "services/settings/settings_service.py",
+          "symbol": "SettingsService"
+        },
+        {
+          "path": "data/settings/settings_db.py",
+          "symbol": "SettingsDatabase"
+        },
+        {
+          "path": "data/settings/settings_schema.py",
+          "symbol": "SCHEMA_VERSION"
+        }
+      ]
+    },
+    {
+      "id": "data_change_bus",
+      "label": "Оркестрация записи и шина изменений",
+      "type": "queue",
+      "boundary": "application",
+      "path": "services/data_service.py",
+      "role": "Сериализует записи из интерфейса, классифицирует изменения БД, отправляет сигналы обновления, обрабатывает потерю сети и выполняет обслуживающие обратные вызовы.",
+      "entrypoints": [
+        "services/data_service.py#DataService"
+      ],
+      "tests": [
+        "tests/test_data_update_monitor_connection_reuse.py",
+        "tests/test_network_write_outcome_handling.py",
+        "tests/test_sync_coordinator_refresh_policy.py"
+      ],
+      "constraints": [
+        "После потери сети новые записи отклоняются.",
+        "Успешная запись запрашивает немедленное классифицированное обновление."
+      ],
+      "evidence": [
+        {
+          "path": "services/data_service.py",
+          "symbol": "DataService"
+        },
+        {
+          "path": "services/data_service.py",
+          "symbol": "enqueue_write"
+        },
+        {
+          "path": "services/data_service.py",
+          "symbol": "changes_detected"
+        }
+      ]
+    },
+    {
+      "id": "dao",
+      "label": "Клинические DAO и DTO",
+      "type": "data",
+      "boundary": "persistence",
+      "path": "data/dao",
+      "role": "Репозитории SQL и отображение DTO для пациентов, статусов, показателей, жидкостей, назначений, ИВЛ, диет, лабораторных назначений, процедур и курсоров синхронизации.",
+      "entrypoints": [
+        "data/dao/patient_dao.py#PatientDAO",
+        "data/dao/remcard_dao.py#VitalsDAO",
+        "data/dao/orders_dao.py#OrdersDAO"
+      ],
+      "tests": [
+        "tests/test_card_dates_query.py",
+        "tests/test_patient_archive_scope.py",
+        "tests/test_vitals_query_indexes.py"
+      ],
+      "constraints": [
+        "DAO получают DatabaseManager через внедрение в конструктор.",
+        "Изменения нескольких таблиц используют транзакции записи DatabaseManager."
+      ],
+      "evidence": [
+        {
+          "path": "data/dao/patient_dao.py",
+          "symbol": "PatientDAO"
+        },
+        {
+          "path": "data/dao/remcard_dao.py",
+          "symbol": "VitalsDAO"
+        },
+        {
+          "path": "data/dao/orders_dao.py",
+          "symbol": "OrdersDAO"
+        }
+      ]
+    },
+    {
+      "id": "medical_db",
+      "label": "Медицинская среда SQLite",
+      "type": "database",
+      "boundary": "persistence",
+      "path": "data/dao/db_manager.py",
+      "role": "Управляет соединениями единой медицинской SQLite, инициализацией схемы, политикой транзакций и блокировок, резервными копиями, проверками целостности, журналом изменений, локальным чтением и сетевой записью.",
+      "entrypoints": [
+        "data/dao/db_manager.py#DatabaseManager"
+      ],
+      "tests": [
+        "tests/test_sqlite_shared_maintenance_lock.py",
+        "tests/test_manual_db_rotation_undo.py",
+        "tests/test_network_write_worker.py"
+      ],
+      "constraints": [
+        "Выбранный контекст среды задаёт один путь медицинской базы данных.",
+        "Записи проходят через SQLiteWriteController или изолированный сетевой процесс согласно политике.",
+        "Проверка целостности выполняется до штатного использования."
+      ],
+      "evidence": [
+        {
+          "path": "data/dao/db_manager.py",
+          "symbol": "DatabaseManager"
+        },
+        {
+          "path": "data/dao/db_manager.py",
+          "symbol": "run_write_operation"
+        },
+        {
+          "path": "data/dao/db_manager.py",
+          "symbol": "fetch_all_remcard"
+        }
+      ]
+    },
+    {
+      "id": "write_queue",
+      "label": "Конвейер записи SQLite",
+      "type": "queue",
+      "boundary": "persistence",
+      "path": "app/sqlite_shared.py",
+      "role": "Объединяет внутрипроцессную LocalWriteQueue, межпроцессный контроллер записи SQLite, изолированный сетевой процесс и необязательное повторное применение устойчивого SQL-outbox.",
+      "entrypoints": [
+        "app/sqlite_shared.py#LocalWriteQueue",
+        "app/sqlite_shared.py#SQLiteWriteController",
+        "app/network_write_worker.py#NetworkWriteWorkerClient",
+        "app/durable_sql_outbox.py#DurableSqlOutbox"
+      ],
+      "tests": [
+        "tests/test_network_write_worker.py",
+        "tests/test_network_write_outcome_handling.py",
+        "tests/test_sqlite_shared_maintenance_lock.py"
+      ],
+      "constraints": [
+        "Записи из очереди выполняются одним рабочим потоком.",
+        "В outbox сохраняются только безопасные для повторения SQL-операторы.",
+        "Интерактивные записи операционного блока имеют ограниченное ожидание блокировки."
+      ],
+      "evidence": [
+        {
+          "path": "app/sqlite_shared.py",
+          "symbol": "LocalWriteQueue"
+        },
+        {
+          "path": "app/sqlite_shared.py",
+          "symbol": "SQLiteWriteController"
+        },
+        {
+          "path": "app/network_write_worker.py",
+          "symbol": "NetworkWriteWorkerClient"
+        },
+        {
+          "path": "app/durable_sql_outbox.py",
+          "symbol": "DurableSqlOutbox"
+        }
+      ]
+    },
+    {
+      "id": "local_replica",
+      "label": "Локальная реплика чтения",
+      "type": "resilience",
+      "boundary": "persistence",
+      "path": "app/local_replica_sync.py",
+      "role": "Поддерживает неблокирующую локальную реплику сетевой медицинской SQLite только для чтения и предоставляет локальное чтение с учётом курсора.",
+      "entrypoints": [
+        "app/local_replica_sync.py#LocalReplicaSync",
+        "app/local_replica_worker.py#main"
+      ],
+      "tests": [
+        "tests/test_local_replica_sync.py",
+        "tests/test_network_maintenance.py"
+      ],
+      "constraints": [
+        "Включается только в сетевой среде, если REMCARD_LOCAL_FIRST_SYNC не отключает функцию.",
+        "Замена реплики сохраняет проверенное локальное соединение."
+      ],
+      "evidence": [
+        {
+          "path": "app/local_replica_sync.py",
+          "symbol": "LocalReplicaSync"
+        },
+        {
+          "path": "app/local_replica_sync.py",
+          "symbol": "sync_once"
+        },
+        {
+          "path": "app/local_replica_worker.py",
+          "symbol": "LocalReplicaWorkerClient"
+        }
+      ]
+    },
+    {
+      "id": "emergency_runtime",
+      "label": "Аварийная и автономная среда",
+      "type": "resilience",
+      "boundary": "persistence",
+      "path": "app/emergency_store.py",
+      "role": "Создаёт и возобновляет локальные аварийные снимки медицинской БД и настроек, резервные копии, автономное хранилище операционного блока, метаданные, проверку и подготовку объединения.",
+      "entrypoints": [
+        "app/emergency_store.py#EmergencyLocalStore",
+        "app/emergency_startup.py#start_or_resume_emergency_session"
+      ],
+      "tests": [
+        "tests/test_emergency_storage_retention.py",
+        "tests/test_single_instance_offline_startup.py",
+        "tests/test_operblock_offline_shadow_startup.py"
+      ],
+      "constraints": [
+        "Аварийный режим включается только после классифицированной сетевой ошибки и проверок роли и пароля.",
+        "Метаданные сессии и снимки SQLite проверяются перед использованием или объединением."
+      ],
+      "evidence": [
+        {
+          "path": "app/emergency_store.py",
+          "symbol": "EmergencyLocalStore"
+        },
+        {
+          "path": "app/emergency_startup.py",
+          "symbol": "start_or_resume_emergency_session"
+        },
+        {
+          "path": "app/operblock_offline_store.py",
+          "symbol": "start_or_resume_operblock_offline_session"
+        }
+      ]
+    },
+    {
+      "id": "updater",
+      "label": "Обновлятор релизов",
+      "type": "external",
+      "boundary": "external",
+      "path": "app/updater_main.py",
+      "role": "Сканирует каталоги релизов, проверяет манифесты полного обновления, координирует блокировки, подготавливает установку, откатывает её при ошибке и перезапускает выбранный исполняемый файл.",
+      "entrypoints": [
+        "run_updater.py#__main__",
+        "app/updater_main.py#main",
+        "app/update_launcher.py#launch_update"
+      ],
+      "tests": [
+        "tests/test_updater_install_safety.py",
+        "tests/test_build_release_test_worktree.py"
+      ],
+      "constraints": [
+        "Обновлятор проверяет целевые пути и манифесты до замены файлов.",
+        "Ошибка установки переводит процесс на путь отката."
+      ],
+      "evidence": [
+        {
+          "path": "app/updater_main.py",
+          "symbol": "main"
+        },
+        {
+          "path": "app/update_checker.py",
+          "symbol": "find_best_update_with_reason"
+        },
+        {
+          "path": "app/update_launcher.py",
+          "symbol": "launch_update"
+        }
+      ]
+    },
+    {
+      "id": "external_deps",
+      "label": "Внешние библиотеки",
+      "type": "external",
+      "boundary": "external",
+      "path": "requirements.txt",
+      "role": "Зафиксированный стек среды: PySide6/pyqtgraph для интерфейса, NumPy/Pandas/Matplotlib для аналитики, ReportLab/PyPDF/Pillow для документов и интеграция Windows; инструменты сборки и проверки также закреплены.",
+      "entrypoints": [
+        "requirements.txt#PySide6",
+        "requirements.txt#reportlab",
+        "requirements.txt#pandas"
+      ],
+      "tests": [],
+      "constraints": [
+        "Версии закреплены в requirements.txt.",
+        "pywin32 подключается только в Windows."
+      ],
+      "evidence": [
+        {
+          "path": "requirements.txt",
+          "symbol": "PySide6==6.11.1"
+        },
+        {
+          "path": "requirements.txt",
+          "symbol": "reportlab==5.0.0"
+        },
+        {
+          "path": "requirements.txt",
+          "symbol": "pandas==3.0.5"
+        },
+        {
+          "path": "requirements.txt",
+          "symbol": "pywin32==312"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "entrypoints",
+      "to": "startup_runtime",
+      "type": "imports",
+      "label": "импортирует main",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "launcher.py",
+          "symbol": "from rem_card.app.main import main"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "container",
+      "type": "calls",
+      "label": "создаёт зависимости",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/main.py",
+          "symbol": "_bootstrap_startup_container"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "ui_shell",
+      "type": "calls",
+      "label": "создаёт MainWindow",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/main.py",
+          "symbol": "_run_startup_application"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "emergency_runtime",
+      "type": "calls",
+      "label": "выбирает резервную среду",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/main.py",
+          "symbol": "_try_emergency_startup_after_network_failure"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "updater",
+      "type": "calls",
+      "label": "запускает проверку обновлений",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/main.py",
+          "symbol": "_launch_startup_update_after_single_instance"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "external_deps",
+      "type": "imports",
+      "label": "использует среду Qt",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/main.py",
+          "symbol": "_create_startup_qt_context"
+        }
+      ]
+    },
+    {
+      "from": "container",
+      "to": "medical_db",
+      "type": "calls",
+      "label": "создаёт DatabaseManager",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/bootstrap.py",
+          "symbol": "bootstrap"
+        }
+      ]
+    },
+    {
+      "from": "container",
+      "to": "settings_store",
+      "type": "calls",
+      "label": "подготавливает БД настроек",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/bootstrap.py",
+          "symbol": "bootstrap"
+        }
+      ]
+    },
+    {
+      "from": "container",
+      "to": "data_change_bus",
+      "type": "calls",
+      "label": "создаёт DataService",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/bootstrap.py",
+          "symbol": "Container"
+        }
+      ]
+    },
+    {
+      "from": "container",
+      "to": "clinical_services",
+      "type": "calls",
+      "label": "связывает фасад",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/bootstrap.py",
+          "symbol": "Container"
+        }
+      ]
+    },
+    {
+      "from": "container",
+      "to": "operblock_domain",
+      "type": "calls",
+      "label": "создаёт ленивый сервис роли",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/bootstrap.py",
+          "symbol": "_create_service"
+        }
+      ]
+    },
+    {
+      "from": "ui_shell",
+      "to": "doctor_ui",
+      "type": "calls",
+      "label": "активирует роль врача",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/main_window.py",
+          "symbol": "_activate_initial_doctor_role"
+        }
+      ]
+    },
+    {
+      "from": "ui_shell",
+      "to": "nurse_ui",
+      "type": "calls",
+      "label": "активирует роль медсестры",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/main_window.py",
+          "symbol": "_activate_initial_nurse_role"
+        }
+      ]
+    },
+    {
+      "from": "ui_shell",
+      "to": "operblock_ui",
+      "type": "calls",
+      "label": "активирует роль операционного блока",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/main_window.py",
+          "symbol": "_activate_initial_operblock_role"
+        }
+      ]
+    },
+    {
+      "from": "doctor_ui",
+      "to": "clinical_ui",
+      "type": "calls",
+      "label": "создаёт карту пациента",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/doctor_view/doctor_main_widget.py",
+          "symbol": "init_ui"
+        }
+      ]
+    },
+    {
+      "from": "nurse_ui",
+      "to": "clinical_ui",
+      "type": "calls",
+      "label": "загружает макет карты",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/nurse_view/nurse_main_widget.py",
+          "symbol": "_ensure_full_layout"
+        }
+      ]
+    },
+    {
+      "from": "doctor_ui",
+      "to": "clinical_services",
+      "type": "calls",
+      "label": "загружает клинические снимки",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/doctor_view/doctor_main_widget.py",
+          "symbol": "_refresh_w1a"
+        }
+      ]
+    },
+    {
+      "from": "nurse_ui",
+      "to": "clinical_services",
+      "type": "calls",
+      "label": "загружает и обновляет карту",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/nurse_view/nurse_main_widget.py",
+          "symbol": "load_patient_card"
+        }
+      ]
+    },
+    {
+      "from": "operblock_ui",
+      "to": "clinical_services",
+      "type": "calls",
+      "label": "адаптирует общий API показателей и пациента",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/operblock_view/operblock_main_widget.py",
+          "symbol": "OperBlockVitalsServiceAdapter"
+        }
+      ]
+    },
+    {
+      "from": "operblock_ui",
+      "to": "operblock_domain",
+      "type": "calls",
+      "label": "выполняет действия протокола",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/operblock_view/operblock_main_widget.py",
+          "symbol": "_start_anesthesia"
+        }
+      ]
+    },
+    {
+      "from": "clinical_ui",
+      "to": "clinical_services",
+      "type": "calls",
+      "label": "сохраняет клинический ввод",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/rem_card_sectors/lab_analysis_dialog.py",
+          "symbol": "_save"
+        }
+      ]
+    },
+    {
+      "from": "clinical_services",
+      "to": "dao",
+      "type": "calls",
+      "label": "использует репозитории",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/remcard_facade.py",
+          "symbol": "build_vitals_snapshot"
+        }
+      ]
+    },
+    {
+      "from": "clinical_services",
+      "to": "data_change_bus",
+      "type": "publishes",
+      "label": "отправляет записи",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/remcard_facade.py",
+          "symbol": "enqueue_write"
+        }
+      ]
+    },
+    {
+      "from": "data_change_bus",
+      "to": "write_queue",
+      "type": "publishes",
+      "label": "ставит задачу записи в очередь",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/data_service.py",
+          "symbol": "enqueue_write"
+        }
+      ]
+    },
+    {
+      "from": "data_change_bus",
+      "to": "medical_db",
+      "type": "calls",
+      "label": "выполняет транзакционную запись",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/data_service.py",
+          "symbol": "run_write"
+        }
+      ]
+    },
+    {
+      "from": "data_change_bus",
+      "to": "medical_db",
+      "type": "reads",
+      "label": "опрашивает журнал изменений",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/data_service.py",
+          "symbol": "fetch_changes_since"
+        }
+      ]
+    },
+    {
+      "from": "data_change_bus",
+      "to": "doctor_ui",
+      "type": "publishes",
+      "label": "отправляет адресное обновление",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/data_service.py",
+          "symbol": "changes_detected"
+        },
+        {
+          "path": "ui/doctor_view/doctor_main_widget.py",
+          "symbol": "_on_data_changes"
+        }
+      ]
+    },
+    {
+      "from": "data_change_bus",
+      "to": "nurse_ui",
+      "type": "publishes",
+      "label": "отправляет частичное обновление",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/data_service.py",
+          "symbol": "changes_detected"
+        },
+        {
+          "path": "ui/nurse_view/nurse_main_widget.py",
+          "symbol": "_on_data_changes"
+        }
+      ]
+    },
+    {
+      "from": "data_change_bus",
+      "to": "operblock_ui",
+      "type": "publishes",
+      "label": "отправляет обновление доски",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/data_service.py",
+          "symbol": "changes_detected"
+        },
+        {
+          "path": "ui/operblock_view/operblock_main_widget.py",
+          "symbol": "_on_changes_detected"
+        }
+      ]
+    },
+    {
+      "from": "dao",
+      "to": "medical_db",
+      "type": "reads",
+      "label": "запрашивает единую схему",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "data/dao/patient_dao.py",
+          "symbol": "get_active_patients"
+        }
+      ]
+    },
+    {
+      "from": "dao",
+      "to": "medical_db",
+      "type": "writes",
+      "label": "выполняет доменные транзакции",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "data/dao/patient_dao.py",
+          "symbol": "delete_admission"
+        }
+      ]
+    },
+    {
+      "from": "operblock_domain",
+      "to": "medical_db",
+      "type": "reads",
+      "label": "загружает столы и временные шкалы",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/operblock_service.py",
+          "symbol": "build_operblock_board_snapshot"
+        }
+      ]
+    },
+    {
+      "from": "operblock_domain",
+      "to": "medical_db",
+      "type": "writes",
+      "label": "фиксирует транзакцию протокола",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/operblock_service.py",
+          "symbol": "create_operation_case"
+        }
+      ]
+    },
+    {
+      "from": "doctor_ui",
+      "to": "analytics_reports",
+      "type": "calls",
+      "label": "открывает статистику архива",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/doctor_view/archive_widget.py",
+          "symbol": "open_operblock_statistics_dialog"
+        }
+      ]
+    },
+    {
+      "from": "analytics_reports",
+      "to": "medical_db",
+      "type": "reads",
+      "label": "открывает наборы данных только для чтения",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/analytics/multi_db_analytics.py",
+          "symbol": "create_readonly_analytics_manager"
+        }
+      ]
+    },
+    {
+      "from": "analytics_reports",
+      "to": "external_deps",
+      "type": "imports",
+      "label": "формирует графики и PDF",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "services/analytics/graphs_service.py",
+          "symbol": "build_graphs_pdf"
+        }
+      ]
+    },
+    {
+      "from": "medical_db",
+      "to": "write_queue",
+      "type": "calls",
+      "label": "использует worker/outbox-конвейер",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "data/dao/db_manager.py",
+          "symbol": "_network_write_worker_client"
+        },
+        {
+          "path": "data/dao/db_manager.py",
+          "symbol": "_enqueue_outbox_fallback"
+        }
+      ]
+    },
+    {
+      "from": "medical_db",
+      "to": "local_replica",
+      "type": "calls",
+      "label": "запускает и обновляет реплику",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "data/dao/db_manager.py",
+          "symbol": "_start_local_replica_sync"
+        }
+      ]
+    },
+    {
+      "from": "emergency_runtime",
+      "to": "medical_db",
+      "type": "writes",
+      "label": "создаёт локальный снимок среды",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/emergency_store.py",
+          "symbol": "_create_empty_medical_snapshot"
+        }
+      ]
+    },
+    {
+      "from": "ui_shell",
+      "to": "external_deps",
+      "type": "imports",
+      "label": "использует виджеты PySide6",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/main_window.py",
+          "symbol": "PySide6.QtWidgets"
+        }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "role_startup",
+      "name": "Запуск роли до отображения рабочего места",
+      "trigger": "Пользователь запускает приложение по умолчанию или точку запуска конкретной роли.",
+      "steps": [
+        "entrypoints",
+        "startup_runtime",
+        "ui_shell",
+        "doctor_ui"
+      ],
+      "outcome": "Защищённый процесс Qt получает владение экземпляром роли и показывает выбранное рабочее место; путь врача представлен как основной, а ветви медсестры и операционного блока выходят из той же оболочки."
+    },
+    {
+      "id": "clinical_write",
+      "name": "Клиническая запись медсестры и обновление",
+      "trigger": "Медсестра изменяет лабораторное назначение или другое поле общей карты пациента.",
+      "steps": [
+        "nurse_ui",
+        "clinical_ui",
+        "clinical_services",
+        "data_change_bus",
+        "medical_db"
+      ],
+      "outcome": "Запись выполняется транзакционно, после чего DataService планирует классифицированное обновление затронутых экранов."
+    },
+    {
+      "id": "operblock_protocol",
+      "name": "Действие в протоколе операционного блока",
+      "trigger": "Пользователь операционного блока запускает этап случая, записывает показатель или изменяет препарат либо инфузию.",
+      "steps": [
+        "operblock_ui",
+        "operblock_domain",
+        "medical_db",
+        "local_replica"
+      ],
+      "outcome": "Транзакция с проверкой конфликтов фиксируется в медицинской БД, а локальная реплика получает запрос на ускоренную синхронизацию."
+    },
+    {
+      "id": "local_first_refresh",
+      "name": "Обнаружение изменений между клиентами и локальное чтение",
+      "trigger": "Фоновый монитор выполняет опрос по таймеру или после успешной записи.",
+      "steps": [
+        "data_change_bus",
+        "medical_db",
+        "local_replica",
+        "data_change_bus",
+        "nurse_ui"
+      ],
+      "outcome": "Изменения с учётом курсора классифицируются, а интерфейс медсестры применяет адресное или частичное обновление без перестроения несвязанных представлений."
+    },
+    {
+      "id": "emergency_fallback",
+      "name": "Переход от потери сети к аварийной среде",
+      "trigger": "При запуске медицинская сетевая БД классифицируется как недоступная для подходящей роли.",
+      "steps": [
+        "startup_runtime",
+        "emergency_runtime",
+        "medical_db"
+      ],
+      "outcome": "Для сессии открывается проверенная локальная среда медицинской БД и настроек, сохранённая для последующего восстановления или объединения."
+    }
+  ]
+}
+</script>
+<script>
+(function(){
+"use strict";
+var d=JSON.parse(document.getElementById("codemap-data").textContent),map=new Map(d.nodes.map(function(n){return[n.id,n]}));
+var colors={entry:"#a78bfa",orchestration:"#60a5fa",ui:"#22d3ee",service:"#34d399",data:"#f59e0b",queue:"#fb7185",database:"#fbbf24",resilience:"#c084fc",external:"#94a3b8"};
+var typeRu={entry:"запуск",orchestration:"оркестрация",ui:"интерфейс",service:"сервис",data:"данные",queue:"очередь",database:"база данных",resilience:"устойчивость",external:"внешнее"},edgeRu={imports:"импортирует",calls:"вызывает",reads:"читает",writes:"записывает",publishes:"публикует",subscribes:"подписывается"};
+var bOrder=["client","application","persistence","external"],bTitle={client:"КЛИЕНТ / НАСТОЛЬНЫЙ ИНТЕРФЕЙС",application:"СЕРВИСЫ ПРИЛОЖЕНИЯ",persistence:"SQLITE / ЛОКАЛЬНАЯ УСТОЙЧИВОСТЬ",external:"ВНЕШНЕЕ / РЕЛИЗ"},bShort={client:"клиент",application:"приложение",persistence:"хранение",external:"внешнее"},bx={client:25,application:350,persistence:710,external:1068},bw={client:275,application:310,persistence:310,external:225};
+var svg=document.getElementById("map"),view=document.getElementById("view"),nl=document.getElementById("nodes"),elayer=document.getElementById("edges"),bl=document.getElementById("bounds"),details=document.getElementById("details"),pos=new Map(),nels=new Map(),eels=[],hidden=new Set(),selected=null,flowId=null,query="",tr={x:0,y:0,k:1},pan=null,drag=null,W=205,H=80;
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function se(tag,a,p){var x=document.createElementNS("http://www.w3.org/2000/svg",tag);Object.keys(a||{}).forEach(function(k){x.setAttribute(k,a[k])});if(p)p.appendChild(x);return x}
+function adjacent(id){var a=[];d.edges.forEach(function(e){if(e.from===id)a.push(e.to);if(e.to===id)a.push(e.from)});return a}
+function layout(){var g={};bOrder.forEach(function(b){g[b]=d.nodes.filter(function(n){return n.boundary===b})});for(var pass=0;pass<8;pass++){bOrder.forEach(function(b){var idx=new Map();bOrder.forEach(function(bb){g[bb].forEach(function(n,i){idx.set(n.id,i)})});g[b].sort(function(a,z){function score(n){var q=adjacent(n.id).filter(function(id){return idx.has(id)});return q.length?q.reduce(function(s,id){return s+idx.get(id)},0)/q.length:999}return score(a)-score(z)||a.label.localeCompare(z.label)})})}bOrder.forEach(function(b){var q=g[b],gap=q.length>1?Math.min(30,(760-q.length*H)/(q.length-1)):0;q.forEach(function(n,i){pos.set(n.id,{x:bx[b]+(bw[b]-W)/2,y:62+i*(H+gap)})})})}
+function path(e){var a=pos.get(e.from),b=pos.get(e.to),ax=a.x+W,ay=a.y+H/2,cx=b.x,cy=b.y+H/2;if(cx<ax){ax=a.x+W/2;ay=a.y+H;cx=b.x+W/2;cy=b.y;var m=(ay+cy)/2;return"M"+ax+","+ay+"C"+ax+","+m+" "+cx+","+m+" "+cx+","+cy}var q=Math.max(45,(cx-ax)*.48);return"M"+ax+","+ay+"C"+(ax+q)+","+ay+" "+(cx-q)+","+cy+" "+cx+","+cy}
+function redraw(){eels.forEach(function(o){var p=path(o.e);o.line.setAttribute("d",p);o.hit.setAttribute("d",p)})}
+function fitText(el,value,maxWidth){var s=String(value);el.textContent=s;if(el.getComputedTextLength()<=maxWidth)return;s=s.trim();while(s.length>1){s=s.slice(0,-1).trimEnd();el.textContent=s+"…";if(el.getComputedTextLength()<=maxWidth)return}el.textContent="…"}
+function renderTitle(el,label){var words=String(label).trim().split(/\s+/),first="",split=0,maxWidth=W-20;for(var i=0;i<words.length;i++){var candidate=first?first+" "+words[i]:words[i];el.textContent=candidate;if(first&&el.getComputedTextLength()>maxWidth)break;first=candidate;split=i+1}var rest=words.slice(split).join(" "),lines=rest?[first,rest]:[first];el.textContent="";lines.forEach(function(line,index){var span=se("tspan",{x:10,y:lines.length===1?43:(index===0?35:51)},el);fitText(span,line,maxWidth)})}
+function draw(){bOrder.forEach(function(b){se("rect",{class:"boundary",x:bx[b],y:22,width:bw[b],height:806,rx:14},bl);var t=se("text",{class:"boundary-title",x:bx[b]+13,y:44},bl);t.textContent=bTitle[b]});d.edges.forEach(function(e){var g=se("g",{},elayer),line=se("path",{class:"edge",d:path(e)},g),hit=se("path",{class:"hit",d:path(e)},g);hit.onclick=function(ev){ev.stopPropagation();selected=null;flowId=null;document.getElementById("flow").value="";showEdge(e);state()};eels.push({e:e,line:line,hit:hit})});d.nodes.forEach(function(n){var p=pos.get(n.id),g=se("g",{class:"node","data-id":n.id,transform:"translate("+p.x+" "+p.y+")",style:"--c:"+colors[n.type]},nl);se("rect",{class:"card",width:W,height:H},g);se("rect",{class:"band",width:W,height:19},g);var b=se("text",{class:"badge",x:10,y:13},g);b.textContent=(typeRu[n.type]||n.type).toUpperCase();var tc=se("text",{class:"tests",x:W-10,y:13,"text-anchor":"end"},g);tc.textContent=(n.tests||[]).length+" тестов";var t=se("text",{class:"title",x:10},g);renderTitle(t,n.label);var q=se("text",{class:"path",x:10,y:69},g);q.textContent=n.path.length>34?n.path.slice(0,33)+"…":n.path;g.onpointerdown=function(ev){ev.stopPropagation();g.setPointerCapture(ev.pointerId);drag={id:n.id,x:ev.clientX,y:ev.clientY,p:{x:pos.get(n.id).x,y:pos.get(n.id).y},m:false}};g.onpointermove=function(ev){if(!drag||drag.id!==n.id)return;var dx=(ev.clientX-drag.x)/tr.k,dy=(ev.clientY-drag.y)/tr.k;if(Math.abs(dx)+Math.abs(dy)>3)drag.m=true;var np={x:drag.p.x+dx,y:drag.p.y+dy};pos.set(n.id,np);g.setAttribute("transform","translate("+np.x+" "+np.y+")");redraw()};g.onpointerup=function(){if(!drag)return;var moved=drag.m;drag=null;if(!moved){selected=n.id;flowId=null;document.getElementById("flow").value="";showNode(n);state()}};nels.set(n.id,g)})}
+function reach(id,rev){var seen=new Set(),stack=[id];while(stack.length){var cur=stack.pop();d.edges.forEach(function(e){var n=rev?(e.to===cur?e.from:null):(e.from===cur?e.to:null);if(n&&n!==id&&!seen.has(n)){seen.add(n);stack.push(n)}})}return seen}
+function flowEdge(e,f){for(var i=0;i<f.steps.length-1;i++)if(f.steps[i]===e.from&&f.steps[i+1]===e.to)return true;return false}
+function state(){var up=selected?reach(selected,true):new Set(),down=selected?reach(selected,false):new Set(),f=flowId?d.flows.find(function(x){return x.id===flowId}):null,fn=new Set(f?f.steps:[]);d.nodes.forEach(function(n){var g=nels.get(n.id),hay=(n.label+" "+n.path+" "+n.role+" "+n.id).toLowerCase(),match=!query||hay.indexOf(query)>=0;g.setAttribute("class","node");g.classList.toggle("hide",hidden.has(n.type));g.classList.toggle("selected",selected===n.id);g.classList.toggle("upstream",up.has(n.id));g.classList.toggle("downstream",down.has(n.id));g.classList.toggle("in-flow",fn.has(n.id));g.classList.toggle("search",!!query&&match);g.classList.toggle("dim",(!match&&!!query)||(selected&&selected!==n.id&&!up.has(n.id)&&!down.has(n.id))||(f&&!fn.has(n.id)))});eels.forEach(function(o){var e=o.e,hide=hidden.has(map.get(e.from).type)||hidden.has(map.get(e.to).type);o.line.setAttribute("class","edge");o.line.classList.toggle("hide",hide);o.hit.style.display=hide?"none":"";if(f){o.line.classList.add(flowEdge(e,f)?"flow":"dim")}else if(selected){if(e.to===selected||up.has(e.from)&&up.has(e.to))o.line.classList.add("up");else if(e.from===selected||down.has(e.from)&&down.has(e.to))o.line.classList.add("down");else o.line.classList.add("dim")}})}
+function list(title,a,code){return!a||!a.length?"":"<h3>"+title+"</h3><ul>"+a.map(function(x){return"<li>"+(code?"<code>"+esc(x)+"</code>":esc(x))+"</li>"}).join("")+"</ul>"}
+function evidence(a){return"<h3>Свидетельства в исходниках</h3>"+a.map(function(x){return'<div class="ev"><code>'+esc(x.path)+"</code><br>"+esc(x.symbol)+"</div>"}).join("")}
+function showNode(n){var up=Array.from(reach(n.id,true)).map(function(x){return map.get(x).label}),down=Array.from(reach(n.id,false)).map(function(x){return map.get(x).label}),flows=d.flows.filter(function(f){return f.steps.indexOf(n.id)>=0});details.innerHTML="<h2>"+esc(n.label)+"</h2><code>"+esc(n.path)+'</code><div class="kind" style="border-color:'+colors[n.type]+';color:'+colors[n.type]+'">'+esc(typeRu[n.type])+" · "+esc(bShort[n.boundary])+"</div><p>"+esc(n.role)+"</p>"+list("Точки входа",n.entrypoints,true)+list("Ограничения",n.constraints,false)+list("Связанные тесты",n.tests,true)+list("Вызывающие модули",up,false)+list("Нижележащие зависимости",down,false)+(flows.length?"<h3>Сквозные потоки</h3>"+flows.map(function(f){return'<div class="flow-card"><b>'+esc(f.name)+"</b>"+esc(f.trigger)+"</div>"}).join(""):"")+evidence(n.evidence)}
+function showEdge(e){details.innerHTML="<h2>"+esc(map.get(e.from).label)+" → "+esc(map.get(e.to).label)+'</h2><div class="kind">'+esc(edgeRu[e.type]||e.type)+"</div><p>"+esc(e.label)+"</p>"+evidence(e.evidence)}
+function showFlow(f){details.innerHTML="<h2>"+esc(f.name)+'</h2><div class="kind" style="color:var(--flow)">сквозной поток</div><h3>Триггер</h3><p>'+esc(f.trigger)+"</p><h3>Путь</h3><ul>"+f.steps.map(function(id,i){return"<li><b>"+(i+1)+".</b> "+esc(map.get(id).label)+"</li>"}).join("")+"</ul><h3>Результат</h3><p>"+esc(f.outcome)+"</p>"}
+function empty(){details.innerHTML='<div class="empty">Выберите модуль, связь или поток, чтобы увидеть свидетельства, вызывающие модули, зависимости, тесты и ограничения.<div class="legend">'+Object.keys(colors).map(function(t){return'<span><i style="background:'+colors[t]+'"></i>'+typeRu[t]+"</span>"}).join("")+"</div></div>"}
+function controls(){var types=document.getElementById("types");Object.keys(colors).forEach(function(t){var b=document.createElement("button");b.style.setProperty("--c",colors[t]);b.textContent=typeRu[t];b.onclick=function(){hidden.has(t)?hidden.delete(t):hidden.add(t);b.classList.toggle("off",hidden.has(t));state()};types.appendChild(b)});var fs=document.getElementById("flow");d.flows.forEach(function(f){var o=document.createElement("option");o.value=f.id;o.textContent=f.name;fs.appendChild(o)});fs.onchange=function(){flowId=fs.value||null;selected=null;if(flowId)showFlow(d.flows.find(function(f){return f.id===flowId}));else empty();state()}}
+function apply(){view.setAttribute("transform","translate("+tr.x+" "+tr.y+") scale("+tr.k+")")}function zoom(q,x,y){var old=tr.k,n=Math.max(.35,Math.min(2.5,old*q));tr.x=x-(x-tr.x)*n/old;tr.y=y-(y-tr.y)*n/old;tr.k=n;apply()}function fit(){tr={x:0,y:0,k:1};apply()}
+svg.onwheel=function(ev){ev.preventDefault();var r=svg.getBoundingClientRect();zoom(ev.deltaY<0?1.12:.89,ev.clientX-r.left,ev.clientY-r.top)};svg.onpointerdown=function(ev){if(ev.target.closest&&ev.target.closest(".node"))return;svg.setPointerCapture(ev.pointerId);pan={x:ev.clientX,y:ev.clientY,tx:tr.x,ty:tr.y};svg.classList.add("pan")};svg.onpointermove=function(ev){if(!pan)return;tr.x=pan.tx+ev.clientX-pan.x;tr.y=pan.ty+ev.clientY-pan.y;apply()};svg.onpointerup=function(){pan=null;svg.classList.remove("pan")};
+document.getElementById("search").oninput=function(ev){query=ev.target.value.trim().toLowerCase();state()};document.getElementById("zin").onclick=function(){zoom(1.2,svg.clientWidth/2,svg.clientHeight/2)};document.getElementById("zout").onclick=function(){zoom(.83,svg.clientWidth/2,svg.clientHeight/2)};document.getElementById("fit").onclick=fit;document.getElementById("reset").onclick=function(){selected=null;flowId=null;query="";hidden.clear();document.getElementById("search").value="";document.getElementById("flow").value="";document.querySelectorAll(".types button").forEach(function(b){b.classList.remove("off")});layout();nels.forEach(function(g,id){var p=pos.get(id);g.setAttribute("transform","translate("+p.x+" "+p.y+")")});redraw();fit();empty();state()};
+document.getElementById("generated").textContent=d.generated_at;document.getElementById("commit").textContent=d.generated_from_commit.slice(0,12);document.getElementById("nc").textContent=d.nodes.length+" модулей";document.getElementById("ec").textContent=d.edges.length+" связей";document.getElementById("fc").textContent=d.flows.length+" потоков";
+layout();draw();controls();empty();state();
+})();
+</script>
+</body></html>
