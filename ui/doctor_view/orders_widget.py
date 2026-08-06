@@ -19,6 +19,7 @@ from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.services.read_coordinator import OrdersRefreshCancelled
 from rem_card.services.orders_sync_observability import record_orders_sync_event
+from rem_card.services.order_service import OrderConflictError
 from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, TEXT_SECONDARY,
                             BORDER_COLOR, BG_LIGHT, STYLE_ORDERS_VERTICAL_SCROLLBAR)
@@ -1273,28 +1274,6 @@ class OrdersWidget(QWidget):
         self.table_view.verticalHeader().setDefaultSectionSize(45)
         self._apply_table_header_layout()
 
-    def _apply_cached_snapshot_if_available(self, context=None, *, allow_stale: bool = False) -> bool:
-        coordinator = self._get_read_coordinator()
-        if coordinator is None:
-            return False
-        try:
-            target_context = context or self._build_orders_context()
-        except Exception as exc:
-            logger.warning("[OrdersWidget] Failed to build context for cache lookup: %s", exc, exc_info=True)
-            return False
-        if allow_stale and hasattr(coordinator, "get_cached_or_stale_orders_tab"):
-            snapshot = coordinator.get_cached_or_stale_orders_tab(target_context)
-        else:
-            snapshot = coordinator.get_cached_tab(target_context)
-        if snapshot is None:
-            return False
-        return self._apply_snapshot_data(
-            snapshot=snapshot,
-            admission_id=target_context.admission_id,
-            shift_date=target_context.shift_date,
-            context_key=target_context.cache_key(),
-        )
-
     def _warn_legacy_direct_snapshot_path(self):
         if self._legacy_direct_snapshot_warned:
             return
@@ -2315,7 +2294,6 @@ class OrdersWidget(QWidget):
         self._snapshot_seq += 1
         self._clear_soft_update_state()
         if request_source == "post_finalize" and context is not None:
-            self._apply_cached_snapshot_if_available(context=context, allow_stale=True)
             self._set_refresh_status("Сохранено, данные обновляются...")
             self._schedule_post_finalize_retry(context_hash=context_hash)
         if self._snapshot_pending:
@@ -2408,8 +2386,6 @@ class OrdersWidget(QWidget):
                 context_hash = context_hash or context.hash()
             except Exception:
                 context = None
-            if context is not None:
-                self._apply_cached_snapshot_if_available(context=context, allow_stale=True)
             self._set_refresh_status("Сохранено, данные обновляются...")
             self._schedule_post_finalize_retry(context_hash=context_hash)
             return
@@ -2672,6 +2648,13 @@ class OrdersWidget(QWidget):
         )
 
     def _show_write_error(self, description: str, exc: Exception):
+        if isinstance(exc, OrderConflictError):
+            self._show_warning(
+                "Назначения были изменены на другом рабочем месте. "
+                "Несохранённые изменения отклонены, загружается актуальный лист. "
+                "После обновления повторите нужное изменение."
+            )
+            return
         if not self._is_foreign_key_error(exc):
             self._show_warning(f"Ошибка сохранения: {exc}")
             return
@@ -3509,6 +3492,12 @@ class OrdersWidget(QWidget):
                     and bool(snapshot.get("only_committed", False))
                 ):
                     try:
+                        coordinator = self._get_read_coordinator()
+                        if coordinator is not None:
+                            snapshot = coordinator.accept_committed_orders_snapshot(
+                                self._build_orders_context(),
+                                snapshot,
+                            )
                         snapshot_applied = self._apply_snapshot_data(
                             snapshot=snapshot,
                             admission_id=target_admission_id,
@@ -3544,8 +3533,41 @@ class OrdersWidget(QWidget):
                 self._refresh_model(source="post_finalize")
             self.localDraftResolutionFinished.emit(True)
 
-        def after_error(_exc):
+        def after_error(exc):
             self._local_draft_save_pending = False
+            if isinstance(exc, OrderConflictError):
+                coordinator = self._get_read_coordinator()
+                conflict_context_hash = None
+                if coordinator is not None:
+                    coordinator.invalidate_orders_for_admission(
+                        target_admission_id,
+                        shift_date=target_shift_date,
+                        reason=f"write_conflict:{getattr(exc, 'reason', 'unknown')}",
+                    )
+                    if self._is_current_context(target_admission_id, target_shift_date):
+                        conflict_context_hash = self._build_orders_context().hash()
+                record_orders_sync_event(
+                    "conflict",
+                    role="doctor",
+                    admission_id=int(target_admission_id or 0),
+                    context_hash=conflict_context_hash,
+                    reason=str(getattr(exc, "reason", "unknown")),
+                    immediate=True,
+                )
+                if coordinator is not None and self._is_current_context(target_admission_id, target_shift_date):
+                    self._reset_local_draft_tracking(clear_baseline=True)
+                    self._clear_pending_reorder()
+                    self._cached_has_drafts = False
+                    if self.model is not None:
+                        self.model._set_has_any_draft(False, emit_order_column=True)
+                    self._discard_deferred_forced_reload_after_guard(discard_reason="write_conflict")
+                    self._clear_local_cell_draft_guard()
+                    self._request_snapshot(
+                        force=True,
+                        source="write_conflict",
+                        priority="HIGH",
+                        invalidate_reason="write_conflict",
+                    )
             self.check_drafts()
             self.localDraftResolutionFinished.emit(False)
 
@@ -3625,13 +3647,12 @@ class OrdersWidget(QWidget):
             self._reset_cached_state()
             self._apply_table_header_layout()
             self._reset_change_cursor()
-            if not self._apply_cached_snapshot_if_available():
-                self._request_snapshot(
-                    force=False,
-                    source="user",
-                    priority="HIGH",
-                    invalidate_reason=None,
-                )
+            self._request_snapshot(
+                force=False,
+                source="user",
+                priority="HIGH",
+                invalidate_reason=None,
+            )
         else:
             self._reset_change_cursor()
             self._reset_cached_state()
@@ -3739,8 +3760,6 @@ class OrdersWidget(QWidget):
             return
 
         if self._snapshot_stale:
-            if self._apply_cached_snapshot_if_available():
-                return
             self._request_snapshot(
                 force=False,
                 source="refresh",
@@ -3750,8 +3769,6 @@ class OrdersWidget(QWidget):
             return
 
         if not self.model.orders:
-            if self._apply_cached_snapshot_if_available():
-                return
             self._request_snapshot(
                 force=False,
                 source="user",
@@ -3878,20 +3895,6 @@ class OrdersWidget(QWidget):
             return True
         if self._draft_baseline_snapshot is not None:
             return False
-        coordinator = self._get_read_coordinator()
-        if coordinator is not None:
-            try:
-                cached_snapshot = coordinator.get_cached_tab(self._build_orders_context())
-            except Exception:
-                cached_snapshot = None
-            if cached_snapshot is not None:
-                return any(
-                    str(getattr(order, "drug_key", "") or "") == CVP_QUICK_ORDER_KEY
-                    or OrderService._is_cvp_order_text(getattr(order, "latin", ""))
-                    or OrderService._is_cvp_order_text(getattr(order, "_order_text", ""))
-                    for order in (cached_snapshot.get("orders") or [])
-                    if order is not None
-                )
         checker = getattr(self.service, "has_cvp_order", None)
         if not callable(checker) or not self.admission_id or not self.shift_date:
             return False

@@ -1867,6 +1867,145 @@ class ReadCoordinator:
             int(snapshot is not None),
         )
 
+    @staticmethod
+    def _orders_key_matches_scope(cache_key, admission_id: int, shift_key: Optional[str]) -> bool:
+        try:
+            if int(cache_key[1]) != int(admission_id):
+                return False
+            return shift_key is None or str(cache_key[2]) == str(shift_key)
+        except (IndexError, TypeError, ValueError):
+            return False
+
+    def invalidate_orders_for_admission(
+        self,
+        admission_id: int,
+        *,
+        reason: str,
+        shift_date: Optional[datetime] = None,
+    ) -> int:
+        """Invalidate every role/variant cache for an admission."""
+        normalized_shift_key = None
+        if shift_date is not None:
+            normalized_shift_key = OrdersContext._normalize_shift_date(shift_date).isoformat(timespec="seconds")
+
+        all_keys = set(self._orders_tab_cache)
+        all_keys.update(self._orders_stale_snapshots)
+        with self._orders_refresh_lock:
+            all_keys.update(self._orders_active_refreshes)
+        matching_keys = {
+            cache_key
+            for cache_key in all_keys
+            if self._orders_key_matches_scope(cache_key, admission_id, normalized_shift_key)
+        }
+
+        active_refreshes = []
+        with self._orders_refresh_lock:
+            for cache_key in matching_keys:
+                active = self._orders_active_refreshes.get(cache_key)
+                if active is not None:
+                    active_refreshes.append((cache_key, dict(active)))
+        for cache_key, active in active_refreshes:
+            self._poison_orders_refresh(
+                cache_key,
+                request_id=str(active.get("request_id") or ""),
+                reason=str(reason or "orders_admission_invalidated"),
+                context_hash=str(active.get("context_hash") or cache_key[-1]),
+            )
+
+        invalidated = 0
+        for cache_key in matching_keys:
+            snapshot = self._orders_tab_cache.pop(cache_key, None)
+            if snapshot is not None:
+                self._orders_stale_snapshots[cache_key] = snapshot
+                invalidated += 1
+            old_version = int(
+                (snapshot or {}).get("version")
+                or self._orders_stale_versions.get(cache_key)
+                or 0
+            )
+            if old_version > 0:
+                self._orders_stale_versions[cache_key] = old_version
+            self._drop_cache_index_by_key(self._orders_cache_index, cache_key)
+
+        logger.info(
+            "[ReadCoordinator] orders_admission_invalidate admission_id=%s shift_key=%s reason=%s "
+            "matched_contexts=%s invalidated_cache_entries=%s retired_refreshes=%s",
+            admission_id,
+            normalized_shift_key or "all",
+            str(reason or "unknown"),
+            len(matching_keys),
+            invalidated,
+            len(active_refreshes),
+        )
+        return invalidated
+
+    def invalidate_all_orders(self, *, reason: str) -> int:
+        with self._orders_refresh_lock:
+            active_keys = set(self._orders_active_refreshes)
+        admission_ids = {
+            int(cache_key[1])
+            for cache_key in (
+                set(self._orders_tab_cache)
+                | set(self._orders_stale_snapshots)
+                | active_keys
+            )
+            if len(cache_key) > 1
+        }
+        return sum(
+            self.invalidate_orders_for_admission(admission_id, reason=reason)
+            for admission_id in admission_ids
+        )
+
+    def accept_committed_orders_snapshot(self, context: OrdersContext, snapshot) -> MappingProxyType:
+        """Publish an authoritative post-write snapshot into the exact UI context."""
+        if not isinstance(context, OrdersContext):
+            raise TypeError("context must be OrdersContext")
+        payload = dict(snapshot or {})
+        if int(payload.get("admission_id") or 0) != int(context.admission_id):
+            raise ValueError("orders snapshot admission does not match context")
+        snapshot_shift = payload.get("shift_date")
+        if snapshot_shift is None:
+            raise ValueError("orders snapshot shift_date is missing")
+        if OrdersContext._normalize_shift_date(snapshot_shift) != context.shift_date:
+            raise ValueError("orders snapshot shift does not match context")
+        if not bool(payload.get("only_committed", False)):
+            raise ValueError("post-write orders snapshot must be committed")
+
+        self.invalidate_orders_for_admission(
+            context.admission_id,
+            shift_date=context.shift_date,
+            reason="orders_write_committed",
+        )
+        trace_id = str(payload.get("load_trace_id") or self._next_trace_id("orders-commit", context.hash()))
+        frozen_snapshot = self._finalize_snapshot(
+            snapshot=payload,
+            scope="orders_tab",
+            tab_name="orders",
+            cache_key=context.cache_key(),
+            context_hash=context.hash(),
+            role=context.role,
+            mode=context.mode,
+            source_db=context.source_db,
+            variant=context.variant,
+            load_strategy="commit_snapshot",
+            load_trace_id=trace_id,
+            source="post_finalize",
+            stale=False,
+            invalidate_reason=None,
+        )
+        if context.mode == "live":
+            self._store_orders_tab(context, frozen_snapshot)
+        logger.info(
+            "[ReadCoordinator] orders_write_snapshot_accepted admission_id=%s role=%s version=%s "
+            "context_hash=%s trace_id=%s",
+            context.admission_id,
+            context.role,
+            frozen_snapshot.get("version"),
+            context.hash(),
+            trace_id,
+        )
+        return frozen_snapshot
+
     def record_orders_ui_event(self, event_name: str, *, role: str, context_hash: Optional[str] = None) -> None:
         event = str(event_name or "").strip().lower()
         normalized_role = str(role or "").strip().lower() or "unknown"

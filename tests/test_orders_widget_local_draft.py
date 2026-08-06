@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
 from rem_card.services.order_service import OrderConflictError
+from rem_card.services.read_coordinator import OrdersContext
 from rem_card.ui.doctor_view.components.order_template_builder import build_orders_from_template
 from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 from rem_card.ui.shared.components.vital_settings_dialog import VitalSettingsDialog
@@ -317,6 +318,91 @@ def test_save_applies_snapshot_from_write_result_without_async_refresh():
         committed_admin = next(iter(widget.model.admin_map.values()))
         assert committed_admin.id == 101
         assert committed_admin.is_committed == 1
+    finally:
+        widget.shutdown()
+
+
+def test_save_publishes_write_snapshot_to_read_coordinator():
+    widget, service = _make_widget()
+    accepted = []
+
+    class Coordinator:
+        @staticmethod
+        def make_orders_context(**kwargs):
+            return OrdersContext(**kwargs)
+
+        @staticmethod
+        def accept_committed_orders_snapshot(context, snapshot):
+            accepted.append((context, snapshot))
+            return snapshot
+
+    service.read_coordinator = Coordinator()
+    try:
+        widget._handle_cell_action(
+            widget.model.index(0, 1),
+            "orders_left_click",
+            service.forbidden_cell_write,
+        )
+        service.commit_result = {
+            "order_id_map": {},
+            "snapshot": _committed_snapshot_for_current_mark(widget, change_id=28),
+        }
+        widget._refresh_model = lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("authoritative write snapshot triggered reload")
+        )
+
+        widget.finalize_card()
+
+        assert len(accepted) == 1
+        assert accepted[0][0].role == "doctor"
+        assert accepted[0][0].variant == "committed"
+        assert accepted[0][1]["change_id"] == 28
+    finally:
+        widget.shutdown()
+
+
+def test_conflict_invalidates_cache_and_forces_authoritative_reload():
+    widget, service = _make_widget()
+    invalidations = []
+    refreshes = []
+
+    class Coordinator:
+        @staticmethod
+        def make_orders_context(**kwargs):
+            return OrdersContext(**kwargs)
+
+        @staticmethod
+        def invalidate_orders_for_admission(admission_id, *, reason, shift_date=None):
+            invalidations.append((admission_id, reason, shift_date))
+
+    service.read_coordinator = Coordinator()
+    try:
+        widget._handle_cell_action(
+            widget.model.index(0, 1),
+            "orders_left_click",
+            service.forbidden_cell_write,
+        )
+        queued = []
+        widget._enqueue_write = lambda *args, **kwargs: queued.append((args, kwargs))
+        widget._request_snapshot = lambda **kwargs: refreshes.append(kwargs)
+
+        widget.finalize_card()
+        queued[0][1]["on_error"](
+            OrderConflictError(reason="administration_version_mismatch")
+        )
+
+        assert invalidations == [
+            (1, "write_conflict:administration_version_mismatch", widget.shift_date)
+        ]
+        assert refreshes == [
+            {
+                "force": True,
+                "source": "write_conflict",
+                "priority": "HIGH",
+                "invalidate_reason": "write_conflict",
+            }
+        ]
+        assert not widget.has_drafts()
     finally:
         widget.shutdown()
 

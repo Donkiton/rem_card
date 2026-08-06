@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import List, Mapping, Optional, Sequence
 
 from rem_card.data.dao.sync_cursor import normalize_sync_cursor
+from rem_card.app.logger import logger
 from rem_card.services.order_domain_service import OrderDomainService
 from rem_card.services.shift_service import ShiftService
 
@@ -18,7 +19,20 @@ CVP_QUICK_ORDER_KEY = "quick_cvp"
 
 
 class OrderConflictError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str = ORDER_CONFLICT_MESSAGE,
+        *,
+        reason: str = "unknown",
+        order_id: Optional[int] = None,
+        expected=None,
+        actual=None,
+    ):
+        super().__init__(message)
+        self.reason = str(reason or "unknown")
+        self.order_id = order_id
+        self.expected = expected
+        self.actual = actual
 
 
 class OrderService:
@@ -42,8 +56,21 @@ class OrderService:
             return
         dto.sort_order = self.dao.get_next_sort_order(dto.admission_id, getattr(dto, "created_at", None))
 
-    def _raise_order_conflict(self, order_id=None):
-        raise OrderConflictError(ORDER_CONFLICT_MESSAGE)
+    def _raise_order_conflict(self, order_id=None, *, reason="unknown", expected=None, actual=None):
+        logger.warning(
+            "[OrdersSync] write_conflict reason=%s order_id=%s expected=%s actual=%s",
+            str(reason or "unknown"),
+            order_id,
+            expected,
+            actual,
+        )
+        raise OrderConflictError(
+            ORDER_CONFLICT_MESSAGE,
+            reason=reason,
+            order_id=order_id,
+            expected=expected,
+            actual=actual,
+        )
 
     def _normalize_expected_revisions(self, expected_revisions) -> dict[int, int]:
         if not expected_revisions:
@@ -74,7 +101,12 @@ class OrderService:
         current = {int(row["id"]): int(row["revision"] or 0) for row in cursor.fetchall()}
         for order_id, revision in expected.items():
             if current.get(order_id) != revision:
-                self._raise_order_conflict(order_id)
+                self._raise_order_conflict(
+                    order_id,
+                    reason="order_revision_mismatch",
+                    expected=revision,
+                    actual=current.get(order_id),
+                )
 
     def _assert_order_revision(self, cursor, order_id: int, expected_revision: Optional[int]):
         if expected_revision is None:
@@ -255,7 +287,11 @@ class OrderService:
         )
         current_ids = {int(row["id"]) for row in cursor.fetchall()}
         if current_ids != expected_ids:
-            self._raise_order_conflict()
+            self._raise_order_conflict(
+                reason="active_order_set_mismatch",
+                expected=sorted(expected_ids),
+                actual=sorted(current_ids),
+            )
 
     @staticmethod
     def _load_local_draft_orders(cursor, orders: Sequence[OrderDTO]) -> tuple[list[OrderDTO], list[int], dict]:
@@ -328,10 +364,10 @@ class OrderService:
         end: datetime,
     ) -> None:
         if current is None or int(current["admission_id"] or 0) != int(admission_id):
-            self._raise_order_conflict(local_order_id)
+            self._raise_order_conflict(local_order_id, reason="order_missing_or_other_admission")
         current_dt = datetime.fromisoformat(str(current["datetime"]).replace(" ", "T"))
         if not (start <= current_dt < end):
-            self._raise_order_conflict(local_order_id)
+            self._raise_order_conflict(local_order_id, reason="order_outside_shift")
 
     def _assert_no_committed_nurse_mark(self, cursor, order_id: int) -> None:
         cursor.execute(
@@ -353,7 +389,7 @@ class OrderService:
             (order_id,),
         )
         if cursor.fetchone() is not None:
-            self._raise_order_conflict(order_id)
+            self._raise_order_conflict(order_id, reason="committed_nurse_mark_present")
 
     @staticmethod
     def _update_local_draft_order(
@@ -607,7 +643,7 @@ class OrderService:
         if local_order_id > 0:
             baseline = normalized_baseline.get((local_order_id, planned_key))
             if self._draft_admin_token(current) != self._draft_admin_token(baseline):
-                self._raise_order_conflict(local_order_id)
+                self._raise_order_conflict(local_order_id, reason="administration_version_mismatch")
 
         desired_status, desired_role, desired_chain, desired_volume = self._resolve_draft_admin_values(
             desired,
@@ -621,7 +657,7 @@ class OrderService:
         if desired_status in {"deleted", "cancelled"} and current_mark in {
             "nurse_executed", "nurse_not_executed"
         }:
-            self._raise_order_conflict(local_order_id)
+            self._raise_order_conflict(local_order_id, reason="committed_nurse_mark_present")
 
         target_shape = (desired_status, desired_role, str(desired_chain or ""), desired_volume)
         if self._draft_admin_shape(current) == target_shape:
@@ -794,7 +830,7 @@ class OrderService:
             )
             current = cursor.fetchone()
             if current is None:
-                self._raise_order_conflict(order_id)
+                self._raise_order_conflict(order_id, reason="order_missing")
 
             text_rep = f"{dto.latin} {float(dto.dose_value or 0):g} {dto.dose_unit or ''}".strip()
             admission_id = int(current["admission_id"])

@@ -242,6 +242,23 @@ class RemCardService(QObject):
                     "RemCardService invalidated vital settings cache reason=%s",
                     "full_refresh" if sync_actions.get("full_refresh_required") else "vital_settings",
                 )
+            if changed_entities.intersection({"orders", "administrations"}):
+                coordinator = getattr(self, "read_coordinator", None)
+                if coordinator is not None:
+                    admission_ids = {
+                        int(change.get("admission_id"))
+                        for change in ((payload or {}).get("changes") or [])
+                        if change.get("admission_id") is not None
+                        and str(change.get("entity_name") or "") in {"orders", "administrations"}
+                    }
+                    if admission_ids:
+                        for admission_id in admission_ids:
+                            coordinator.invalidate_orders_for_admission(
+                                admission_id,
+                                reason="change_log_orders",
+                            )
+                    else:
+                        coordinator.invalidate_all_orders(reason="unscoped_change_log_orders")
         except Exception as exc:
             logger.warning("Failed to invalidate RemCardService caches after data changes: %s", exc)
 
