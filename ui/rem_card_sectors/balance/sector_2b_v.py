@@ -191,10 +191,18 @@ class Sector2b_v(QWidget):
         
         return val_input, x_val_lbl
 
-    def update_balance(self, total_in, total_out, total_in_daily=None, total_out_daily=None):
+    def update_balance(
+        self,
+        total_in,
+        total_out,
+        total_in_daily=None,
+        total_out_daily=None,
+        total_out_current_hour=None,
+    ):
         balance_cur = int(round(total_in - total_out))
         if total_in_daily is None: total_in_daily = total_in
         if total_out_daily is None: total_out_daily = total_out
+        if total_out_current_hour is None: total_out_current_hour = total_out
         balance_day = int(round(total_in_daily - total_out_daily))
 
         prefix_cur = "+" if balance_cur > 0 else ""
@@ -202,7 +210,7 @@ class Sector2b_v(QWidget):
         
         self.balance_val.setText(f"{prefix_cur}{balance_cur}/{balance_day} мл")
         self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {color};")
-        self.total_out_val.setText(f"{int(total_out)} мл")
+        self.total_out_val.setText(f"{int(total_out_current_hour)} мл")
 
     def update_quick_values(self, hour_data: dict):
         """Обновляет значения 'X' в полях ввода."""

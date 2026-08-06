@@ -40,9 +40,9 @@ class Sector3b(BaseSectorWidget):
         self.data_layout.setContentsMargins(10, 10, 10, 10)
         self.data_layout.setSpacing(8)
 
-        # Заголовок с общим объемом за текущий час внутри области данных
+        # Заголовок "Всего выведено" внутри области данных
         header_layout = QHBoxLayout()
-        header_lbl = QLabel("Всего выведено за текущий час:")
+        header_lbl = QLabel("Всего:")
         header_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #495057; border: none; background: transparent;")
         self.total_out_val = QLabel("0 мл")
         self.total_out_val.setStyleSheet("font-weight: bold; color: #28a745; font-size: 14px; border: none; background: transparent;")
