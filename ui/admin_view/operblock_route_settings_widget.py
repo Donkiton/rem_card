@@ -22,6 +22,7 @@ from rem_card.services.operblock_route_settings import (
     save_operblock_group_route_settings,
 )
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.admin_view.dictionary_page_chrome import apply_dictionary_page_chrome
 
 
 class OperBlockRouteSettingsWidget(QWidget):
@@ -94,6 +95,25 @@ class OperBlockRouteSettingsWidget(QWidget):
         layout.addWidget(self.btn_back)
 
         main_layout.addWidget(self.frame)
+
+        apply_dictionary_page_chrome(
+            self,
+            frame=self.frame,
+            header_label=header,
+            table=self.table,
+            back_button=self.btn_back,
+            title="Пути введения оперблока",
+            description=(
+                "Доступные пути введения и их приоритет для каждой "
+                "группы препаратов."
+            ),
+            primary_buttons=(self.btn_save,),
+            secondary_buttons=(
+                self.btn_reload,
+                self.btn_move_earlier,
+                self.btn_move_later,
+            ),
+        )
 
         self.btn_save.clicked.connect(self.save)
         self.btn_reload.clicked.connect(self.load_data)

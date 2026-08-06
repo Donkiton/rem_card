@@ -4,11 +4,14 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
     QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, 
-    QFormLayout, QDialogButtonBox, QComboBox, QFrame
+    QFormLayout, QDialogButtonBox, QComboBox, QFrame, QScrollArea,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt
 from rem_card.services.prescription_engine import engine
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
+from rem_card.ui.admin_view.dictionary_page_chrome import apply_dictionary_page_chrome
 from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.theme_tokens import token
 
@@ -100,6 +103,37 @@ def _admin_drugs_table_style():
             width: 0px;
         }}
     """
+
+
+def _drug_editor_scroll(form_widget: QWidget, object_name: str) -> QScrollArea:
+    """Create a scroll layer that does not paint a second dialog background."""
+
+    scroll = QScrollArea()
+    scroll.setObjectName(object_name)
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    scroll.setAutoFillBackground(False)
+    scroll.viewport().setAutoFillBackground(False)
+    form_widget.setAutoFillBackground(False)
+    scroll.setWidget(form_widget)
+    scroll.setStyleSheet(
+        f"""
+        QScrollArea#{object_name} {{
+            background: transparent;
+            border: none;
+        }}
+        QScrollArea#{object_name} > QWidget > QWidget {{
+            background: transparent;
+            border: none;
+        }}
+        QWidget#{form_widget.objectName()} {{
+            background: transparent;
+            border: none;
+        }}
+        """
+    )
+    return scroll
 
 
 def _volume_value(value):
@@ -395,10 +429,16 @@ class TemplateDilutionVolumeReplaceDialog(BaseStyledDialog):
         if self._save_pending_changes():
             self.accept()
 
-class DrugDialog(BaseStyledDialog):
+class DrugDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     def __init__(self, key="", data=None, parent=None):
         super().__init__("Редактирование препарата", parent)
-        self.setFixedSize(550, 550)
+        self._init_saved_frameless_dialog(
+            "admin/drug_dialog_geometry_v2",
+            drag_area_height=42,
+        )
+        self.setMinimumSize(520, 480)
+        self.resize(620, 680)
+        self.setSizeGripEnabled(True)
         
         if data is None:
             data = {}
@@ -516,7 +556,13 @@ class DrugDialog(BaseStyledDialog):
         self.concentration_input.setValue(float(data.get("concentration_mg_ml", 0.0)))
         self.concentration_label = QLabel("Концентрация (мг/мл):")
             
-        form_layout = QFormLayout()
+        self.form_widget = QWidget()
+        self.form_widget.setObjectName("DrugEditorForm")
+        self.form_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        form_layout = QFormLayout(self.form_widget)
+        form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form_layout.setVerticalSpacing(10)
         form_layout.addRow("Ключ (англ):", self.key_input)
         form_layout.addRow("Название (Латынь):", self.latin_input)
         form_layout.addRow("Алиасы (через запятую):", self.aliases_input)
@@ -530,7 +576,8 @@ class DrugDialog(BaseStyledDialog):
         form_layout.addRow("Предпочитаемый растворитель:", self.diluent_combo)
         form_layout.addRow("Группа:", self.group_combo)
 
-        self.content_layout.addLayout(form_layout)
+        self.form_scroll = _drug_editor_scroll(self.form_widget, "DrugEditorScroll")
+        self.content_layout.addWidget(self.form_scroll, 1)
 
         # Логика видимости концентрации
         self.form_combo.currentIndexChanged.connect(self.update_concentration_visibility)
@@ -542,6 +589,7 @@ class DrugDialog(BaseStyledDialog):
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         self.content_layout.addWidget(self.buttons)
+        self._restore_saved_geometry()
         
     def _is_solution_form(self):
         """Проверяет, является ли выбранная форма раствором"""
@@ -562,6 +610,7 @@ class DrugDialog(BaseStyledDialog):
         is_solution = self._is_solution_form()
         self.concentration_input.setVisible(is_solution)
         self.concentration_label.setVisible(is_solution)
+        self.form_widget.adjustSize()
 
     def get_data(self):
         forms_str = self.forms_input.text().strip()
@@ -601,10 +650,16 @@ class DrugDialog(BaseStyledDialog):
             
         return self.key_input.text().strip(), data
 
-class MultiCompDrugDialog(BaseStyledDialog):
+class MultiCompDrugDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     def __init__(self, key="", data=None, parent=None):
         super().__init__("Многокомпонентный препарат", parent)
-        self.setFixedSize(600, 750)
+        self._init_saved_frameless_dialog(
+            "admin/multicomp_drug_dialog_geometry_v2",
+            drag_area_height=42,
+        )
+        self.setMinimumSize(560, 520)
+        self.resize(680, 760)
+        self.setSizeGripEnabled(True)
         
         if data is None:
             data = {}
@@ -667,7 +722,13 @@ class MultiCompDrugDialog(BaseStyledDialog):
             idx = self.group_combo.findData(data["group"])
             if idx >= 0: self.group_combo.setCurrentIndex(idx)
             
-        form_layout = QFormLayout()
+        self.form_widget = QWidget()
+        self.form_widget.setObjectName("MultiCompDrugEditorForm")
+        self.form_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        form_layout = QFormLayout(self.form_widget)
+        form_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form_layout.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form_layout.setVerticalSpacing(10)
         form_layout.addRow("Ключ (англ):", self.key_input)
         form_layout.addRow("Название (Латынь):", self.latin_input)
         form_layout.addRow("Алиасы (через запятую):", self.aliases_input)
@@ -712,7 +773,11 @@ class MultiCompDrugDialog(BaseStyledDialog):
             form_layout.addRow(f"Компонент {i+1}:", comp_layout)
             self.components.append((combo, spin))
             
-        self.content_layout.addLayout(form_layout)
+        self.form_scroll = _drug_editor_scroll(
+            self.form_widget,
+            "MultiCompDrugEditorScroll",
+        )
+        self.content_layout.addWidget(self.form_scroll, 1)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         for btn in self.buttons.buttons():
@@ -720,6 +785,7 @@ class MultiCompDrugDialog(BaseStyledDialog):
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         self.content_layout.addWidget(self.buttons)
+        self._restore_saved_geometry()
         
     def get_data(self):
         aliases = [a.strip() for a in self.aliases_input.text().split(",") if a.strip()]
@@ -845,6 +911,29 @@ class DrugsDictWidget(QWidget):
         layout.addWidget(self.btn_back)
 
         main_layout.addWidget(self.frame)
+
+        apply_dictionary_page_chrome(
+            self,
+            frame=self.frame,
+            header_label=header,
+            table=self.table,
+            back_button=self.btn_back,
+            title="Препараты",
+            description=(
+                "Состав, дозировки, формы выпуска и параметры назначения "
+                "лекарственных средств."
+            ),
+            primary_buttons=(self.btn_add,),
+            secondary_buttons=(
+                self.btn_add_multicomp,
+                self.btn_edit,
+                self.btn_replace_template_dilutions,
+            ),
+            danger_buttons=(self.btn_delete,),
+            search_input=self.search_input,
+            toolbar_layout=filter_layout,
+            filter_widgets=(self.group_filter,),
+        )
         
         self.btn_add.clicked.connect(self.add_item)
         self.btn_add_multicomp.clicked.connect(self.add_multicomp_item)

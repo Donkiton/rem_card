@@ -20,6 +20,7 @@ from rem_card.services.operblock_quick_order_buttons import (
     save_operblock_quick_order_buttons,
 )
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.admin_view.dictionary_page_chrome import apply_dictionary_page_chrome
 
 
 class OperBlockQuickButtonsSettingsWidget(QWidget):
@@ -52,10 +53,10 @@ class OperBlockQuickButtonsSettingsWidget(QWidget):
         )
         layout = QVBoxLayout(self.frame)
 
-        header = QLabel("Кнопки быстрых назначений")
-        header.setProperty("heading", "true")
-        header.setStyleSheet("border: none; background: transparent;")
-        layout.addWidget(header)
+        header_label = QLabel("Кнопки быстрых назначений")
+        header_label.setProperty("heading", "true")
+        header_label.setStyleSheet("border: none; background: transparent;")
+        layout.addWidget(header_label)
 
         self.table = QTableWidget()
         self.table.setColumnCount(2)
@@ -89,6 +90,22 @@ class OperBlockQuickButtonsSettingsWidget(QWidget):
         layout.addWidget(self.btn_back)
 
         main_layout.addWidget(self.frame)
+
+        apply_dictionary_page_chrome(
+            self,
+            frame=self.frame,
+            header_label=header_label,
+            table=self.table,
+            back_button=self.btn_back,
+            title="Быстрые назначения оперблока",
+            description=(
+                "Основные и дополнительные кнопки для часто используемых "
+                "назначений."
+            ),
+            primary_buttons=(self.btn_add, self.btn_save),
+            secondary_buttons=(self.btn_reload,),
+            danger_buttons=(self.btn_delete,),
+        )
 
         self.btn_add.clicked.connect(self.add_button)
         self.btn_delete.clicked.connect(self.delete_selected)

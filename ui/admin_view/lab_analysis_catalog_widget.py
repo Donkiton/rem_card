@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from rem_card.data.dto.lab_orders_dto import LAB_MATERIAL_LABELS
 from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService, normalize_lab_times
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.admin_view.dictionary_page_chrome import apply_dictionary_page_chrome
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 
@@ -438,9 +439,9 @@ class LabAnalysisCatalogWidget(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(3, 3, 3, 3)
 
-        frame = QFrame()
-        frame.setObjectName("adminDictFrame")
-        frame.setStyleSheet(
+        self.frame = QFrame()
+        self.frame.setObjectName("adminDictFrame")
+        self.frame.setStyleSheet(
             """
             QFrame#adminDictFrame {
                 border: 1.5px solid #bdc3c7;
@@ -449,7 +450,7 @@ class LabAnalysisCatalogWidget(QWidget):
             }
             """
         )
-        layout = QVBoxLayout(frame)
+        layout = QVBoxLayout(self.frame)
 
         header = QLabel("Справочник анализов")
         header.setProperty("heading", "true")
@@ -503,7 +504,25 @@ class LabAnalysisCatalogWidget(QWidget):
         self.btn_back.setFixedHeight(40)
         layout.addWidget(self.btn_back)
 
-        main_layout.addWidget(frame)
+        main_layout.addWidget(self.frame)
+
+        apply_dictionary_page_chrome(
+            self,
+            frame=self.frame,
+            header_label=header,
+            table=self.table,
+            back_button=self.btn_back,
+            title="Лабораторные анализы",
+            description=(
+                "Исследования, материалы, стандартное время забора "
+                "и комментарии для назначений."
+            ),
+            primary_buttons=(self.btn_add,),
+            secondary_buttons=(self.btn_edit, self.btn_add_material),
+            danger_buttons=(self.btn_delete,),
+            icon_buttons=(self.btn_move_up, self.btn_move_down),
+            search_input=self.search_input,
+        )
 
         self.table.itemSelectionChanged.connect(self._update_reorder_buttons)
         self.btn_move_up.clicked.connect(self.move_selected_up)

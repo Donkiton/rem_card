@@ -37,3 +37,13 @@ class BaseStyledDialog(QDialog):
         self.frame_layout.addWidget(self.title_bar)
         self.frame_layout.addWidget(self.content_widget)
         self.main_layout.addWidget(self.main_frame)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        from rem_card.ui.styles.settings_surface import (
+            apply_settings_surface,
+            is_settings_context,
+        )
+
+        if is_settings_context(self):
+            apply_settings_surface(self)

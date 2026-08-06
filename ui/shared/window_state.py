@@ -60,6 +60,8 @@ class SavedFramelessDialogMixin:
         self._center_on_available_screen()
 
     def _save_saved_geometry(self) -> None:
+        if bool(self.property("settingsEmbedded")):
+            return
         key = getattr(self, "_geometry_settings_key", "")
         if not key:
             return

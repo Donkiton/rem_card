@@ -10,6 +10,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QEvent, QPoint, QTimer
 from rem_card.services.prescription_engine import engine
 from rem_card.ui.admin_view.drugs_dict_widget import _admin_drugs_table_style
+from rem_card.ui.admin_view.dictionary_page_chrome import (
+    apply_settings_editor_page_chrome,
+)
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.duration_combo import configure_duration_combo, set_end_of_day_duration_text
 
@@ -901,6 +904,33 @@ class TemplatesDictWidget(QWidget):
         splitter.addWidget(right_widget)
         splitter.setSizes([200, 800])
         layout.addWidget(splitter)
+
+        apply_settings_editor_page_chrome(
+            self,
+            frame=self.frame,
+            legacy_header_layout=header_layout,
+            header_label=header,
+            back_button=self.btn_back,
+            title="Шаблоны назначений",
+            description=(
+                "Клинические протоколы, состав назначений, дозировки "
+                "и порядок препаратов."
+            ),
+            tables=(self.table,),
+            primary_buttons=(self.btn_save_tpl,),
+            secondary_buttons=(
+                self.btn_new_tpl,
+                self.btn_replace_template_dilutions,
+                self.btn_edit_drug,
+            ),
+            danger_buttons=(self.btn_del_tpl, self.btn_remove_drug),
+            icon_buttons=(
+                self.btn_tpl_up,
+                self.btn_tpl_down,
+                self.btn_move_up,
+                self.btn_move_down,
+            ),
+        )
         self._update_reorder_buttons()
         self._update_template_order_buttons()
 
