@@ -29,6 +29,7 @@ EVENT_TYPES = {
     "unhandled_python_exception",
     "unhandled_thread_exception",
     "native_crash",
+    "ui_hang",
     "previous_session_unclean",
     "database_corruption",
     "database_unavailable_startup",
@@ -173,6 +174,12 @@ def _native_trace_payload(content: str) -> list[str]:
     while lines and sum(len(line) for line in lines) > MAX_NATIVE_TRACE_CHARS:
         lines.pop(0)
     return lines
+
+
+def _native_trace_event_type(content: str) -> str:
+    if "=== REMCARD_THREAD_DUMP" in str(content or ""):
+        return "ui_hang"
+    return "native_crash"
 
 
 def _fingerprint(event_type: str, exception_type: str, frames: list[dict[str, Any]], details: dict[str, Any]) -> str:
@@ -489,7 +496,7 @@ def _process_stale_sessions() -> None:
                 native_content = ""
         if native_content.strip():
             capture_crash_event(
-                "native_crash",
+                _native_trace_event_type(native_content),
                 role=str(marker.get("role") or ""),
                 details={
                     "native_trace": _native_trace_payload(native_content),
@@ -547,6 +554,26 @@ def initialize_crash_session(role: str | None = None) -> str:
         return session_id
 
 
+def dump_current_thread_stacks(*, reason: str = "ui_hang") -> bool:
+    """Append every Python thread stack to the current local native log."""
+    if not _STATE_LOCK.acquire(timeout=0.1):
+        return False
+    try:
+        fault_file = _FAULT_FILE
+        if fault_file is None:
+            return False
+        fault_file.write(
+            f"\n=== REMCARD_THREAD_DUMP reason={str(reason or 'ui_hang')} "
+            f"ts={_now_iso()} ===\n"
+        )
+        fault_file.flush()
+        faulthandler.dump_traceback(file=fault_file, all_threads=True)
+        fault_file.flush()
+        return True
+    finally:
+        _STATE_LOCK.release()
+
+
 def finalize_crash_session(exit_code: int | None = None, *, crash_recorded: bool = False) -> None:
     global _FAULT_FILE, _CURRENT_MARKER_PATH, _CURRENT_NATIVE_PATH, _CURRENT_SESSION_ID
     with _STATE_LOCK:
@@ -577,7 +604,7 @@ def finalize_crash_session(exit_code: int | None = None, *, crash_recorded: bool
             native_content = ""
     if native_content.strip():
         capture_crash_event(
-            "native_crash",
+            _native_trace_event_type(native_content),
             details={"native_trace": _native_trace_payload(native_content)},
             session_id=session_id,
         )

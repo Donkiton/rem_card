@@ -134,14 +134,6 @@ class LocalReplicaSync:
         with self._lock:
             if self._local_conn is None or self.last_sync_ok_ts <= 0:
                 return False
-            rotation_deferred = (
-                self.last_sync_error_class == LocalReplicaRotationBusy.__name__
-            )
-            if (
-                self.consecutive_failures > 0
-                or (self.last_sync_error is not None and not rotation_deferred)
-            ):
-                return False
             age_sec = max(0.0, time.time() - self.last_sync_ok_ts)
             return age_sec <= max(1.0, float(max_stale_sec))
 
@@ -155,6 +147,7 @@ class LocalReplicaSync:
             return {
                 "enabled": True,
                 "ready": self._local_conn is not None and self.last_sync_ok_ts > 0,
+                "degraded": bool(self.last_sync_error),
                 "last_sync_ok_ts": float(self.last_sync_ok_ts),
                 "last_sync_age_sec": age_sec,
                 "last_sync_error": str(self.last_sync_error or ""),
@@ -278,6 +271,7 @@ class LocalReplicaSync:
                     1,
                     force_flush=failure_count >= 2,
                     error_class=type(exc).__name__,
+                    failure_stage=str(getattr(exc, "stage", "") or ""),
                     consecutive_failures=failure_count,
                     retry_backoff_sec=self._current_backoff_sec,
                     duration_ms=round(

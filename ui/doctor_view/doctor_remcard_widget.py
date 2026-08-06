@@ -57,6 +57,7 @@ LOCAL_ORDER_FORCE_PREFIXES = (
     "doctor_order_mark:",
     "nurse_order_mark:",
     "nurse_order_panel_mark:",
+    "orders_finalize:",
 )
 EMERGENCY_NOTICE_FORCE_PREFIX = "emergency_notice_save:"
 ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
@@ -243,7 +244,10 @@ class DoctorRemCardWidget(QWidget):
         data_service = self._get_data_service()
         if data_service:
             try:
-                data_service.request_immediate_refresh(force_emit=True)
+                data_service.request_immediate_refresh(
+                    force_emit=True,
+                    source="archive_journal_exit:doctor",
+                )
             except Exception as exc:
                 logger.warning("Failed to wake monitor after journal exit (doctor): %s", exc)
 
@@ -708,7 +712,10 @@ class DoctorRemCardWidget(QWidget):
 
         data_service = self._get_data_service()
         if data_service:
-            data_service.request_immediate_refresh(force_emit=force_emit)
+            data_service.request_immediate_refresh(
+                force_emit=force_emit,
+                source="card_snapshot:doctor",
+            )
 
     def _build_card_snapshot_job(self, request: dict):
         load_scope = str(request.get("load_scope") or "full")
@@ -3587,7 +3594,10 @@ class DoctorRemCardWidget(QWidget):
         """Принудительно обновляет максимум доступных представлений без изменения UI-структуры."""
         data_service = self._get_data_service()
         if data_service:
-            data_service.request_immediate_refresh(force_emit=True)
+            data_service.request_immediate_refresh(
+                force_emit=True,
+                source="manual_refresh:doctor",
+            )
 
         try:
             if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
@@ -3913,7 +3923,10 @@ class DoctorRemCardWidget(QWidget):
         data_service = getattr(self._primary_service, "data_service", None)
         if data_service:
             try:
-                data_service.request_immediate_refresh(force_emit=True)
+                data_service.request_immediate_refresh(
+                    force_emit=True,
+                    source="archive_patient_edit:doctor",
+                )
             except Exception as exc:
                 logger.warning("Failed to request refresh after archive patient edit: %s", exc)
 

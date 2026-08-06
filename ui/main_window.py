@@ -275,6 +275,7 @@ class MainWindow(QMainWindow):
         self._loading_order = []
         self._is_closing = False
         self._event_loop_watchdog_timer = None
+        self._hard_ui_watchdog = None
         self._event_loop_watchdog_last_ts = 0.0
         self._event_loop_watchdog_last_log_ts = 0.0
         self._focus_refresh_pending = False
@@ -1096,8 +1097,32 @@ class MainWindow(QMainWindow):
         timer.start()
         self._event_loop_watchdog_timer = timer
 
+        from rem_card.app.ui_hang_watchdog import UIHeartbeatWatchdog
+        from rem_card.services.crash_reports import dump_current_thread_stacks
+
+        hard_threshold_sec = max(
+            2.0,
+            float(os.environ.get("REMCARD_UI_HARD_HANG_THRESHOLD_SEC", "5")),
+        )
+        hard_cooldown_sec = max(
+            hard_threshold_sec,
+            float(os.environ.get("REMCARD_UI_HARD_HANG_COOLDOWN_SEC", "30")),
+        )
+        hard_watchdog = UIHeartbeatWatchdog(
+            threshold_sec=hard_threshold_sec,
+            cooldown_sec=hard_cooldown_sec,
+            dump_callback=lambda stalled_sec: dump_current_thread_stacks(
+                reason=f"ui_hang_{stalled_sec:.1f}s"
+            ),
+        )
+        hard_watchdog.start()
+        self._hard_ui_watchdog = hard_watchdog
+
     def _poll_event_loop_watchdog(self, expected_interval_ms: int):
         now = time.perf_counter()
+        hard_watchdog = getattr(self, "_hard_ui_watchdog", None)
+        if hard_watchdog is not None:
+            hard_watchdog.beat(now)
         previous = float(self._event_loop_watchdog_last_ts or now)
         self._event_loop_watchdog_last_ts = now
         delta_ms = max(0.0, (now - previous) * 1000.0)
@@ -1935,7 +1960,10 @@ class MainWindow(QMainWindow):
         data_service = getattr(self.container, "data_service", None)
         if data_service:
             try:
-                data_service.request_immediate_refresh(force_emit=True)
+                data_service.request_immediate_refresh(
+                    force_emit=False,
+                    source="window_focus",
+                )
             except Exception:
                 logger.exception("Focus refresh monitor wake failed")
 
@@ -2094,6 +2122,10 @@ class MainWindow(QMainWindow):
         if not self._prepare_orders_draft_for_close(event):
             return
         self._is_closing = True
+        hard_watchdog = getattr(self, "_hard_ui_watchdog", None)
+        if hard_watchdog is not None:
+            hard_watchdog.stop(timeout_sec=0.5)
+            self._hard_ui_watchdog = None
         exit_role = self._current_role_key()
         if exit_role not in ("doctor", "nurse"):
             exit_role = self._last_active_role_key or exit_role

@@ -15587,8 +15587,28 @@ def _check_sync_forced_classifications(actions) -> tuple[bool, str]:
         return False, f"gap must require full refresh: {gap}"
 
     empty_forced = actions({"forced": True, "force_source": "unknown_source"})
-    if not (empty_forced["full_refresh_required"] and empty_forced["card_snapshot_required"]):
-        return False, f"unknown forced refresh must be conservative: {empty_forced}"
+    if empty_forced["full_refresh_required"] or empty_forced["card_snapshot_required"]:
+        return False, f"unknown forced refresh must stay targeted: {empty_forced}"
+
+    manual_refresh = actions({
+        "forced": True,
+        "force_source": "manual_refresh:doctor",
+    })
+    if not (
+        manual_refresh["full_refresh_required"]
+        and manual_refresh["card_snapshot_required"]
+    ):
+        return False, f"explicit manual refresh must stay full: {manual_refresh}"
+
+    rotation_refresh = actions({
+        "forced": True,
+        "force_source": "database_rotation:admin",
+    })
+    if not (
+        rotation_refresh["full_refresh_required"]
+        and rotation_refresh["card_snapshot_required"]
+    ):
+        return False, f"database rotation must require full refresh: {rotation_refresh}"
     return True, "ok"
 
 

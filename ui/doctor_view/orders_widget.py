@@ -114,6 +114,7 @@ class OrdersWidget(QWidget):
         "orders_left_click:",
         "orders_middle_click:",
         "orders_right_click:",
+        "orders_finalize:",
     )
     _ORDERS_CHANGE_ENTITIES = {"orders", "administrations"}
 
@@ -1390,11 +1391,22 @@ class OrdersWidget(QWidget):
             return False
         if changed_entities and not set(changed_entities).issubset(self._ORDERS_CHANGE_ENTITIES):
             return False
-        return any(
-            source.startswith(prefix)
+        matched_prefixes = {
+            prefix
             for source in sources
             for prefix in self._LOCAL_SILENT_FORCE_PREFIXES
-        )
+            if source.startswith(prefix)
+        }
+        if not matched_prefixes:
+            return False
+        if "orders_finalize:" in matched_prefixes:
+            try:
+                payload_change_id = int(payload.get("last_change_id") or 0)
+                applied_change_id = int(self._last_polled_change_id or 0)
+            except (TypeError, ValueError):
+                return False
+            return payload_change_id > 0 and applied_change_id >= payload_change_id
+        return True
 
     def _extract_scoped_orders_change_id(self, payload: dict) -> tuple[bool, int]:
         try:
