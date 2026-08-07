@@ -51,6 +51,125 @@ def test_async_store_freezes_payload_and_coalesces_latest(isolated_cache):
     assert cache.load_snapshot("coalesce", key) == {"version": 3, "items": [3]}
 
 
+def test_async_schedule_does_not_wait_for_active_writer_commit(isolated_cache, monkeypatch):
+    namespace = "nonblocking_writer_commit"
+    key = ("live", 21, "2026-08-08T08:00:00")
+    commit_started = threading.Event()
+    allow_commit = threading.Event()
+    second_finished = threading.Event()
+    second_result: dict[str, bool] = {}
+    original_commit = cache._commit_snapshot_file
+
+    def blocked_commit(*args, **kwargs):
+        commit_started.set()
+        assert allow_commit.wait(5.0)
+        return original_commit(*args, **kwargs)
+
+    monkeypatch.setattr(cache, "_commit_snapshot_file", blocked_commit)
+    assert cache.schedule_store_snapshot(namespace, key, {"version": 1})
+    assert commit_started.wait(5.0)
+
+    def schedule_second():
+        second_result["value"] = cache.schedule_store_snapshot(namespace, key, {"version": 2})
+        second_finished.set()
+
+    second_thread = threading.Thread(target=schedule_second, daemon=True)
+    second_thread.start()
+    try:
+        finished_without_waiting = second_finished.wait(1.0)
+    finally:
+        allow_commit.set()
+    second_thread.join(5.0)
+
+    assert finished_without_waiting
+    assert not second_thread.is_alive()
+    assert second_result == {"value": True}
+    assert cache.flush(timeout_sec=5.0)
+    assert cache.load_snapshot(namespace, key) == {"version": 2}
+
+
+def test_async_schedule_uses_cached_guard_when_its_manifest_is_busy(isolated_cache):
+    namespace = "nonblocking_busy_manifest"
+    key = ("live", 22, "2026-08-08T08:00:00")
+    assert cache.store_snapshot(namespace, key, {"version": 1})
+    manifest_locked = threading.Event()
+    release_manifest = threading.Event()
+    schedule_finished = threading.Event()
+    schedule_result: dict[str, bool] = {}
+
+    def hold_manifest_lock():
+        with cache._manifest_lock(namespace):
+            manifest_locked.set()
+            assert release_manifest.wait(5.0)
+
+    holder = threading.Thread(target=hold_manifest_lock, daemon=True)
+    holder.start()
+    assert manifest_locked.wait(5.0)
+
+    def schedule_while_busy():
+        schedule_result["value"] = cache.schedule_store_snapshot(namespace, key, {"version": 2})
+        schedule_finished.set()
+
+    caller = threading.Thread(target=schedule_while_busy, daemon=True)
+    caller.start()
+    try:
+        finished_without_waiting = schedule_finished.wait(1.0)
+    finally:
+        release_manifest.set()
+    caller.join(5.0)
+    holder.join(5.0)
+
+    assert finished_without_waiting
+    assert not caller.is_alive()
+    assert not holder.is_alive()
+    assert schedule_result == {"value": True}
+    assert cache.flush(timeout_sec=5.0)
+    assert cache.load_snapshot(namespace, key) == {"version": 2}
+
+
+def test_busy_manifest_does_not_block_another_namespace(isolated_cache):
+    busy_namespace = "busy_patient_card"
+    free_namespace = "free_current_orders"
+    key = ("live", 23, "2026-08-08T08:00:00")
+    manifest_locked = threading.Event()
+    release_manifest = threading.Event()
+    schedule_finished = threading.Event()
+    schedule_result: dict[str, bool] = {}
+
+    def hold_manifest_lock():
+        with cache._manifest_lock(busy_namespace):
+            manifest_locked.set()
+            assert release_manifest.wait(5.0)
+
+    holder = threading.Thread(target=hold_manifest_lock, daemon=True)
+    holder.start()
+    assert manifest_locked.wait(5.0)
+
+    def schedule_other_namespace():
+        schedule_result["value"] = cache.schedule_store_snapshot(
+            free_namespace,
+            key,
+            {"version": 1},
+        )
+        schedule_finished.set()
+
+    caller = threading.Thread(target=schedule_other_namespace, daemon=True)
+    caller.start()
+    try:
+        finished_without_waiting = schedule_finished.wait(1.0)
+    finally:
+        release_manifest.set()
+    caller.join(5.0)
+    holder.join(5.0)
+
+    assert finished_without_waiting
+    assert not caller.is_alive()
+    assert not holder.is_alive()
+    assert schedule_result == {"value": True}
+    assert cache.flush(timeout_sec=5.0)
+    assert cache.load_snapshot(free_namespace, key) == {"version": 1}
+
+
 def test_async_delete_tombstone_prevents_stale_write_resurrection(isolated_cache):
     key = ("live", 3, "2026-07-12T08:00:00")
     assert cache.schedule_store_snapshot("delete_race", key, {"version": 1})

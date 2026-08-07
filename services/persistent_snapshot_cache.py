@@ -49,10 +49,12 @@ PERSISTENT_SNAPSHOT_CACHE_DIR = Path(LOCAL_CACHE_DIR) / "patient_snapshots"
 _CACHE_LOCK = threading.RLock()
 _PRUNE_LOCK = threading.Lock()
 _LAST_PRUNE_MONOTONIC: dict[str, float] = {}
-_MANIFEST_LOCK = threading.RLock()
+_MANIFEST_LOCKS_LOCK = threading.Lock()
+_MANIFEST_LOCKS: dict[str, threading.RLock] = {}
 _MANIFEST_FILE_NAME = "_snapshot_manifest_v1.json"
 _MANIFEST_VERSION = 1
 _MANIFEST_STATES: dict[str, dict[str, Any]] = {}
+_MANIFEST_EPOCH_SNAPSHOTS: dict[str, tuple[dict[str, int], dict[str, int]]] = {}
 
 
 def _namespace_dir(namespace: str) -> Path:
@@ -150,6 +152,28 @@ def _manifest_state_key(namespace: str) -> str:
     return os.path.normcase(os.path.abspath(str(_namespace_dir(namespace))))
 
 
+def _manifest_lock(namespace: str) -> threading.RLock:
+    """Return the in-process lock for one cache namespace."""
+    state_key = _manifest_state_key(namespace)
+    with _MANIFEST_LOCKS_LOCK:
+        lock = _MANIFEST_LOCKS.get(state_key)
+        if lock is None:
+            lock = threading.RLock()
+            _MANIFEST_LOCKS[state_key] = lock
+        return lock
+
+
+def _publish_manifest_epoch_snapshot(namespace: str, state: dict[str, Any]) -> None:
+    """Publish immutable-by-convention epoch maps for lock-free UI scheduling."""
+    _MANIFEST_EPOCH_SNAPSHOTS[_manifest_state_key(namespace)] = (
+        {str(key): int(value) for key, value in dict(state.get("key_epochs") or {}).items()},
+        {
+            str(key): int(value)
+            for key, value in dict(state.get("admission_epochs") or {}).items()
+        },
+    )
+
+
 def _cache_key_integer_indexes(cache_key: Any) -> dict[str, int]:
     if not isinstance(cache_key, (tuple, list)):
         return {}
@@ -191,6 +215,8 @@ def _load_manifest_state_locked(namespace: str, *, force_reload: bool = False) -
         and not force_reload
         and cached.get("_manifest_fingerprint") == disk_fingerprint
     ):
+        if state_key not in _MANIFEST_EPOCH_SNAPSHOTS:
+            _publish_manifest_epoch_snapshot(namespace, cached)
         return cached
 
     namespace_dir = manifest_path.parent
@@ -238,6 +264,7 @@ def _load_manifest_state_locked(namespace: str, *, force_reload: bool = False) -
     state["_unindexed_digests"] = set(unindexed_digests)
     state["_manifest_fingerprint"] = disk_fingerprint
     _MANIFEST_STATES[state_key] = state
+    _publish_manifest_epoch_snapshot(namespace, state)
     return state
 
 
@@ -265,6 +292,7 @@ def _write_manifest_state_locked(namespace: str, state: dict[str, Any]) -> bool:
             json.dump(payload, fh, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         os.replace(str(tmp_path), str(path))
         state["_manifest_fingerprint"] = _manifest_file_fingerprint(path)
+        _publish_manifest_epoch_snapshot(namespace, state)
         return True
     except Exception as exc:
         logger.warning("[PersistentSnapshotCache] failed to write manifest %s: %s", path, exc)
@@ -379,12 +407,35 @@ def _capture_manifest_write_guard(
     digest: str,
 ) -> tuple[_ManifestWriteGuard, bool]:
     """Capture the persisted invalidation generations seen by a prospective write."""
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         state = _load_manifest_state_locked(namespace)
         return (
             _manifest_write_guard_from_state(state, cache_key, digest),
             _manifest_cache_key_blocked_in_state(state, cache_key, digest),
         )
+
+
+def _try_capture_cached_manifest_write_guard(
+    namespace: str,
+    cache_key: Any,
+    digest: str,
+) -> _ManifestWriteGuard:
+    """Read only the process-local guard without waiting or touching the filesystem.
+
+    A missing local manifest state deliberately produces a zero-generation guard.
+    The writer verifies it against the persisted manifest before replacing a file,
+    so a process that has not observed a tombstone may lose this best-effort cache
+    write but can never resurrect an invalidated snapshot.
+    """
+    key_epochs, admission_epochs = _MANIFEST_EPOCH_SNAPSHOTS.get(
+        _manifest_state_key(namespace),
+        ({}, {}),
+    )
+    state = {
+        "key_epochs": key_epochs,
+        "admission_epochs": admission_epochs,
+    }
+    return _manifest_write_guard_from_state(state, cache_key, digest)
 
 
 def _manifest_register_in_state(
@@ -422,7 +473,7 @@ def _commit_snapshot_file(
     write_guard: _ManifestWriteGuard,
 ) -> bool:
     """Atomically coordinate file replacement with the cross-process manifest."""
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         with _manifest_cross_process_lock(namespace):
             state = _load_manifest_state_locked(namespace, force_reload=True)
             if not _manifest_write_guard_is_current_in_state(
@@ -453,7 +504,7 @@ def _manifest_register_legacy_entries(
 ) -> None:
     if not items:
         return
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         with _manifest_cross_process_lock(namespace):
             state = _load_manifest_state_locked(namespace, force_reload=True)
             entries = state.setdefault("entries", {})
@@ -485,7 +536,7 @@ def _manifest_register_legacy_entries(
 def _manifest_remove_digests(namespace: str, digests: set[str]) -> None:
     if not digests:
         return
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         with _manifest_cross_process_lock(namespace):
             state = _load_manifest_state_locked(namespace, force_reload=True)
             entries = state.setdefault("entries", {})
@@ -498,7 +549,7 @@ def _manifest_remove_digests(namespace: str, digests: set[str]) -> None:
 
 
 def _manifest_cache_key_blocked(namespace: str, cache_key: Any, digest: str) -> bool:
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         state = _load_manifest_state_locked(namespace)
         return _manifest_cache_key_blocked_in_state(state, cache_key, digest)
 
@@ -509,7 +560,7 @@ def _manifest_content_hash_matches(
     digest: str,
     content_hash: str,
 ) -> bool:
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         state = _load_manifest_state_locked(namespace)
         entry = (state.get("entries") or {}).get(str(digest))
         if not isinstance(entry, dict) or str(entry.get("content_hash") or "") != str(content_hash or ""):
@@ -526,7 +577,7 @@ def _manifest_invalidate_admission(
     target = int(admission_id)
     index_text = str(int(admission_id_index))
     epoch_key = _manifest_epoch_key(admission_id_index, target)
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         with _manifest_cross_process_lock(namespace):
             state = _load_manifest_state_locked(namespace, force_reload=True)
             epochs = state.setdefault("admission_epochs", {})
@@ -559,7 +610,7 @@ def _manifest_complete_admission_cleanup(
     legacy_scan_completed: bool,
 ) -> None:
     epoch_key = _manifest_epoch_key(admission_id_index, admission_id)
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         with _manifest_cross_process_lock(namespace):
             state = _load_manifest_state_locked(namespace, force_reload=True)
             epochs = state.setdefault("admission_epochs", {})
@@ -678,14 +729,6 @@ class _SnapshotWriter:
                 and pending.write_guard == write_guard
             ):
                 return True
-            if (
-                not has_sync_reservation
-                and self._last_written_hash.get(key) == content_hash
-                and path.exists()
-                and _manifest_content_hash_matches(namespace, cache_key, key[1], content_hash)
-            ):
-                self._last_written_hash.move_to_end(key)
-                return True
 
             generation = int(self._generation.get(key, 0)) + 1
             self._generation[key] = generation
@@ -749,11 +792,18 @@ class _SnapshotWriter:
         with self._condition:
             if self._generation.get(key) != generation:
                 return False
-            callback()
-            return True
+        callback()
+        return self.is_generation_current(key, generation)
 
     def is_current(self, job: _ScheduledWrite) -> bool:
         return self.is_generation_current(job.writer_key, job.generation)
+
+    def has_matching_written_hash(self, job: _ScheduledWrite) -> bool:
+        with self._condition:
+            return (
+                self._generation.get(job.writer_key) == job.generation
+                and self._last_written_hash.get(job.writer_key) == job.content_hash
+            )
 
     def is_generation_current(self, key: tuple[str, str], generation: int) -> bool:
         with self._condition:
@@ -884,6 +934,21 @@ class _SnapshotWriter:
             tmp_path: Path | None = None
             wrote = False
             try:
+                if not self.is_current(job):
+                    continue
+                matching_written_hash = self.has_matching_written_hash(job)
+                if (
+                    matching_written_hash
+                    and _manifest_content_hash_matches(
+                        job.namespace,
+                        job.cache_key,
+                        job.writer_key[1],
+                        job.content_hash,
+                    )
+                    and self.is_current(job)
+                ):
+                    self.mark_written(job.writer_key, job.generation, job.content_hash)
+                    continue
                 job.path.parent.mkdir(parents=True, exist_ok=True)
                 with tempfile.NamedTemporaryFile(
                     "wb",
@@ -947,7 +1012,7 @@ def _delete_path_if_unchanged(
     expected_fingerprint: dict[str, Any] | None,
 ) -> str:
     """Delete one stale file while holding the global cache lock only for unlink."""
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         with _manifest_cross_process_lock(namespace):
             state = _load_manifest_state_locked(namespace, force_reload=True)
             if isinstance((state.get("entries") or {}).get(path.stem), dict):
@@ -973,7 +1038,7 @@ def _delete_manifest_entries_batch(
         return True
     namespace_dir = _namespace_dir(namespace)
     cleanup_ok = True
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         try:
             with _manifest_cross_process_lock(namespace):
                 state = _load_manifest_state_locked(namespace, force_reload=True)
@@ -1005,7 +1070,7 @@ def _delete_invalid_snapshot_if_unchanged(
     expected_fingerprint: dict[str, Any],
 ) -> bool:
     """Remove a corrupt/expired file without cancelling a newer replacement."""
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         try:
             with _manifest_cross_process_lock(namespace):
                 state = _load_manifest_state_locked(namespace, force_reload=True)
@@ -1153,7 +1218,7 @@ def delete_snapshot(namespace: str, cache_key: Any) -> bool:
         return False
     _ASYNC_WRITER.invalidate_key(namespace, cache_key)
     path = _cache_path(namespace, cache_key)
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         try:
             with _manifest_cross_process_lock(namespace):
                 state = _load_manifest_state_locked(namespace, force_reload=True)
@@ -1300,7 +1365,7 @@ def schedule_store_snapshot(
         return False
     try:
         digest = _cache_digest(cache_key)
-        write_guard, _blocked = _capture_manifest_write_guard(namespace, cache_key, digest)
+        write_guard = _try_capture_cached_manifest_write_guard(namespace, cache_key, digest)
         serialized, content_hash = _serialize_snapshot(cache_key, snapshot, expires_at=expires_at)
     except Exception as exc:
         logger.warning("[PersistentSnapshotCache] failed to schedule namespace=%s: %s", namespace, exc)
@@ -1336,7 +1401,7 @@ def prune_namespace(namespace: str, *, now: Optional[datetime] = None) -> None:
     namespace_dir = _namespace_dir(namespace)
     if not namespace_dir.exists():
         return
-    with _MANIFEST_LOCK:
+    with _manifest_lock(namespace):
         try:
             with _manifest_cross_process_lock(namespace):
                 state = _load_manifest_state_locked(namespace, force_reload=True)
