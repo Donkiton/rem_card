@@ -1,0 +1,2442 @@
+import json
+import logging
+import os
+import queue
+import random
+import hashlib
+import shutil
+import socket
+import sqlite3
+import threading
+import time
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Callable, Optional
+
+from rem_card.app.local_metrics import record_metric
+from rem_card.app.db_availability import DatabaseClosedError
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
+
+NETWORK_SAFE_DB_PROFILE = "network_safe_v1"
+SQLITE_BUSY_TIMEOUT_MS = max(100, int(os.environ.get("REMCARD_SQLITE_BUSY_TIMEOUT_MS", "10000")))
+OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS = min(
+    8000,
+    max(5000, int(float(os.environ.get("REMCARD_OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS", "7000")))),
+)
+_SQLITE_ALLOWED_CONNECTION_PROFILES = {"network", "local_replica", "local_outbox"}
+_SQLITE_ALLOWED_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
+_SQLITE_ALLOWED_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
+_SQLITE_ALLOWED_TEMP_STORE = {"DEFAULT", "FILE", "MEMORY"}
+_LOCK_READ_UNAVAILABLE = object()
+_SQLITE_NATIVE_MAINTENANCE_LOCK = threading.RLock()
+_SQLITE_DIAGNOSTICS_LOCK = threading.Lock()
+_ACTIVE_SQLITE_OPERATIONS: dict[int, dict[str, Any]] = {}
+
+
+@dataclass(frozen=True)
+class _LockFileSnapshot:
+    exists: bool
+    readable: bool
+    reason: str
+    payload: dict[str, Any] | None = None
+    content_hash: str = ""
+    size: int | None = None
+    mtime_ns: int | None = None
+    inode: int | None = None
+    error_class: str = ""
+    error_message_sanitized: str = ""
+
+
+def _timestamp_ms() -> int:
+    return int(time.time() * 1000.0)
+
+
+def _payload_age_ms(payload: dict[str, Any]) -> Optional[float]:
+    ts = payload.get("timestamp")
+    if not isinstance(ts, (int, float)):
+        return None
+    return max(0.0, (time.time() - float(ts)) * 1000.0)
+
+
+def _payload_created_at(payload: dict[str, Any]) -> str:
+    ts = payload.get("timestamp")
+    if not isinstance(ts, (int, float)):
+        return ""
+    try:
+        return datetime.fromtimestamp(float(ts)).astimezone().isoformat(timespec="milliseconds")
+    except Exception:
+        return ""
+
+
+def describe_sqlite_lock_holder(lock_path: str) -> dict[str, Any]:
+    """Read db.lock holder data for diagnostics without changing lock state."""
+    path = str(lock_path or "")
+    base = {
+        "lock_path": path,
+        "readable": False,
+        "reason": "unknown",
+        "holder_pid": None,
+        "holder_host": "",
+        "holder_user_id": "",
+        "holder_source": "",
+        "holder_created_at": "",
+        "holder_age_ms": None,
+    }
+    if not path:
+        base["reason"] = "missing"
+        return base
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        base["reason"] = "missing"
+        return base
+    except PermissionError:
+        base["reason"] = "permission_denied"
+        return base
+    except json.JSONDecodeError:
+        base["reason"] = "parse_error"
+        return base
+    except Exception:
+        base["reason"] = "unknown"
+        return base
+    if not isinstance(payload, dict):
+        base["reason"] = "parse_error"
+        return base
+    base.update(
+        {
+            "readable": True,
+            "reason": "ok",
+            "holder_pid": payload.get("pid"),
+            "holder_host": str(payload.get("host") or ""),
+            "holder_user_id": str(payload.get("user_id") or ""),
+            "holder_source": str(payload.get("source") or ""),
+            "holder_created_at": _payload_created_at(payload),
+            "holder_age_ms": _payload_age_ms(payload),
+        }
+    )
+    return base
+
+
+def _lock_holder_metric_fields(holder: dict[str, Any] | None) -> dict[str, Any]:
+    data = dict(holder or {})
+    return {
+        "lock_holder_pid": data.get("holder_pid"),
+        "lock_holder_host": data.get("holder_host"),
+        "lock_holder_source": data.get("holder_source"),
+        "lock_holder_age_ms": data.get("holder_age_ms"),
+    }
+
+
+def _sanitize_sqlite_error_message(exc: object, *, limit: int = 240) -> str:
+    text = " ".join(str(exc or "").split())
+    return text[:limit]
+
+
+def _coerce_lock_pid(value: object) -> int | None:
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _same_host(left: object, right: object) -> bool:
+    return str(left or "").strip().lower() == str(right or "").strip().lower()
+
+
+def is_local_pid_alive(pid: int) -> bool | None:
+    """Return False only when the local PID is definitely gone; None means unknown."""
+    try:
+        checked_pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if checked_pid <= 0:
+        return None
+    if checked_pid == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            process_query_limited_information = 0x1000
+            process_synchronize = 0x00100000
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(
+                process_query_limited_information | process_synchronize,
+                False,
+                checked_pid,
+            )
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == 87:  # ERROR_INVALID_PARAMETER: PID does not exist.
+                    return False
+                return None
+            try:
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return None
+                return int(exit_code.value) == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        os.kill(checked_pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return None
+    except OSError:
+        return None
+
+
+def _bounded_opblock_interactive_timeout_ms(value: object = None) -> int:
+    try:
+        raw = int(float(value if value is not None else OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS))
+    except Exception:
+        raw = OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS
+    return min(8000, max(5000, raw))
+
+
+class OpBlockInteractiveWriteBusyTimeout(RuntimeError):
+    def __init__(
+        self,
+        *,
+        operation_name: str,
+        source: str,
+        timeout_ms: int,
+        total_wait_ms: float,
+        phase: str,
+        holder: dict[str, Any] | None = None,
+        sqlite_error_class: str = "",
+        sqlite_error_message_sanitized: str = "",
+        request_id: str = "",
+        foreground_lease_id: str = "",
+    ):
+        self.operation_name = str(operation_name or "")
+        self.source = str(source or "")
+        self.timeout_ms = int(timeout_ms)
+        self.total_wait_ms = float(total_wait_ms or 0.0)
+        self.phase = str(phase or "")
+        self.holder = dict(holder or {})
+        self.sqlite_error_class = str(sqlite_error_class or "")
+        self.sqlite_error_message_sanitized = str(sqlite_error_message_sanitized or "")
+        self.request_id = str(request_id or "")
+        self.foreground_lease_id = str(foreground_lease_id or "")
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        holder_pid = self.holder.get("holder_pid")
+        holder_host = str(self.holder.get("holder_host") or "")
+        holder_source = str(self.holder.get("holder_source") or "")
+        if holder_pid or holder_host or holder_source:
+            return (
+                "База занята процессом"
+                f"{(' PID ' + str(holder_pid)) if holder_pid else ''}"
+                f"{(' на ' + holder_host) if holder_host else ''}.\n"
+                f"Операция: {holder_source or 'неизвестно'}.\n\n"
+                "Действие не выполнено.\n"
+                "Подождите несколько секунд и повторите.\n\n"
+                "Если сообщение повторяется — закройте лишние окна RemCard на этом рабочем месте."
+            )
+        return (
+            "База данных сейчас занята другой операцией.\n\n"
+            "Действие не выполнено.\n"
+            "Подождите несколько секунд и повторите.\n\n"
+            "Если сообщение повторяется — закройте лишние окна RemCard на этом рабочем месте."
+        )
+
+
+def _set_active_sqlite_operation(thread_id: int, payload: dict[str, Any]) -> None:
+    with _SQLITE_DIAGNOSTICS_LOCK:
+        _ACTIVE_SQLITE_OPERATIONS[int(thread_id)] = dict(payload)
+
+
+def _clear_active_sqlite_operation(thread_id: int) -> None:
+    with _SQLITE_DIAGNOSTICS_LOCK:
+        _ACTIVE_SQLITE_OPERATIONS.pop(int(thread_id), None)
+
+
+def active_sqlite_operation_snapshot(*, limit: int = 4) -> dict[str, Any]:
+    now = time.perf_counter()
+    max_items = max(1, int(limit or 1))
+    with _SQLITE_DIAGNOSTICS_LOCK:
+        items = [dict(item) for item in _ACTIVE_SQLITE_OPERATIONS.values()]
+    items.sort(key=lambda item: float(item.get("started_monotonic") or 0.0), reverse=True)
+    compact: list[dict[str, Any]] = []
+    for item in items[:max_items]:
+        holder = dict(item.get("lock_holder") or {})
+        compact.append(
+            {
+                "operation_name": str(item.get("operation_name") or ""),
+                "source": str(item.get("source") or ""),
+                "status": str(item.get("status") or ""),
+                "db_path": str(item.get("db_path") or ""),
+                "lock_path": str(item.get("lock_path") or ""),
+                "attempt": item.get("attempt"),
+                "age_sec": round(max(0.0, now - float(item.get("started_monotonic") or now)), 3),
+                "lock_holder_pid": holder.get("holder_pid"),
+                "lock_holder_host": holder.get("holder_host"),
+                "lock_holder_source": holder.get("holder_source"),
+                "lock_holder_age_ms": holder.get("holder_age_ms"),
+            }
+        )
+    return {"active_count": len(items), "active": compact}
+
+
+def _safe_env_int(name: str) -> Optional[int]:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(float(raw))
+    except Exception:
+        return None
+
+
+def _resolve_sqlite_profile_settings(profile: str = "network") -> dict[str, Any]:
+    normalized_profile = str(profile or "network").strip().lower()
+    if normalized_profile not in _SQLITE_ALLOWED_CONNECTION_PROFILES:
+        normalized_profile = "network"
+
+    settings_by_profile: dict[str, dict[str, Any]] = {
+        "network": {
+            "profile": "network",
+            "journal_mode": "DELETE",
+            "synchronous": "EXTRA",
+            "temp_store": "MEMORY",
+            "cache_kb": 8 * 1024,
+            "mmap_mb": 0,
+        },
+        "local_replica": {
+            "profile": "local_replica",
+            "journal_mode": "WAL",
+            "synchronous": "NORMAL",
+            "temp_store": "MEMORY",
+            "cache_kb": 32 * 1024,
+            "mmap_mb": 128,
+        },
+        "local_outbox": {
+            "profile": "local_outbox",
+            "journal_mode": "WAL",
+            "synchronous": "NORMAL",
+            "temp_store": "MEMORY",
+            "cache_kb": 16 * 1024,
+            "mmap_mb": 64,
+        },
+    }
+    settings = dict(settings_by_profile[normalized_profile])
+
+    env_prefix = f"REMCARD_SQLITE_{normalized_profile.upper()}"
+    journal_override = str(
+        os.environ.get(f"{env_prefix}_JOURNAL_MODE", os.environ.get("REMCARD_SQLITE_JOURNAL_MODE", ""))
+    ).strip().upper()
+    if journal_override in _SQLITE_ALLOWED_JOURNAL_MODES:
+        settings["journal_mode"] = journal_override
+
+    synchronous_override = str(
+        os.environ.get(f"{env_prefix}_SYNCHRONOUS", os.environ.get("REMCARD_SQLITE_SYNCHRONOUS", ""))
+    ).strip().upper()
+    if synchronous_override in _SQLITE_ALLOWED_SYNCHRONOUS:
+        settings["synchronous"] = synchronous_override
+
+    temp_store_override = str(
+        os.environ.get(f"{env_prefix}_TEMP_STORE", os.environ.get("REMCARD_SQLITE_TEMP_STORE", ""))
+    ).strip().upper()
+    if temp_store_override in _SQLITE_ALLOWED_TEMP_STORE:
+        settings["temp_store"] = temp_store_override
+
+    cache_override = _safe_env_int(f"{env_prefix}_CACHE_KB")
+    if cache_override is None:
+        cache_override = _safe_env_int("REMCARD_SQLITE_CACHE_KB")
+    if cache_override and cache_override > 0:
+        settings["cache_kb"] = cache_override
+
+    mmap_override = _safe_env_int(f"{env_prefix}_MMAP_MB")
+    if mmap_override is None:
+        mmap_override = _safe_env_int("REMCARD_SQLITE_MMAP_MB")
+    if mmap_override and mmap_override >= 0:
+        settings["mmap_mb"] = mmap_override
+
+    if normalized_profile == "network":
+        settings["journal_mode"] = "DELETE"
+        settings["synchronous"] = "EXTRA"
+        settings["mmap_mb"] = 0
+
+    return settings
+
+
+def configure_connection(
+    conn: sqlite3.Connection,
+    *,
+    readonly: bool = False,
+    profile: str = "network",
+):
+    settings = _resolve_sqlite_profile_settings(profile)
+    with _SQLITE_NATIVE_MAINTENANCE_LOCK:
+        conn.row_factory = sqlite3.Row
+        conn.create_function(
+            "CASEFOLD",
+            1,
+            lambda value: "" if value is None else str(value).casefold(),
+            deterministic=True,
+        )
+        conn.execute("PRAGMA foreign_keys = ON")
+        if readonly:
+            conn.execute("PRAGMA query_only = ON")
+        else:
+            conn.execute(f"PRAGMA journal_mode = {settings['journal_mode']}")
+            conn.execute(f"PRAGMA synchronous = {settings['synchronous']}")
+        if settings["temp_store"] != "DEFAULT":
+            conn.execute(f"PRAGMA temp_store = {settings['temp_store']}")
+        if settings["cache_kb"]:
+            conn.execute(f"PRAGMA cache_size = {-int(settings['cache_kb'])}")
+        if settings["mmap_mb"] is not None:
+            conn.execute(f"PRAGMA mmap_size = {int(settings['mmap_mb']) * 1024 * 1024}")
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+
+
+def run_integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
+    started = time.perf_counter()
+    ok = False
+    try:
+        # Keep long DB scans outside _SQLITE_NATIVE_MAINTENANCE_LOCK; UI connection setup uses it.
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        if not row:
+            return False, "integrity_check returned no result"
+        result = row[0]
+        ok = result == "ok"
+        return ok, str(result)
+    finally:
+        record_metric(
+            "integrity_check_duration_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            result="ok" if ok else "error",
+            force_flush=not ok,
+        )
+
+def run_quick_check(conn: sqlite3.Connection) -> tuple[bool, str]:
+    started = time.perf_counter()
+    ok = False
+    try:
+        # Keep long DB scans outside _SQLITE_NATIVE_MAINTENANCE_LOCK; UI connection setup uses it.
+        row = conn.execute("PRAGMA quick_check").fetchone()
+        if not row:
+            return False, "quick_check returned no result"
+        result = row[0]
+        ok = result == "ok"
+        return ok, str(result)
+    finally:
+        record_metric(
+            "quick_check_duration_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            result="ok" if ok else "error",
+            force_flush=not ok,
+        )
+
+
+def _move_invalid_backup(candidate_path: str, invalid_dir: Optional[str], reason: str) -> Optional[str]:
+    if not candidate_path or not os.path.exists(candidate_path):
+        return None
+    if not invalid_dir:
+        try:
+            os.remove(candidate_path)
+        except Exception:
+            pass
+        return None
+
+    os.makedirs(invalid_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = os.path.basename(candidate_path)
+    invalid_path = os.path.join(invalid_dir, f"invalid_{timestamp}_{base_name}")
+    counter = 1
+    while os.path.exists(invalid_path):
+        invalid_path = os.path.join(invalid_dir, f"invalid_{timestamp}_{counter}_{base_name}")
+        counter += 1
+    try:
+        os.replace(candidate_path, invalid_path)
+        try:
+            with open(f"{invalid_path}.reason.txt", "w", encoding="utf-8") as fh:
+                fh.write(f"time={datetime.now().isoformat()}\n")
+                fh.write(f"reason={reason}\n")
+        except Exception:
+            pass
+        return invalid_path
+    except Exception:
+        try:
+            os.remove(candidate_path)
+        except Exception:
+            pass
+        return None
+
+
+def _infer_baza_dir_for_audit(path: str) -> Optional[str]:
+    try:
+        current = os.path.abspath(os.path.dirname(path))
+        while current and os.path.dirname(current) != current:
+            if (
+                os.path.isfile(os.path.join(current, "archiv", "rao_journal.db"))
+                or (
+                    os.path.isdir(os.path.join(current, "archiv"))
+                    and os.path.isdir(os.path.join(current, "backups"))
+                    and os.path.isdir(os.path.join(current, "settings"))
+                )
+            ):
+                return current
+            current = os.path.dirname(current)
+    except Exception:
+        return None
+    return None
+
+
+def _write_backup_audit(event: str, backup_path: str, details: dict[str, Any]):
+    try:
+        from rem_card.app.jsonl_audit_log import write_audit_event
+
+        write_audit_event(
+            event,
+            baza_dir=_infer_baza_dir_for_audit(backup_path),
+            details={"backup_path": backup_path, **details},
+        )
+    except Exception:
+        pass
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_backup_meta(meta_path: str, backup_path: str, sha256: str):
+    payload = {
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "backup_path": backup_path,
+        "size_bytes": os.path.getsize(backup_path),
+        "sha256": sha256,
+        "quick_check": "ok",
+        "integrity_check": "ok",
+        "db_profile": NETWORK_SAFE_DB_PROFILE,
+    }
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+
+def backup_meta_path(backup_path: str) -> str:
+    default_path = f"{backup_path}.meta.json"
+    if os.name != "nt" or len(os.path.abspath(default_path)) < 240:
+        return default_path
+    backup_dir = os.path.dirname(os.path.abspath(backup_path))
+    digest = hashlib.sha1(os.path.basename(backup_path).encode("utf-8", errors="replace")).hexdigest()[:16]
+    return os.path.join(backup_dir, f".{digest}.meta.json")
+
+
+def backup_connection(
+    conn: sqlite3.Connection,
+    backup_path: str,
+    *,
+    invalid_dir: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+    validate: bool = True,
+    lock_path: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    source: str = "backup",
+    lock_wait_sec: float = 60.0,
+):
+    logger = logger or logging.getLogger(__name__)
+    started = time.perf_counter()
+    backup_result = "error"
+    lock = None
+    if lock_path:
+        lock = FileWriteLock(lock_path, stale_timeout_sec=10 * 60, logger=logger)
+        lock_owner = owner_id or f"{socket.gethostname()}:{os.getpid()}:sqlite_backup"
+        deadline = time.time() + max(1.0, lock_wait_sec)
+        while not lock.acquire(lock_owner, source):
+            if time.time() >= deadline:
+                raise sqlite3.OperationalError(f"Could not acquire db lock for backup: {lock_path}")
+            time.sleep(0.25)
+
+    try:
+        backup_dir = os.path.dirname(backup_path)
+        os.makedirs(backup_dir, exist_ok=True)
+        temp_path = os.path.join(
+            backup_dir,
+            f".backup_{random.getrandbits(32):08x}.tmp",
+        )
+        backup_conn = sqlite3.connect(temp_path)
+        try:
+            with backup_conn:
+                conn.backup(backup_conn)
+        except Exception:
+            try:
+                backup_conn.close()
+            except Exception:
+                pass
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                backup_conn.close()
+            except Exception:
+                pass
+
+        sha256 = ""
+        if validate:
+            ok, reason = validate_sqlite_file(temp_path)
+            if not ok:
+                invalid_path = _move_invalid_backup(temp_path, invalid_dir, reason)
+                logger.warning(
+                    "SQLite backup validation failed for %s: %s%s",
+                    backup_path,
+                    reason,
+                    f" | moved to {invalid_path}" if invalid_path else "",
+                )
+                _write_backup_audit(
+                    "backup_invalid",
+                    backup_path,
+                    {"reason": reason, "invalid_path": invalid_path},
+                )
+                raise sqlite3.DatabaseError(f"backup validation failed: {reason}")
+            sha256 = _sha256_file(temp_path)
+
+        os.replace(temp_path, backup_path)
+        meta_path = backup_meta_path(backup_path)
+        if validate:
+            _write_backup_meta(meta_path, backup_path, sha256)
+        _write_backup_audit(
+            "backup_validated",
+            backup_path,
+            {
+                "quick_check": "ok",
+                "integrity_check": "ok",
+                "sha256": sha256,
+                "meta_path": meta_path if validate else None,
+            },
+        )
+        backup_result = "ok"
+        return backup_path
+    finally:
+        record_metric(
+            "backup_duration_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            result=backup_result,
+            source=source,
+            backup_path=backup_path,
+            force_flush=True,
+        )
+        record_metric("backup_result", backup_result, source=source, backup_path=backup_path, force_flush=True)
+        if lock:
+            lock.release()
+
+
+def restore_database(db_path: str, backup_path: str):
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    temp_path = f"{db_path}.restore_tmp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+    shutil.copy2(backup_path, temp_path)
+    ok, reason = validate_sqlite_file(temp_path)
+    if not ok:
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+        raise sqlite3.DatabaseError(f"restore source failed validation: {reason}")
+    os.replace(temp_path, db_path)
+    ok, reason = validate_sqlite_file(db_path)
+    if not ok:
+        raise sqlite3.DatabaseError(f"restored database failed validation: {reason}")
+
+
+def find_latest_backup(backup_dir: str, prefix: Optional[str] = None) -> Optional[str]:
+    candidates = list_backup_candidates(backup_dir=backup_dir, prefix=prefix)
+    return candidates[0] if candidates else None
+
+
+def list_backup_candidates(backup_dir: str, prefix: Optional[str] = None) -> list[str]:
+    if not os.path.isdir(backup_dir):
+        return []
+
+    candidates = []
+    scan_dirs = [backup_dir]
+    valid_dir = os.path.join(backup_dir, "valid")
+    if os.path.isdir(valid_dir):
+        scan_dirs.append(valid_dir)
+    for directory in scan_dirs:
+        for name in os.listdir(directory):
+            if not name.endswith(".db"):
+                continue
+            if prefix and not name.startswith(prefix):
+                continue
+            full_path = os.path.join(directory, name)
+            if os.path.isfile(full_path):
+                candidates.append(full_path)
+
+    candidates.sort(key=os.path.getmtime, reverse=True)
+    return candidates
+
+
+def validate_sqlite_file(file_path: str) -> tuple[bool, str]:
+    if not file_path:
+        return False, "empty file path"
+    if not os.path.exists(file_path):
+        return False, "file does not exist"
+    if os.path.getsize(file_path) <= 0:
+        return False, "file size is zero"
+
+    conn = None
+    try:
+        uri = build_sqlite_file_uri(file_path, mode="ro")
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=5.0,
+        )
+        configure_connection(conn, readonly=True)
+
+        ok, result = run_quick_check(conn)
+        if not ok:
+            return False, f"quick_check failed: {result}"
+
+        ok, result = run_integrity_check(conn)
+        if not ok:
+            return False, f"integrity_check failed: {result}"
+
+        return True, "ok"
+    except Exception as exc:
+        return False, str(exc)
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def quarantine_corrupted_db_file(
+    db_path: str,
+    logger: Optional[logging.Logger] = None,
+    *,
+    quarantine_dir: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> Optional[str]:
+    if not db_path or not os.path.exists(db_path):
+        return None
+
+    logger = logger or logging.getLogger(__name__)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if quarantine_dir:
+        os.makedirs(quarantine_dir, exist_ok=True)
+        quarantine_path = os.path.join(quarantine_dir, f"{os.path.basename(db_path)}.corrupt_{timestamp}")
+    else:
+        quarantine_path = f"{db_path}.corrupt_{timestamp}"
+    counter = 1
+    while os.path.exists(quarantine_path):
+        if quarantine_dir:
+            quarantine_path = os.path.join(quarantine_dir, f"{os.path.basename(db_path)}.corrupt_{timestamp}_{counter}")
+        else:
+            quarantine_path = f"{db_path}.corrupt_{timestamp}_{counter}"
+        counter += 1
+
+    try:
+        os.replace(db_path, quarantine_path)
+    except Exception as exc:
+        logger.warning("Failed to move corrupted DB to quarantine (%s): %s", db_path, exc)
+        return None
+
+    for suffix in ("-journal", "-wal", "-shm"):
+        src = f"{db_path}{suffix}"
+        if not os.path.exists(src):
+            continue
+        try:
+            os.replace(src, f"{quarantine_path}{suffix}")
+        except Exception as exc:
+            logger.warning("Failed to move DB sidecar %s to quarantine: %s", src, exc)
+
+    if reason:
+        meta_path = f"{quarantine_path}.reason.txt"
+        try:
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                fh.write(f"time={datetime.now().isoformat()}\n")
+                fh.write(f"original_path={db_path}\n")
+                fh.write(f"quarantined_path={quarantine_path}\n")
+                fh.write(f"reason={reason}\n")
+        except Exception as exc:
+            logger.warning("Failed to write quarantine metadata %s: %s", meta_path, exc)
+
+    return quarantine_path
+
+
+def restore_from_best_available_source(
+    *,
+    db_path: str,
+    backup_dir: str,
+    preferred_sources: Optional[list[str]] = None,
+    backup_prefix: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+    quarantine_dir: Optional[str] = None,
+    failure_reason: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
+    logger = logger or logging.getLogger(__name__)
+
+    def _norm(path: str) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    primary_norm = _norm(db_path)
+
+    for source in preferred_sources or []:
+        if not source:
+            continue
+        if not os.path.exists(source):
+            continue
+        source_norm = _norm(source)
+        if source_norm == primary_norm or source_norm in seen:
+            continue
+        seen.add(source_norm)
+        candidates.append(source)
+
+    for source in list_backup_candidates(backup_dir=backup_dir, prefix=backup_prefix):
+        source_norm = _norm(source)
+        if source_norm == primary_norm or source_norm in seen:
+            continue
+        seen.add(source_norm)
+        candidates.append(source)
+
+    if not candidates:
+        raise RuntimeError(f"No recovery candidates found in backup dir: {backup_dir}")
+
+    selected_source: Optional[str] = None
+    for candidate in candidates:
+        ok, reason = validate_sqlite_file(candidate)
+        if ok:
+            selected_source = candidate
+            break
+        logger.warning("Recovery candidate skipped (invalid): %s | %s", candidate, reason)
+
+    if not selected_source:
+        raise RuntimeError("No healthy recovery source found (all candidates failed validation)")
+
+    quarantined_path = quarantine_corrupted_db_file(
+        db_path,
+        logger=logger,
+        quarantine_dir=quarantine_dir,
+        reason=failure_reason,
+    )
+    restore_database(db_path, selected_source)
+    return selected_source, quarantined_path
+
+
+class FileWriteLock:
+    _AUDITED_SOURCES = {
+        "db_rotation",
+        "db_rotation_undo",
+        "local_replica_snapshot",
+    }
+
+    def __init__(
+        self,
+        lock_path: str,
+        stale_timeout_sec: float = 60.0,
+        logger: Optional[logging.Logger] = None,
+        *,
+        lease_duration_sec: float | None = None,
+        allow_expired_lease_cleanup: bool = False,
+        allow_legacy_replica_cleanup: bool = False,
+        allow_malformed_cleanup: bool = False,
+        malformed_grace_sec: float = 5.0,
+        malformed_quarantine_dir: str | None = None,
+    ):
+        self.lock_path = lock_path
+        self.stale_timeout_sec = stale_timeout_sec
+        self.logger = logger or logging.getLogger(__name__)
+        self.lease_duration_sec = (
+            None
+            if lease_duration_sec is None
+            else max(1.0, float(lease_duration_sec))
+        )
+        self.allow_expired_lease_cleanup = bool(allow_expired_lease_cleanup)
+        self.allow_legacy_replica_cleanup = bool(allow_legacy_replica_cleanup)
+        self.allow_malformed_cleanup = bool(allow_malformed_cleanup)
+        self.malformed_grace_sec = max(0.25, float(malformed_grace_sec))
+        self.malformed_quarantine_dir = (
+            os.path.abspath(os.path.normpath(malformed_quarantine_dir))
+            if malformed_quarantine_dir
+            else ""
+        )
+        self._owner_token = None
+        self._owner_thread_id = None
+        self._reentrancy = 0
+        self._mutex = threading.Lock()
+
+    def _build_payload(self, owner_id: str, source: str) -> dict[str, Any]:
+        timestamp = time.time()
+        payload = {
+            "timestamp": timestamp,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "user_id": owner_id,
+            "source": source,
+            "thread_id": threading.get_ident(),
+            "lock_token": uuid.uuid4().hex,
+        }
+        if self.lease_duration_sec is not None:
+            payload["lease_expires_at"] = timestamp + self.lease_duration_sec
+        return payload
+
+    def _try_read_payload(self) -> Optional[dict[str, Any]]:
+        try:
+            with open(self.lock_path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            self.logger.warning("Failed to read db lock %s: %s", self.lock_path, exc)
+            return _LOCK_READ_UNAVAILABLE
+
+    def _read_lock_snapshot(self) -> _LockFileSnapshot:
+        try:
+            stat_before = os.stat(self.lock_path)
+            with open(self.lock_path, "rb") as fh:
+                content = fh.read()
+            payload = json.loads(content.decode("utf-8"))
+            if not isinstance(payload, dict):
+                return _LockFileSnapshot(
+                    exists=True,
+                    readable=False,
+                    reason="parse_error",
+                    content_hash=hashlib.sha256(content).hexdigest(),
+                    size=stat_before.st_size,
+                    mtime_ns=getattr(stat_before, "st_mtime_ns", None),
+                    inode=getattr(stat_before, "st_ino", None),
+                )
+            return _LockFileSnapshot(
+                exists=True,
+                readable=True,
+                reason="ok",
+                payload=payload,
+                content_hash=hashlib.sha256(content).hexdigest(),
+                size=stat_before.st_size,
+                mtime_ns=getattr(stat_before, "st_mtime_ns", None),
+                inode=getattr(stat_before, "st_ino", None),
+            )
+        except FileNotFoundError:
+            return _LockFileSnapshot(exists=False, readable=False, reason="missing")
+        except PermissionError as exc:
+            return _LockFileSnapshot(
+                exists=True,
+                readable=False,
+                reason="permission_denied",
+                error_class=type(exc).__name__,
+                error_message_sanitized=_sanitize_sqlite_error_message(exc),
+            )
+        except json.JSONDecodeError as exc:
+            content_hash = ""
+            size = None
+            mtime_ns = None
+            inode = None
+            try:
+                stat_result = os.stat(self.lock_path)
+                with open(self.lock_path, "rb") as fh:
+                    content = fh.read()
+                content_hash = hashlib.sha256(content).hexdigest()
+                size = int(stat_result.st_size)
+                mtime_ns = getattr(stat_result, "st_mtime_ns", None)
+                inode = getattr(stat_result, "st_ino", None)
+            except Exception:
+                pass
+            return _LockFileSnapshot(
+                exists=True,
+                readable=False,
+                reason="parse_error",
+                content_hash=content_hash,
+                size=size,
+                mtime_ns=mtime_ns,
+                inode=inode,
+                error_class=type(exc).__name__,
+                error_message_sanitized=_sanitize_sqlite_error_message(exc),
+            )
+        except Exception as exc:
+            return _LockFileSnapshot(
+                exists=True,
+                readable=False,
+                reason="unreadable",
+                error_class=type(exc).__name__,
+                error_message_sanitized=_sanitize_sqlite_error_message(exc),
+            )
+
+    @staticmethod
+    def _same_lock_snapshot(left: _LockFileSnapshot, right: _LockFileSnapshot) -> bool:
+        return (
+            left.exists
+            and right.exists
+            and left.readable
+            and right.readable
+            and left.content_hash == right.content_hash
+            and left.size == right.size
+            and left.mtime_ns == right.mtime_ns
+            and left.inode == right.inode
+        )
+
+    @staticmethod
+    def _same_file_snapshot(left: _LockFileSnapshot, right: _LockFileSnapshot) -> bool:
+        return (
+            left.exists
+            and right.exists
+            and left.readable == right.readable
+            and left.reason == right.reason
+            and left.content_hash == right.content_hash
+            and left.size == right.size
+            and left.mtime_ns == right.mtime_ns
+            and left.inode == right.inode
+        )
+
+    def _cleanup_metric_fields(
+        self,
+        snapshot: _LockFileSnapshot,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload = dict(snapshot.payload or {})
+        fields = {
+            "lock_path": self.lock_path,
+            "holder_pid": payload.get("pid"),
+            "holder_host": str(payload.get("host") or ""),
+            "holder_source": str(payload.get("source") or ""),
+            "holder_age_ms": _payload_age_ms(payload),
+            "current_pid": os.getpid(),
+            "current_host": socket.gethostname(),
+            "operation_name": source,
+            "source": source,
+        }
+        for key, value in dict(metric_context or {}).items():
+            if key not in fields:
+                fields[key] = value
+        return fields
+
+    def _record_cleanup_skipped(
+        self,
+        reason: str,
+        snapshot: _LockFileSnapshot,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None,
+    ) -> None:
+        record_metric(
+            "sqlite_write_lock_stale_cleanup_skipped",
+            1,
+            reason=reason,
+            **self._cleanup_metric_fields(snapshot, source=source, metric_context=metric_context),
+        )
+
+    def _record_cleanup_failed(
+        self,
+        reason: str,
+        snapshot: _LockFileSnapshot,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None,
+        exc: Exception,
+    ) -> None:
+        record_metric(
+            "sqlite_write_lock_stale_cleanup_failed",
+            1,
+            reason=reason,
+            error_class=type(exc).__name__,
+            error_message_sanitized=_sanitize_sqlite_error_message(exc),
+            **self._cleanup_metric_fields(snapshot, source=source, metric_context=metric_context),
+        )
+
+    def _cleanup_local_dead_pid_lock(self, *, source: str, metric_context: dict[str, Any] | None = None) -> bool:
+        started = time.perf_counter()
+        snapshot = self._read_lock_snapshot()
+        if not snapshot.exists:
+            return False
+        if not snapshot.readable:
+            self._record_cleanup_skipped(snapshot.reason or "unreadable", snapshot, source=source, metric_context=metric_context)
+            return False
+
+        payload = dict(snapshot.payload or {})
+        holder_pid = _coerce_lock_pid(payload.get("pid"))
+        holder_host = str(payload.get("host") or "")
+        current_host = socket.gethostname()
+        if holder_pid is None:
+            self._record_cleanup_skipped("missing_pid", snapshot, source=source, metric_context=metric_context)
+            return False
+        if not holder_host:
+            self._record_cleanup_skipped("missing_host", snapshot, source=source, metric_context=metric_context)
+            return False
+        if not _same_host(holder_host, current_host):
+            self._record_cleanup_skipped("other_host", snapshot, source=source, metric_context=metric_context)
+            return False
+
+        pid_alive = is_local_pid_alive(holder_pid)
+        if pid_alive is True:
+            self._record_cleanup_skipped("pid_alive", snapshot, source=source, metric_context=metric_context)
+            return False
+        if pid_alive is None:
+            self._record_cleanup_skipped("pid_unknown", snapshot, source=source, metric_context=metric_context)
+            return False
+
+        record_metric(
+            "sqlite_write_lock_local_dead_pid_detected",
+            1,
+            **self._cleanup_metric_fields(snapshot, source=source, metric_context=metric_context),
+        )
+        latest = self._read_lock_snapshot()
+        if not self._same_lock_snapshot(snapshot, latest):
+            self._record_cleanup_skipped(
+                "changed_during_cleanup_check",
+                latest if latest.exists else snapshot,
+                source=source,
+                metric_context=metric_context,
+            )
+            return False
+        try:
+            os.remove(self.lock_path)
+        except FileNotFoundError:
+            self._record_cleanup_skipped(
+                "changed_during_cleanup_check",
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+            )
+            return False
+        except Exception as exc:
+            self._record_cleanup_failed(
+                "delete_failed",
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+                exc=exc,
+            )
+            return False
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
+        record_metric(
+            "sqlite_write_lock_stale_removed",
+            1,
+            old_pid=holder_pid,
+            old_host=holder_host,
+            old_source=str(payload.get("source") or ""),
+            reason="local_dead_pid",
+            lock_content_hash=snapshot.content_hash,
+            elapsed_ms=elapsed_ms,
+            **self._cleanup_metric_fields(snapshot, source=source, metric_context=metric_context),
+        )
+        self.logger.warning("Removed local dead-PID db lock at %s (pid=%s host=%s)", self.lock_path, holder_pid, holder_host)
+        return True
+
+    def _malformed_quarantine_path(self, snapshot: _LockFileSnapshot) -> str:
+        target_dir = self.malformed_quarantine_dir or os.path.dirname(self.lock_path)
+        os.makedirs(target_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        digest = str(snapshot.content_hash or "empty")[:12]
+        base_name = os.path.basename(self.lock_path)
+        return os.path.join(
+            target_dir,
+            f"{base_name}.{stamp}.{digest}.{uuid.uuid4().hex[:8]}.malformed",
+        )
+
+    def _cleanup_malformed_lock(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self.allow_malformed_cleanup:
+            return False
+        started = time.perf_counter()
+        snapshot = self._read_lock_snapshot()
+        if not snapshot.exists or snapshot.readable or snapshot.reason != "parse_error":
+            return False
+        try:
+            stat_result = os.stat(self.lock_path)
+            age_sec = max(0.0, time.time() - float(stat_result.st_mtime))
+        except OSError:
+            return False
+        if age_sec < self.malformed_grace_sec:
+            self._record_cleanup_skipped(
+                "malformed_grace_period",
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+            )
+            return False
+
+        # A second identical observation prevents cleanup while another process
+        # is still publishing the JSON payload over SMB.
+        time.sleep(0.03)
+        latest = self._read_lock_snapshot()
+        if not self._same_file_snapshot(snapshot, latest):
+            self._record_cleanup_skipped(
+                "changed_during_malformed_cleanup",
+                latest if latest.exists else snapshot,
+                source=source,
+                metric_context=metric_context,
+            )
+            return False
+
+        quarantine_path = self._malformed_quarantine_path(snapshot)
+        try:
+            os.replace(self.lock_path, quarantine_path)
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            self._record_cleanup_failed(
+                "malformed_quarantine_failed",
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+                exc=exc,
+            )
+            return False
+
+        record_metric(
+            "sqlite_write_lock_malformed_quarantined",
+            1,
+            reason=snapshot.reason,
+            quarantine_path=quarantine_path,
+            lock_content_hash=snapshot.content_hash,
+            lock_size=snapshot.size,
+            elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
+            **self._cleanup_metric_fields(
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+            ),
+        )
+        self.logger.warning(
+            "Quarantined malformed db lock %s -> %s",
+            self.lock_path,
+            quarantine_path,
+        )
+        return True
+
+    def _cleanup_expired_replica_lease(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self.allow_expired_lease_cleanup:
+            return False
+        started = time.perf_counter()
+        snapshot = self._read_lock_snapshot()
+        if not snapshot.exists or not snapshot.readable:
+            return False
+        payload = dict(snapshot.payload or {})
+        if str(payload.get("source") or "") not in {
+            "local_replica_sync",
+            "local_replica_snapshot",
+        }:
+            return False
+
+        now = time.time()
+        lease_expires_at = payload.get("lease_expires_at")
+        lease_expired = isinstance(lease_expires_at, (int, float)) and float(
+            lease_expires_at
+        ) <= now
+        legacy_age_expired = (
+            self.allow_legacy_replica_cleanup
+            and lease_expires_at is None
+            and isinstance(payload.get("timestamp"), (int, float))
+            and (now - float(payload["timestamp"])) > self.stale_timeout_sec
+        )
+        if not lease_expired and not legacy_age_expired:
+            return False
+
+        latest = self._read_lock_snapshot()
+        if not self._same_lock_snapshot(snapshot, latest):
+            self._record_cleanup_skipped(
+                "changed_during_lease_cleanup",
+                latest if latest.exists else snapshot,
+                source=source,
+                metric_context=metric_context,
+            )
+            return False
+        try:
+            os.remove(self.lock_path)
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            self._record_cleanup_failed(
+                "expired_lease_delete_failed",
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+                exc=exc,
+            )
+            return False
+
+        reason = "expired_lease" if lease_expired else "legacy_replica_timeout"
+        record_metric(
+            "sqlite_write_lock_stale_removed",
+            1,
+            reason=reason,
+            lock_content_hash=snapshot.content_hash,
+            elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
+            **self._cleanup_metric_fields(
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+            ),
+        )
+        self.logger.warning(
+            "Removed expired local-replica lease at %s (reason=%s holder=%s:%s)",
+            self.lock_path,
+            reason,
+            payload.get("host"),
+            payload.get("pid"),
+        )
+        return True
+
+    def cleanup_abandoned(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+    ) -> bool:
+        """Safely recover only locks with independently provable abandonment."""
+        if self._cleanup_malformed_lock(
+            source=source,
+            metric_context=metric_context,
+        ):
+            return True
+        if self._cleanup_local_dead_pid_lock(
+            source=source,
+            metric_context=metric_context,
+        ):
+            return True
+        return self._cleanup_expired_replica_lease(
+            source=source,
+            metric_context=metric_context,
+        )
+
+    def cleanup_malformed(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+    ) -> bool:
+        return self._cleanup_malformed_lock(
+            source=source,
+            metric_context=metric_context,
+        )
+
+    def _is_stale(self, payload: Optional[dict[str, Any]]) -> bool:
+        if payload is _LOCK_READ_UNAVAILABLE:
+            # Ошибка чтения lock-файла не означает "stale".
+            # В этой ситуации безопаснее считать lock занятым.
+            return False
+        if not payload:
+            return True
+        ts = payload.get("timestamp")
+        if not isinstance(ts, (int, float)):
+            return True
+        return (time.time() - ts) > self.stale_timeout_sec
+
+    @staticmethod
+    def _is_self_orphan(payload: Optional[dict[str, Any]], owner_id: str, thread_id: int) -> bool:
+        if not payload:
+            return False
+        try:
+            return (
+                payload.get("user_id") == owner_id
+                and int(payload.get("pid")) == os.getpid()
+                and int(payload.get("thread_id")) == int(thread_id)
+            )
+        except Exception:
+            return False
+
+    def acquire(self, owner_id: str, source: str, metric_context: Optional[dict[str, Any]] = None) -> bool:
+        thread_id = threading.get_ident()
+        with self._mutex:
+            if self._owner_thread_id == thread_id and self._owner_token is not None:
+                self._reentrancy += 1
+                return True
+
+        os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
+        payload = self._build_payload(owner_id, source)
+        raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+        while True:
+            fd = None
+            created_here = False
+            try:
+                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                created_here = True
+                try:
+                    written = 0
+                    while written < len(raw):
+                        chunk_size = os.write(fd, raw[written:])
+                        if chunk_size <= 0:
+                            raise OSError("lock payload write returned no progress")
+                        written += int(chunk_size)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                    fd = None
+                with self._mutex:
+                    self._owner_token = payload
+                    self._owner_thread_id = thread_id
+                    self._reentrancy = 1
+                if source in self._AUDITED_SOURCES:
+                    record_metric(
+                        "sqlite_write_lock_acquired",
+                        1,
+                        lock_path=self.lock_path,
+                        operation_name=source,
+                        source=source,
+                        lock_token=str(payload.get("lock_token") or ""),
+                    )
+                return True
+            except FileExistsError:
+                existing = self._try_read_payload()
+                if existing is _LOCK_READ_UNAVAILABLE:
+                    if self.cleanup_abandoned(
+                        source=source,
+                        metric_context=metric_context,
+                    ):
+                        continue
+                    return False
+                if self._is_self_orphan(existing, owner_id, thread_id):
+                    try:
+                        os.remove(self.lock_path)
+                        self.logger.warning("Removed orphan self-owned db lock at %s", self.lock_path)
+                        continue
+                    except FileNotFoundError:
+                        continue
+                    except Exception as exc:
+                        self.logger.warning("Failed to remove orphan self-owned db lock %s: %s", self.lock_path, exc)
+                if self._cleanup_local_dead_pid_lock(source=source, metric_context=metric_context):
+                    continue
+                if self._cleanup_expired_replica_lease(
+                    source=source,
+                    metric_context=metric_context,
+                ):
+                    continue
+                if self._is_stale(existing):
+                    self.logger.warning("Observed stale db lock at %s; age-only cleanup is disabled", self.lock_path)
+                return False
+            except Exception as exc:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except Exception:
+                        pass
+                if created_here:
+                    try:
+                        os.remove(self.lock_path)
+                    except FileNotFoundError:
+                        pass
+                    except Exception as cleanup_exc:
+                        self.logger.warning(
+                            "Failed to remove incomplete db lock %s after create error: %s",
+                            self.lock_path,
+                            cleanup_exc,
+                        )
+                record_metric(
+                    "sqlite_write_lock_create_failed",
+                    1,
+                    lock_path=self.lock_path,
+                    operation_name=source,
+                    source=source,
+                    error_class=type(exc).__name__,
+                    error_message_sanitized=_sanitize_sqlite_error_message(exc),
+                )
+                self.logger.warning(
+                    "Failed to create complete db lock %s: %s",
+                    self.lock_path,
+                    exc,
+                )
+                return False
+
+    def refresh(self, *, metadata: Optional[dict[str, Any]] = None) -> bool:
+        """Refresh a held lock without discarding its ownership token."""
+        with self._mutex:
+            if self._owner_token is None:
+                return False
+            owner_token = dict(self._owner_token)
+
+        expected_token = str(owner_token.get("lock_token") or "")
+        if not expected_token:
+            return False
+
+        try:
+            with open(self.lock_path, "r+", encoding="utf-8") as fh:
+                payload = json.load(fh)
+                if not isinstance(payload, dict):
+                    return False
+                current_token = str(payload.get("lock_token") or "")
+                if not current_token or current_token != expected_token:
+                    return False
+
+                payload["timestamp"] = time.time()
+                if self.lease_duration_sec is not None:
+                    payload["lease_expires_at"] = payload["timestamp"] + self.lease_duration_sec
+                for key, value in dict(metadata or {}).items():
+                    if key not in {"lock_token", "pid", "host", "user_id", "thread_id"}:
+                        payload[key] = value
+
+                fh.seek(0)
+                json.dump(payload, fh, ensure_ascii=True)
+                fh.truncate()
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            self.logger.warning("Failed to refresh db lock %s: %s", self.lock_path, exc)
+            return False
+
+    def release(self) -> bool:
+        thread_id = threading.get_ident()
+        owner_token = None
+        with self._mutex:
+            if self._owner_thread_id != thread_id or self._owner_token is None:
+                return False
+
+            self._reentrancy -= 1
+            if self._reentrancy > 0:
+                return True
+
+            owner_token = dict(self._owner_token)
+            self._owner_token = None
+            self._owner_thread_id = None
+            self._reentrancy = 0
+
+        try:
+            for attempt in range(10):
+                try:
+                    snapshot = self._read_lock_snapshot()
+                    if not snapshot.exists:
+                        return True
+                    current_token = str(
+                        (snapshot.payload or {}).get("lock_token") or ""
+                    )
+                    expected_token = str(
+                        (owner_token or {}).get("lock_token") or ""
+                    )
+                    if not snapshot.readable:
+                        if attempt < 9:
+                            time.sleep(0.03)
+                            continue
+                        reason = snapshot.reason or "unreadable"
+                    else:
+                        reason = "ownership_changed"
+                    if (
+                        not snapshot.readable
+                        or not current_token
+                        or current_token != expected_token
+                    ):
+                        record_metric(
+                            "sqlite_write_lock_release_skipped",
+                            1,
+                            lock_path=self.lock_path,
+                            reason=reason,
+                            expected_token=expected_token,
+                            current_token=current_token,
+                        )
+                        self.logger.warning(
+                            "Skipped db lock release after ownership changed: %s",
+                            self.lock_path,
+                        )
+                        return False
+                    os.remove(self.lock_path)
+                    released_source = str((owner_token or {}).get("source") or "")
+                    if released_source in self._AUDITED_SOURCES:
+                        record_metric(
+                            "sqlite_write_lock_released",
+                            1,
+                            lock_path=self.lock_path,
+                            source=released_source,
+                            lock_token=expected_token,
+                        )
+                    return True
+                except FileNotFoundError:
+                    return True
+                except PermissionError:
+                    if attempt >= 9:
+                        raise
+                    time.sleep(0.03)
+                except OSError as exc:
+                    # На Windows возможен sharing violation (WinError 32) на короткое время.
+                    if getattr(exc, "winerror", None) == 32 and attempt < 9:
+                        time.sleep(0.03)
+                        continue
+                    raise
+        except FileNotFoundError:
+            return True
+        except Exception as exc:
+            self.logger.warning("Failed to remove db lock %s: %s", self.lock_path, exc)
+            record_metric(
+                "sqlite_write_lock_release_failed",
+                1,
+                lock_path=self.lock_path,
+                error_class=type(exc).__name__,
+                error_message_sanitized=_sanitize_sqlite_error_message(exc),
+            )
+            return False
+
+
+@dataclass
+class _WriteTransactionState:
+    source: str
+    options: dict[str, Any]
+    lock_wait_started: float
+    thread_id: int
+    is_interactive_write: bool
+    timeout_ms: int
+    deadline: float | None
+    metric_context: dict[str, Any]
+    attempt: int = 0
+    last_exc: Exception | None = None
+    lock_acquired: bool = False
+    lock_held_started: float | None = None
+
+
+class SQLiteWriteController:
+    def __init__(
+        self,
+        db_path: str,
+        lock_path: str,
+        owner_id: str,
+        logger: Optional[logging.Logger] = None,
+        max_retries: int = 20,
+        retry_delay_ms: int = 200,
+        stale_timeout_sec: float = 60.0,
+    ):
+        self.db_path = db_path
+        self.lock_path = lock_path
+        self.owner_id = owner_id
+        self.logger = logger or logging.getLogger(__name__)
+        self.max_retries = max_retries
+        self.retry_delay_sec = retry_delay_ms / 1000.0
+        self.lock = FileWriteLock(lock_path, stale_timeout_sec=stale_timeout_sec, logger=self.logger)
+        self._conn_locks: dict[int, threading.RLock] = {}
+        self._conn_locks_mutex = threading.Lock()
+
+    def _is_retryable(self, exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "database is locked" in message or "database table is locked" in message
+
+    def _get_conn_lock(self, conn: sqlite3.Connection) -> threading.RLock:
+        if conn is None:
+            raise DatabaseClosedError("SQLite connection is closed")
+        key = id(conn)
+        with self._conn_locks_mutex:
+            lock = self._conn_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._conn_locks[key] = lock
+            return lock
+
+    @contextmanager
+    def connection_guard(self, conn: sqlite3.Connection):
+        if conn is None:
+            raise DatabaseClosedError("SQLite connection is closed")
+        lock = self._get_conn_lock(conn)
+        with lock:
+            yield
+
+    @staticmethod
+    def _write_metric_context(options: dict[str, Any], *, interactive: bool) -> dict[str, Any]:
+        return {
+            "request_id": str(options.get("request_id") or ""),
+            "role": str(options.get("role") or ""),
+            "idle_before_action_ms": options.get("idle_before_action_ms"),
+            "foreground_lease_id": str(options.get("foreground_lease_id") or ""),
+            "admission_id": options.get("admission_id"),
+            "operation_case_id": options.get("operation_case_id"),
+            "table_code": str(options.get("table_code") or ""),
+            "interactive": bool(interactive),
+        }
+
+    @staticmethod
+    def _remaining_ms(deadline: float | None) -> float:
+        if deadline is None:
+            return float("inf")
+        return max(0.0, (deadline - time.perf_counter()) * 1000.0)
+
+    def _sleep_before_retry(self, deadline: float | None) -> None:
+        if deadline is None:
+            time.sleep(self.retry_delay_sec)
+            return
+        delay_sec = min(self.retry_delay_sec, max(0.0, self._remaining_ms(deadline) / 1000.0))
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+
+    def _raise_interactive_timeout(
+        self,
+        *,
+        source: str,
+        timeout_ms: int,
+        lock_wait_started: float,
+        thread_id: int,
+        attempt: int,
+        phase: str,
+        holder: dict[str, Any] | None,
+        metric_context: dict[str, Any],
+        options: dict[str, Any],
+        exc: Exception | None = None,
+    ) -> None:
+        total_wait_ms = round((time.perf_counter() - lock_wait_started) * 1000.0, 3)
+        sqlite_error_class = type(exc).__name__ if exc is not None else ""
+        sqlite_error_message_sanitized = _sanitize_sqlite_error_message(exc)
+        record_metric(
+            "sqlite_write_lock_timeout",
+            1,
+            operation_name=source,
+            source=source,
+            db_path=self.db_path,
+            lock_path=self.lock_path,
+            pid=os.getpid(),
+            thread=thread_id,
+            attempt=attempt,
+            wait_ms=round(max(0.0, total_wait_ms), 3),
+            total_wait_ms=total_wait_ms,
+            timeout_ms=timeout_ms,
+            phase=phase,
+            sqlite_error_class=sqlite_error_class,
+            sqlite_error_message_sanitized=sqlite_error_message_sanitized,
+            timestamp_ms=_timestamp_ms(),
+            **metric_context,
+            **_lock_holder_metric_fields(holder),
+        )
+        raise OpBlockInteractiveWriteBusyTimeout(
+            operation_name=source,
+            source=source,
+            timeout_ms=timeout_ms,
+            total_wait_ms=total_wait_ms,
+            phase=phase,
+            holder=holder,
+            sqlite_error_class=sqlite_error_class,
+            sqlite_error_message_sanitized=sqlite_error_message_sanitized,
+            request_id=str(options.get("request_id") or ""),
+            foreground_lease_id=str(options.get("foreground_lease_id") or ""),
+        ) from exc
+
+    def _make_write_transaction_state(
+        self,
+        source: str,
+        write_options: Optional[dict[str, Any]],
+    ) -> _WriteTransactionState:
+        lock_wait_started = time.perf_counter()
+        options = dict(write_options or {})
+        role = str(options.get("role") or "").strip().lower()
+        metadata_source = str(options.get("source") or "")
+        interactive = bool(options.get("interactive"))
+        is_interactive_opblock = interactive and role.startswith("operblock")
+        is_interactive_clinical_write = interactive and (
+            (role == "doctor" and metadata_source.startswith("ivl_"))
+            or (
+                role == "nurse"
+                and metadata_source.startswith("nurse_order_mark:")
+            )
+        )
+        is_interactive_write = (
+            is_interactive_opblock or is_interactive_clinical_write
+        )
+        timeout_ms = (
+            _bounded_opblock_interactive_timeout_ms(options.get("timeout_ms"))
+            if is_interactive_write
+            else SQLITE_BUSY_TIMEOUT_MS
+        )
+        deadline = (
+            lock_wait_started + (timeout_ms / 1000.0)
+            if is_interactive_write
+            else None
+        )
+        return _WriteTransactionState(
+            source=source,
+            options=options,
+            lock_wait_started=lock_wait_started,
+            thread_id=threading.get_ident(),
+            is_interactive_write=is_interactive_write,
+            timeout_ms=timeout_ms,
+            deadline=deadline,
+            metric_context=self._write_metric_context(
+                options,
+                interactive=is_interactive_write,
+            ),
+        )
+
+    def _override_interactive_busy_timeout(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+    ) -> tuple[int | None, bool]:
+        if not state.is_interactive_write:
+            return None, False
+        try:
+            row = conn.execute("PRAGMA busy_timeout").fetchone()
+            original_busy_timeout_ms = int(row[0]) if row else SQLITE_BUSY_TIMEOUT_MS
+        except Exception:
+            original_busy_timeout_ms = SQLITE_BUSY_TIMEOUT_MS
+        begin_busy_timeout_ms = min(
+            max(100, int(self.retry_delay_sec * 1000.0)),
+            state.timeout_ms,
+        )
+        conn.execute(f"PRAGMA busy_timeout = {begin_busy_timeout_ms}")
+        return original_busy_timeout_ms, True
+
+    def _restore_busy_timeout(
+        self,
+        conn: sqlite3.Connection,
+        original_busy_timeout_ms: int | None,
+        busy_timeout_overridden: bool,
+    ) -> None:
+        if not busy_timeout_overridden or original_busy_timeout_ms is None:
+            return
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {int(original_busy_timeout_ms)}")
+        except Exception:
+            pass
+
+    def _raise_if_interactive_deadline_expired(
+        self,
+        state: _WriteTransactionState,
+    ) -> None:
+        if (
+            not state.is_interactive_write
+            or self._remaining_ms(state.deadline) > 0
+        ):
+            return
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        phase = (
+            "begin_immediate_timeout"
+            if state.last_exc is not None and self._is_retryable(state.last_exc)
+            else "file_lock_timeout"
+        )
+        self._raise_interactive_timeout(
+            source=state.source,
+            timeout_ms=state.timeout_ms,
+            lock_wait_started=state.lock_wait_started,
+            thread_id=state.thread_id,
+            attempt=state.attempt,
+            phase=phase,
+            holder=holder,
+            metric_context=state.metric_context,
+            options=state.options,
+            exc=state.last_exc,
+        )
+
+    def _record_lock_wait_started(
+        self,
+        state: _WriteTransactionState,
+    ) -> tuple[dict[str, Any], float]:
+        total_wait_ms = round(
+            (time.perf_counter() - state.lock_wait_started) * 1000.0,
+            3,
+        )
+        active_payload = {
+            "operation_name": state.source,
+            "source": state.source,
+            "status": "waiting_for_file_lock",
+            "db_path": self.db_path,
+            "lock_path": self.lock_path,
+            "attempt": state.attempt,
+            "started_monotonic": state.lock_wait_started,
+            "thread": state.thread_id,
+            **state.metric_context,
+        }
+        _set_active_sqlite_operation(state.thread_id, active_payload)
+        record_metric(
+            "sqlite_write_lock_wait_started",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            db_path=self.db_path,
+            lock_path=self.lock_path,
+            pid=os.getpid(),
+            thread=state.thread_id,
+            attempt=state.attempt,
+            timeout_ms=state.timeout_ms,
+            timestamp_ms=_timestamp_ms(),
+            **state.metric_context,
+        )
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        if holder.get("readable"):
+            active_payload["lock_holder"] = holder
+            _set_active_sqlite_operation(state.thread_id, active_payload)
+        holder_age_ms = (
+            holder.get("holder_age_ms") if isinstance(holder, dict) else None
+        )
+        if (
+            isinstance(holder_age_ms, (int, float))
+            and holder_age_ms >= self.lock.stale_timeout_sec * 1000.0
+        ):
+            record_metric(
+                "sqlite_write_lock_stale_observed",
+                1,
+                lock_path=self.lock_path,
+                holder_pid=holder.get("holder_pid"),
+                holder_host=holder.get("holder_host"),
+                holder_source=holder.get("holder_source"),
+                holder_age_ms=holder_age_ms,
+                current_pid=os.getpid(),
+                current_host=socket.gethostname(),
+                decision="no_cleanup_in_stage3",
+            )
+        return active_payload, total_wait_ms
+
+    def _retry_wait_ms(self, state: _WriteTransactionState) -> float:
+        if state.is_interactive_write:
+            return round(
+                min(
+                    self.retry_delay_sec * 1000.0,
+                    self._remaining_ms(state.deadline),
+                ),
+                3,
+            )
+        return round(self.retry_delay_sec * 1000.0, 3)
+
+    def _try_acquire_file_lock(
+        self,
+        state: _WriteTransactionState,
+    ) -> dict[str, Any] | None:
+        active_payload, total_wait_ms = self._record_lock_wait_started(state)
+        if self.lock.acquire(
+            self.owner_id,
+            state.source,
+            metric_context=state.metric_context,
+        ):
+            state.lock_acquired = True
+            state.lock_held_started = time.perf_counter()
+            record_metric(
+                "db_lock_wait_ms",
+                round(
+                    (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                    3,
+                ),
+                source=state.source,
+                attempt=state.attempt,
+            )
+            return active_payload
+
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        active_payload["lock_holder"] = holder
+        _set_active_sqlite_operation(state.thread_id, active_payload)
+        record_metric(
+            "sqlite_write_lock_wait_retry",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            attempt=state.attempt,
+            wait_ms=self._retry_wait_ms(state),
+            total_wait_ms=total_wait_ms,
+            timeout_ms=state.timeout_ms,
+            phase="file_lock",
+            **state.metric_context,
+            **_lock_holder_metric_fields(holder),
+        )
+        if (
+            state.is_interactive_write
+            and self._remaining_ms(state.deadline) <= 0
+        ):
+            self._raise_interactive_timeout(
+                source=state.source,
+                timeout_ms=state.timeout_ms,
+                lock_wait_started=state.lock_wait_started,
+                thread_id=state.thread_id,
+                attempt=state.attempt,
+                phase="file_lock_timeout",
+                holder=holder,
+                metric_context=state.metric_context,
+                options=state.options,
+                exc=state.last_exc,
+            )
+        self._sleep_before_retry(state.deadline)
+        return None
+
+    def _release_failed_begin_lock(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+    ) -> None:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        record_metric(
+            "sqlite_write_lock_released",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            held_ms=(
+                None
+                if state.lock_held_started is None
+                else round(
+                    (time.perf_counter() - state.lock_held_started) * 1000.0,
+                    3,
+                )
+            ),
+            committed=False,
+            timeout_ms=state.timeout_ms,
+            **state.metric_context,
+        )
+        self.lock.release()
+        state.lock_acquired = False
+        state.lock_held_started = None
+
+    def _record_begin_retry(
+        self,
+        state: _WriteTransactionState,
+        exc: sqlite3.OperationalError,
+    ) -> dict[str, Any]:
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        record_metric(
+            "sqlite_write_lock_wait_retry",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            attempt=state.attempt,
+            wait_ms=self._retry_wait_ms(state),
+            total_wait_ms=round(
+                (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                3,
+            ),
+            timeout_ms=state.timeout_ms,
+            phase="begin_immediate",
+            sqlite_error_class=type(exc).__name__,
+            sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
+            **state.metric_context,
+            **_lock_holder_metric_fields(holder),
+        )
+        return holder
+
+    def _try_begin_immediate(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+        active_payload: dict[str, Any],
+        before_begin: Optional[Callable[[], None]],
+    ) -> sqlite3.Cursor | None:
+        try:
+            active_payload["status"] = "begin_immediate"
+            _set_active_sqlite_operation(state.thread_id, active_payload)
+            if before_begin is not None:
+                before_begin()
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            record_metric(
+                "sqlite_write_lock_acquired",
+                1,
+                operation_name=state.source,
+                source=state.source,
+                db_path=self.db_path,
+                lock_path=self.lock_path,
+                pid=os.getpid(),
+                thread=state.thread_id,
+                total_wait_ms=round(
+                    (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                    3,
+                ),
+                attempts=state.attempt,
+                timeout_ms=state.timeout_ms,
+                **state.metric_context,
+            )
+            active_payload["status"] = "transaction_active"
+            _set_active_sqlite_operation(state.thread_id, active_payload)
+            return cursor
+        except sqlite3.OperationalError as exc:
+            state.last_exc = exc
+            retryable = self._is_retryable(exc)
+            if retryable:
+                record_metric(
+                    "sqlite_locked_count",
+                    1,
+                    source=state.source,
+                    phase="begin_immediate",
+                )
+            self._release_failed_begin_lock(conn, state)
+            if retryable and (
+                state.is_interactive_write or state.attempt < self.max_retries
+            ):
+                holder = self._record_begin_retry(state, exc)
+                if (
+                    state.is_interactive_write
+                    and self._remaining_ms(state.deadline) <= 0
+                ):
+                    self._raise_interactive_timeout(
+                        source=state.source,
+                        timeout_ms=state.timeout_ms,
+                        lock_wait_started=state.lock_wait_started,
+                        thread_id=state.thread_id,
+                        attempt=state.attempt,
+                        phase="begin_immediate_timeout",
+                        holder=holder,
+                        metric_context=state.metric_context,
+                        options=state.options,
+                        exc=exc,
+                    )
+                self._sleep_before_retry(state.deadline)
+                return None
+            if state.is_interactive_write and retryable:
+                holder = describe_sqlite_lock_holder(self.lock_path)
+                self._raise_interactive_timeout(
+                    source=state.source,
+                    timeout_ms=state.timeout_ms,
+                    lock_wait_started=state.lock_wait_started,
+                    thread_id=state.thread_id,
+                    attempt=state.attempt,
+                    phase="begin_immediate_timeout",
+                    holder=holder,
+                    metric_context=state.metric_context,
+                    options=state.options,
+                    exc=exc,
+                )
+            record_metric(
+                "sqlite_write_lock_timeout",
+                1,
+                operation_name=state.source,
+                source=state.source,
+                total_wait_ms=round(
+                    (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                    3,
+                ),
+                timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+                sqlite_error_class=type(exc).__name__,
+                sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
+                **_lock_holder_metric_fields(None),
+            )
+            raise
+
+    def _raise_transaction_lock_exhausted(
+        self,
+        state: _WriteTransactionState,
+    ) -> None:
+        holder = describe_sqlite_lock_holder(self.lock_path)
+        if state.is_interactive_write:
+            phase = (
+                "begin_immediate_timeout"
+                if state.last_exc is not None and self._is_retryable(state.last_exc)
+                else "file_lock_timeout"
+            )
+            self._raise_interactive_timeout(
+                source=state.source,
+                timeout_ms=state.timeout_ms,
+                lock_wait_started=state.lock_wait_started,
+                thread_id=state.thread_id,
+                attempt=state.attempt,
+                phase=phase,
+                holder=holder,
+                metric_context=state.metric_context,
+                options=state.options,
+                exc=state.last_exc,
+            )
+        record_metric(
+            "sqlite_write_lock_timeout",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            total_wait_ms=round(
+                (time.perf_counter() - state.lock_wait_started) * 1000.0,
+                3,
+            ),
+            timeout_ms=round(
+                self.max_retries * self.retry_delay_sec * 1000.0,
+                3,
+            ),
+            sqlite_error_class=type(state.last_exc).__name__ if state.last_exc else "",
+            sqlite_error_message_sanitized=_sanitize_sqlite_error_message(
+                state.last_exc or "sequential write lock unavailable"
+            ),
+            **_lock_holder_metric_fields(holder),
+        )
+        if state.last_exc:
+            raise state.last_exc
+        raise sqlite3.OperationalError(
+            "Could not acquire sequential write lock for SQLite"
+        )
+
+    def _acquire_transaction_cursor(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+        before_begin: Optional[Callable[[], None]],
+    ) -> sqlite3.Cursor:
+        while True:
+            state.attempt += 1
+            if (
+                not state.is_interactive_write
+                and state.attempt > self.max_retries
+            ):
+                break
+            self._raise_if_interactive_deadline_expired(state)
+            active_payload = self._try_acquire_file_lock(state)
+            if active_payload is None:
+                continue
+            cursor = self._try_begin_immediate(
+                conn,
+                state,
+                active_payload,
+                before_begin,
+            )
+            if cursor is not None:
+                return cursor
+        self._raise_transaction_lock_exhausted(state)
+
+    def _record_transaction_lock_released(
+        self,
+        state: _WriteTransactionState,
+        *,
+        committed: bool,
+    ) -> None:
+        if not state.lock_acquired:
+            return
+        record_metric(
+            "sqlite_write_lock_released",
+            1,
+            operation_name=state.source,
+            source=state.source,
+            held_ms=(
+                None
+                if state.lock_held_started is None
+                else round(
+                    (time.perf_counter() - state.lock_held_started) * 1000.0,
+                    3,
+                )
+            ),
+            committed=bool(committed),
+            timeout_ms=state.timeout_ms,
+            **state.metric_context,
+        )
+        self.lock.release()
+
+    @contextmanager
+    def transaction(
+        self,
+        conn: sqlite3.Connection,
+        source: str = "unknown",
+        before_begin: Optional[Callable[[], None]] = None,
+        write_options: Optional[dict[str, Any]] = None,
+    ):
+        if conn is None:
+            raise DatabaseClosedError(f"SQLite connection is closed for {source}")
+        started = time.perf_counter()
+        status = "error"
+        with self.connection_guard(conn):
+            if conn.in_transaction:
+                cursor = conn.cursor()
+                try:
+                    yield cursor
+                    status = "ok"
+                    return
+                finally:
+                    record_metric(
+                        "write_duration_ms",
+                        round((time.perf_counter() - started) * 1000.0, 3),
+                        source=source,
+                        status=status,
+                        nested=True,
+                    )
+
+            state = self._make_write_transaction_state(source, write_options)
+            committed = False
+            original_busy_timeout_ms = None
+            busy_timeout_overridden = False
+
+            try:
+                (
+                    original_busy_timeout_ms,
+                    busy_timeout_overridden,
+                ) = self._override_interactive_busy_timeout(conn, state)
+                cursor = self._acquire_transaction_cursor(
+                    conn,
+                    state,
+                    before_begin,
+                )
+                yield cursor
+                conn.execute("COMMIT")
+                status = "ok"
+                committed = True
+            except Exception:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            finally:
+                self._restore_busy_timeout(
+                    conn,
+                    original_busy_timeout_ms,
+                    busy_timeout_overridden,
+                )
+                record_metric(
+                    "write_duration_ms",
+                    round((time.perf_counter() - started) * 1000.0, 3),
+                    source=source,
+                    status=status,
+                    nested=False,
+                )
+                self._record_transaction_lock_released(
+                    state,
+                    committed=committed,
+                )
+                _clear_active_sqlite_operation(state.thread_id)
+
+    def execute(self, conn: sqlite3.Connection, query: str, params: tuple = (), source: str = "unknown"):
+        with self.transaction(conn, source=source) as cursor:
+            cursor.execute(query, params)
+            return cursor
+
+
+@dataclass
+class QueuedWriteTask:
+    func: Callable[[], Any]
+    description: str
+    on_success: Optional[Callable[[Any], None]] = None
+    on_error: Optional[Callable[[Exception], None]] = None
+    retryable: bool = True
+    retries_left: int = 10
+    enqueued_at: float = field(default_factory=time.perf_counter)
+
+
+class LocalWriteQueue:
+    _SHUTDOWN_TASK_DESCRIPTION = "__shutdown__"
+
+    def __init__(self, logger: Optional[logging.Logger] = None):
+        self.logger = logger or logging.getLogger(__name__)
+        self._queue: queue.Queue[QueuedWriteTask] = queue.Queue()
+        self._accepting = True
+        self._accepting_lock = threading.Lock()
+        self._active_lock = threading.Lock()
+        self._active_count = 0
+        self._thread = threading.Thread(target=self._worker, name="SQLiteLocalWriteQueue", daemon=True)
+        self._thread.start()
+
+    def submit(
+        self,
+        func: Callable[[], Any],
+        description: str,
+        on_success: Optional[Callable[[Any], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        retryable: bool = True,
+        retries_left: int = 10,
+    ):
+        with self._accepting_lock:
+            if not self._accepting:
+                exc = RuntimeError("SQLite write queue is shutting down")
+                if on_error:
+                    on_error(exc)
+                    return
+                raise exc
+
+            self._queue.put(
+                QueuedWriteTask(
+                    func=func,
+                    description=description,
+                    on_success=on_success,
+                    on_error=on_error,
+                    retryable=retryable,
+                    retries_left=retries_left,
+                )
+            )
+
+    def shutdown(self, timeout: float = 1.0) -> bool:
+        with self._accepting_lock:
+            if not self._accepting:
+                return not self._thread.is_alive()
+            self._accepting = False
+
+        self._queue.put(
+            QueuedWriteTask(
+                func=lambda: None,
+                description=self._SHUTDOWN_TASK_DESCRIPTION,
+                retryable=False,
+            )
+        )
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            self.logger.warning(
+                "SQLite write queue did not drain within %.1fs; pending writes may still be running.",
+                timeout,
+            )
+            return False
+        return True
+
+    def is_idle(self) -> bool:
+        with self._active_lock:
+            active_count = int(self._active_count)
+        return active_count <= 0 and self._queue.empty()
+
+    def pending_count(self) -> int:
+        return int(self._queue.qsize())
+
+    def active_count(self) -> int:
+        with self._active_lock:
+            return int(self._active_count)
+
+    def is_accepting(self) -> bool:
+        with self._accepting_lock:
+            return bool(self._accepting)
+
+    def _worker(self):
+        while True:
+            task = self._queue.get()
+            active_marked = False
+            try:
+                if task.description == self._SHUTDOWN_TASK_DESCRIPTION:
+                    return
+                with self._active_lock:
+                    self._active_count += 1
+                    active_marked = True
+                record_metric(
+                    "write_queue_wait_ms",
+                    round((time.perf_counter() - task.enqueued_at) * 1000.0, 3),
+                    description=task.description,
+                )
+
+                while True:
+                    try:
+                        result = task.func()
+                        if task.on_success:
+                            task.on_success(result)
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if task.retryable and task.retries_left > 0 and self._is_retryable_operational_error(exc):
+                            task.retries_left -= 1
+                            time.sleep(random.uniform(0.10, 0.30))
+                            continue
+                        if task.on_error:
+                            task.on_error(exc)
+                        else:
+                            self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
+                        break
+                    except Exception as exc:
+                        if task.on_error:
+                            task.on_error(exc)
+                        else:
+                            self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
+                        break
+            finally:
+                if active_marked:
+                    with self._active_lock:
+                        self._active_count = max(0, self._active_count - 1)
+                self._queue.task_done()
+
+    @staticmethod
+    def _is_retryable_operational_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        if "database is locked" in message or "database table is locked" in message:
+            return True
+        if "could not acquire sequential write lock" in message:
+            return True
+        if "busy" in message and "sqlite" in message:
+            return True
+        return False

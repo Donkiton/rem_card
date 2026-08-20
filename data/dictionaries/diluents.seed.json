@@ -1,0 +1,37 @@
+{
+  "nacl_09": {
+    "latin": "Natrii chloridi 0.9%",
+    "display": "NaCl 0.9%",
+    "short": "S.",
+    "adds_volume": true,
+    "default_volumes": [10, 100, 200, 250, 500]
+  },
+  "glucose_5": {
+    "latin": "Glucosae 5%",
+    "display": "Glucose 5%",
+    "short": "S.",
+    "adds_volume": true,
+    "default_volumes": [100, 200, 250, 400, 500]
+  },
+  "glucose_10": {
+    "latin": "Glucosae 10%",
+    "display": "Glucose 10%",
+    "short": "S.",
+    "adds_volume": true,
+    "default_volumes": [100, 200, 250, 400, 500]
+  },
+  "ringer": {
+    "latin": "Solutionis Ringeri",
+    "display": "Sol. Ringeri",
+    "short": "S.",
+    "adds_volume": true,
+    "default_volumes": [250, 400, 500]
+  },
+  "sterofundin": {
+    "latin": "Solutionis Sterofundini",
+    "display": "Sterofundin",
+    "short": "S.",
+    "adds_volume": true,
+    "default_volumes": [250, 500]
+  }
+}

@@ -1,0 +1,2706 @@
+import os
+import socket
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QStackedWidget
+from PySide6.QtCore import QTimer, Qt
+from datetime import datetime, timedelta
+from rem_card.app.foreground_activity import should_defer_background_io
+from rem_card.app.logger import logger, log_execution_time
+from rem_card.app.local_metrics import record_metric
+from rem_card.app.paths import get_role_lock_path
+from rem_card.app.role_session_lock import RoleSessionLock
+from rem_card.ui.shared.async_call import AsyncCallThread
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
+from rem_card.ui.shared.orders_balance_adapter import (
+    apply_current_order_mark_overrides,
+    build_balance_orders_from_orders_widget,
+    oral_totals_from_runtime,
+)
+from rem_card.ui.shared.recovery_elapsed_time import (
+    recovery_elapsed_reference_date,
+    should_auto_update_recovery_elapsed_time,
+)
+
+ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
+ADD_PATIENT_LOCK_KEY = "add_patient_button"
+PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
+CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") == "1"
+CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
+CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
+CARD_OPEN_HYDRATE_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_OPEN_HYDRATE_DELAY_MS", "250")))
+CARD_HYDRATION_FOREGROUND_IDLE_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_CARD_HYDRATION_FOREGROUND_IDLE_SEC", "3")),
+)
+CARD_HYDRATION_MAX_DEFER_ATTEMPTS = max(
+    0,
+    int(os.environ.get("REMCARD_CARD_HYDRATION_MAX_DEFER_ATTEMPTS", "5")),
+)
+CHART_LAZY_INIT_DELAY_MS = max(0, int(os.environ.get("REMCARD_CHART_LAZY_INIT_DELAY_MS", "0")))
+W1A_STARTUP_IDLE_DELAY_MS = max(0, int(os.environ.get("REMCARD_W1A_STARTUP_IDLE_DELAY_MS", "500")))
+JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
+JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
+JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"
+PATIENT_PREVIEW_ICON_PREWARM_DELAY_MS = max(
+    0,
+    int(os.environ.get("REMCARD_PATIENT_PREVIEW_ICON_PREWARM_DELAY_MS", "1200")),
+)
+LOCAL_ORDER_FORCE_PREFIXES = (
+    "orders_add_input:",
+    "orders_edit_input:",
+    "orders_left_click:",
+    "orders_middle_click:",
+    "orders_right_click:",
+    "nurse_order_mark:",
+    "nurse_order_panel_mark:",
+)
+EMERGENCY_NOTICE_FORCE_PREFIX = "emergency_notice_save:"
+ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
+LAB_ORDER_CHANGE_ENTITIES = {"lab_orders"}
+W1A_PANEL_REFRESH_ENTITIES = {
+    "orders",
+    "administrations",
+    "lab_orders",
+    "patients",
+    "admissions",
+    "beds",
+    "patient_status_events",
+}
+VITALS_CACHE_CHANGE_ENTITIES = {
+    "patients",
+    "admissions",
+    "beds",
+    "operations",
+    "vitals",
+    "vital_settings",
+    "patient_status_events",
+    "fluids",
+    "diet_plan",
+    "oral_intake_events",
+}
+CARD_CACHE_CHANGE_ENTITIES = VITALS_CACHE_CHANGE_ENTITIES | ORDER_CHANGE_ENTITIES | {
+    "diet_templates",
+    "ivl_episodes",
+    "transfusions",
+    "clinical_events",
+    "devices",
+    "respiratory_support",
+}
+W1_BEDS_REFRESH_ENTITIES = {
+    "patients",
+    "admissions",
+    "beds",
+    "operations",
+    "vitals",
+    "vital_settings",
+    "patient_status_events",
+    "fluids",
+    "orders",
+    "diet_plan",
+    "oral_intake_events",
+}
+W1_BEDS_PARTIAL_REFRESH_ENTITIES = {
+    "vitals",
+    "vital_settings",
+    "fluids",
+    "diet_plan",
+    "oral_intake_events",
+}
+W1_REFRESH_ENTITIES = W1_BEDS_REFRESH_ENTITIES | W1A_PANEL_REFRESH_ENTITIES | {"diet_templates"}
+W1_BEDS_REFRESH_SOURCE_PREFIXES = (
+    "patient_bed",
+    "archive_",
+    "status_",
+)
+
+class NurseMainWidget(QWidget):
+    """Главный виджет медсестры с изолированным UI и исправленной навигацией."""
+    def __init__(self, patient_service, remcard_service, parent=None):
+        super().__init__(parent)
+        self.patient_service = patient_service
+        self.remcard_service = remcard_service
+        self._current_date = datetime.now()
+        self._last_sync_time = "1970-01-01 00:00:00.000"
+        self._last_change_id = 0
+        self._last_global_change_id = 0
+        self._update_scheduled = False
+        self._last_patients_sync = datetime.now() - timedelta(minutes=1)
+        self._balance_widgets_bound = False
+        self._balance_quick_oral_connected = False
+        self._balance_calculator_cls = None
+        self._admin_signals_bound = False
+        self._archive_signals_bound = False
+        self._bound_archive_widget = None
+        self._bound_admin_widget = None
+        self._orders_balance_signals_bound = False
+        self._nurse_orders_balance_signals_bound = False
+        self.report_controller = None
+        self._card_ui_prewarm_started = False
+        self._card_ui_prewarm_done = False
+        self._chart_init_pending = False
+        self._last_applied_card_snapshot_signature = None
+        self._last_applied_chart_signature = None
+        self._journal_prewarm_started = False
+        self._journal_prewarm_done = False
+        self._initial_beds_refresh_requested = False
+        self._initial_w1a_refresh_requested = False
+        self._selection_mode = "beds"
+        self._settings_return_mode = None
+        self._add_patient_lock = self._build_add_patient_lock()
+        self._add_patient_lock_held = False
+        self._add_patient_locked_by_other = False
+        self._monitor_connected = False
+        self._snapshot_worker = None
+        self._snapshot_pending = None
+        self._snapshot_request_id = 0
+        self._card_snapshot_cache = None
+        self._balance_runtime_cache = None
+        self._is_closing = False
+        self.diet_intake_widget = None
+        self._full_layout_created = False
+        self._full_layout_static_signals_bound = False
+        self._patient_open_generation = 0
+        
+        self.init_ui()
+        self._balance_update_delay_ms = 120
+        self._balance_update_timer = QTimer(self)
+        self._balance_update_timer.setSingleShot(True)
+        self._balance_update_timer.timeout.connect(self._flush_scheduled_balance_update)
+        self._add_patient_lock_watch_timer = None
+        QTimer.singleShot(0, self._refresh_add_patient_button_lock_state)
+        if CARD_UI_PREWARM_ENABLED:
+            QTimer.singleShot(CARD_UI_PREWARM_DELAY_MS, self._schedule_card_ui_prewarm)
+        if JOURNAL_PREWARM_ENABLED:
+            QTimer.singleShot(JOURNAL_PREWARM_DELAY_MS, self._schedule_journal_prewarm)
+        QTimer.singleShot(
+            PATIENT_PREVIEW_ICON_PREWARM_DELAY_MS,
+            self._preload_patient_preview_icons,
+        )
+
+    def _preload_patient_preview_icons(self) -> None:
+        if self._is_closing:
+            return
+        from rem_card.ui.patient_bed_management.side_patient_card import (
+            preload_patient_preview_icon_pixmaps,
+        )
+
+        preload_patient_preview_icon_pixmaps()
+
+    def _build_add_patient_lock(self) -> RoleSessionLock:
+        from rem_card.app.runtime_paths import get_dev_local_operation_lock_path, is_compiled
+
+        owner_id = f"{socket.gethostname()}:{os.getpid()}:nurse_add_patient"
+        lock_path = (
+            get_role_lock_path(ADD_PATIENT_LOCK_KEY)
+            if is_compiled()
+            else get_dev_local_operation_lock_path(ADD_PATIENT_LOCK_KEY)
+        )
+        return RoleSessionLock(
+            lock_path=lock_path,
+            role=ADD_PATIENT_LOCK_KEY,
+            owner_id=owner_id,
+            owner_role="nurse",
+            stale_timeout_sec=60.0,
+            heartbeat_sec=8.0,
+            logger=logger,
+        )
+
+    def _acquire_add_patient_lock(self) -> bool:
+        if self._add_patient_lock_held:
+            return True
+        if not self._add_patient_lock:
+            return True
+        acquired = self._add_patient_lock.acquire()
+        self._add_patient_lock_held = bool(acquired)
+        return self._add_patient_lock_held
+
+    def _release_add_patient_lock(self):
+        if not self._add_patient_lock_held or not self._add_patient_lock:
+            return
+        try:
+            self._add_patient_lock.release()
+        except Exception as exc:
+            logger.warning("Failed to release add-patient lock (nurse): %s", exc)
+        finally:
+            self._add_patient_lock_held = False
+
+    def _set_add_patient_button_hint(self, text: str):
+        if hasattr(self, "sector8_panel") and hasattr(self.sector8_panel, "btn_add_patient"):
+            # Tooltip intentionally disabled for this button.
+            self.sector8_panel.btn_add_patient.setToolTip("")
+
+    def _force_beds_refresh_after_journal_exit(self):
+        """Локально обновляет список коек сразу после выхода из управления пациентами."""
+        data_service = self._get_data_service()
+        if data_service:
+            try:
+                data_service.request_immediate_refresh(
+                    force_emit=True,
+                    source="archive_journal_exit:nurse",
+                )
+            except Exception as exc:
+                logger.warning("Failed to wake monitor after journal exit (nurse): %s", exc)
+
+        def _refresh():
+            try:
+                if (
+                    hasattr(self, "layout_manager")
+                    and hasattr(self.layout_manager, "beds_selection_widget")
+                    and self.layout_manager.beds_selection_widget
+                ):
+                    self.layout_manager.beds_selection_widget.refresh()
+            except Exception as exc:
+                logger.warning("Failed to refresh beds list after journal exit (nurse): %s", exc)
+
+        QTimer.singleShot(0, _refresh)
+
+    def _resolve_selection_mode(self) -> str:
+        """Best-effort определение активного режима по реальному индексу стека."""
+        mode = str(self._selection_mode or "")
+        layout = getattr(self, "layout_manager", None)
+        if not layout or not hasattr(layout, "selection_stack"):
+            return mode
+
+        stack = layout.selection_stack
+        current_idx = stack.currentIndex()
+
+        journal_idx = stack.indexOf(getattr(layout, "journal_view", None)) if hasattr(layout, "journal_view") else -1
+        beds_idx = stack.indexOf(getattr(layout, "beds_view", None)) if hasattr(layout, "beds_view") else -1
+        card_idx = stack.indexOf(getattr(layout, "right_area", None)) if hasattr(layout, "right_area") else -1
+        archive_idx = stack.indexOf(getattr(layout, "archive_view", None)) if hasattr(layout, "archive_view") else -1
+        admin_idx = stack.indexOf(getattr(layout, "admin_view", None)) if hasattr(layout, "admin_view") else -1
+
+        if current_idx == journal_idx and journal_idx != -1:
+            return PATIENT_BED_MANAGEMENT_MODE
+        if current_idx == beds_idx and beds_idx != -1:
+            return "beds"
+        if current_idx == card_idx and card_idx != -1:
+            return "card"
+        if current_idx == archive_idx and archive_idx != -1:
+            return "archive"
+        if current_idx == admin_idx and admin_idx != -1:
+            return "admin"
+
+        return str(getattr(layout, "current_mode", mode) or mode)
+
+    def _apply_add_patient_button_state(self):
+        if not hasattr(self, "sector8_panel") or not hasattr(self.sector8_panel, "set_add_patient_enabled"):
+            return
+        is_beds_mode = self._selection_mode == "beds"
+        enabled = is_beds_mode
+        self.sector8_panel.set_add_patient_enabled(enabled)
+
+        if is_beds_mode:
+            self._set_add_patient_button_hint("Открыть управление пациентами")
+        else:
+            self._set_add_patient_button_hint("Кнопка доступна только в режиме списка коек")
+
+    def _refresh_add_patient_button_lock_state(self):
+        resolved_mode = self._resolve_selection_mode()
+        if resolved_mode:
+            self._selection_mode = resolved_mode
+
+        # Fail-safe: если уже вышли из управления пациентами, lock должен быть снят
+        # даже если сигнал смены режима по какой-то причине не пришел.
+        if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE and self._add_patient_lock_held:
+            self._release_add_patient_lock()
+
+        self._add_patient_locked_by_other = False
+        self._apply_add_patient_button_state()
+
+    def _get_data_service(self):
+        return getattr(self.remcard_service, "data_service", None)
+
+    def _get_read_coordinator(self):
+        return getattr(self.remcard_service, "read_coordinator", None)
+
+    def _get_cached_patient_vitals_snapshot(self, admission_id, shift_date):
+        coordinator = self._get_read_coordinator()
+        if coordinator is None or not admission_id or shift_date is None:
+            return None
+        try:
+            context = coordinator.make_patient_snapshot_context(
+                source_db="live",
+                admission_id=int(admission_id),
+                shift_date=shift_date,
+                role="nurse",
+                mode="live",
+                variant="vitals",
+            )
+            if hasattr(coordinator, "get_cached_vitals"):
+                return coordinator.get_cached_vitals(context.cache_key())
+            if hasattr(coordinator, "get_current_cached_vitals"):
+                return coordinator.get_current_cached_vitals(context.cache_key())
+        except Exception as exc:
+            logger.debug("Nurse vitals cache lookup failed: %s", exc)
+            return None
+
+    def _get_cached_patient_card_snapshot(self, admission_id, shift_date):
+        coordinator = self._get_read_coordinator()
+        if coordinator is None or not admission_id or shift_date is None:
+            return None
+        try:
+            context = coordinator.make_patient_snapshot_context(
+                source_db="live",
+                admission_id=int(admission_id),
+                shift_date=shift_date,
+                role="nurse",
+                mode="live",
+                variant="card_committed",
+            )
+            if hasattr(coordinator, "get_cached_card"):
+                return coordinator.get_cached_card(context.cache_key())
+        except Exception as exc:
+            logger.debug("Nurse card cache lookup failed: %s", exc)
+        return None
+
+    def _apply_patient_open_cache(self, admission_id, shift_date, snapshot):
+        if not snapshot:
+            return False
+        load_scope = (
+            "patient_open_card"
+            if ("balance_runtime" in snapshot or "fluids" in snapshot)
+            else "patient_open_vitals"
+        )
+        request = {
+            "admission_id": int(admission_id),
+            "shift_date": shift_date,
+            "ensure_initial_status": False,
+            "load_scope": load_scope,
+            "context_key": self._current_snapshot_context_key(
+                admission_id=admission_id,
+                shift_date=shift_date,
+                load_scope=load_scope,
+            ),
+            "snapshot": snapshot,
+            "from_cache": True,
+        }
+        self._apply_card_snapshot(request)
+        logger.info(
+            "NurseMainWidget applied cached vitals snapshot admission_id=%s version=%s",
+            admission_id,
+            snapshot.get("version"),
+        )
+        return True
+
+    @staticmethod
+    def _card_snapshot_apply_signature(snapshot: dict):
+        if not snapshot:
+            return None
+        content_hash = snapshot.get("content_hash")
+        cache_key = snapshot.get("cache_key")
+        if cache_key is not None and content_hash:
+            try:
+                version = int(snapshot.get("version") or snapshot.get("change_id") or 0)
+            except Exception:
+                version = 0
+            return (
+                cache_key,
+                str(snapshot.get("scope") or ""),
+                version,
+                str(content_hash),
+            )
+        dedup_signature = snapshot.get("dedup_signature")
+        if dedup_signature is not None:
+            return ("dedup", tuple(dedup_signature))
+        return None
+
+    def _chart_matches_context(self, admission_id, start_dt):
+        chart = getattr(self, "chart", None)
+        if chart is None:
+            return False
+        return (
+            int(getattr(chart, "admission_id", 0) or 0) == int(admission_id or 0)
+            and getattr(chart, "start_time", None) == start_dt
+            and bool(getattr(chart, "vitals_data", None))
+        )
+
+    def _chart_snapshot_signature(self, snapshot: dict):
+        chart = getattr(self, "chart", None)
+        if not snapshot or chart is None:
+            return None
+        chart_cls = chart.__class__
+        normalize_dt = getattr(chart_cls, "_normalize_key_dt", None)
+        build_vitals_key = getattr(chart_cls, "_build_vitals_key", None)
+        build_intervals_key = getattr(chart_cls, "_build_intervals_key", None)
+        if not (normalize_dt and build_vitals_key and build_intervals_key):
+            return None
+        runtime = snapshot.get("balance_runtime") or {}
+        active_intervals = snapshot.get("chart_active_intervals") or runtime.get("active_intervals")
+        try:
+            admission_id = getattr(getattr(self, "layout_manager", None), "current_admission_id", None)
+            return (
+                int(snapshot.get("admission_id") or admission_id or 0),
+                normalize_dt(snapshot.get("start_dt")),
+                build_vitals_key(snapshot.get("vitals_extended") or []),
+                build_intervals_key(active_intervals or []),
+            )
+        except Exception as exc:
+            logger.debug("Nurse chart snapshot signature failed: %s", exc)
+            return None
+
+    def _ensure_diet_widget(self):
+        if getattr(self, "diet_intake_widget", None) is not None:
+            return self.diet_intake_widget
+        if not hasattr(self, "layout_manager") or not hasattr(self.layout_manager, "sector_5"):
+            return None
+        from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
+
+        self.diet_intake_widget = DietIntakeWidget(self.remcard_service, role="nurse", show_prn_input=False)
+        self.diet_intake_widget.data_changed.connect(self._schedule_balance_update)
+        self.layout_manager.sector_5.set_content(self.diet_intake_widget)
+        return self.diet_intake_widget
+
+    def _configure_balance_quick_oral_input(self):
+        sector_2b_g = getattr(getattr(self, "layout_manager", None), "sector_2b_g", None)
+        if sector_2b_g is None or not hasattr(sector_2b_g, "configure_quick_oral_intake"):
+            return
+
+        admission_id = getattr(self.layout_manager, "current_admission_id", None)
+        sector_2b_g.configure_quick_oral_intake(
+            service=self.remcard_service,
+            admission_id=admission_id,
+            shift_date=self._current_date,
+            visible=bool(admission_id),
+        )
+        if not self._balance_quick_oral_connected and hasattr(sector_2b_g, "oral_intake_changed"):
+            sector_2b_g.oral_intake_changed.connect(self._on_balance_quick_oral_changed)
+            self._balance_quick_oral_connected = True
+
+    def _on_balance_quick_oral_changed(self):
+        diet_widget = self._ensure_diet_widget()
+        if diet_widget:
+            diet_widget.refresh_data()
+        self._schedule_balance_update()
+
+    def _current_snapshot_context_key(
+        self,
+        *,
+        admission_id=None,
+        shift_date=None,
+        load_scope: str = "full",
+    ):
+        target_admission_id = int(
+            admission_id
+            if admission_id is not None
+            else (getattr(self.layout_manager, "current_admission_id", None) or 0)
+        )
+        target_shift_date = shift_date if shift_date is not None else self._current_date
+        coordinator = self._get_read_coordinator()
+        if coordinator is not None and target_shift_date is not None:
+            try:
+                context = coordinator.make_patient_snapshot_context(
+                    source_db="live",
+                    admission_id=target_admission_id,
+                    shift_date=target_shift_date,
+                    role="nurse",
+                    mode="live",
+                    variant=str(load_scope or "full"),
+                )
+                context_hash = context.hash()
+            except Exception:
+                context_hash = "unavailable"
+        else:
+            context_hash = "unavailable"
+        return (
+            target_admission_id,
+            target_shift_date.isoformat() if target_shift_date else None,
+            "nurse",
+            "live",
+            str(load_scope or "full"),
+            context_hash,
+        )
+
+    def _ensure_monitor_subscription(self):
+        data_service = self._get_data_service()
+        if not data_service or self._monitor_connected:
+            return
+        data_service.changes_detected.connect(self._on_data_changes, Qt.QueuedConnection)
+        self._monitor_connected = True
+
+    def _disconnect_monitor(self):
+        data_service = self._get_data_service()
+        if not data_service or not self._monitor_connected:
+            return
+        try:
+            data_service.changes_detected.disconnect(self._on_data_changes)
+        except Exception:
+            pass
+        self._monitor_connected = False
+
+    def _disconnect_snapshot_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._apply_card_snapshot),
+            (worker.failed, self._on_card_snapshot_failed),
+            (worker.finished, self._on_card_snapshot_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def _shutdown_snapshot_worker(self):
+        self._snapshot_pending = None
+        self._snapshot_request_id += 1
+        worker = self._snapshot_worker
+        self._snapshot_worker = None
+        if worker is None:
+            return
+        self._disconnect_snapshot_worker(worker)
+        if worker.isRunning():
+            worker.quit()
+
+    def _request_pending_card_snapshot(self):
+        if self._is_closing:
+            self._snapshot_pending = None
+            return
+        pending = self._snapshot_pending
+        self._snapshot_pending = None
+        if not pending:
+            return
+        self._request_card_snapshot(
+            ensure_initial_status=pending["ensure_initial_status"],
+            load_scope=pending.get("load_scope", "full"),
+        )
+
+    def _request_card_snapshot(
+        self,
+        *,
+        ensure_initial_status: bool = False,
+        force_emit: bool = False,
+        load_scope: str = "full",
+    ):
+        if self._is_closing:
+            return
+        adm_id = getattr(self.layout_manager, "current_admission_id", None)
+        if not adm_id:
+            return
+        ensure_initial_status = bool(ensure_initial_status) and self._should_ensure_initial_status_for_date(
+            self._current_date
+        )
+
+        if self._snapshot_worker is not None:
+            self._snapshot_pending = {
+                "ensure_initial_status": ensure_initial_status,
+                "load_scope": str(load_scope or "full"),
+            }
+            return
+
+        self._snapshot_request_id += 1
+        request = {
+            "request_id": self._snapshot_request_id,
+            "admission_id": int(adm_id),
+            "shift_date": self._current_date,
+            "ensure_initial_status": ensure_initial_status,
+            "load_scope": str(load_scope or "full"),
+            "context_key": self._current_snapshot_context_key(load_scope=load_scope),
+        }
+
+        worker = AsyncCallThread(self._build_card_snapshot_job, request)
+        self._snapshot_worker = worker
+        worker.succeeded.connect(self._apply_card_snapshot)
+        worker.failed.connect(self._on_card_snapshot_failed)
+        worker.finished.connect(self._on_card_snapshot_finished)
+        message = (
+            "Загрузка карты пациента..."
+            if str(load_scope or "").startswith("patient_open")
+            else "Обновление данных карты..."
+        )
+        show_app_loading(
+            self,
+            message,
+            key=f"nurse-card-snapshot:{id(self)}",
+            auto_hide_ms=20000,
+        )
+        worker.start()
+
+        data_service = self._get_data_service()
+        if data_service:
+            data_service.request_immediate_refresh(
+                force_emit=force_emit,
+                source="card_snapshot:nurse",
+            )
+
+    def _schedule_card_hydration_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        ensure_initial_status: bool,
+    ):
+        context_key = self._current_snapshot_context_key(
+            admission_id=admission_id,
+            shift_date=shift_date,
+            load_scope="patient_open_card",
+        )
+        QTimer.singleShot(
+            CARD_OPEN_HYDRATE_DELAY_MS,
+            lambda: self._request_card_hydration_if_current(
+                admission_id,
+                shift_date,
+                context_key,
+                ensure_initial_status=ensure_initial_status,
+            ),
+        )
+
+    def _request_card_hydration_if_current(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        context_key,
+        *,
+        ensure_initial_status: bool,
+        defer_attempts: int = 0,
+    ):
+        current_admission_id = getattr(self.layout_manager, "current_admission_id", None)
+        if int(admission_id or 0) != int(current_admission_id or 0):
+            return
+        if shift_date != self._current_date:
+            return
+        if context_key != self._current_snapshot_context_key(load_scope="patient_open_card"):
+            return
+
+        should_defer, reason, age_sec = should_defer_background_io(
+            idle_window_sec=CARD_HYDRATION_FOREGROUND_IDLE_SEC,
+            names={"orders", "orders_show"},
+        )
+        active_foreground = str(reason or "").startswith("active:")
+        if should_defer and (active_foreground or defer_attempts < CARD_HYDRATION_MAX_DEFER_ATTEMPTS):
+            delay_ms = max(1000, CARD_OPEN_HYDRATE_DELAY_MS)
+            logger.info(
+                "[NURSE_VIEW] card_hydration_deferred_for_foreground admission_id=%s reason=%s age_sec=%s attempt=%s delay_ms=%s",
+                admission_id,
+                reason,
+                None if age_sec is None else round(age_sec, 3),
+                defer_attempts + 1,
+                delay_ms,
+            )
+            record_metric(
+                "card_hydration_deferred_for_foreground",
+                1,
+                admission_id=admission_id,
+                reason=reason,
+                age_sec=None if age_sec is None else round(age_sec, 3),
+                attempt=defer_attempts + 1,
+                source="refresh",
+            )
+            QTimer.singleShot(
+                delay_ms,
+                lambda: self._request_card_hydration_if_current(
+                    admission_id,
+                    shift_date,
+                    context_key,
+                    ensure_initial_status=ensure_initial_status,
+                    defer_attempts=defer_attempts + 1,
+                ),
+            )
+            return
+
+        self._request_card_snapshot(
+            ensure_initial_status=ensure_initial_status,
+            load_scope="patient_open_card",
+        )
+
+    def _build_card_snapshot_job(self, request: dict):
+        load_scope = str(request.get("load_scope") or "full")
+        if load_scope == "patient_open_vitals":
+            coordinator = self._get_read_coordinator()
+            if coordinator is not None:
+                snapshot = coordinator.load_patient_vitals_snapshot(
+                    request["admission_id"],
+                    request["shift_date"],
+                    role="nurse",
+                    mode="live",
+                    source_db="live",
+                    ensure_initial_status=request["ensure_initial_status"],
+                    force_refresh=False,
+                )
+            else:
+                logger.warning(
+                    "NurseMainWidget: ReadCoordinator unavailable, using build_full_card_snapshot for patient open"
+                )
+                snapshot = self.remcard_service.build_full_card_snapshot(
+                    request["admission_id"],
+                    request["shift_date"],
+                    include_change_cursor=True,
+                    include_balance=True,
+                    balance_only_committed=True,
+                    ensure_initial_status=request["ensure_initial_status"],
+                )
+        elif load_scope in {"patient_open_card", "full"}:
+            coordinator = self._get_read_coordinator()
+            if coordinator is not None and hasattr(coordinator, "load_patient_card_snapshot"):
+                snapshot = coordinator.load_patient_card_snapshot(
+                    request["admission_id"],
+                    request["shift_date"],
+                    role="nurse",
+                    mode="live",
+                    source_db="live",
+                    ensure_initial_status=request["ensure_initial_status"],
+                    balance_only_committed=True,
+                    force_refresh=False,
+                )
+            else:
+                snapshot = self.remcard_service.build_full_card_snapshot(
+                    request["admission_id"],
+                    request["shift_date"],
+                    include_change_cursor=True,
+                    include_balance=True,
+                    balance_only_committed=True,
+                    ensure_initial_status=request["ensure_initial_status"],
+                )
+        else:
+            snapshot = self.remcard_service.build_full_card_snapshot(
+                request["admission_id"],
+                request["shift_date"],
+                include_change_cursor=True,
+                include_balance=True,
+                balance_only_committed=True,
+                ensure_initial_status=request["ensure_initial_status"],
+            )
+        request["snapshot"] = snapshot
+        return request
+
+    def _apply_card_snapshot(self, request: dict):
+        if self._is_closing:
+            return
+        request_id = request.get("request_id")
+        if request_id is None and not request.get("from_cache"):
+            logger.info(
+                "NurseMainWidget discarded snapshot without request_id current_request_id=%s",
+                self._snapshot_request_id,
+            )
+            return
+        if request_id is not None and request_id != self._snapshot_request_id:
+            logger.info(
+                "NurseMainWidget discarded stale snapshot request_id=%s current_request_id=%s",
+                request_id,
+                self._snapshot_request_id,
+            )
+            return
+        adm_id = getattr(self.layout_manager, "current_admission_id", None)
+        if int(request["admission_id"]) != int(adm_id or 0) or request["shift_date"] != self._current_date:
+            return
+        if request.get("context_key") != self._current_snapshot_context_key(
+            load_scope=request.get("load_scope", "full")
+        ):
+            logger.info(
+                "NurseMainWidget discarded stale snapshot admission_id=%s load_scope=%s request_context=%s current_context=%s",
+                request.get("admission_id"),
+                request.get("load_scope"),
+                request.get("context_key"),
+                self._current_snapshot_context_key(load_scope=request.get("load_scope", "full")),
+            )
+            return
+
+        snapshot = dict(request.get("snapshot") or {})
+        previous_snapshot = self._card_snapshot_cache or {}
+        snapshot_signature = self._card_snapshot_apply_signature(snapshot)
+        if (
+            snapshot_signature is not None
+            and snapshot_signature == self._last_applied_card_snapshot_signature
+        ):
+            self._card_snapshot_cache = snapshot
+            self._balance_runtime_cache = snapshot.get("balance_runtime")
+            self._last_change_id = max(
+                int(self._last_change_id or 0),
+                int(snapshot.get("change_id") or 0),
+            )
+            logger.info(
+                "NurseMainWidget skipped unchanged card snapshot admission_id=%s scope=%s version=%s",
+                request.get("admission_id"),
+                snapshot.get("scope"),
+                snapshot.get("version"),
+            )
+            return
+        if (
+            previous_snapshot
+            and not request.get("from_cache")
+            and previous_snapshot.get("cache_key") == snapshot.get("cache_key")
+            and int(previous_snapshot.get("version") or 0) == int(snapshot.get("version") or 0)
+            and previous_snapshot.get("scope") == snapshot.get("scope")
+            and previous_snapshot.get("load_trace_id") == snapshot.get("load_trace_id")
+        ):
+            logger.info(
+                "NurseMainWidget skipped unchanged cached snapshot admission_id=%s scope=%s version=%s",
+                request.get("admission_id"),
+                snapshot.get("scope"),
+                snapshot.get("version"),
+            )
+            return
+        self._card_snapshot_cache = snapshot
+        self._last_applied_card_snapshot_signature = snapshot_signature
+        self._balance_runtime_cache = snapshot.get("balance_runtime")
+        effective_bounds = snapshot.get("effective_bounds")
+
+        self._ensure_card_widgets_initialized()
+        self._bind_balance_widgets_if_ready()
+
+        if hasattr(self, "chart"):
+            self._update_chart_from_snapshot(snapshot)
+        else:
+            self._schedule_chart_init()
+
+        if hasattr(self, "vitals_input") and effective_bounds:
+            self.vitals_input.admission_id = adm_id
+            self.vitals_input.shift_date = self._current_date
+            self.vitals_input.apply_context_snapshot(
+                patient=snapshot.get("patient"),
+                settings=snapshot.get("settings") or {},
+                effective_bounds=effective_bounds,
+                has_vitals=bool(snapshot.get("has_vitals")),
+                vitals=snapshot.get("vitals") or [],
+            )
+
+        if hasattr(self, "balance_controller") and effective_bounds and snapshot.get("fluids") is not None:
+            self.balance_controller.apply_loaded_data(
+                snapshot.get("fluids") or [],
+                effective_bounds,
+            )
+
+        self.refresh_data()
+        self._last_change_id = max(
+            int(self._last_change_id or 0),
+            int(snapshot.get("change_id") or 0),
+        )
+
+    def _on_card_snapshot_failed(self, exc: Exception):
+        if self._is_closing:
+            return
+        exc_info = (type(exc), exc, exc.__traceback__) if isinstance(exc, BaseException) else None
+        logger.error("NurseMainWidget snapshot load failed: %s", exc, exc_info=exc_info)
+
+    def _on_card_snapshot_finished(self):
+        worker = self.sender()
+        if self._snapshot_worker is worker:
+            self._snapshot_worker = None
+        elif self._snapshot_worker is not None:
+            return
+        if self._is_closing:
+            self._snapshot_pending = None
+            hide_app_loading(self, f"nurse-card-snapshot:{id(self)}", delay_ms=350)
+            return
+        if self._snapshot_pending:
+            QTimer.singleShot(0, self._request_pending_card_snapshot)
+            return
+        hide_app_loading(self, f"nurse-card-snapshot:{id(self)}", delay_ms=350)
+
+    def _reset_balance_view_state(self):
+        if hasattr(self, "balance_controller") and self.balance_controller:
+            self.balance_controller.hourly_cache = self.balance_controller._build_empty_hourly_cache()
+            self.balance_controller._effective_bounds_cache = None
+            if getattr(self.balance_controller, "quick_input", None):
+                quick_input = self.balance_controller.quick_input
+                if hasattr(quick_input, "set_loading_state"):
+                    quick_input.set_loading_state()
+                else:
+                    quick_input.update_quick_values({})
+
+        sector_2b_g = getattr(self.layout_manager, "sector_2b_g", None)
+        if sector_2b_g is not None:
+            if hasattr(sector_2b_g, "set_loading_state"):
+                sector_2b_g.set_loading_state()
+            else:
+                sector_2b_g.update_values()
+        sector_2b_v = getattr(self.layout_manager, "sector_2b_v", None)
+        if sector_2b_v is not None:
+            if hasattr(sector_2b_v, "set_loading_state"):
+                sector_2b_v.set_loading_state()
+            else:
+                sector_2b_v.update_balance(0, 0, 0, 0)
+                sector_2b_v.update_quick_values({})
+        sector_3a = getattr(self.layout_manager, "sector_3a", None)
+        if sector_3a is not None:
+            if hasattr(sector_3a, "set_loading_state"):
+                sector_3a.set_loading_state()
+            else:
+                sector_3a.update_values(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        sector_3b = getattr(self.layout_manager, "sector_3b", None)
+        if sector_3b is not None:
+            if hasattr(sector_3b, "set_loading_state"):
+                sector_3b.set_loading_state()
+            else:
+                sector_3b.update_values(0, {})
+        sector_4a = getattr(self.layout_manager, "sector_4a", None)
+        if sector_4a is not None:
+            if hasattr(sector_4a, "set_loading_state"):
+                sector_4a.set_loading_state()
+            else:
+                sector_4a.update_balance(0, 0, 0, 0)
+
+    def _payload_is_relevant(self, payload: dict) -> bool:
+        adm_id = getattr(self.layout_manager, "current_admission_id", None)
+        if not adm_id:
+            return False
+        if payload.get("forced"):
+            return True
+        relevant_entities = {
+            "patients",
+            "admissions",
+            "beds",
+            "operations",
+            "diet_templates",
+            "patient_status_events",
+        } | LAB_ORDER_CHANGE_ENTITIES
+        orders_entities = {"orders", "administrations", "lab_orders"}
+        for change in payload.get("changes") or []:
+            admission_id = change.get("admission_id")
+            entity_name = str(change.get("entity_name") or "")
+            if admission_id is not None and int(admission_id) == int(adm_id):
+                return True
+            if entity_name in orders_entities and admission_id is None:
+                return True
+            if entity_name in relevant_entities:
+                return True
+        changed_entities = {
+            str(entity)
+            for entity in (payload.get("changed_entities") or [])
+            if entity is not None
+        }
+        if changed_entities.intersection(relevant_entities):
+            return True
+        if changed_entities.intersection(orders_entities | {"diet_templates"}) and not payload.get("changes"):
+            return True
+        return False
+
+    @staticmethod
+    def _payload_force_sources(payload: dict) -> list[str]:
+        sources: list[str] = []
+        raw_many = payload.get("force_sources") or []
+        if isinstance(raw_many, (list, tuple, set)):
+            sources.extend(str(item) for item in raw_many if item)
+        raw_one = payload.get("force_source")
+        if raw_one:
+            sources.append(str(raw_one))
+        return list(dict.fromkeys(sources))
+
+    @staticmethod
+    def _admission_ids_from_payload(payload: dict) -> set[int]:
+        ids = {
+            int(admission_id)
+            for admission_id in (payload.get("admission_ids") or [])
+            if admission_id is not None
+        }
+        for change in payload.get("changes") or []:
+            admission_id = change.get("admission_id")
+            if admission_id is not None:
+                ids.add(int(admission_id))
+        return ids
+
+    def _refresh_beds_for_payload(
+        self,
+        payload: dict,
+        *,
+        changed_entities: set[str],
+        force_sources: list[str],
+        full_refresh_required: bool,
+    ):
+        source_requires_full = any(
+            source.startswith(prefix)
+            for source in force_sources
+            for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
+        )
+        beds_widget = getattr(self.layout_manager, "beds_selection_widget", None)
+        admission_ids = self._admission_ids_from_payload(payload)
+        if (
+            not full_refresh_required
+            and not payload.get("forced")
+            and not source_requires_full
+            and admission_ids
+            and changed_entities
+            and set(changed_entities).issubset(W1_BEDS_PARTIAL_REFRESH_ENTITIES)
+            and beds_widget
+            and hasattr(beds_widget, "refresh_admissions")
+        ):
+            beds_widget.refresh_admissions(admission_ids)
+            return
+        if beds_widget:
+            beds_widget.refresh()
+
+    def _is_local_orders_force_payload(self, payload: dict, changed_entities: set[str]) -> bool:
+        if not payload.get("forced"):
+            return False
+        sources = self._payload_force_sources(payload)
+        if not sources:
+            return False
+        if changed_entities and not set(changed_entities).issubset(ORDER_CHANGE_ENTITIES):
+            return False
+        return any(
+            source.startswith(prefix)
+            for source in sources
+            for prefix in LOCAL_ORDER_FORCE_PREFIXES
+        )
+
+    def _is_local_emergency_notice_payload(self, payload: dict, changed_entities: set[str]) -> bool:
+        if not payload.get("forced"):
+            return False
+        sources = self._payload_force_sources(payload)
+        if not any(source.startswith(EMERGENCY_NOTICE_FORCE_PREFIX) for source in sources):
+            return False
+        return set(changed_entities).issubset({"admissions"})
+
+    def _invalidate_vitals_cache_from_payload(self, payload: dict, changed_entities: set[str]) -> None:
+        force_sources = self._payload_force_sources(payload)
+        vitals_entities = changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES)
+        card_entities = changed_entities.intersection(CARD_CACHE_CHANGE_ENTITIES)
+        invalidate_vitals = bool(vitals_entities)
+        invalidate_card = bool(card_entities)
+        if payload.get("forced") and force_sources:
+            if self._is_local_orders_force_payload(payload, changed_entities):
+                invalidate_card = True
+            elif self._is_local_emergency_notice_payload(payload, changed_entities):
+                invalidate_card = True
+            else:
+                invalidate_vitals = True
+                invalidate_card = True
+        if not (invalidate_vitals or invalidate_card):
+            return
+        coordinator = self._get_read_coordinator()
+        if coordinator is None:
+            return
+
+        admission_ids = {
+            int(admission_id)
+            for admission_id in (payload.get("admission_ids") or [])
+            if admission_id is not None
+        }
+        for change in payload.get("changes") or []:
+            entity_name = str(change.get("entity_name") or "")
+            admission_id = change.get("admission_id")
+            if (
+                entity_name in (VITALS_CACHE_CHANGE_ENTITIES | CARD_CACHE_CHANGE_ENTITIES)
+                and admission_id is not None
+            ):
+                admission_ids.add(int(admission_id))
+
+        if not admission_ids and (invalidate_vitals or invalidate_card):
+            current_admission_id = getattr(self.layout_manager, "current_admission_id", None)
+            if current_admission_id:
+                admission_ids.add(int(current_admission_id))
+
+        reason = f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}"
+        for admission_id in admission_ids:
+            vitals_removed = 0
+            card_removed = 0
+            if invalidate_vitals and hasattr(coordinator, "invalidate_patient_vitals_for_admission"):
+                vitals_removed = coordinator.invalidate_patient_vitals_for_admission(
+                    admission_id,
+                    reason=reason,
+                )
+            if invalidate_card and hasattr(coordinator, "invalidate_patient_card_for_admission"):
+                card_removed = coordinator.invalidate_patient_card_for_admission(
+                    admission_id,
+                    reason=reason,
+                )
+            logger.info(
+                "NurseMainWidget invalidated patient snapshot cache admission_id=%s vitals_entries=%s card_entries=%s reason=%s",
+                admission_id,
+                vitals_removed,
+                card_removed,
+                reason,
+            )
+
+    def _refresh_balance_from_db(self) -> None:
+        try:
+            self._ensure_card_widgets_initialized()
+            self._bind_balance_widgets_if_ready()
+            adm_id = getattr(self.layout_manager, "current_admission_id", None)
+            if not adm_id:
+                return
+            snapshot = None
+            coordinator = self._get_read_coordinator()
+            if coordinator is not None and hasattr(coordinator, "load_balance_snapshot"):
+                snapshot = coordinator.load_balance_snapshot(
+                    adm_id,
+                    self._current_date,
+                    role="nurse",
+                    mode="live",
+                    source_db="live",
+                    balance_only_committed=True,
+                    force_refresh=True,
+                )
+            elif hasattr(self.remcard_service, "build_balance_snapshot"):
+                snapshot = self.remcard_service.build_balance_snapshot(
+                    adm_id,
+                    self._current_date,
+                    include_change_cursor=True,
+                    balance_only_committed=True,
+                )
+
+            if snapshot:
+                cached_snapshot = dict(self._card_snapshot_cache or {})
+                for key in ("effective_bounds", "fluids", "balance_runtime", "balance_calc", "change_id", "version"):
+                    if key in snapshot:
+                        cached_snapshot[key] = snapshot.get(key)
+                self._card_snapshot_cache = cached_snapshot
+                if snapshot.get("balance_runtime") is not None:
+                    self._balance_runtime_cache = snapshot.get("balance_runtime")
+                if (
+                    hasattr(self, "balance_controller")
+                    and snapshot.get("effective_bounds")
+                    and snapshot.get("fluids") is not None
+                ):
+                    self.balance_controller.apply_loaded_data(
+                        snapshot.get("fluids") or [],
+                        snapshot.get("effective_bounds"),
+                    )
+                else:
+                    self._update_balance_calculations()
+                return
+
+            if hasattr(self, "balance_controller"):
+                self.balance_controller.refresh()
+            else:
+                self._update_balance_calculations()
+        except Exception:
+            logger.exception("Nurse balance partial refresh failed")
+
+    def _refresh_status_from_db(self) -> None:
+        try:
+            if hasattr(self.layout_manager, "set_current_status_dto"):
+                self.layout_manager.set_current_status_dto(None)
+            if hasattr(self.layout_manager, "refresh_current_status"):
+                self.layout_manager.refresh_current_status()
+            events_sector = getattr(self.layout_manager, "sector_events", None)
+            if events_sector is not None and hasattr(events_sector, "refresh"):
+                events_sector.refresh(force=True)
+        except Exception:
+            logger.exception("Nurse status partial refresh failed")
+
+    def _refresh_ivl_from_db(self) -> None:
+        try:
+            sector_ivl = getattr(self.layout_manager, "sector_ivl", None)
+            if sector_ivl is not None and hasattr(sector_ivl, "refresh"):
+                sector_ivl.refresh()
+        except Exception:
+            logger.exception("Nurse IVL partial refresh failed")
+
+    def _refresh_procedures_from_db(self) -> None:
+        try:
+            sector_proc = getattr(self.layout_manager, "sector_proc", None)
+            if sector_proc is not None and hasattr(sector_proc, "refresh"):
+                sector_proc.refresh()
+        except Exception:
+            logger.exception("Nurse procedures partial refresh failed")
+
+    def _sync_lab_orders_context(self) -> bool:
+        try:
+            layout = getattr(self, "layout_manager", None)
+            if layout is None:
+                return False
+            layout.current_date = self._current_date
+            sector_anal = getattr(layout, "sector_anal", None)
+            if sector_anal is None:
+                return False
+            admission_id = getattr(layout, "current_admission_id", None)
+            if not admission_id or self._current_date is None:
+                if hasattr(sector_anal, "set_lab_orders"):
+                    sector_anal.set_lab_orders([])
+                return True
+            if hasattr(sector_anal, "set_context"):
+                sector_anal.set_context(self.remcard_service, admission_id, self._current_date)
+                return True
+            if hasattr(sector_anal, "refresh"):
+                sector_anal.refresh()
+                return True
+        except Exception:
+            logger.exception("Nurse lab orders context sync failed")
+        return False
+
+    def _refresh_labs_from_db(self) -> None:
+        try:
+            self._sync_lab_orders_context()
+        except Exception:
+            logger.exception("Nurse lab orders partial refresh failed")
+
+    def _refresh_emergency_notice_from_db(self) -> None:
+        try:
+            layout = getattr(self, "layout_manager", None)
+            sector = getattr(layout, "sector_7vit_b", None) if layout is not None else None
+            admission_id = getattr(layout, "current_admission_id", None) if layout is not None else None
+            if sector is None:
+                return
+            if hasattr(sector, "set_context") and admission_id:
+                sector.set_context(self.remcard_service, admission_id, self._current_date)
+            if hasattr(sector, "refresh"):
+                sector.refresh()
+        except Exception:
+            logger.exception("Nurse emergency notice partial refresh failed")
+
+    @staticmethod
+    def _changed_entities_from_payload(payload: dict) -> set[str]:
+        changed_entities = {
+            str(entity)
+            for entity in (payload.get("changed_entities") or [])
+            if entity is not None
+        }
+        if changed_entities:
+            return changed_entities
+        return {
+            str(change.get("entity_name") or "")
+            for change in (payload.get("changes") or [])
+            if change.get("entity_name")
+        }
+
+    def _handle_diet_sync(
+        self,
+        payload: dict,
+        changed_entities: set[str],
+        *,
+        full_refresh_required: bool,
+        diet_refresh: bool,
+    ) -> bool:
+        diet_widget = getattr(self, "diet_intake_widget", None)
+        if diet_widget is None:
+            return False
+        diet_entities = {"diet_templates", "diet_plan", "oral_intake_events"}
+        has_diet_changes = bool(changed_entities.intersection(diet_entities))
+        if full_refresh_required or diet_refresh:
+            diet_widget.handle_data_changes(payload)
+            return False
+        if not has_diet_changes:
+            return False
+        diet_widget.handle_data_changes(payload)
+        if "oral_intake_events" in changed_entities:
+            self._update_balance_calculations()
+        return set(changed_entities).issubset(diet_entities)
+
+    def _refresh_orders_from_payload(
+        self,
+        payload: dict,
+        *,
+        full_refresh_required: bool,
+        has_orders_changes: bool,
+        orders_refresh: bool,
+    ) -> None:
+        current_orders_visibility_changes = bool(
+            self._changed_entities_from_payload(payload).intersection(
+                {"admissions", "patient_status_events"}
+            )
+        )
+        should_refresh = full_refresh_required or has_orders_changes or orders_refresh
+        if not should_refresh:
+            if current_orders_visibility_changes:
+                self._refresh_current_orders_from_payload(payload)
+            return
+        orders_widget = getattr(self.layout_manager, "orders_widget", None)
+        if orders_widget is not None:
+            try:
+                orders_widget.handle_data_changes(
+                    payload,
+                    tab_active=self._is_orders_tab_active(),
+                )
+            except Exception:
+                logger.exception("Nurse orders delta refresh failed")
+        self._refresh_current_orders_from_payload(payload)
+
+    def _refresh_current_orders_from_payload(self, payload: dict) -> None:
+        layout = getattr(self, "layout_manager", None)
+        mgr = getattr(layout, "nurse_orders_manager", None) if layout is not None else None
+        if mgr is None or not hasattr(mgr, "handle_data_changes"):
+            return
+        try:
+            mgr.handle_data_changes(payload)
+        except Exception:
+            logger.exception("Current nurse orders refresh failed")
+
+    def _apply_partial_sync_actions(self, sync_actions: dict, *, full_refresh_required: bool) -> None:
+        if full_refresh_required:
+            return
+        if sync_actions.get("balance_refresh"):
+            self._refresh_balance_from_db()
+        if sync_actions.get("status_refresh"):
+            self._refresh_status_from_db()
+        if sync_actions.get("ivl_refresh"):
+            self._refresh_ivl_from_db()
+        if sync_actions.get("procedures_refresh"):
+            self._refresh_procedures_from_db()
+        if sync_actions.get("lab_orders_refresh"):
+            self._refresh_labs_from_db()
+        if sync_actions.get("emergency_notice_refresh"):
+            self._refresh_emergency_notice_from_db()
+
+    def _on_data_changes(self, payload: dict):
+        if self._is_closing or not self.isVisible():
+            return
+        sync_actions = payload.get("sync_actions") or {}
+        full_refresh_required = bool(sync_actions.get("full_refresh_required"))
+        card_snapshot_required = bool(sync_actions.get("card_snapshot_required"))
+        vitals_snapshot_required = bool(sync_actions.get("vitals_snapshot_required"))
+        changed_entities = self._changed_entities_from_payload(payload)
+        self._invalidate_vitals_cache_from_payload(payload, changed_entities)
+        orders_entities = {"orders", "administrations", "lab_orders"}
+        has_w1_changes = bool(changed_entities.intersection(W1_REFRESH_ENTITIES))
+        if self._selection_mode != "card" and self._is_local_emergency_notice_payload(payload, changed_entities):
+            return
+        if self._selection_mode == "beds" and (full_refresh_required or has_w1_changes or payload.get("forced")):
+            force_sources = self._payload_force_sources(payload)
+            beds_refresh_needed = (
+                full_refresh_required
+                or bool(changed_entities.intersection(W1_BEDS_REFRESH_ENTITIES))
+                or any(
+                    source.startswith(prefix)
+                    for source in force_sources
+                    for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
+                )
+            )
+            w1a_refresh_needed = (
+                full_refresh_required
+                or bool(changed_entities.intersection(W1A_PANEL_REFRESH_ENTITIES))
+                or bool(payload.get("forced"))
+            )
+            if beds_refresh_needed and hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
+                self._refresh_beds_for_payload(
+                    payload,
+                    changed_entities=changed_entities,
+                    force_sources=force_sources,
+                    full_refresh_required=full_refresh_required,
+                )
+            if w1a_refresh_needed:
+                self._refresh_w1a(payload)
+        if self._selection_mode == "archive":
+            archive_widget = getattr(self.layout_manager, "archive_widget", None)
+            if archive_widget and (full_refresh_required or changed_entities.intersection({"patients", "admissions"})):
+                archive_widget.load_data()
+
+        if self._selection_mode != "card" or not self._payload_is_relevant(payload):
+            return
+
+        if self._is_local_emergency_notice_payload(payload, changed_entities):
+            self._refresh_emergency_notice_from_db()
+            logger.info(
+                "NurseMainWidget refreshed emergency notice only admission_id=%s sources=%s",
+                getattr(self.layout_manager, "current_admission_id", None),
+                self._payload_force_sources(payload),
+            )
+            return
+
+        if self._is_local_orders_force_payload(payload, changed_entities):
+            if hasattr(self.layout_manager, 'orders_widget'):
+                try:
+                    self.layout_manager.orders_widget.handle_data_changes(
+                        payload,
+                        tab_active=self._is_orders_tab_active(),
+                    )
+                except Exception:
+                    logger.exception("Nurse orders local forced skip failed")
+            self._refresh_current_orders_from_payload(payload)
+            logger.info(
+                "[OrdersClick] skip local forced card snapshot role=nurse admission_id=%s sources=%s entities=%s",
+                getattr(self.layout_manager, "current_admission_id", None),
+                self._payload_force_sources(payload),
+                sorted(changed_entities),
+            )
+            self._schedule_balance_update()
+            return
+
+        if "admissions" in changed_entities and sync_actions.get("patient_header_refresh"):
+            self._refresh_emergency_notice_from_db()
+
+        if self._handle_diet_sync(
+            payload,
+            changed_entities,
+            full_refresh_required=full_refresh_required,
+            diet_refresh=bool(sync_actions.get("diet_refresh")),
+        ):
+            return
+
+        has_orders_changes = bool(changed_entities.intersection(orders_entities))
+        self._refresh_orders_from_payload(
+            payload,
+            full_refresh_required=full_refresh_required,
+            has_orders_changes=has_orders_changes,
+            orders_refresh=bool(sync_actions.get("orders_refresh")),
+        )
+        self._apply_partial_sync_actions(sync_actions, full_refresh_required=full_refresh_required)
+        if full_refresh_required or card_snapshot_required:
+            self._request_card_snapshot()
+        elif vitals_snapshot_required:
+            if self._current_status_is_outcome():
+                logger.info(
+                    "NurseMainWidget skipped vitals snapshot after outcome admission_id=%s sources=%s entities=%s",
+                    getattr(self.layout_manager, "current_admission_id", None),
+                    self._payload_force_sources(payload),
+                    sorted(changed_entities),
+                )
+            else:
+                self._request_card_snapshot(load_scope="patient_open_vitals")
+
+    def _is_orders_tab_active(self) -> bool:
+        return (
+            hasattr(self.layout_manager, 'vitals_stack')
+            and self.layout_manager.vitals_stack.currentIndex() == 1
+            and hasattr(self.layout_manager, 'orders_widget')
+        )
+
+    def start_auto_refresh(self, *, wake_monitor: bool = True):
+        data_service = self._get_data_service()
+        if data_service and hasattr(data_service, "set_change_monitor_enabled"):
+            data_service.set_change_monitor_enabled(True)
+        self._ensure_monitor_subscription()
+        if (
+            not self._initial_beds_refresh_requested
+            and hasattr(self.layout_manager, "beds_selection_widget")
+            and self.layout_manager.beds_selection_widget
+        ):
+            self._initial_beds_refresh_requested = True
+            self.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
+        self._schedule_initial_w1a_refresh()
+        if data_service and wake_monitor:
+            data_service.request_immediate_refresh(force_emit=False)
+
+    def stop_auto_refresh(self):
+        self._disconnect_monitor()
+
+    def init_ui(self):
+        from .components.nurse_sector8_panel import NurseSector8Panel
+        from ..shared.lightweight_w1_shell import LightweightW1Shell
+
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.main_stack = QStackedWidget()
+        
+        self._w1_shell = LightweightW1Shell(
+            role="nurse",
+            patient_service=self.patient_service,
+            remcard_service=self.remcard_service,
+            parent=self.main_stack,
+        )
+        self.layout_manager = self._w1_shell
+        
+        self.main_stack.addWidget(self.layout_manager)
+        main_layout.addWidget(self.main_stack)
+
+        # Панель управления медсестры (Сектор 8)
+        self.sector8_panel = NurseSector8Panel()
+        self.sector8_panel.btn_back.clicked.connect(self.on_back_clicked)
+        self.sector8_panel.btn_exit.clicked.connect(self.on_exit_clicked)
+        self.sector8_panel.archive_clicked.connect(self.on_global_archive_clicked)
+        self.sector8_panel.refresh_clicked.connect(self.force_refresh_everywhere)
+        self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
+        self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
+        self.sector8_panel.settings_clicked.connect(self.on_settings_clicked)
+        self.sector8_panel.user_report_clicked.connect(self.on_user_report_clicked)
+        self.sector8_panel.user_reports_clicked.connect(self.on_user_reports_clicked)
+        
+        self.layout_manager.sector_8.set_content(self.sector8_panel)
+        if hasattr(self.layout_manager, "selection_mode_changed"):
+            self.layout_manager.selection_mode_changed.connect(self._on_selection_mode_changed)
+            self._on_selection_mode_changed(getattr(self.layout_manager, "current_mode", "beds"))
+
+        # Подключаем выбор пациента из списка коек
+        self.layout_manager.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
+
+    def has_full_layout(self) -> bool:
+        return bool(self._full_layout_created)
+
+    def _ensure_full_layout(self, reason: str = "") -> bool:
+        if self._is_closing:
+            return False
+        if self._full_layout_created:
+            return True
+        if not hasattr(self, "main_stack"):
+            return False
+
+        from .nurse_remcard_layout import NurseRemCardLayoutManager
+
+        old_shell = getattr(self, "_w1_shell", None)
+        handoff = old_shell.create_layout_handoff() if old_shell is not None else None
+        try:
+            layout = NurseRemCardLayoutManager(
+                patient_service=self.patient_service,
+                remcard_service=self.remcard_service,
+                parent=self.main_stack,
+                w1_handoff=handoff,
+            )
+        except Exception:
+            if old_shell is not None and handoff is not None:
+                old_shell.restore_layout_handoff(handoff)
+            raise
+        layout.patient_status_service = self.remcard_service.status_service
+        layout.current_admission_id = None
+        layout.current_date = self._current_date
+        if hasattr(layout, "sector_w1a"):
+            layout.sector_w1a.set_service(self.remcard_service)
+
+        if old_shell is not None and handoff is not None:
+            self._disconnect_w1_shell_routing(old_shell)
+            try:
+                old_shell.complete_layout_handoff(handoff)
+            except Exception:
+                old_shell.restore_layout_handoff(handoff)
+                self._connect_w1_shell_routing(old_shell)
+                layout.deleteLater()
+                raise
+
+        self.main_stack.addWidget(layout)
+        self.layout_manager = layout
+        self._full_layout_created = True
+        self._full_layout_static_signals_bound = False
+        self._wire_full_layout_signals()
+        self.main_stack.setCurrentWidget(layout)
+        self._retire_w1_shell(old_shell)
+        logger.info("[NURSE_VIEW] lazy full layout created reason=%s", reason)
+        return True
+
+    def _wire_full_layout_signals(self):
+        if self._full_layout_static_signals_bound:
+            return
+        layout = getattr(self, "layout_manager", None)
+        if layout is None or layout is getattr(self, "_w1_shell", None):
+            return
+
+        if hasattr(layout, 'sector_4v'):
+            layout.sector_4v.show_card_requested.connect(
+                lambda: self.load_patient_card(layout.current_admission_id, datetime.now())
+            )
+            layout.sector_4v.yest_card_requested.connect(self.on_yest_card_clicked)
+            layout.sector_4v.full_report_requested.connect(self.on_full_report_clicked)
+            layout.sector_4v.daily_report_requested.connect(self.on_daily_report_clicked)
+            layout.sector_4v.archive_requested.connect(self.show_archive)
+
+        layout.sector_8.set_content(self.sector8_panel)
+        if hasattr(layout, "selection_mode_changed"):
+            layout.selection_mode_changed.connect(self._on_selection_mode_changed)
+            self._on_selection_mode_changed(getattr(layout, "current_mode", "beds"))
+        if hasattr(layout, "sector_2b"):
+            layout.sector_2b.tab_changed.connect(self.on_tab_changed)
+
+        if hasattr(layout, "register_events_status_handler"):
+            layout.register_events_status_handler(self.refresh_data)
+        elif hasattr(layout, 'sector_events') and layout.sector_events:
+            layout.sector_events.role = "Медсестра"
+            layout.sector_events.status_changed.connect(self.refresh_data)
+
+        layout.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
+        self._orders_balance_signals_bound = False
+        self._nurse_orders_balance_signals_bound = False
+        self._bind_orders_balance_signals()
+        self._bind_nurse_orders_balance_signals()
+        self._full_layout_static_signals_bound = True
+
+    def _disconnect_w1_shell_routing(self, shell):
+        if getattr(shell, "_controller_routing_disconnected", False):
+            return
+        try:
+            if hasattr(shell, "beds_selection_widget") and shell.beds_selection_widget is not None:
+                shell.beds_selection_widget.patient_selected.disconnect(self.on_patient_selected)
+        except Exception:
+            pass
+        try:
+            if hasattr(shell, "selection_mode_changed"):
+                shell.selection_mode_changed.disconnect(self._on_selection_mode_changed)
+        except Exception:
+            pass
+        shell._controller_routing_disconnected = True
+
+    def _connect_w1_shell_routing(self, shell):
+        if not getattr(shell, "_controller_routing_disconnected", False):
+            return
+        if getattr(shell, "beds_selection_widget", None) is not None:
+            shell.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
+        shell.selection_mode_changed.connect(self._on_selection_mode_changed)
+        shell._controller_routing_disconnected = False
+
+    def _retire_w1_shell(self, shell):
+        if shell is None:
+            return
+        self._disconnect_w1_shell_routing(shell)
+        try:
+            if hasattr(shell, "shutdown"):
+                shell.shutdown()
+        except Exception:
+            logger.debug("Nurse W1 shell shutdown failed", exc_info=True)
+        try:
+            if self.main_stack.indexOf(shell) >= 0:
+                self.main_stack.removeWidget(shell)
+        except Exception:
+            pass
+        shell.deleteLater()
+        self._w1_shell = None
+
+    def _refresh_w1a(self, payload: dict | None = None):
+        sector = getattr(getattr(self, "layout_manager", None), "sector_w1a", None)
+        if sector is None:
+            return
+        if hasattr(sector, "set_service"):
+            sector.set_service(self.remcard_service)
+        if payload is not None and hasattr(sector, "handle_data_changes"):
+            sector.handle_data_changes(payload)
+        elif hasattr(sector, "refresh_data"):
+            sector.refresh_data()
+
+    def _schedule_initial_w1a_refresh(self):
+        if self._initial_w1a_refresh_requested:
+            return
+        self._initial_w1a_refresh_requested = True
+        QTimer.singleShot(W1A_STARTUP_IDLE_DELAY_MS, self._run_initial_w1a_refresh)
+
+    def _run_initial_w1a_refresh(self):
+        if self._is_closing:
+            return
+        if getattr(self, "_selection_mode", "beds") != "beds":
+            return
+        self._refresh_w1a()
+
+    def _wire_dynamic_views(self):
+        archive_widget = getattr(self.layout_manager, "archive_widget", None)
+        if archive_widget and archive_widget is not self._bound_archive_widget:
+            archive_widget.back_requested.connect(lambda: self.on_back_clicked())
+            archive_widget.patient_selected.connect(self.on_patient_selected_from_archive)
+            self._bound_archive_widget = archive_widget
+            self._archive_signals_bound = True
+
+        admin_widget = getattr(self.layout_manager, "admin_widget", None)
+        if admin_widget and admin_widget is not self._bound_admin_widget:
+            self._bound_admin_widget = admin_widget
+            self._admin_signals_bound = True
+
+    def _bind_orders_balance_signals(self):
+        if self._orders_balance_signals_bound:
+            return
+        orders_widget = getattr(getattr(self, "layout_manager", None), "orders_widget", None)
+        if orders_widget is None:
+            return
+        if hasattr(orders_widget, "orderMarked"):
+            orders_widget.orderMarked.connect(self._schedule_balance_update)
+        if hasattr(orders_widget, "localBalanceChanged"):
+            orders_widget.localBalanceChanged.connect(self._schedule_balance_update)
+        self._orders_balance_signals_bound = True
+
+    def _ensure_orders_widget(self):
+        layout = getattr(self, "layout_manager", None)
+        if layout is None:
+            return None
+        if hasattr(layout, "ensure_orders_widget"):
+            ow = layout.ensure_orders_widget()
+        else:
+            ow = getattr(layout, "orders_widget", None)
+        if ow is not None:
+            ow.service = self.remcard_service
+            self._bind_orders_balance_signals()
+        return ow
+
+    def _bind_nurse_orders_balance_signals(self):
+        if self._nurse_orders_balance_signals_bound:
+            return
+        mgr = getattr(getattr(self, "layout_manager", None), "nurse_orders_manager", None)
+        if mgr is None:
+            return
+        if hasattr(mgr, "localBalanceChanged"):
+            mgr.localBalanceChanged.connect(self._schedule_balance_update)
+        if hasattr(mgr, "balanceRefreshRequested"):
+            mgr.balanceRefreshRequested.connect(self._refresh_balance_from_db)
+        self._nurse_orders_balance_signals_bound = True
+
+    def _schedule_balance_update(self, *_args):
+        self._balance_update_timer.start(self._balance_update_delay_ms)
+
+    def _flush_scheduled_balance_update(self):
+        self._update_balance_calculations()
+
+    def _local_oral_events_for_balance(self):
+        state = self._local_oral_state_for_balance()
+        if state is None:
+            return None
+        return state[0]
+
+    def _local_oral_state_for_balance(self):
+        widget = getattr(self, "diet_intake_widget", None)
+        if widget is None:
+            return None
+        admission_id = getattr(getattr(self, "layout_manager", None), "current_admission_id", None)
+        try:
+            if int(getattr(widget, "admission_id", 0) or 0) != int(admission_id or 0):
+                return None
+        except Exception:
+            return None
+        if getattr(widget, "shift_date", None) != self._current_date:
+            return None
+        return (
+            list(getattr(widget, "_events", []) or []),
+            getattr(widget, "_plan", None),
+        )
+
+    def _schedule_card_ui_prewarm(self):
+        if self._card_ui_prewarm_started or self._card_ui_prewarm_done:
+            return
+        if not self._full_layout_created and not self._ensure_full_layout(reason="idle_prewarm"):
+            return
+        self._card_ui_prewarm_started = True
+        QTimer.singleShot(0, self._run_card_ui_prewarm)
+
+    def _run_card_ui_prewarm(self):
+        if self._card_ui_prewarm_done:
+            return
+        try:
+            if hasattr(self, 'layout_manager'):
+                self.layout_manager.setUpdatesEnabled(False)
+            self._ensure_card_widgets_initialized()
+            QTimer.singleShot(CARD_UI_PREWARM_STAGGER_MS, self._run_card_ui_prewarm_stage_2)
+        except Exception as exc:
+            logger.warning("Nurse card UI prewarm stage1 failed: %s", exc)
+            self._card_ui_prewarm_started = False
+        finally:
+            if hasattr(self, 'layout_manager'):
+                self.layout_manager.setUpdatesEnabled(True)
+
+    def _run_card_ui_prewarm_stage_2(self):
+        if self._card_ui_prewarm_done:
+            return
+        try:
+            ow = self._ensure_orders_widget()
+            if ow is not None and getattr(ow, "main_layout", None) is None:
+                ow.setup_ui()
+            QTimer.singleShot(CARD_UI_PREWARM_STAGGER_MS, self._run_card_ui_prewarm_stage_3)
+        except Exception as exc:
+            logger.warning("Nurse card UI prewarm stage2 failed: %s", exc)
+            self._card_ui_prewarm_started = False
+
+    def _run_card_ui_prewarm_stage_3(self):
+        if self._card_ui_prewarm_done:
+            return
+        try:
+            if hasattr(self.layout_manager, 'ensure_nurse_orders_manager'):
+                self.layout_manager.ensure_nurse_orders_manager()
+                self._bind_nurse_orders_balance_signals()
+            self._card_ui_prewarm_done = True
+            logger.debug("Nurse card UI prewarm completed")
+        except Exception as exc:
+            logger.warning("Nurse card UI prewarm stage3 failed: %s", exc)
+            self._card_ui_prewarm_started = False
+
+    def _schedule_journal_prewarm(self):
+        if self._journal_prewarm_started or self._journal_prewarm_done:
+            return
+        self._journal_prewarm_started = True
+        QTimer.singleShot(0, self._run_journal_prewarm)
+
+    def _run_journal_prewarm(self):
+        if self._journal_prewarm_done:
+            return
+
+        try:
+            if not JOURNAL_WIDGET_PREWARM_ENABLED:
+                self._journal_prewarm_done = True
+                return
+
+            if hasattr(self, "layout_manager") and hasattr(self.layout_manager, "prewarm_journal_widget"):
+                self.layout_manager.prewarm_journal_widget()
+                self._journal_prewarm_done = True
+                logger.debug("Nurse patient-bed management widget prewarm completed")
+        except Exception as exc:
+            logger.warning("Nurse patient-bed management prewarm failed: %s", exc)
+        finally:
+            if not self._journal_prewarm_done:
+                self._journal_prewarm_started = False
+
+    def _current_status_is_outcome(self) -> bool:
+        snapshot = self._card_snapshot_cache or {}
+        status_dto = snapshot.get("status")
+        status_value = getattr(status_dto, "status", None)
+        if status_dto and getattr(status_value, "is_outcome", lambda: False)():
+            return True
+
+        layout_status = getattr(getattr(self, "layout_manager", None), "_current_status_dto", None)
+        layout_status_value = getattr(layout_status, "status", None)
+        if layout_status and getattr(layout_status_value, "is_outcome", lambda: False)():
+            return True
+
+        patient = snapshot.get("patient")
+        if patient and (
+            getattr(patient, "transfer_datetime", None)
+            or getattr(patient, "death_datetime", None)
+            or getattr(patient, "outcome", None)
+        ):
+            return True
+
+        admission_id = getattr(getattr(self, "layout_manager", None), "current_admission_id", None)
+        if (
+            admission_id
+            and getattr(self, "remcard_service", None)
+            and hasattr(self.remcard_service, "get_current_status")
+        ):
+            try:
+                current_status = self.remcard_service.get_current_status(admission_id)
+            except Exception:
+                current_status = None
+            current_status_value = getattr(current_status, "status", None)
+            if current_status and getattr(current_status_value, "is_outcome", lambda: False)():
+                return True
+        return False
+
+    def _schedule_chart_init(self, delay_ms: int = CHART_LAZY_INIT_DELAY_MS):
+        if getattr(self, "chart", None) is not None or self._chart_init_pending:
+            return
+        self._chart_init_pending = True
+        QTimer.singleShot(max(0, int(delay_ms or 0)), self._run_deferred_chart_init)
+
+    def _run_deferred_chart_init(self):
+        self._chart_init_pending = False
+        if self._is_closing:
+            return
+        try:
+            self._ensure_chart_initialized()
+        except Exception as exc:
+            logger.warning("Nurse chart lazy init failed: %s", exc, exc_info=True)
+
+    def _ensure_chart_initialized(self) -> bool:
+        if getattr(self, "chart", None) is not None:
+            return True
+        if not hasattr(self, "layout_manager") or not getattr(self.layout_manager, "sector_2v", None):
+            return False
+
+        from ..shared.chart_widget import ChartWidget
+
+        self.chart = ChartWidget()
+        self.chart.service = self.remcard_service
+        self.chart.status_service = self.remcard_service.status_service
+        self.chart.admission_id = getattr(self.layout_manager, "current_admission_id", None)
+        self.layout_manager.sector_2v.set_content(self.chart)
+        self._update_chart_from_snapshot(self._card_snapshot_cache or {})
+        return True
+
+    def _update_chart_from_snapshot(self, snapshot: dict) -> None:
+        if not snapshot or getattr(self, "chart", None) is None:
+            return
+        runtime = snapshot.get("balance_runtime") or {}
+        chart_signature = self._chart_snapshot_signature(snapshot)
+        if (
+            chart_signature is not None
+            and chart_signature == self._last_applied_chart_signature
+        ):
+            logger.info(
+                "NurseMainWidget skipped unchanged chart snapshot admission_id=%s scope=%s version=%s",
+                snapshot.get("admission_id"),
+                snapshot.get("scope"),
+                snapshot.get("version"),
+            )
+            return
+        self.chart.update_data(
+            snapshot.get("vitals_extended") or [],
+            snapshot.get("start_dt"),
+            active_intervals=snapshot.get("chart_active_intervals") or runtime.get("active_intervals"),
+        )
+        self._last_applied_chart_signature = chart_signature
+
+    def _ensure_card_widgets_initialized(self):
+        if hasattr(self, "vitals_input") and hasattr(self, "balance_controller"):
+            self._schedule_chart_init()
+            return
+        if not self._full_layout_created:
+            return
+
+        from ..shared.vitals_widget import VitalsWidget
+        from ..shared.components.balance_controller import BalanceController
+
+        self.vitals_input = VitalsWidget(
+            self.remcard_service,
+            None,
+            datetime.now(),
+            future_input_limit_minutes=20,
+        )
+        self.vitals_input.save_btn.clicked.connect(self.refresh_data)
+        self.vitals_input.data_changed.connect(self.refresh_data)
+        self.layout_manager.sector_1b.set_content(self.vitals_input)
+
+        self.balance_controller = BalanceController(self.remcard_service.fluid_service, None, self._current_date)
+        self._bind_balance_widgets_if_ready()
+        self._schedule_chart_init()
+
+    def _bind_balance_widgets_if_ready(self) -> bool:
+        if not hasattr(self, "balance_controller") or self.balance_controller is None:
+            return False
+        if self._balance_widgets_bound:
+            return True
+
+        lm = getattr(self, "layout_manager", None)
+        if lm is None:
+            return False
+
+        grid = getattr(lm, "balance_grid", None)
+        panel = getattr(lm, "sector_2d", None)
+        quick = getattr(lm, "sector_2b_v", None)
+        summary = getattr(lm, "sector_3b", None)
+        if not (grid and panel and quick and summary):
+            return False
+
+        self.balance_controller.set_widgets(
+            grid,
+            panel,
+            [quick, summary],
+        )
+        self.balance_controller.data_updated.connect(self.refresh_data)
+        self._balance_widgets_bound = True
+        return True
+
+    def _apply_balance_snapshot_if_available(self) -> bool:
+        snapshot = self._card_snapshot_cache or {}
+        if not hasattr(self, "balance_controller") or self.balance_controller is None:
+            return False
+        effective_bounds = snapshot.get("effective_bounds")
+        if not effective_bounds:
+            return False
+        if "fluids" not in snapshot or "balance_runtime" not in snapshot:
+            return False
+        self.balance_controller.apply_loaded_data(
+            snapshot.get("fluids") or [],
+            effective_bounds,
+        )
+        return True
+
+    def _ensure_balance_tab_ready(self):
+        if hasattr(self.layout_manager, "ensure_balance_tab_initialized"):
+            self.layout_manager.ensure_balance_tab_initialized()
+        self._configure_balance_quick_oral_input()
+        if not self._bind_balance_widgets_if_ready():
+            return
+        if hasattr(self, "balance_controller") and self.balance_controller:
+            self.balance_controller.admission_id = getattr(self.layout_manager, "current_admission_id", None)
+            self.balance_controller.shift_date = self._current_date
+        if not self._apply_balance_snapshot_if_available():
+            self._request_card_snapshot(load_scope="full")
+
+    def _should_ensure_initial_status_for_date(self, value: datetime) -> bool:
+        try:
+            current_start, current_end = self.remcard_service.get_day_period(datetime.now())
+            return current_start <= value < current_end
+        except Exception as exc:
+            logger.warning("Failed to resolve current medical day for nurse initial status guard: %s", exc)
+            return False
+
+    def _update_sector_4b_patient_info(self, patient, reference_date):
+        layout = getattr(self, "layout_manager", None)
+        if not patient or not hasattr(layout, "sector_4b"):
+            return
+        auto_update = should_auto_update_recovery_elapsed_time(
+            patient,
+            reference_date,
+            self.remcard_service,
+        )
+        display_date = recovery_elapsed_reference_date(reference_date, auto_update=auto_update)
+        layout.sector_4b.update_patient_info(
+            patient,
+            display_date,
+            auto_update_recovery_time=auto_update,
+        )
+
+    @property
+    def current_date(self):
+        return self._current_date
+
+    def _get_report_controller(self):
+        if self.report_controller is None:
+            from ..shared.report_controller import RemCardReportController
+
+            self.report_controller = RemCardReportController(self.remcard_service, self)
+        return self.report_controller
+
+    @current_date.setter
+    def current_date(self, value):
+        self._current_date = value
+        if hasattr(self, 'layout_manager'):
+            self.layout_manager.current_date = self._current_date
+        if hasattr(self.layout_manager, 'sector_2a'):
+            start_dt, _ = self.remcard_service.get_day_period(value)
+            self.layout_manager.sector_2a.update_period(start_dt)
+        diet_widget = self._ensure_diet_widget()
+        if diet_widget and getattr(self.layout_manager, 'current_admission_id', None):
+            diet_widget.set_context(self.layout_manager.current_admission_id, self._current_date)
+        self._update_emergency_notice_sector()
+        self._configure_balance_quick_oral_input()
+        self._sync_lab_orders_context()
+        # Держим сектор 5 в синхроне с датой открытой карты.
+        if (
+            hasattr(self, 'layout_manager')
+            and hasattr(self.layout_manager, 'nurse_orders_manager')
+            and getattr(self.layout_manager, 'current_admission_id', None)
+        ):
+            mgr = self.layout_manager.nurse_orders_manager
+            if mgr:
+                mgr.set_context(
+                    self.layout_manager.current_admission_id,
+                    self._current_date
+                )
+
+    def load_patient_card(self, admission_id, date):
+        if self._is_closing:
+            return
+        open_loading_key = show_app_loading(
+            self,
+            "Открытие карты пациента...",
+            key=f"nurse-card-open:{id(self)}",
+            auto_hide_ms=10000,
+            process_events=True,
+        )
+        self._patient_open_generation += 1
+        patient_open_generation = self._patient_open_generation
+        if not self._ensure_full_layout(reason="patient_open"):
+            if open_loading_key:
+                hide_app_loading(self, open_loading_key, delay_ms=350)
+            return
+        self._schedule_card_ui_prewarm()
+        self._ensure_card_widgets_initialized()
+        self._balance_update_timer.stop()
+        self.layout_manager.current_admission_id = admission_id
+        self.current_date = date
+        self._card_snapshot_cache = None
+        self._balance_runtime_cache = None
+        self._update_emergency_notice_sector()
+        
+        # Рассчитываем мед. сутки для правильной инициализации
+        start_dt, end_dt = self.remcard_service.get_day_period(date)
+        cached_card_snapshot = self._get_cached_patient_card_snapshot(admission_id, date)
+        cached_vitals_snapshot = cached_card_snapshot or self._get_cached_patient_vitals_snapshot(admission_id, date)
+        
+        # Обновляем контекст сектора событий (без принудительного раннего создания вкладки).
+        if hasattr(self.layout_manager, "set_events_context"):
+            self.layout_manager.set_events_context(
+                admission_id=admission_id,
+                status_service=self.remcard_service.status_service,
+                shift_date=date,
+                shift_start=start_dt,
+                shift_end=end_dt,
+            )
+
+        if hasattr(self, "chart"):
+            self.chart.admission_id = admission_id
+            chart_matches_target = self._chart_matches_context(admission_id, start_dt)
+            if not chart_matches_target:
+                self._last_applied_chart_signature = None
+            if (
+                hasattr(self.chart, "clear_for_context")
+                and not cached_vitals_snapshot
+                and not chart_matches_target
+            ):
+                self.chart.clear_for_context(admission_id=admission_id, start_time=start_dt)
+        else:
+            self._last_applied_chart_signature = None
+            self._schedule_chart_init()
+        self.vitals_input.admission_id = admission_id
+        self.vitals_input.shift_date = date
+        self.vitals_input.mark_dirty()
+
+        if hasattr(self, 'balance_controller'):
+            self.balance_controller.admission_id = admission_id
+            self.balance_controller.shift_date = date
+
+        diet_widget = self._ensure_diet_widget()
+        if diet_widget:
+            diet_widget.set_context(admission_id, date)
+        self._configure_balance_quick_oral_input()
+
+        # Обновляем orders_widget
+        ow = self._ensure_orders_widget()
+        if ow is not None:
+            if hasattr(ow, "set_context"):
+                ow.set_context(
+                    service=self.remcard_service,
+                    admission_id=admission_id,
+                    shift_date=date,
+                )
+            else:
+                ow.service = self.remcard_service
+                ow.admission_id = admission_id
+                ow.shift_date = date
+
+        # Обновляем контекст 1а/5 явно: важно и для ПЕРВОГО входа в карту.
+        # Manager может отсутствовать до первого переключения из режима коек в режим карты.
+        nurse_orders_mgr = None
+        if hasattr(self.layout_manager, "ensure_nurse_orders_manager"):
+            nurse_orders_mgr = self.layout_manager.ensure_nurse_orders_manager()
+        elif hasattr(self.layout_manager, "nurse_orders_manager"):
+            nurse_orders_mgr = self.layout_manager.nurse_orders_manager
+        if nurse_orders_mgr:
+            self._bind_nurse_orders_balance_signals()
+            QTimer.singleShot(
+                0,
+                lambda mgr=nurse_orders_mgr, aid=admission_id, d=date, gen=patient_open_generation: (
+                    self._set_nurse_orders_context_if_current(mgr, aid, d, gen)
+                ),
+            )
+
+        self._last_change_id = 0
+        if not cached_card_snapshot:
+            self._reset_balance_view_state()
+        if cached_vitals_snapshot:
+            self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
+        if cached_vitals_snapshot:
+            should_ensure_initial_status = self._should_ensure_initial_status_for_date(date)
+            self._schedule_card_hydration_snapshot(
+                admission_id,
+                date,
+                ensure_initial_status=should_ensure_initial_status,
+            )
+        else:
+            should_ensure_initial_status = self._should_ensure_initial_status_for_date(date)
+            self._request_card_snapshot(
+                ensure_initial_status=should_ensure_initial_status,
+                load_scope="patient_open_vitals",
+            )
+            self._schedule_card_hydration_snapshot(
+                admission_id,
+                date,
+                ensure_initial_status=should_ensure_initial_status,
+            )
+        if hasattr(self, 'layout_manager'):
+            active_tab = self.layout_manager.set_active_tab("Витальные функции", source="refresh") or "Витальные функции"
+            if hasattr(self.layout_manager, 'sector_2b'):
+                self.layout_manager.sector_2b.select_tab(active_tab, emit=False)
+            if active_tab != "Витальные функции":
+                self.on_tab_changed(active_tab)
+        if open_loading_key:
+            hide_app_loading(self, open_loading_key, delay_ms=600)
+
+    def _set_nurse_orders_context_if_current(self, mgr, admission_id, date, generation: int):
+        if self._is_closing or generation != self._patient_open_generation:
+            return
+        current_admission_id = getattr(self.layout_manager, "current_admission_id", None)
+        if int(admission_id or 0) != int(current_admission_id or 0):
+            return
+        if date != self._current_date:
+            return
+        try:
+            mgr.set_context(admission_id, date)
+        except RuntimeError:
+            logger.debug("Nurse orders panel context skipped for deleted widget", exc_info=True)
+
+    def _prime_patient_header_from_w1(self, patient, target_date):
+        """Заполняет 4б/4в данными W1 до показа карты, чтобы не было визуального скачка."""
+        if not patient or not hasattr(self, "layout_manager"):
+            return
+        layout = self.layout_manager
+        runtime = dict(getattr(patient, "_w1_runtime_snapshot", None) or {})
+        try:
+            if hasattr(layout, "sector_4b"):
+                self._update_sector_4b_patient_info(patient, target_date)
+
+                if "status" in runtime:
+                    status_dto = runtime.get("status")
+                    if hasattr(layout, "set_current_status_dto"):
+                        layout.set_current_status_dto(status_dto)
+                    else:
+                        layout.sector_4b.update_status(status_dto)
+                    if hasattr(layout.sector_4b, "update_outcome_timer"):
+                        layout.sector_4b.update_outcome_timer(
+                            status_dto,
+                            int(runtime.get("outcome_delay_min") or 30),
+                        )
+
+            if hasattr(layout, "sector_4v"):
+                latest_values = runtime.get("latest_values")
+                settings = runtime.get("settings")
+                if latest_values is not None or settings is not None:
+                    layout.sector_4v.update_latest_vitals(latest_values or {}, settings)
+
+                runtime_now = runtime.get("now")
+                same_shift = False
+                if runtime_now is not None:
+                    try:
+                        target_start, _ = self.remcard_service.get_day_period(target_date)
+                        runtime_start, _ = self.remcard_service.get_day_period(runtime_now)
+                        same_shift = target_start == runtime_start
+                    except Exception:
+                        same_shift = False
+
+                if same_shift and ("card_exists" in runtime or "yest_exists" in runtime):
+                    layout.sector_4v.set_buttons_state(
+                        bool(runtime.get("card_exists")),
+                        bool(runtime.get("yest_exists")),
+                    )
+
+            logger.info(
+                "[NURSE_VIEW] primed patient header from W1 admission_id=%s has_runtime=%s",
+                getattr(patient, "id", None),
+                int(bool(runtime)),
+            )
+        except Exception as exc:
+            logger.warning("Failed to prime nurse patient header from W1: %s", exc, exc_info=True)
+
+    def refresh_data(self):
+        adm_id = self.layout_manager.current_admission_id
+        if not adm_id: return
+        snapshot = self._card_snapshot_cache or {}
+        self._update_emergency_notice_sector(snapshot)
+        if hasattr(self, 'layout_manager') and hasattr(self.layout_manager, 'sector_4b'):
+            patient = snapshot.get("patient")
+            if patient:
+                self._update_sector_4b_patient_info(patient, self.current_date)
+        if hasattr(self.layout_manager, 'sector_4v'):
+            latest_values = snapshot.get("latest_values") or {}
+            settings = snapshot.get("settings") or {}
+            if hasattr(self.layout_manager, 'sector_2g'):
+                self.layout_manager.sector_2g.update_legend(settings)
+            self.layout_manager.sector_4v.update_latest_vitals(latest_values, settings)
+            self.layout_manager.sector_4v.set_buttons_state(
+                bool(snapshot.get("card_exists")),
+                bool(snapshot.get("yest_exists")),
+            )
+        if hasattr(self.layout_manager, "set_current_status_dto"):
+            self.layout_manager.set_current_status_dto(snapshot.get("status"))
+        self.layout_manager.refresh_current_status()
+        self._bind_balance_widgets_if_ready()
+        self._bind_orders_balance_signals()
+        self._bind_nurse_orders_balance_signals()
+        self._update_balance_calculations()
+
+    def _update_emergency_notice_sector(self, snapshot=None):
+        layout = getattr(self, "layout_manager", None)
+        sector = getattr(layout, "sector_7vit_b", None) if layout is not None else None
+        admission_id = getattr(layout, "current_admission_id", None) if layout is not None else None
+        if sector is None:
+            return
+        try:
+            loaded_from_service = False
+            if hasattr(sector, "set_context") and admission_id:
+                loaded_from_service = bool(sector.set_context(self.remcard_service, admission_id, self._current_date))
+                if not loaded_from_service and hasattr(sector, "refresh"):
+                    loaded_from_service = bool(sector.refresh())
+            patient = (snapshot or self._card_snapshot_cache or {}).get("patient")
+            if not loaded_from_service and patient and hasattr(sector, "set_notice_data"):
+                sector.set_notice_data(
+                    getattr(patient, "emergency_notice_number", "") or "",
+                    getattr(patient, "emergency_notice_entered_at", None),
+                )
+            if hasattr(sector, "set_forced_read_only"):
+                sector.set_forced_read_only(True)
+        except Exception as exc:
+            logger.warning("Failed to update emergency notice sector (nurse): %s", exc, exc_info=True)
+
+    def on_tab_changed(self, tab_name):
+        if hasattr(self.layout_manager, "sector_2b") and hasattr(self.layout_manager.sector_2b, "current_tab_name"):
+            tab_name = self.layout_manager.sector_2b.current_tab_name() or tab_name
+        if tab_name == "Баланс жидкости":
+            self._ensure_balance_tab_ready()
+        elif tab_name == "Назначения":
+            ow = self._ensure_orders_widget()
+            if ow is None:
+                logger.warning("Nurse orders tab requested, but orders widget was not initialized")
+                return
+            self._bind_orders_balance_signals()
+            if hasattr(ow, "set_context"):
+                ow.set_context(
+                    service=self.remcard_service,
+                    admission_id=self.layout_manager.current_admission_id,
+                    shift_date=self._current_date,
+                )
+            else:
+                ow.service = self.remcard_service
+                ow.admission_id = self.layout_manager.current_admission_id
+                ow.shift_date = self._current_date
+            ow.ensure_ready_for_show()
+
+    def on_patient_selected(self, patient, action_type):
+        if action_type == "show":
+            target_date = datetime.now()
+            self.load_patient_card(patient.id, target_date)
+            self._prime_patient_header_from_w1(patient, target_date)
+            self.layout_manager.set_patient_selection_mode("card")
+        elif action_type == "yest":
+            yest_date = datetime.now() - timedelta(days=1)
+            self.load_patient_card(patient.id, yest_date)
+            self._prime_patient_header_from_w1(patient, yest_date)
+            self.layout_manager.set_patient_selection_mode("card")
+        elif action_type == "archive":
+            self.show_archive(patient)
+
+    def show_archive(self, patient=None):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from ..shared.patient_archive_dialog import PatientArchiveDialog
+        from PySide6.QtWidgets import QDialog
+        
+        if not patient:
+            adm_id = self.layout_manager.current_admission_id
+            if not adm_id: return
+            patient = self.remcard_service.get_patient(adm_id)
+            
+        if not patient:
+            CustomMessageBox.warning(self, "Ошибка", "Пациент не найден.")
+            return
+            
+        dialog = PatientArchiveDialog(self.remcard_service, patient, self)
+        dialog.setAttribute(Qt.WA_DeleteOnClose)
+        result = dialog.exec()
+        
+        if result == QDialog.Accepted:
+            selected_date = dialog.get_selected_date()
+            if selected_date:
+                target_dt = datetime.fromtimestamp(selected_date.timestamp())
+                # Загружаем карту и переключаемся в режим карты
+                self.load_patient_card(patient.id, target_dt)
+                self.layout_manager.set_patient_selection_mode("card")
+
+    def on_global_archive_clicked(self):
+        self.layout_manager.set_patient_selection_mode("archive")
+        self._wire_dynamic_views()
+
+    def on_patient_selected_from_archive(self, patient):
+        self.show_archive(patient)
+
+    def on_yest_card_clicked(self):
+        yest_date = self.current_date - timedelta(days=1)
+        self.load_patient_card(self.layout_manager.current_admission_id, yest_date)
+
+    def on_daily_report_clicked(self):
+        """Обработка запроса отчета за сутки из открытой карты пациента (медсестра)."""
+        adm_id = self.layout_manager.current_admission_id
+        controller = self._get_report_controller()
+        controller.run_daily_report(adm_id, self.current_date)
+        self.daily_worker = controller.daily_worker
+
+    def on_full_report_clicked(self):
+        """Обработка запроса общего отчета из открытой карты пациента (медсестра)."""
+        adm_id = self.layout_manager.current_admission_id
+        controller = self._get_report_controller()
+        controller.run_full_report(adm_id)
+        self.report_worker = controller.full_worker
+
+    @log_execution_time(threshold_ms=50)
+    def on_calculator_clicked(self):
+        from rem_card.ui.shared.components.infusion_calculator import InfusionCalculatorDialog
+
+        dialog = InfusionCalculatorDialog(parent=self)
+        dialog.exec()
+
+    @log_execution_time(threshold_ms=50)
+    def auto_refresh(self, force=False):
+        if hasattr(self, 'vitals_input'):
+            self.vitals_input.refresh_time_only()
+        self._update_balance_calculations()
+        data_service = self._get_data_service()
+        if force:
+            self.force_refresh_everywhere()
+        if data_service:
+            data_service.request_immediate_refresh(
+                force_emit=force,
+                source=(
+                    "manual_refresh:nurse_auto"
+                    if force
+                    else "nurse_auto_refresh"
+                ),
+            )
+
+    def force_refresh_everywhere(self):
+        """Принудительное обновление всех доступных представлений (кнопка 'Обновить')."""
+        data_service = self._get_data_service()
+        if data_service:
+            data_service.request_immediate_refresh(
+                force_emit=True,
+                source="manual_refresh:nurse",
+            )
+
+        try:
+            if hasattr(self.layout_manager, 'beds_selection_widget') and self.layout_manager.beds_selection_widget:
+                self.layout_manager.beds_selection_widget.refresh()
+        except Exception:
+            pass
+
+        current_idx = self.layout_manager.selection_stack.currentIndex() if hasattr(self.layout_manager, "selection_stack") else -1
+        is_card_mode = current_idx == 0 and bool(getattr(self.layout_manager, "current_admission_id", None))
+
+        if is_card_mode:
+            try:
+                self._request_card_snapshot(
+                    ensure_initial_status=self._should_ensure_initial_status_for_date(self._current_date),
+                    force_emit=True,
+                )
+                orders_widget = self._ensure_orders_widget()
+                if orders_widget is not None:
+                    orders_widget.request_refresh(force=True)
+                if hasattr(self.layout_manager, 'nurse_orders_manager') and self.layout_manager.nurse_orders_manager:
+                    self.layout_manager.nurse_orders_manager.refresh_data()
+                events_sector = None
+                if hasattr(self.layout_manager, "ensure_events_sector"):
+                    events_sector = self.layout_manager.ensure_events_sector()
+                else:
+                    events_sector = getattr(self.layout_manager, "sector_events", None)
+                if events_sector:
+                    events_sector.refresh()
+            except Exception as exc:
+                logger.warning("Nurse force refresh: card mode refresh failed: %s", exc, exc_info=True)
+
+        try:
+            if hasattr(self.layout_manager, "journal_widget") and self.layout_manager.journal_widget:
+                jw = self.layout_manager.journal_widget
+                if hasattr(jw, "refresh_data"):
+                    jw.refresh_data()
+                if hasattr(jw, "refresh_bed_statuses"):
+                    jw.refresh_bed_statuses()
+        except Exception as exc:
+            logger.warning("Nurse force refresh: journal refresh failed: %s", exc)
+
+    def perform_coalesced_update(self):
+        self._update_scheduled = False
+        self._request_card_snapshot()
+
+    def on_exit_clicked(self):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        reply = CustomMessageBox.question(self, "Подтверждение", "Выйти из программы?", CustomMessageBox.Yes | CustomMessageBox.No, CustomMessageBox.No)
+        if reply == CustomMessageBox.Yes: self.window().close()
+
+    def on_settings_clicked(self):
+        self._remember_settings_return_mode()
+        self.layout_manager.set_patient_selection_mode("admin")
+        self._wire_dynamic_views()
+        admin_widget = getattr(self.layout_manager, 'admin_widget', None)
+        if admin_widget:
+            admin_widget.set_print_context(
+                self.remcard_service,
+                self.layout_manager.current_admission_id,
+                self._current_date,
+            )
+
+    def on_user_report_clicked(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportDialog
+
+        dialog = UserReportDialog(role="nurse", parent=self)
+        dialog.submitted.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def on_user_reports_clicked(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportsInboxDialog
+
+        dialog = UserReportsInboxDialog(role="nurse", parent=self)
+        dialog.reports_changed.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def _refresh_user_reports_count(self):
+        panel = getattr(self, "sector8_panel", None)
+        method = getattr(panel, "refresh_user_reports_count", None)
+        if callable(method):
+            method()
+
+    def _remember_settings_return_mode(self):
+        mode = self._resolve_selection_mode()
+        if mode and mode != "admin":
+            self._settings_return_mode = mode
+
+    def on_add_patient_clicked(self):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        if not self._acquire_add_patient_lock():
+            holder_role = self._add_patient_lock.holder_owner_role()
+            holder_label = {"doctor": "врача", "nurse": "медсестры"}.get(holder_role)
+            message = "Окно добавления пациента уже открыто.\nПожалуйста, подождите."
+            if holder_label:
+                message = f"Окно добавления пациента уже открыто у {holder_label}.\nПожалуйста, подождите."
+            CustomMessageBox.warning(
+                self,
+                "Добавление занято",
+                message,
+            )
+            self._refresh_add_patient_button_lock_state()
+            return
+        try:
+            self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
+        except Exception:
+            self._release_add_patient_lock()
+            raise
+
+    def _on_selection_mode_changed(self, mode: str):
+        if (
+            str(mode or "") == "beds"
+            and self._full_layout_created
+            and getattr(getattr(self, "layout_manager", None), "current_mode", None) == "card"
+        ):
+            logger.debug("Nurse ignored stale beds selection signal during card mode")
+            return
+        self._selection_mode = str(mode or "")
+        if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
+            self._release_add_patient_lock()
+        self._refresh_add_patient_button_lock_state()
+
+    def back_to_roles(self):
+        if self.parent() and hasattr(self.parent(), 'setCurrentIndex'):
+            self.parent().setCurrentIndex(0)
+
+    def on_back_clicked(self):
+        current_idx = self.layout_manager.selection_stack.currentIndex()
+        journal_idx = -1
+        if hasattr(self.layout_manager, "journal_view"):
+            journal_idx = self.layout_manager.selection_stack.indexOf(self.layout_manager.journal_view)
+        was_journal_mode = (current_idx == journal_idx and journal_idx != -1)
+        admin_idx = -1
+        if hasattr(self.layout_manager, "admin_view"):
+            admin_idx = self.layout_manager.selection_stack.indexOf(self.layout_manager.admin_view)
+
+        if current_idx == admin_idx and admin_idx != -1:
+            admin_widget = getattr(self.layout_manager, "admin_widget", None)
+            if admin_widget is not None and hasattr(admin_widget, "go_back") and admin_widget.go_back():
+                return
+            if self._return_from_settings():
+                return
+
+        if current_idx in (0, 2, 3, 4):
+            # Явно снимаем lock перед выходом из журнала/режимов выбора.
+            self._release_add_patient_lock()
+            self.layout_manager.set_patient_selection_mode("beds")
+            if was_journal_mode:
+                self._force_beds_refresh_after_journal_exit()
+        else: 
+            self._release_add_patient_lock()
+            self.back_to_roles()
+
+    def _return_from_settings(self) -> bool:
+        mode = str(self._settings_return_mode or "").strip()
+        self._settings_return_mode = None
+        if not mode or mode == "admin":
+            return False
+
+        self._release_add_patient_lock()
+        if mode == "archive":
+            self.layout_manager.set_patient_selection_mode("archive")
+            self._wire_dynamic_views()
+            return True
+        if mode in (PATIENT_BED_MANAGEMENT_MODE, "journal"):
+            self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
+            return True
+        if mode == "card" and getattr(self.layout_manager, "current_admission_id", None) is not None:
+            self.layout_manager.set_patient_selection_mode("card")
+            return True
+
+        self.layout_manager.set_patient_selection_mode("beds")
+        return True
+
+    def show_beds_mode(self):
+        if self._is_closing:
+            return
+        layout = getattr(self, "layout_manager", None)
+        if layout is not None:
+            layout.current_admission_id = None
+            if hasattr(layout, "set_patient_selection_mode"):
+                layout.set_patient_selection_mode("beds")
+
+    def reset_to_beds(self):
+        self.show_beds_mode()
+
+    def refresh_w1(self):
+        layout = getattr(self, "layout_manager", None)
+        beds_widget = getattr(layout, "beds_selection_widget", None)
+        if beds_widget is not None and hasattr(beds_widget, "refresh"):
+            beds_widget.refresh(queue_if_running=False)
+        self._refresh_w1a()
+
+    def shutdown(self):
+        self._is_closing = True
+        self._shutdown_snapshot_worker()
+        if hasattr(self, "_balance_update_timer"):
+            self._balance_update_timer.stop()
+        if hasattr(self, "_add_patient_lock_watch_timer"):
+            if self._add_patient_lock_watch_timer:
+                self._add_patient_lock_watch_timer.stop()
+        panel = getattr(self, "sector8_panel", None)
+        if panel is not None and hasattr(panel, "shutdown"):
+            panel.shutdown()
+        self._disconnect_monitor()
+        self._release_add_patient_lock()
+        if getattr(self, "layout_manager", None) is getattr(self, "_w1_shell", None):
+            if hasattr(self.layout_manager, "shutdown"):
+                self.layout_manager.shutdown()
+        else:
+            if hasattr(self.layout_manager, "beds_selection_widget") and hasattr(self.layout_manager.beds_selection_widget, "shutdown"):
+                self.layout_manager.beds_selection_widget.shutdown()
+            if hasattr(self.layout_manager, 'orders_widget') and hasattr(self.layout_manager.orders_widget, "shutdown"):
+                self.layout_manager.orders_widget.shutdown()
+            if hasattr(self.layout_manager, "nurse_orders_manager") and hasattr(self.layout_manager.nurse_orders_manager, "shutdown"):
+                self.layout_manager.nurse_orders_manager.shutdown()
+            if hasattr(self.layout_manager, "sector_w1a") and hasattr(self.layout_manager.sector_w1a, "shutdown"):
+                self.layout_manager.sector_w1a.shutdown()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+
+    def _update_balance_calculations(self):
+        """Медсестринская версия расчета баланса для обновления UI секторов."""
+        if self._balance_calculator_cls is None:
+            from ...services.balance_calculator import BalanceCalculator
+
+            self._balance_calculator_cls = BalanceCalculator
+
+        adm_id = self.layout_manager.current_admission_id
+        if not adm_id: return
+        runtime = self._balance_runtime_cache or {}
+        if not runtime:
+            return
+        local_orders = build_balance_orders_from_orders_widget(
+            getattr(self.layout_manager, "orders_widget", None),
+            adm_id,
+            self._current_date,
+            tab_active=self._is_orders_tab_active(),
+        )
+        orders = local_orders if local_orders is not None else (runtime.get("orders") or [])
+        panel_orders = apply_current_order_mark_overrides(
+            orders,
+            getattr(self.layout_manager, "nurse_orders_manager", None),
+            adm_id,
+            self._current_date,
+        )
+        if panel_orders is not None:
+            orders = panel_orders
+
+        now = datetime.now()
+        start = runtime.get("start_dt")
+        end = runtime.get("end_dt")
+        calc_time = now if start and end and start <= now < end else end
+        calc_res = self._balance_calculator_cls.calculate(
+            orders=orders,
+            current_time=calc_time,
+            end_of_card=end,
+            transfer_time=runtime.get("transfer_time"),
+            active_intervals=runtime.get("active_intervals") or [],
+            outcome_time=runtime.get("outcome_time"),
+        )
+        
+        cur, day = calc_res["current"], calc_res["daily"]
+        local_oral_state = self._local_oral_state_for_balance()
+        oral_kwargs = {}
+        if local_oral_state is not None:
+            oral_kwargs["oral_events"] = local_oral_state[0]
+            oral_kwargs["oral_plan"] = local_oral_state[1]
+        oral_cur, oral_day = oral_totals_from_runtime(runtime, calc_time, **oral_kwargs)
+        total_in_cur, total_in_day = cur["total"] + oral_cur, day["total"] + oral_day
+        total_out_cur = 0
+        total_out_day = 0
+        total_out_current_hour = 0
+        
+        if hasattr(self, 'balance_controller'): 
+            total_out_cur = self.balance_controller.get_total_out_to_now()
+            total_out_day = self.balance_controller.get_total_out_daily()
+            total_out_current_hour = self.balance_controller.get_total_out_current_hour()
+            
+        sector_2b_g = getattr(self.layout_manager, 'sector_2b_g', None)
+        if sector_2b_g is not None:
+            sector_2b_g.update_values(
+                infusion=cur["infusion"], preparats=cur["preparats"], blood=cur["blood"], plasma=cur["plasma"],
+                infusion_daily=day["infusion"], preparats_daily=day["preparats"], blood_daily=day["blood"], plasma_daily=day["plasma"],
+                oral=oral_cur, oral_daily=oral_day
+            )
+        sector_2b_v = getattr(self.layout_manager, 'sector_2b_v', None)
+        if sector_2b_v is not None:
+            sector_2b_v.update_balance(
+                total_in_cur,
+                total_out_cur,
+                total_in_daily=total_in_day,
+                total_out_daily=total_out_day,
+                total_out_current_hour=total_out_current_hour,
+            )
+        sector_3a = getattr(self.layout_manager, 'sector_3a', None)
+        if sector_3a is not None:
+            sector_3a.update_values(
+                total=total_in_cur, infusion=cur["infusion"], preparats=cur["preparats"], blood=cur["blood"], plasma=cur["plasma"],
+                total_daily=total_in_day, infusion_daily=day["infusion"], preparats_daily=day["preparats"], blood_daily=day["blood"], plasma_daily=day["plasma"],
+                oral=oral_cur, oral_daily=oral_day
+            )
+        sector_3b = getattr(self.layout_manager, 'sector_3b', None)
+        if sector_3b is not None:
+            cumulative_out_day = self.balance_controller.get_cumulative_data_daily() if hasattr(self, 'balance_controller') else None
+            sector_3b.update_values(total=total_out_day, hour_data=cumulative_out_day)
+        sector_4a = getattr(self.layout_manager, 'sector_4a', None)
+        if sector_4a is not None:
+            sector_4a.update_balance(total_in_cur, total_out_cur, total_in_daily=total_in_day, total_out_daily=total_out_day)

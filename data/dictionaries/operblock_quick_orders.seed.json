@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "drug_name": "S. Ketamini 5%",
+      "group": 1,
+      "kind": "bolus",
+      "doses": [
+        "0,25 мл",
+        "0,5 мл",
+        "1 мл",
+        "2 мл"
+      ]
+    },
+    {
+      "drug_name": "Noradrenalini",
+      "label": "Noradrenalini",
+      "group": 2,
+      "kind": "infusion",
+      "rates": [
+        "1 мл/час",
+        "2 мл/час",
+        "5 мл/час",
+        "10 мл/час"
+      ],
+      "concentration": "4 мг / 50 мл"
+    }
+  ]
+}

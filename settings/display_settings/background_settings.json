@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "backgrounds": [
+    {
+      "id": "default",
+      "name": "Стандартный фон",
+      "file": "fon.png",
+      "start": "01-01",
+      "end": "12-31",
+      "locked": true
+    },
+    {
+      "id": "background_20260509_123815",
+      "name": "Фон 09.05-12.05",
+      "file": "fon_20260509_123847_fon_9maya.png",
+      "start": "05-09",
+      "end": "05-11",
+      "locked": false
+    },
+    {
+      "id": "background_20260509_124501",
+      "name": "Фон 09.05-09.05",
+      "file": "fon_20260509_124508_0abb8406-5e64-4f43-815a-091770979a26.png",
+      "start": "05-12",
+      "end": "05-12",
+      "locked": false
+    },
+    {
+      "id": "background_20260509_212312",
+      "name": "Фон 09.05-09.05",
+      "file": "fon_20260509_212318_nekuri.png",
+      "start": "05-31",
+      "end": "05-31",
+      "locked": false
+    },
+    {
+      "id": "background_20260512_131906",
+      "name": "Фон 12.05-12.05",
+      "file": "fon_20260512_131912_17maya.png",
+      "start": "05-17",
+      "end": "05-17",
+      "locked": false
+    },
+    {
+      "id": "background_20260512_131921",
+      "name": "Фон 12.05-12.05",
+      "file": "fon_20260512_131924_19maya.png",
+      "start": "05-19",
+      "end": "05-19",
+      "locked": false
+    },
+    {
+      "id": "background_20260512_131929",
+      "name": "Фон 12.05-12.05",
+      "file": "fon_20260512_131931_20maya.png",
+      "start": "05-20",
+      "end": "05-20",
+      "locked": false
+    },
+    {
+      "id": "background_20260512_131939",
+      "name": "Фон 12.05-12.05",
+      "file": "fon_20260512_132013_1iunya.png",
+      "start": "06-01",
+      "end": "06-01",
+      "locked": false
+    },
+    {
+      "id": "background_20260519_103128",
+      "name": "Фон 25.05-25.05",
+      "file": "fon_20260519_103154_25maya.png",
+      "start": "05-25",
+      "end": "05-25",
+      "locked": false
+    }
+  ]
+}

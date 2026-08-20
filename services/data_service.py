@@ -1,0 +1,1170 @@
+from datetime import datetime
+import re
+import threading
+import time
+from contextlib import contextmanager
+from typing import Any, Callable, Optional
+
+from PySide6.QtCore import QObject, QTimer, Signal, Qt, Slot
+
+from rem_card.app.db_access_classifier import classify_database_access, classify_database_access_error
+from rem_card.app.foreground_activity import should_defer_for_foreground_resume
+from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
+from rem_card.app.network_write_worker import NetworkWriteWorkerTimeout
+from rem_card.app.sqlite_shared import LocalWriteQueue, OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS
+from rem_card.app.runtime_outage import (
+    RuntimeNetworkOutageWriteBlockedError,
+    runtime_outage_transition_allowed,
+)
+from rem_card.services.data_update_monitor import DataUpdateMonitor
+from rem_card.services.sync_coordinator import SyncCoordinator
+
+
+OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS = 3
+OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS = (1000, 5000)
+
+
+def _sanitize_diagnostic_message(exc: Exception, *, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(exc or "")).strip()
+    return text[:limit]
+
+
+def _operblock_description_context(description: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    text = str(description or "")
+    payload = dict(metadata or {})
+    numbers = [int(match) for match in re.findall(r":(\d+)", text)]
+    operation_case_id = payload.get("operation_case_id")
+    admission_id = payload.get("admission_id")
+    if operation_case_id in ("", 0):
+        operation_case_id = None
+    if admission_id in ("", 0):
+        admission_id = None
+    if operation_case_id is None:
+        operation_case_id = numbers[0] if numbers and "operation_case" in text else None
+    if admission_id is None:
+        admission_id = numbers[0] if numbers and "admission" in text else None
+    if operation_case_id is None and text.startswith(("operblock_undo_last:", "operblock_release_operation_table:")):
+        operation_case_id = numbers[0] if numbers else None
+    return {
+        "operation_case_id": operation_case_id,
+        "admission_id": admission_id,
+        "table_code": str(payload.get("table_code") or ""),
+        "request_id": str(payload.get("request_id") or ""),
+    }
+
+
+class DataService(QObject):
+    write_failed = Signal(str)
+    write_finished = Signal(str)
+    changes_detected = Signal(dict)
+    network_outage_detected = Signal(dict)
+    restore_probe_status = Signal(dict)
+    _success_callback_requested = Signal(object, object)
+    _error_callback_requested = Signal(object, object)
+
+    def __init__(self, db_manager, *, monitor_enabled: bool = True):
+        super().__init__()
+        self.db = db_manager
+        self._queue = LocalWriteQueue(logger=logger)
+        self._monitor_enabled = bool(monitor_enabled)
+        self._monitor = DataUpdateMonitor(self, enabled=self._monitor_enabled)
+        self._sync_coordinator = SyncCoordinator()
+        self._poll_maintenance_tasks: list[Callable[[], Any]] = []
+        self._emergency_standby_scheduler = None
+        self._emergency_restore_probe_scheduler = None
+        self._shutting_down = False
+        self._runtime_role = None
+        self._network_outage_detected = False
+        self._network_outage_info: dict[str, Any] = {}
+        self._last_failure_category = ""
+        self._unconfirmed_write_count = 0
+        self._unknown_active_write = False
+        self._opblock_shadow_mirror_lock = threading.Lock()
+        self._opblock_shadow_mirror_active: dict[str, Any] | None = None
+        self._opblock_shadow_mirror_deferred_lock = threading.Lock()
+        self._opblock_shadow_mirror_deferred: list[dict[str, Any]] = []
+        self._outage_signal_emitted = False
+        self._last_runtime_outage_shutdown_result = ""
+        self._last_runtime_outage_queue_settled = None
+        self._monitor.changes_detected.connect(self._emit_coordinated_changes, Qt.QueuedConnection)
+        self._monitor.monitor_error.connect(self._handle_monitor_error, Qt.QueuedConnection)
+        self._success_callback_requested.connect(self._dispatch_success_callback, Qt.QueuedConnection)
+        self._error_callback_requested.connect(self._dispatch_error_callback, Qt.QueuedConnection)
+        self._monitor.start()
+        if hasattr(self.db, "set_local_replica_failure_callback"):
+            self.db.set_local_replica_failure_callback(
+                self._handle_local_replica_sync_failure
+            )
+
+    def set_runtime_role(self, role: str | None):
+        self._runtime_role = str(role or "").strip().lower() or None
+
+    def _handle_local_replica_sync_failure(
+        self,
+        snapshot: dict[str, Any] | None,
+    ) -> None:
+        if self._shutting_down or self._network_outage_detected:
+            return
+        payload = dict(snapshot or {})
+        failure_count = int(payload.get("consecutive_failures") or 0)
+        if failure_count != 2:
+            return
+        # Локальная реплика — необязательный кэш чтения. Только прямая ошибка
+        # центральной БД может переводить работающую программу в аварийный режим.
+        error = str(payload.get("last_sync_error") or "")
+        error_class = str(payload.get("last_sync_error_class") or "")
+        record_metric(
+            "local_replica_failure_did_not_trigger_network_outage",
+            1,
+            force_flush=True,
+            error_class=error_class or "unknown",
+            consecutive_failures=failure_count,
+            error_message_sanitized=_sanitize_diagnostic_message(
+                RuntimeError(error or error_class or "неизвестная ошибка")
+            ),
+        )
+        logger.warning(
+            "Local replica is degraded after %s consecutive failures; "
+            "keeping central database runtime active until a direct central "
+            "access failure is observed: %s",
+            failure_count,
+            error or error_class or "unknown error",
+        )
+
+    def get_data_version(self) -> int:
+        return self.db.get_data_version()
+
+    def get_latest_change_id(self, admission_id: Optional[int] = None, include_global: bool = True) -> int:
+        return self.db.get_latest_change_id(admission_id=admission_id, include_global=include_global)
+
+    def get_observed_change_state(self) -> Optional[dict[str, Any]]:
+        if not self._monitor:
+            return None
+        return self._monitor.get_change_state()
+
+    def set_change_monitor_enabled(self, enabled: bool):
+        self._monitor_enabled = bool(enabled)
+        if self._monitor:
+            self._monitor.set_enabled(self._monitor_enabled)
+
+    def is_change_monitor_enabled(self) -> bool:
+        if self._monitor:
+            return bool(self._monitor.is_enabled())
+        return bool(self._monitor_enabled)
+
+    def pause_for_database_rotation(self, timeout_sec: float = 5.0) -> dict[str, Any]:
+        if self._shutting_down:
+            return {
+                "ok": False,
+                "reason": "data_service_shutting_down",
+            }
+        if not self.is_write_queue_idle():
+            return {
+                "ok": False,
+                "reason": "write_queue_busy",
+                "write_queue": self.get_write_queue_state(),
+            }
+
+        monitor_was_enabled = self.is_change_monitor_enabled()
+        if monitor_was_enabled and self._monitor:
+            paused = self._monitor.pause_and_wait(timeout_sec)
+            if not paused:
+                self.set_change_monitor_enabled(True)
+                return {
+                    "ok": False,
+                    "reason": "monitor_pause_timeout",
+                    "timeout_sec": float(timeout_sec),
+                }
+        return {
+            "ok": True,
+            "monitor_was_enabled": bool(monitor_was_enabled),
+        }
+
+    def resume_after_database_rotation(self, token: dict[str, Any] | None = None) -> None:
+        if self._shutting_down or self._network_outage_detected:
+            return
+        if bool(dict(token or {}).get("monitor_was_enabled")):
+            self.set_change_monitor_enabled(True)
+            self.request_immediate_refresh(
+                force_emit=True,
+                source="database_rotation_resume",
+            )
+
+    def is_network_outage_detected(self) -> bool:
+        return bool(self._network_outage_detected)
+
+    def get_write_queue_state(self) -> dict[str, Any]:
+        queue = self._queue
+        pending_count = getattr(queue, "pending_count", lambda: 0)
+        active_count = getattr(queue, "active_count", lambda: 0)
+        accepting = getattr(queue, "is_accepting", lambda: True)
+        return {
+            "idle": bool(queue.is_idle()),
+            "shutting_down": bool(self._shutting_down),
+            "pending_count": int(pending_count()),
+            "active_write_in_progress": int(active_count()) > 0,
+            "active_count": int(active_count()),
+            "accepting": bool(accepting()),
+            "last_failure_category": str(self._last_failure_category or ""),
+            "network_outage_detected": bool(self._network_outage_detected),
+            "unconfirmed_write_count": int(self._unconfirmed_write_count),
+            "unknown_active_write": bool(self._unknown_active_write),
+            "queue_shutdown_result": str(self._last_runtime_outage_shutdown_result or ""),
+            "queue_settled": self._last_runtime_outage_queue_settled,
+        }
+
+    def fetch_changes_since(self, last_change_id: int, admission_id: Optional[int] = None, include_global: bool = True):
+        return self.db.fetch_changes_since(
+            last_change_id=last_change_id,
+            admission_id=admission_id,
+            include_global=include_global,
+        )
+
+    def get_latest_settings_change_id(self) -> int:
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        return get_settings_service().latest_change_id()
+
+    def fetch_settings_changes_since(self, last_change_id: int) -> list[dict[str, Any]]:
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        return get_settings_service().fetch_changes_since(last_change_id)
+
+    def get_changed_entities_since(
+        self,
+        last_change_id: int,
+        admission_id: Optional[int] = None,
+        include_global: bool = True,
+    ) -> set[str]:
+        return self.db.get_changed_entities_since(
+            last_change_id=last_change_id,
+            admission_id=admission_id,
+            include_global=include_global,
+        )
+
+    def add_poll_maintenance_task(self, task: Callable[[], Any]):
+        if task not in self._poll_maintenance_tasks:
+            self._poll_maintenance_tasks.append(task)
+
+    def set_emergency_standby_scheduler(self, scheduler):
+        self._emergency_standby_scheduler = scheduler
+        if scheduler is None:
+            return
+        self.write_finished.connect(self._request_emergency_standby_after_write, Qt.QueuedConnection)
+        self.changes_detected.connect(self._request_emergency_standby_after_changes, Qt.QueuedConnection)
+        self.add_poll_maintenance_task(self._request_emergency_standby_on_idle)
+
+    def set_emergency_restore_probe_scheduler(self, scheduler):
+        self._emergency_restore_probe_scheduler = scheduler
+        if scheduler is None:
+            return
+        self.write_finished.connect(self._request_emergency_restore_probe_after_write, Qt.QueuedConnection)
+
+    def emit_restore_probe_status(self, payload: dict[str, Any]):
+        if self._shutting_down:
+            return
+        self.restore_probe_status.emit(dict(payload or {}))
+
+    def run_poll_maintenance_tasks(self):
+        for task in list(self._poll_maintenance_tasks):
+            task_name = str(getattr(task, "__name__", "") or "poll_maintenance")
+            decision = should_defer_for_foreground_resume(
+                task_name,
+                source="data_service_poll",
+                write_queue_idle=self.is_write_queue_idle(),
+                active_foreground_action=False,
+            )
+            if decision.get("defer"):
+                continue
+            try:
+                task()
+            except Exception as exc:
+                logger.warning("DataService poll maintenance task failed: %s", exc, exc_info=True)
+
+    def run_write(self, description: str, operation: Callable):
+        if self._reject_write_if_outage(description):
+            raise RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
+        operation_uuid = self._record_operblock_write_intent(description)
+        metadata = self._opblock_interactive_write_metadata(description)
+        if operation_uuid:
+            metadata["operation_id"] = operation_uuid
+        try:
+            with self._write_metadata_context(metadata):
+                result = self.db.run_write_operation(operation, source=description)
+        except Exception as exc:
+            self._mark_operblock_write_outcome(operation_uuid, description, exc)
+            self._handle_database_access_failure(exc, source=description, write_description=description)
+            raise
+        self._mark_operblock_write_remote_committed(operation_uuid, description)
+        self.write_finished.emit(description)
+        self.request_immediate_refresh(force_emit=True, source=description)
+        self._mirror_operblock_write_after_commit(
+            description,
+            operation_uuid=operation_uuid,
+            context=_operblock_description_context(description, metadata),
+        )
+        return result
+
+    def is_write_queue_idle(self) -> bool:
+        return bool(self._queue.is_idle())
+
+    def block_new_writes_for_runtime_outage(self, info: dict[str, Any] | None = None) -> None:
+        if self._network_outage_detected:
+            return
+        self._network_outage_detected = True
+        self._network_outage_info = dict(info or {})
+        logger.warning("Runtime network outage detected; new writes are blocked: %s", self._network_outage_info)
+
+    def _reject_write_if_outage(self, description: str) -> bool:
+        if not self._network_outage_detected:
+            return False
+        exc = RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
+        logger.warning("Queued write rejected after runtime network outage for %s", description)
+        self.write_failed.emit(f"{description}: {exc}")
+        return True
+
+    def _is_operblock_network_write(self, description: str) -> bool:
+        role = str(self._runtime_role or "").strip().lower()
+        if not role.startswith("operblock"):
+            return False
+        if not str(description or "").startswith("operblock_"):
+            return False
+        runtime_context = getattr(self.db, "runtime_context", None)
+        return str(getattr(runtime_context, "mode", "") or "") == "network"
+
+    def _is_interactive_opblock_write(self, description: str) -> bool:
+        role = str(self._runtime_role or "").strip().lower()
+        return bool(role.startswith("operblock") and str(description or "").startswith("operblock_"))
+
+    def _opblock_interactive_write_metadata(
+        self,
+        description: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        if not payload.get("interactive") and not self._is_interactive_opblock_write(description):
+            return payload
+        role = str(payload.get("role") or self._runtime_role or "").strip().lower()
+        payload.update(
+            {
+                "interactive": True,
+                "role": role or "operblock",
+                "source": str(description or ""),
+                "operation_name": str(description or ""),
+                "timeout_ms": int(payload.get("timeout_ms") or OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS),
+                "isolated_worker": True,
+            }
+        )
+        return payload
+
+    @contextmanager
+    def _write_metadata_context(self, metadata: dict[str, Any] | None):
+        if metadata and hasattr(self.db, "write_metadata_context"):
+            with self.db.write_metadata_context(metadata):
+                yield
+            return
+        yield
+
+    def _record_operblock_write_intent(self, description: str) -> str | None:
+        if not self._is_operblock_network_write(description):
+            return None
+        try:
+            from rem_card.app.operblock_offline_store import record_operblock_write_intent
+
+            return record_operblock_write_intent(self.db, description=str(description or ""))
+        except Exception as exc:
+            logger.warning("Operblock pre-commit local journal failed for %s: %s", description, exc, exc_info=True)
+            raise RuntimeError("Не удалось сохранить локальный журнал записи оперблока.") from exc
+
+    def _mark_operblock_write_failed(self, operation_uuid: str | None, description: str, exc: Exception) -> None:
+        if not operation_uuid:
+            return
+        try:
+            from rem_card.app.operblock_offline_store import mark_operblock_write_failed
+
+            mark_operblock_write_failed(
+                operation_uuid=operation_uuid,
+                description=str(description or ""),
+                error=exc,
+            )
+        except Exception as journal_exc:
+            logger.warning("Operblock failed-write local journal failed for %s: %s", description, journal_exc, exc_info=True)
+
+    def _mark_operblock_write_outcome(
+        self,
+        operation_uuid: str | None,
+        description: str,
+        exc: Exception,
+    ) -> None:
+        if not operation_uuid:
+            return
+        if isinstance(exc, NetworkWriteWorkerTimeout) and exc.outcome_unknown:
+            self._unknown_active_write = True
+            try:
+                from rem_card.app.operblock_offline_store import mark_operblock_write_outcome_unknown
+
+                mark_operblock_write_outcome_unknown(
+                    operation_uuid=operation_uuid,
+                    description=str(description or ""),
+                    error=exc,
+                    phase=exc.phase,
+                )
+                record_metric(
+                    "operblock_write_outcome_unknown",
+                    1,
+                    force_flush=True,
+                    operation_id=operation_uuid,
+                    operation_name=str(description or ""),
+                    phase=exc.phase,
+                )
+            except Exception as journal_exc:
+                logger.critical(
+                    "Operblock unknown-write local journal failed for %s operation_uuid=%s: %s",
+                    description,
+                    operation_uuid,
+                    journal_exc,
+                    exc_info=True,
+                )
+            return
+        self._mark_operblock_write_failed(operation_uuid, description, exc)
+
+    def _mark_operblock_write_remote_committed(self, operation_uuid: str | None, description: str) -> bool:
+        if not operation_uuid:
+            return True
+        try:
+            from rem_card.app.operblock_offline_store import mark_operblock_write_remote_committed
+
+            mark_operblock_write_remote_committed(
+                self.db,
+                operation_uuid=operation_uuid,
+                description=str(description or ""),
+            )
+            return True
+        except Exception as journal_exc:
+            self._unknown_active_write = True
+            self._unconfirmed_write_count = max(1, int(self._unconfirmed_write_count or 0))
+            logger.critical(
+                "Committed operblock write could not be confirmed in local journal for %s operation_uuid=%s: %s",
+                description,
+                operation_uuid,
+                journal_exc,
+                exc_info=True,
+            )
+            return False
+
+    def get_opblock_shadow_mirror_snapshot(self) -> dict[str, Any]:
+        with self._opblock_shadow_mirror_lock:
+            active = dict(self._opblock_shadow_mirror_active or {})
+        if not active:
+            return {"active": False}
+        active["active"] = True
+        active["age_ms"] = round((time.perf_counter() - float(active.get("started_monotonic") or time.perf_counter())) * 1000.0, 3)
+        return active
+
+    def _opblock_shadow_mirror_metric_fields(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+        duration_ms: float | None = None,
+        retry_delay_ms: int | None = None,
+        exc: Exception | None = None,
+    ) -> dict[str, Any]:
+        fields = {
+            "source": str(description or ""),
+            "operation_name": str(description or ""),
+            "attempt": int(attempt or 1),
+            **dict(context or {}),
+        }
+        if operation_uuid:
+            fields["operation_uuid"] = str(operation_uuid)
+        if not fields.get("request_id") and operation_uuid:
+            fields["request_id"] = str(operation_uuid)
+        if "table_code" not in fields:
+            fields["table_code"] = ""
+        if duration_ms is not None:
+            fields["duration_ms"] = round(float(duration_ms), 3)
+        if retry_delay_ms is not None:
+            fields["retry_delay_ms"] = int(retry_delay_ms)
+        if exc is not None:
+            fields["error_class"] = type(exc).__name__
+            fields["error_message_sanitized"] = _sanitize_diagnostic_message(exc)
+        return fields
+
+    def _schedule_deferred_opblock_shadow_mirror(self, defer_ms: float) -> None:
+        delay_sec = max(1.0, float(defer_ms or 0.0) / 1000.0)
+
+        def submit_deferred():
+            if self._shutting_down:
+                return
+            try:
+                self._queue.submit(
+                    func=self._drain_deferred_opblock_shadow_mirror,
+                    description="opblock_shadow_mirror_deferred_resume",
+                    retryable=False,
+                )
+            except Exception as exc:
+                logger.warning("Failed to schedule deferred operblock shadow mirror: %s", exc, exc_info=True)
+
+        timer = threading.Timer(delay_sec, submit_deferred)
+        timer.daemon = True
+        timer.start()
+
+    def _defer_opblock_shadow_mirror_if_needed(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+    ) -> bool:
+        decision = should_defer_for_foreground_resume(
+            "opblock_shadow_mirror",
+            source="data_service",
+            write_queue_idle=self.is_write_queue_idle(),
+            active_foreground_action=False,
+            admission_id=context.get("admission_id"),
+            operation_case_id=context.get("operation_case_id"),
+        )
+        if not decision.get("defer"):
+            return False
+        item = {
+            "description": str(description or ""),
+            "operation_uuid": operation_uuid,
+            "attempt": int(attempt or 1),
+            "deferred_at": time.perf_counter(),
+            "foreground_lease_id": str(decision.get("foreground_lease_id") or ""),
+            **context,
+        }
+        with self._opblock_shadow_mirror_deferred_lock:
+            self._opblock_shadow_mirror_deferred.append(item)
+        record_metric(
+            "opblock_shadow_mirror_deferred_for_foreground_resume",
+            1,
+            source=str(description or ""),
+            reason="foreground_resume_lease",
+            foreground_lease_id=str(decision.get("foreground_lease_id") or ""),
+            defer_ms=decision.get("defer_ms"),
+            **context,
+        )
+        self._schedule_deferred_opblock_shadow_mirror(float(decision.get("defer_ms") or 0.0))
+        return True
+
+    def _drain_deferred_opblock_shadow_mirror(self) -> None:
+        with self._opblock_shadow_mirror_deferred_lock:
+            items = list(self._opblock_shadow_mirror_deferred)
+            self._opblock_shadow_mirror_deferred.clear()
+        for item in items:
+            if self._shutting_down:
+                return
+            description = str(item.get("description") or "")
+            context = _operblock_description_context(description, item)
+            decision = should_defer_for_foreground_resume(
+                "opblock_shadow_mirror",
+                source="data_service",
+                write_queue_idle=self.is_write_queue_idle(),
+                active_foreground_action=False,
+                admission_id=context.get("admission_id"),
+                operation_case_id=context.get("operation_case_id"),
+            )
+            if decision.get("defer"):
+                with self._opblock_shadow_mirror_deferred_lock:
+                    self._opblock_shadow_mirror_deferred.append(item)
+                self._schedule_deferred_opblock_shadow_mirror(float(decision.get("defer_ms") or 0.0))
+                return
+            record_metric(
+                "maintenance_resume_after_foreground",
+                1,
+                task="opblock_shadow_mirror",
+                foreground_lease_id=str(item.get("foreground_lease_id") or ""),
+                deferred_for_ms=round(max(0.0, (time.perf_counter() - float(item.get("deferred_at") or time.perf_counter())) * 1000.0), 3),
+                reason="shadow_mirror_deferred_drain",
+                timestamp_ms=int(time.time() * 1000.0),
+            )
+            self._run_opblock_shadow_mirror_after_commit(
+                description,
+                operation_uuid=str(item.get("operation_uuid") or "") or None,
+                context=context,
+                attempt=int(item.get("attempt") or 1),
+            )
+
+    def _mirror_operblock_write_after_commit(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        if not self._is_operblock_network_write(description):
+            return
+        context = dict(context or _operblock_description_context(description))
+        record_metric(
+            "opblock_shadow_mirror_decoupled_from_write",
+            1,
+            **self._opblock_shadow_mirror_metric_fields(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=1,
+            ),
+        )
+        if self._shutting_down:
+            self._run_opblock_shadow_mirror_after_commit(
+                description,
+                operation_uuid=None,
+                context=context,
+                attempt=1,
+            )
+            return
+        self._submit_opblock_shadow_mirror_post_commit(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=1,
+        )
+
+    def _submit_opblock_shadow_mirror_post_commit(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+    ) -> None:
+        if self._shutting_down:
+            return
+        attempt = max(1, int(attempt or 1))
+
+        def run_shadow_mirror() -> None:
+            self._execute_opblock_shadow_mirror_after_commit(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=attempt,
+            )
+
+        try:
+            self._queue.submit(
+                func=run_shadow_mirror,
+                description="opblock_shadow_mirror_post_commit" if attempt <= 1 else "opblock_shadow_mirror_retry",
+                retryable=False,
+            )
+        except Exception as exc:
+            self._record_opblock_shadow_mirror_failure(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=attempt,
+                duration_ms=0.0,
+                exc=exc,
+                schedule_retry=not self._shutting_down,
+            )
+
+    def _execute_opblock_shadow_mirror_after_commit(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+    ) -> None:
+        if self._shutting_down:
+            return
+        context = dict(context or _operblock_description_context(description))
+        if self._defer_opblock_shadow_mirror_if_needed(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=attempt,
+        ):
+            return
+        self._run_opblock_shadow_mirror_after_commit(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=attempt,
+        )
+
+    def _schedule_opblock_shadow_mirror_retry(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        failed_attempt: int,
+        exc: Exception | None = None,
+    ) -> None:
+        if self._shutting_down:
+            return
+        next_attempt = int(failed_attempt or 1) + 1
+        if next_attempt > OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS:
+            record_metric(
+                "opblock_shadow_mirror_retry_exhausted",
+                1,
+                force_flush=True,
+                **self._opblock_shadow_mirror_metric_fields(
+                    description,
+                    operation_uuid=operation_uuid,
+                    context=context,
+                    attempt=int(failed_attempt or 1),
+                    exc=exc,
+                ),
+            )
+            return
+        delay_index = min(
+            max(0, next_attempt - 2),
+            max(0, len(OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS) - 1),
+        )
+        retry_delay_ms = int(OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS[delay_index])
+        record_metric(
+            "opblock_shadow_mirror_retry_scheduled",
+            1,
+            **self._opblock_shadow_mirror_metric_fields(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=next_attempt,
+                retry_delay_ms=retry_delay_ms,
+                exc=exc,
+            ),
+        )
+
+        def submit_retry() -> None:
+            self._submit_opblock_shadow_mirror_post_commit(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=next_attempt,
+            )
+
+        timer = threading.Timer(max(0.0, retry_delay_ms / 1000.0), submit_retry)
+        timer.daemon = True
+        timer.start()
+
+    def _record_opblock_shadow_mirror_failure(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+        duration_ms: float,
+        exc: Exception,
+        schedule_retry: bool,
+    ) -> None:
+        fields = self._opblock_shadow_mirror_metric_fields(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=attempt,
+            duration_ms=duration_ms,
+            exc=exc,
+        )
+        record_metric("opblock_shadow_mirror_failed", duration_ms, **fields)
+        record_metric("opblock_shadow_mirror_post_commit_failed", duration_ms, **fields)
+        record_metric("opblock_shadow_mirror_failure_did_not_fail_network_write", 1, **fields)
+        logger.warning("Operblock local shadow mirror failed after %s: %s", description, exc, exc_info=True)
+        if schedule_retry:
+            if int(attempt or 1) >= OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS:
+                record_metric("opblock_shadow_mirror_retry_exhausted", 1, force_flush=True, **fields)
+            else:
+                self._schedule_opblock_shadow_mirror_retry(
+                    description,
+                    operation_uuid=operation_uuid,
+                    context=context,
+                    failed_attempt=attempt,
+                    exc=exc,
+                )
+
+    def _run_opblock_shadow_mirror_after_commit(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None = None,
+        context: dict[str, Any] | None = None,
+        attempt: int = 1,
+    ) -> None:
+        started = time.perf_counter()
+        attempt = max(1, int(attempt or 1))
+        context = dict(context or _operblock_description_context(description))
+        with self._opblock_shadow_mirror_lock:
+            self._opblock_shadow_mirror_active = {
+                "source": str(description or ""),
+                "reason": str(description or ""),
+                "started_monotonic": started,
+                "attempt": attempt,
+                **context,
+            }
+        start_fields = self._opblock_shadow_mirror_metric_fields(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=attempt,
+        )
+        record_metric(
+            "opblock_shadow_mirror_started",
+            1,
+            reason=str(description or ""),
+            **start_fields,
+        )
+        record_metric(
+            "opblock_shadow_mirror_post_commit_started",
+            1,
+            reason=str(description or ""),
+            **start_fields,
+        )
+        try:
+            from rem_card.app.operblock_offline_store import mirror_active_operblock_cases_from_network_db
+
+            mirror_active_operblock_cases_from_network_db(self.db, reason=str(description or ""))
+            duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
+            success_fields = self._opblock_shadow_mirror_metric_fields(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=attempt,
+                duration_ms=duration_ms,
+            )
+            record_metric(
+                "opblock_shadow_mirror_finished",
+                duration_ms,
+                result="success",
+                **success_fields,
+            )
+            record_metric(
+                "opblock_shadow_mirror_post_commit_succeeded",
+                duration_ms,
+                result="success",
+                **success_fields,
+            )
+            if attempt > 1:
+                record_metric(
+                    "opblock_shadow_mirror_retry_succeeded",
+                    duration_ms,
+                    result="success",
+                    **success_fields,
+                )
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
+            self._record_opblock_shadow_mirror_failure(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=attempt,
+                duration_ms=duration_ms,
+                exc=exc,
+                schedule_retry=True,
+            )
+        finally:
+            with self._opblock_shadow_mirror_lock:
+                self._opblock_shadow_mirror_active = None
+
+    def enqueue_write(
+        self,
+        description: str,
+        operation: Callable[[], Any],
+        on_success: Optional[Callable[[Any], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        write_metadata: Optional[dict[str, Any]] = None,
+    ):
+        if self._network_outage_detected:
+            exc = RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
+            logger.warning("Queued write rejected after runtime network outage for %s", description)
+            self.write_failed.emit(f"{description}: {exc}")
+            if on_error:
+                self._error_callback_requested.emit(on_error, exc)
+            return False
+
+        try:
+            operation_uuid = self._record_operblock_write_intent(description)
+        except Exception as exc:
+            self.write_failed.emit(f"{description}: {exc}")
+            if on_error:
+                self._error_callback_requested.emit(on_error, exc)
+            return False
+
+        if self._shutting_down:
+            exc = RuntimeError("Application is shutting down; queued write rejected")
+            self._mark_operblock_write_failed(operation_uuid, description, exc)
+            logger.info("Queued write rejected during shutdown for %s", description)
+            self.write_failed.emit(f"{description}: {exc}")
+            if on_error:
+                try:
+                    on_error(exc)
+                except Exception as callback_exc:
+                    logger.error("DataService shutdown rejection callback failed: %s", callback_exc, exc_info=True)
+            return False
+
+        metadata = self._opblock_interactive_write_metadata(description, write_metadata)
+        if operation_uuid:
+            metadata["operation_id"] = operation_uuid
+
+        def run_operation_with_metadata():
+            with self._write_metadata_context(metadata):
+                return operation()
+
+        def handle_success(result):
+            self._mark_operblock_write_remote_committed(operation_uuid, description)
+            if self._shutting_down:
+                logger.info("Queued write success callbacks skipped during shutdown for %s", description)
+                self._mirror_operblock_write_after_commit(
+                    description,
+                    operation_uuid=operation_uuid,
+                    context=_operblock_description_context(description, metadata),
+                )
+                return
+            if self._network_outage_detected:
+                logger.info("Queued write success callbacks skipped after runtime outage for %s", description)
+                self._mirror_operblock_write_after_commit(
+                    description,
+                    operation_uuid=operation_uuid,
+                    context=_operblock_description_context(description, metadata),
+                )
+                return
+            self.write_finished.emit(description)
+            self.request_immediate_refresh(force_emit=True, source=description)
+            self._success_callback_requested.emit(on_success, result)
+            self._mirror_operblock_write_after_commit(
+                description,
+                operation_uuid=operation_uuid,
+                context=_operblock_description_context(description, metadata),
+            )
+
+        def handle_error(exc: Exception):
+            logger.error("Queued write failed for %s: %s", description, exc)
+            self._mark_operblock_write_outcome(operation_uuid, description, exc)
+            self._handle_database_access_failure(exc, source=description, write_description=description)
+            self.write_failed.emit(f"{description}: {exc}")
+            self._error_callback_requested.emit(on_error, exc)
+
+        self._queue.submit(
+            func=run_operation_with_metadata,
+            description=description,
+            on_success=handle_success,
+            on_error=handle_error,
+            retryable=bool(metadata.get("queue_retryable", True)),
+            retries_left=max(0, int(metadata.get("queue_retries_left", 10))),
+        )
+        return True
+
+    @Slot(object, object)
+    def _dispatch_success_callback(self, callback: Optional[Callable[[Any], None]], result: Any):
+        if self._shutting_down or not callback:
+            return
+        QTimer.singleShot(0, lambda cb=callback, res=result: self._run_success_callback(cb, res))
+
+    def _run_success_callback(self, callback: Callable[[Any], None], result: Any):
+        if self._shutting_down or not callback:
+            return
+        try:
+            callback(result)
+        except Exception as exc:
+            logger.error("DataService success callback failed: %s", exc, exc_info=True)
+
+    @Slot(object, object)
+    def _dispatch_error_callback(self, callback: Optional[Callable[[Exception], None]], exc: Exception):
+        if self._shutting_down or not callback:
+            return
+        QTimer.singleShot(0, lambda cb=callback, err=exc: self._run_error_callback(cb, err))
+
+    def _run_error_callback(self, callback: Callable[[Exception], None], exc: Exception):
+        if self._shutting_down or not callback:
+            return
+        try:
+            callback(exc)
+        except Exception as callback_exc:
+            logger.error("DataService error callback failed: %s", callback_exc, exc_info=True)
+
+    def set_shutting_down(self):
+        self._shutting_down = True
+
+    def prepare_runtime_outage_shutdown(self, timeout: float = 5.0) -> bool:
+        logger.info("Runtime outage shutdown: stopping schedulers, monitor and write queue")
+        self.set_shutting_down()
+        schedulers_stopped = self._stop_emergency_schedulers(timeout=timeout)
+        monitor_stopped = self.stop_data_update_monitor(timeout=timeout)
+        queue_drained = self._queue.shutdown(timeout=timeout)
+        if not queue_drained:
+            self._unknown_active_write = True
+            self._unconfirmed_write_count = max(1, int(self._unconfirmed_write_count or 0))
+            logger.warning("Runtime outage shutdown continued with unconfirmed queued write state")
+        self._last_runtime_outage_queue_settled = bool(queue_drained)
+        if queue_drained and schedulers_stopped and monitor_stopped:
+            self._last_runtime_outage_shutdown_result = "settled"
+        elif not queue_drained:
+            self._last_runtime_outage_shutdown_result = "timeout"
+        else:
+            self._last_runtime_outage_shutdown_result = "failed"
+        try:
+            from rem_card.app.local_metrics import flush_metrics
+
+            flush_metrics(timeout=1.0)
+        except Exception:
+            pass
+        return bool(schedulers_stopped and monitor_stopped and queue_drained)
+
+    def stop_data_update_monitor(self, timeout: float = 5.0) -> bool:
+        if not self._monitor or not self._monitor.isRunning():
+            return True
+        self._monitor.stop()
+        return bool(self._monitor.wait(max(0, int(float(timeout or 0.0) * 1000))))
+
+    def shutdown(self) -> bool:
+        logger.info("DataService shutdown: stopping monitor and write queue")
+        self.set_shutting_down()
+        schedulers_stopped = self._stop_emergency_schedulers(timeout=5.0)
+        monitor_stopped = True
+        if self._monitor and self._monitor.isRunning():
+            self._monitor.stop()
+            monitor_stopped = bool(self._monitor.wait(5000))
+            if not monitor_stopped:
+                logger.warning("DataUpdateMonitor did not stop before DataService shutdown timeout")
+        drained = self._queue.shutdown(timeout=5.0)
+        try:
+            from rem_card.app.local_metrics import flush_metrics
+
+            flush_metrics(timeout=1.0)
+        except Exception:
+            pass
+        logger.info(
+            "DataService shutdown result schedulers_stopped=%s monitor_stopped=%s queue_drained=%s",
+            schedulers_stopped,
+            monitor_stopped,
+            drained,
+        )
+        return bool(schedulers_stopped and monitor_stopped and drained)
+
+    def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):
+        if self._monitor and self._monitor_enabled and not self._shutting_down and not self._network_outage_detected:
+            self._monitor.request_refresh(force_emit=force_emit, source=source)
+
+    @Slot(dict)
+    def _emit_coordinated_changes(self, payload: dict):
+        if self._shutting_down:
+            return
+        if any((change or {}).get("settings_change") for change in (payload or {}).get("changes", [])):
+            try:
+                from rem_card.services.settings.settings_service import get_settings_service
+
+                get_settings_service().invalidate_cache()
+            except Exception as exc:
+                logger.warning("Не удалось инвалидировать кэш settings DB: %s", exc, exc_info=True)
+        self.changes_detected.emit(self._sync_coordinator.classify(payload or {}))
+
+    @Slot(str)
+    def _request_emergency_standby_after_write(self, description: str):
+        if self._shutting_down:
+            return
+        scheduler = getattr(self, "_emergency_standby_scheduler", None)
+        if scheduler is not None:
+            scheduler.request_refresh_after_write("after_write_commit")
+
+    @Slot(dict)
+    def _request_emergency_standby_after_changes(self, payload: dict):
+        if self._shutting_down:
+            return
+        scheduler = getattr(self, "_emergency_standby_scheduler", None)
+        if scheduler is None:
+            return
+        payload = payload or {}
+        previous_change_id = int(payload.get("previous_change_id") or 0)
+        last_change_id = int(payload.get("last_change_id") or 0)
+        previous_settings_change_id = int(payload.get("previous_settings_change_id") or 0)
+        last_settings_change_id = int(payload.get("last_settings_change_id") or 0)
+        has_settings_change = any((change or {}).get("settings_change") for change in payload.get("changes", []))
+        if has_settings_change or last_settings_change_id > previous_settings_change_id:
+            scheduler.request_refresh("settings_changed")
+        elif last_change_id > previous_change_id:
+            scheduler.request_refresh("change_log_advanced")
+
+    def _request_emergency_standby_on_idle(self):
+        if self._shutting_down:
+            return
+        scheduler = getattr(self, "_emergency_standby_scheduler", None)
+        if scheduler is not None:
+            scheduler.request_refresh_on_idle("idle_periodic")
+            self._check_standby_scheduler_outage_status(scheduler)
+
+    @Slot(str)
+    def _request_emergency_restore_probe_after_write(self, description: str):
+        if self._shutting_down:
+            return
+        scheduler = getattr(self, "_emergency_restore_probe_scheduler", None)
+        if scheduler is not None:
+            scheduler.request_probe("after_local_write")
+
+    def _stop_emergency_schedulers(self, *, timeout: float = 5.0) -> bool:
+        stopped = True
+        for attr, label in (
+            ("_emergency_standby_scheduler", "Emergency standby scheduler"),
+            ("_emergency_restore_probe_scheduler", "Emergency restore probe scheduler"),
+        ):
+            scheduler = getattr(self, attr, None)
+            if scheduler is None:
+                continue
+            try:
+                stopped = bool(scheduler.stop(timeout=timeout)) and stopped
+            except Exception as exc:
+                stopped = False
+                logger.warning("%s shutdown failed: %s", label, exc, exc_info=True)
+        return stopped
+
+    @Slot(str)
+    def _handle_monitor_error(self, message: str):
+        self._handle_database_access_failure(RuntimeError(str(message or "")), source="data_update_monitor")
+
+    def _handle_database_access_failure(
+        self,
+        exc: Exception,
+        *,
+        source: str,
+        write_description: str | None = None,
+    ) -> str:
+        classification = classify_database_access(exc)
+        category = classification.category
+        worker_timeout = exc if isinstance(exc, NetworkWriteWorkerTimeout) else None
+        if worker_timeout is not None and worker_timeout.phase == "local_coordination":
+            category = "locked_busy"
+        self._last_failure_category = category
+        transition_allowed = runtime_outage_transition_allowed(category)
+        outcome_unknown = bool(worker_timeout is None or worker_timeout.outcome_unknown)
+        if write_description and transition_allowed and outcome_unknown:
+            self._unconfirmed_write_count += 1
+        if not transition_allowed:
+            return category
+
+        active_count = int(getattr(self._queue, "active_count", lambda: 0)())
+        pending_count = int(getattr(self._queue, "pending_count", lambda: 0)())
+        info = {
+            "category": category,
+            "reason": classification.reason,
+            "source": str(source or ""),
+            "role": str(self._runtime_role or ""),
+            "detected_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "write_description": str(write_description or ""),
+            "pending_count": pending_count,
+            "active_write_in_progress": active_count > 0,
+            "unconfirmed_write_count": int(self._unconfirmed_write_count),
+        }
+        if active_count > 0 and outcome_unknown:
+            self._unknown_active_write = True
+        self.block_new_writes_for_runtime_outage(info)
+        if not self._outage_signal_emitted:
+            self._outage_signal_emitted = True
+            self.network_outage_detected.emit(dict(info))
+        return category
+
+    def _check_standby_scheduler_outage_status(self, scheduler) -> None:
+        try:
+            status = scheduler.get_status()
+        except Exception:
+            return
+        if int(status.get("consecutive_failures") or 0) < 3:
+            return
+        text = f"{status.get('last_status', '')} {status.get('last_reason', '')} {status.get('last_error', '')}"
+        category = classify_database_access_error(RuntimeError(text))
+        if runtime_outage_transition_allowed(category):
+            self._handle_database_access_failure(RuntimeError(text), source="emergency_standby_scheduler")

@@ -1,0 +1,143 @@
+RemCard Proprietary Source License, Version 1.1
+Non-Commercial Individual Use Permitted
+
+Copyright (c) 2026 Битюцкий Вадим Алексеевич
+GitHub: DonKiton
+All rights reserved except as expressly granted below.
+
+1. AUTHORSHIP, OWNERSHIP, AND SCOPE
+
+RemCard was conceived, designed, and developed by Битюцкий Вадим Алексеевич
+(GitHub: DonKiton), who is the copyright holder of the original RemCard source
+code, documentation, artwork, and other original project materials.
+
+"Software" means those original RemCard materials distributed with this
+License, in source or binary form, including any portion of them. This
+attribution records the authorship and development of RemCard. Copyright
+protects the Software and its original expression, not abstract ideas,
+concepts, methods, or systems by themselves.
+
+2. PERMITTED NON-COMMERCIAL INDIVIDUAL USE
+
+Subject to every condition of this License, the copyright holder grants a
+natural person acting solely on their own behalf, and not for an employer,
+client, business, institution, or other organization, a non-exclusive,
+worldwide, royalty-free, non-transferable license to:
+
+a. access, download, copy, and fork the Software;
+b. run, study, test, and evaluate the Software;
+c. modify the Software and create derivative works; and
+d. share original or modified copies without charge and without any direct or
+   indirect commercial advantage.
+
+Personal study, hobby development, experimentation, portfolio work,
+non-commercial research, and contribution through GitHub are permitted when
+they are performed by an individual without compensation or commercial
+purpose.
+
+3. CONDITIONS FOR SHARING AND MODIFICATIONS
+
+Every copy or modified version shared under Section 2 must:
+
+a. include this complete License and all copyright and attribution notices;
+b. clearly state that it is an unofficial copy or modification and identify
+   the material changes and their author;
+c. be made available under this same License, without additional permissions
+   or restrictions;
+d. include the corresponding source code if a binary or executable is shared;
+e. be provided entirely without payment, fee, subscription, advertising
+   revenue, sponsorship, required donation, or other financial benefit; and
+f. not imply endorsement, approval, support, or official status by the
+   copyright holder.
+
+Recipients receive their rights directly from the copyright holder under this
+License. You may not sublicense or transfer your license.
+
+4. COMMERCIAL AND ORGANIZATIONAL USE REQUIRES PERMISSION
+
+Any Commercial Use or Organizational Use requires the copyright holder's
+prior written permission and a separate license agreement.
+
+"Commercial Use" means any use intended for, connected with, or resulting in
+direct or indirect payment, revenue, profit, commercial advantage, or benefit
+to a business or paid professional activity. It includes, without limitation:
+
+a. selling, licensing, renting, leasing, or charging for the Software or a
+   modified version;
+b. charging for access, downloads, hosting, subscriptions, or software as a
+   service;
+c. paid installation, deployment, integration, customization, development,
+   maintenance, support, consulting, or training;
+d. bundling the Software with a paid product or service;
+e. monetization through advertising, sponsorship, affiliate revenue,
+   donations tied to access or functionality, or any similar arrangement;
+f. using the Software in work performed for an employer or client; and
+g. using the Software to operate, support, or obtain an advantage for a
+   business, professional practice, clinic, institution, or organization.
+
+"Organizational Use" means use by or for any company, partnership, employer,
+client, clinic, medical organization, educational institution, government
+body, non-profit organization, or other legal or organized entity, whether or
+not that entity itself operates for profit.
+
+These restrictions apply to the original Software and to every modified or
+derived version, regardless of the amount or significance of the changes.
+Changing features, source code, fonts, colors, interface elements, branding,
+or the product name does not permit Commercial Use or Organizational Use.
+
+5. COMMERCIAL LICENSING AND PERMISSION
+
+Permission is valid only when granted in writing by the copyright holder and
+only for the scope, persons, organization, territory, and term stated in that
+permission. Requests may be sent to menfise@mail.ru or through the RemCard
+repository owned by DonKiton. The copyright holder may offer the Software
+under separate commercial or other terms.
+
+6. PUBLIC GITHUB REPOSITORY
+
+This License permits the individual non-commercial access, copying, forking,
+modification, and sharing described above. It does not limit the separate
+rights that GitHub's Terms of Service require for operating a public
+repository. Public availability or a GitHub fork does not grant Commercial
+Use, Organizational Use, or any permission beyond this License and GitHub's
+applicable terms.
+
+7. NAME, BRANDING, PATENTS, AND OTHER RIGHTS
+
+No trademark or branding license is granted. The RemCard name and project
+identity may be used only for truthful attribution or to identify an
+unofficial non-commercial fork, and never to imply endorsement or official
+status. No patent license is granted. All rights not expressly granted are
+reserved.
+
+8. TERMINATION
+
+Your rights under this License terminate automatically if you violate any of
+its conditions. On termination, you must stop using and distributing the
+Software and remove copies under your control, except where applicable law
+requires otherwise. Rights may be reinstated only by the copyright holder in
+writing.
+
+9. DISCLAIMER AND LIMITATION OF LIABILITY
+
+The Software is provided "AS IS", without warranty of any kind, to the fullest
+extent permitted by applicable law. The copyright holder is not liable for any
+claim, damages, loss, or other liability arising from or related to the
+Software or its use, except where liability cannot lawfully be excluded.
+
+10. THIRD-PARTY COMPONENTS AND EARLIER VERSIONS
+
+This License covers only original RemCard materials owned by the copyright
+holder. Third-party components and dependencies remain subject to their own
+licenses and notices.
+
+This License applies only to versions of the Software distributed with it. It
+does not alter rights that were lawfully obtained for an earlier version under
+different license terms.
+
+11. SEVERABILITY AND NO WAIVER
+
+If any provision of this License is held unenforceable, the remaining
+provisions remain in effect to the fullest extent permitted by applicable law.
+A failure to enforce any provision is not a waiver of the right to enforce it
+later.

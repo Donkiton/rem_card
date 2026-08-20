@@ -1,0 +1,21021 @@
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+import hashlib
+import json
+from math import ceil
+import os
+import re
+import time
+import uuid
+from typing import Any, TYPE_CHECKING
+import weakref
+
+from PySide6.QtCore import QDate, QEvent, QEventLoop, QMimeData, QPointF, QRectF, QRegularExpression, QSettings, QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDrag,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QImage,
+    QIntValidator,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QRegularExpressionValidator,
+)
+from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QApplication,
+    QButtonGroup,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFormLayout,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QProgressBar,
+    QScrollArea,
+    QSizePolicy,
+    QStackedWidget,
+    QStyle,
+    QStyleOptionViewItem,
+    QHeaderView,
+    QStyledItemDelegate,
+    QTableWidget,
+    QTableWidgetItem,
+    QTimeEdit,
+    QToolTip,
+    QVBoxLayout,
+    QWidget,
+)
+
+from rem_card.app import operblock_startup_metrics
+from rem_card.app.foreground_activity import (
+    finish_foreground_resume_lease,
+    mark_foreground_activity,
+    start_foreground_resume_lease,
+)
+from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
+from rem_card.app.patient_age import parse_date_value
+from rem_card.app.paths import get_icon_dir, get_patient_assets_dir
+from rem_card.app.sqlite_shared import OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS, OpBlockInteractiveWriteBusyTimeout
+from rem_card.services.mkb import MKBService
+from rem_card.services.operblock_service import (
+    OPERBLOCK_BLOOD_GROUP_OPTIONS,
+    OPERBLOCK_BLOOD_RH_OPTIONS,
+    OPERBLOCK_TRANSFER_DEPARTMENT_OPTIONS,
+    OPERBLOCK_TABLES,
+    OperBlockConflictError,
+    OperBlockService,
+    OperBlockSourceMovementChangedError,
+    normalize_operblock_transfer_department,
+    is_complete_operblock_mkb_code,
+    normalize_operblock_blood_group,
+    normalize_operblock_blood_rh,
+    normalize_operblock_history_number,
+    normalize_operblock_mkb_code,
+)
+from rem_card.services.concurrency import DataConflictError
+from rem_card.services.operblock_timeline import (
+    build_infusion_intervals_from_timeline_events,
+    format_operblock_medication_display_label,
+    legacy_order_row_to_medication_event,
+    timeline_event_row_to_medication_event,
+)
+from rem_card.services.operblock_quick_orders import (
+    build_operblock_quick_order_text,
+    load_operblock_quick_orders,
+    normalize_operblock_quick_order_kind,
+    normalize_operblock_quick_order_group,
+)
+from rem_card.services.operblock_quick_order_buttons import (
+    load_operblock_extra_quick_type_buttons,
+    load_operblock_quick_order_buttons,
+    normalize_operblock_extra_quick_type_keys,
+    operblock_quick_order_button_label_map,
+)
+from rem_card.services.operblock_medication_presets import (
+    OPERBLOCK_MEDICATION_PRESET_KINDS,
+    build_operblock_preset_bolus_text,
+    build_operblock_preset_payload,
+    load_operblock_diluent_options,
+    load_operblock_medication_presets,
+    normalize_operblock_medication_preset_kind,
+    operblock_medication_preset_display_name,
+    save_operblock_medication_presets,
+)
+from rem_card.services.operblock_route_settings import (
+    OPERBLOCK_DEFAULT_ROUTE_CODE,
+    load_operblock_drug_groups,
+    normalize_operblock_route_code,
+    operblock_comment_with_route,
+    operblock_default_route_for_drug_group,
+    operblock_route_from_comment,
+    operblock_route_label,
+    operblock_routes_for_drug_group,
+)
+from rem_card.services.operblock_icon_defaults import (
+    OPERBLOCK_PATIENT_FEMALE_ICON_KEY,
+    OPERBLOCK_PATIENT_MALE_ICON_KEY,
+    default_drug_icon_file,
+    drug_icon_candidate_keys_from_payload,
+    edit_icon_key,
+    type_icon_key,
+)
+from rem_card.services.operblock_anesthesia_types import (
+    load_operblock_anesthesia_types,
+    normalize_operblock_anesthesia_type_label,
+    save_operblock_anesthesia_types,
+)
+from rem_card.services.operblock_anesthesia_prep import (
+    invalidate_start_anesthesia_options_cache,
+    load_start_anesthesia_options,
+)
+from rem_card.services.operblock_team import (
+    OPERBLOCK_TEAM_DEFAULT_POSITIONS,
+    load_operblock_anesthesiologists,
+    load_operblock_anesthetists,
+    load_operblock_operating_nurses,
+    load_operblock_surgeons,
+    load_operblock_team,
+    normalize_operblock_team_text,
+    save_operblock_team,
+)
+from rem_card.services.patient_departments import PROFILE_DEPARTMENTS, normalize_profile_department
+from rem_card.ui.nurse_view.sectors.nurse_sector_4v import VitalBadge
+from rem_card.ui.rem_card_sectors.sector_1a import Sector1a
+from rem_card.ui.rem_card_sectors.sector_1b import Sector1b
+from rem_card.ui.rem_card_sectors.sector_2g import Sector2g
+from rem_card.ui.rem_card_sectors.sector_2v import Sector2v
+from rem_card.ui.rem_card_sectors.sector_8 import Sector8
+from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.async_call import AsyncCallThread
+from rem_card.ui.shared.display_settings_storage import (
+    DisplaySettingsStorage,
+    SECTOR8_BUTTON_SIDE_LEFT,
+    SECTOR8_BUTTON_SIDE_RIGHT,
+    ordered_visible_ids_by_side,
+    role_display_settings_from_payload,
+)
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
+from rem_card.ui.shared.operblock_icon_settings import request_operblock_icon_pixmap
+from rem_card.ui.shared.pdf_opener import open_pdf_file
+from rem_card.ui.shared.vitals_widget import VitalsWidget
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
+from rem_card.ui.styles.shared_styles import apply_custom_dialog_style
+from rem_card.ui.styles.sector_styles import build_remcard_tab_button_style
+from rem_card.ui.styles.sector_styles import (
+    build_remcard_current_time_label_style,
+    build_remcard_period_label_style,
+)
+from rem_card.ui.styles.theme import (
+    BG_CARD,
+    BG_LIGHT,
+    BG_MAIN,
+    BORDER_COLOR,
+    BORDER_LIGHT,
+    COLOR_DANGER,
+    COLOR_PRIMARY_DARK,
+    COLOR_VITAL_AD_LINE,
+    COLOR_VITAL_PULSE,
+    COLOR_VITAL_SPO2,
+    CUSTOM_DIALOG_RADIUS,
+    STYLE_PATIENT_FORM_CANCEL_BUTTON,
+    STYLE_PATIENT_FORM_INVALID_FIELD,
+    STYLE_PATIENT_FORM_MANUAL_FIELD,
+    STYLE_PATIENT_FORM_PAGE,
+    STYLE_PATIENT_FORM_READONLY_FIELD,
+    STYLE_PATIENT_FORM_SAVE_BUTTON,
+    STYLE_PATIENT_FORM_SCROLL,
+    STYLE_PATIENT_FORM_SECTION_TITLE,
+    STYLE_PATIENT_FORM_TAB,
+    STYLE_PATIENT_FORM_VALID_FIELD,
+    STYLE_SECTOR8_BUTTON,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
+from rem_card.ui.styles.theme_manager import get_theme_manager
+from rem_card.ui.operblock_view.operblock_control_styles import (
+    operblock_arrow_button_style,
+    operblock_arrow_icon,
+    operblock_combo_box_style as _operblock_combo_box_style,
+    operblock_med_action_button_style,
+    operblock_vertical_scrollbar_style as _operblock_vertical_scrollbar_style,
+)
+
+
+if TYPE_CHECKING:
+    from rem_card.ui.operblock_view.operblock_chart_widget import OperBlockChartWidget
+
+
+OPERBLOCK_VITAL_SETTINGS = {"ad": 1, "pulse": 1, "temp": 0, "spo2": 1, "rr": 0, "cvp": 0}
+OPERBLOCK_IDLE_DIAGNOSTIC_THRESHOLD_SEC = 300.0
+OPERBLOCK_INITIAL_CHART_HOURS = 3
+OPERBLOCK_CHART_EXPAND_THRESHOLD_MINUTES = 20
+OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT = 262
+OPERBLOCK_MAX_CHART_HOURS = 72
+OPERBLOCK_VITAL_TIME_STEP_MINUTES = 5
+OPERBLOCK_CHART_GRID_STEP_MINUTES = 15
+OPERBLOCK_VITAL_TIME_QUICK_ACTIONS = (
+    ("Сейчас", None),
+    ("-5 минут", -5),
+    ("-10 минут", -10),
+    ("+5 минут", 5),
+)
+OPERBLOCK_QUICK_ORDERS_WIDTH = 230
+OPERBLOCK_QUICK_ORDER_DRAG_MIME = "application/x-operblock-medication-preset"
+OPERBLOCK_ADD_ORDER_BUTTON_TEXT = "Добавить"
+OPERBLOCK_INFUSION_CHANGE_BUTTON_TEXT = "Изменить"
+OPERBLOCK_INFUSION_STOP_BUTTON_TEXT = "Стоп"
+OPERBLOCK_INFUSION_RATE_UNIT = "мл/час"
+OPERBLOCK_DEFAULT_INFUSION_RATES = ("1 мл/час", "2 мл/час", "5 мл/час", "10 мл/час")
+OPERBLOCK_INFUSION_HISTORY_COLUMN = 4
+OPERBLOCK_PRESET_KIND_TITLES = {
+    "bolus": "Болюс",
+    "gas": "Газ",
+    "continuous_infusion": "Дозатор",
+    "timed_infusion": "Капельница",
+}
+OPERBLOCK_PRESET_KIND_GROUP_TITLES = {
+    "bolus": "Болюсы",
+    "gas": "Газы",
+    "continuous_infusion": "Дозатор",
+    "timed_infusion": "Капельницы",
+}
+OPERBLOCK_PRESET_GROUP_OPTIONS = (
+    "Болюсы",
+    "Газы",
+    "Дозатор",
+    "Капельницы",
+    "Вазопрессоры",
+    "Седация",
+    "Миорелаксанты",
+    "Анальгезия",
+    "Антибиотики / капельницы",
+    "Растворы / прочее",
+)
+OPERBLOCK_PRESET_KIND_BADGES = {
+    "bolus": "БОЛ",
+    "gas": "ГАЗ",
+    "continuous_infusion": "ДОЗ",
+    "timed_infusion": "КАП",
+}
+OPERBLOCK_ORDERS_BG = "#F6F8FA"
+OPERBLOCK_ORDERS_CARD_BG = "#FFFFFF"
+OPERBLOCK_ORDERS_BORDER = BORDER_COLOR
+OPERBLOCK_ORDERS_TEXT = "#0F172A"
+OPERBLOCK_ORDERS_MUTED = "#64748B"
+OPERBLOCK_ORDERS_ACCENT = "#2563EB"
+OPERBLOCK_EVENT_COLORS = {
+    "Болюс": ("#EEF3FF", "#2F6FAE"),
+    "Газ": ("#E0F2FE", "#0369A1"),
+    "Дозатор": ("#ECF7F0", "#2F8A57"),
+    "Капельница": ("#F2F6F8", "#506070"),
+    "Изм. скорость": ("#FFF3E0", "#B26A00"),
+    "Изм. доза": ("#E0F2FE", "#0369A1"),
+    "Стоп": ("#FDECEC", "#C62828"),
+}
+OPERBLOCK_TEMPLATE_FILTERS = (
+    ("bolus", "Болюсы"),
+    ("continuous_infusion", "Дозатор"),
+    ("timed_infusion", "Капельницы"),
+    ("gas", "Газ"),
+    ("favorite", "Избранное"),
+)
+OPERBLOCK_ORDERS_FILTERS = (
+    ("all", "Все"),
+    ("bolus", "Болюсы"),
+    ("gas", "Газ"),
+    ("continuous_infusion", "Дозатор"),
+    ("timed_infusion", "Капельницы"),
+    ("active", "Активные"),
+)
+OPERBLOCK_ORDERS_SORT_OPTIONS = (
+    ("time_desc", "По времени (новые сверху)"),
+    ("time_asc", "По времени (старые сверху)"),
+    ("drug", "По препарату"),
+    ("active_only", "Только активные"),
+)
+OPERBLOCK_ORDER_ROUTE_DEFAULT = OPERBLOCK_DEFAULT_ROUTE_CODE
+OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR = "im"
+OPERBLOCK_ROUTE_ONLY_REFRESH_SUPPRESS_SECONDS = 10.0
+OPERBLOCK_LOCAL_WRITE_REFRESH_SUPPRESS_SECONDS = 10.0
+OPERBLOCK_ACTIVE_INFUSION_COLUMNS = 3
+OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT = 128
+OPERBLOCK_ACTIVE_INFUSION_GRID_SPACING = 10
+OPERBLOCK_ACTIVE_INFUSION_EMPTY_HEIGHT = OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT
+
+
+TOOLTIP_WHITE_STYLE = """
+    QToolTip {
+        color: #000000;
+        background-color: #ffffff;
+        border: 1px solid #8a8f94;
+        padding: 4px 6px;
+    }
+"""
+
+
+def _operblock_app_icon_path() -> str:
+    for icon_name in ("remcardicon.png", "remcardicon.ico"):
+        icon_path = os.path.join(get_icon_dir(), icon_name)
+        if os.path.exists(icon_path):
+            return icon_path
+    return ""
+
+
+def _apply_operblock_window_icon(window: QWidget) -> None:
+    icon_path = _operblock_app_icon_path()
+    if icon_path:
+        window.setWindowIcon(QIcon(icon_path))
+
+
+def _create_operblock_title_icon(size: int = 22) -> QLabel | None:
+    icon_path = _operblock_app_icon_path()
+    if not icon_path:
+        return None
+    pixmap = QPixmap(icon_path)
+    if pixmap.isNull():
+        return None
+    icon_label = QLabel()
+    icon_label.setObjectName("operblock_dialog_icon")
+    icon_label.setFixedSize(size, size)
+    icon_label.setPixmap(pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+    return icon_label
+
+
+DANGER_BUTTON_STYLE = f"""
+    QPushButton {{
+        background-color: #fff0f0;
+        color: {COLOR_DANGER};
+        font-size: 13px;
+        font-weight: bold;
+        padding: 4px 12px;
+        border-radius: {CUSTOM_DIALOG_RADIUS};
+        border: 1.5px solid {COLOR_DANGER};
+    }}
+    QPushButton:hover {{
+        background-color: #ffe2e2;
+    }}
+    QPushButton:disabled {{
+        background-color: {BG_MAIN};
+        color: {TEXT_MUTED};
+        border: 1px solid {BORDER_LIGHT};
+    }}
+"""
+
+
+OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE = (
+    STYLE_PATIENT_FORM_CANCEL_BUTTON
+    + """
+    QPushButton {
+        padding: 4px 12px;
+        min-width: 72px;
+    }
+"""
+)
+OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE = (
+    STYLE_PATIENT_FORM_SAVE_BUTTON
+    + """
+    QPushButton {
+        padding: 4px 12px;
+        min-width: 72px;
+    }
+"""
+)
+
+
+def _operblock_primary_action_button_style(
+    *,
+    radius: int = 8,
+    padding: str = "8px 15px",
+    font_size: int = 13,
+    font_weight: int = 700,
+) -> str:
+    return f"""
+        QPushButton {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6366F1, stop:1 #4F46E5);
+            color: #FFFFFF;
+            border: 1px solid #4F46E5;
+            border-radius: {int(radius)}px;
+            padding: {padding};
+            font-size: {int(font_size)}px;
+            font-weight: {int(font_weight)};
+        }}
+        QPushButton:hover {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7478FF, stop:1 #5B54F0);
+            border-color: #6366F1;
+        }}
+        QPushButton:pressed {{
+            background: #4338CA;
+            border-color: #4338CA;
+        }}
+        QPushButton:disabled {{
+            background: #CBD5E1;
+            border-color: {OPERBLOCK_ORDERS_BORDER};
+            color: #FFFFFF;
+        }}
+    """
+
+
+OPERBLOCK_MEDICATION_SETTINGS_ROW_STYLE = f"""
+    QFrame#medicationPresetSettingsRow {{
+        background-color: {BG_LIGHT};
+        border: 1px solid {BORDER_LIGHT};
+        border-radius: {CUSTOM_DIALOG_RADIUS};
+    }}
+    QFrame#medicationPresetSettingsRow QLineEdit:read-only {{
+        background: {BG_MAIN};
+        color: {TEXT_SECONDARY};
+    }}
+"""
+
+
+PATIENT_CARD_STYLE = f"""
+    QFrame#operblockTableCard {{
+        background-color: {BG_CARD};
+        border: 1.5px solid {BORDER_COLOR};
+        border-radius: 8px;
+    }}
+    QLabel {{
+        background: transparent;
+        border: none;
+    }}
+"""
+
+
+SECTOR_HEADER_STYLE = f"""
+    QLabel {{
+        font-weight: bold;
+        font-size: 14px;
+        color: {TEXT_PRIMARY};
+        background-color: {BG_LIGHT};
+        border-top: 1.5px solid {BORDER_COLOR};
+        border-left: 1.5px solid {BORDER_COLOR};
+        border-right: 1.5px solid {BORDER_COLOR};
+        border-bottom: 0.5px solid {BORDER_COLOR};
+        border-top-left-radius: {CUSTOM_DIALOG_RADIUS};
+        border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
+    }}
+"""
+
+
+SECTOR_BODY_STYLE = f"""
+    QFrame {{
+        background-color: {BG_MAIN};
+        border-left: 1.5px solid {BORDER_COLOR};
+        border-right: 1.5px solid {BORDER_COLOR};
+        border-bottom: 1.5px solid {BORDER_COLOR};
+        border-bottom-left-radius: {CUSTOM_DIALOG_RADIUS};
+        border-bottom-right-radius: {CUSTOM_DIALOG_RADIUS};
+        border-top: none;
+    }}
+    QLabel {{
+        background: transparent;
+        border: none;
+        color: {TEXT_PRIMARY};
+    }}
+"""
+
+
+def _label(text: str, *, size: int = 12, weight: int = 400, color: str = TEXT_PRIMARY) -> QLabel:
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(f"font-size: {size}px; font-weight: {weight}; color: {color}; background: transparent; border: none;")
+    return label
+
+
+class _OperBlockEmptyRoomIllustration(QWidget):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("OperBlockEmptyStateIllustration")
+        self.setFixedSize(144, 144)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def paintEvent(self, event):  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        circle_rect = QRectF(3, 3, 138, 138)
+        clip = QPainterPath()
+        clip.addEllipse(circle_rect)
+        painter.setClipPath(clip)
+        painter.fillPath(clip, QColor("#EEF7FF"))
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawRoundedRect(QRectF(25, 24, 44, 34), 6, 6)
+        painter.drawRoundedRect(QRectF(75, 24, 44, 34), 6, 6)
+        painter.setBrush(QColor("#D9EFFF"))
+        painter.drawRect(QRectF(68, 24, 2, 34))
+
+        painter.setBrush(QColor("#E2E8F0"))
+        painter.drawRect(QRectF(0, 102, 144, 42))
+        painter.setPen(QPen(QColor("#C7D4E2"), 1))
+        painter.drawLine(20, 115, 124, 115)
+
+        painter.setPen(QPen(QColor("#8AA3B8"), 4, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(45, 71, 72, 84)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.setPen(QPen(QColor("#BED0DE"), 2))
+        painter.drawRoundedRect(QRectF(42, 80, 66, 20), 10, 10)
+        painter.setBrush(QColor("#BFE3EA"))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(QRectF(50, 84, 48, 12), 6, 6)
+        painter.setPen(QPen(QColor("#8AA3B8"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(58, 100, 50, 116)
+        painter.drawLine(93, 100, 101, 116)
+
+        painter.setPen(QPen(QColor("#7C93A7"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(98, 68, 98, 92)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.setPen(QPen(QColor("#AFC3D3"), 2))
+        painter.drawRoundedRect(QRectF(102, 64, 23, 18), 4, 4)
+        painter.setBrush(QColor("#93C5FD"))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(QRectF(106, 68, 15, 10), 2, 2)
+
+        painter.setPen(QPen(QColor("#9AAFC1"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(72, 20, 72, 45)
+        painter.drawLine(72, 45, 58, 58)
+        painter.drawLine(72, 45, 86, 58)
+        painter.setBrush(QColor("#FDFDFE"))
+        painter.setPen(QPen(QColor("#BAC8D6"), 2))
+        painter.drawEllipse(QRectF(49, 54, 18, 12))
+        painter.drawEllipse(QRectF(77, 54, 18, 12))
+        painter.setBrush(QColor("#DDF4FF"))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QRectF(54, 58, 8, 5))
+        painter.drawEllipse(QRectF(82, 58, 8, 5))
+
+        painter.setClipping(False)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#BBD7EA"), 2))
+        painter.drawEllipse(circle_rect)
+        painter.end()
+
+
+class _OperBlockCircleIcon(QWidget):
+    def __init__(
+        self,
+        kind: str,
+        *,
+        background: str,
+        border: str,
+        foreground: str,
+        size: int,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._kind = str(kind or "")
+        self._background = QColor(background)
+        self._border = QColor(border)
+        self._foreground = QColor(foreground)
+        self.setFixedSize(size, size)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def paintEvent(self, event):  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = QRectF(1, 1, self.width() - 2, self.height() - 2)
+        painter.setBrush(self._background)
+        painter.setPen(QPen(self._border, 1.2))
+        painter.drawEllipse(rect)
+
+        painter.setPen(QPen(self._foreground, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        width = float(self.width())
+        height = float(self.height())
+        if self._kind == "check":
+            painter.drawLine(QPointF(width * 0.31, height * 0.51), QPointF(width * 0.44, height * 0.64))
+            painter.drawLine(QPointF(width * 0.44, height * 0.64), QPointF(width * 0.70, height * 0.37))
+        else:
+            painter.drawLine(QPointF(width * 0.50, height * 0.43), QPointF(width * 0.50, height * 0.68))
+            painter.drawPoint(QPointF(width * 0.50, height * 0.30))
+        painter.end()
+
+
+class _OperBlockBoardProgressStepper(QWidget):
+    def __init__(self, stages: list[str], active_index: int, fill_fraction: float, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._stages = list(stages)
+        self._active_index = int(active_index)
+        self._fill_fraction = max(0.0, min(1.0, float(fill_fraction)))
+        self.setFixedHeight(92)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def paintEvent(self, event):  # noqa: N802
+        super().paintEvent(event)
+        if not self._stages:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        width = max(1, self.width())
+        circle = 40
+        radius = circle / 2.0
+        center_y = 28.0
+        label_width = 112.0
+        left = max(radius + 6.0, label_width / 2.0)
+        right = max(left + 1.0, width - left)
+        span = right - left
+        points = [left + (span * index / max(1, len(self._stages) - 1)) for index in range(len(self._stages))]
+
+        line_pen = QPen(QColor("#9AA8B8"), 2, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(line_pen)
+        painter.drawLine(int(points[0]), int(center_y), int(points[-1]), int(center_y))
+
+        active_end = points[0] + span * self._fill_fraction
+        active_pen = QPen(QColor("#2563EB"), 2, Qt.SolidLine, Qt.RoundCap)
+        painter.setPen(active_pen)
+        painter.drawLine(int(points[0]), int(center_y), int(active_end), int(center_y))
+
+        circle_font = QFont()
+        circle_font.setPointSize(10)
+        circle_font.setWeight(QFont.Weight.Bold)
+        label_font = QFont()
+        label_font.setPointSize(9)
+        label_font.setWeight(QFont.Weight.DemiBold)
+
+        for index, stage in enumerate(self._stages):
+            is_active = index <= self._active_index or self._active_index == len(self._stages) - 1
+            border = QColor("#2563EB" if is_active else "#CBD5E1")
+            text = QColor("#2563EB" if is_active else "#94A3B8")
+            circle_rect = QRectF(points[index] - radius, center_y - radius, circle, circle)
+            painter.setPen(QPen(border, 2))
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.drawEllipse(circle_rect)
+            painter.setFont(circle_font)
+            painter.setPen(text)
+            painter.drawText(circle_rect, Qt.AlignCenter, str(index + 1))
+
+            label_rect = QRectF(points[index] - label_width / 2.0, center_y + radius + 11.0, label_width, 24.0)
+            painter.setFont(label_font)
+            painter.setPen(QColor("#1F2D3D"))
+            painter.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop, stage)
+
+        painter.end()
+
+
+def _line_edit() -> QLineEdit:
+    edit = QLineEdit()
+    edit.setFixedHeight(34)
+    return edit
+
+
+def _format_dt(value) -> str:
+    text = str(value or "").replace("T", " ")
+    if "." in text:
+        text = text.split(".", 1)[0]
+    return text[:16] if text else "-"
+
+
+def _parse_datetime_value(value) -> datetime | None:
+    text = str(value or "").strip().replace("T", " ")
+    if not text:
+        return None
+    if "." in text:
+        text = text.split(".", 1)[0]
+    candidates = (text[:19], text[:16], text)
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M"):
+        for candidate in candidates:
+            try:
+                return datetime.strptime(candidate, fmt)
+            except Exception:
+                continue
+    try:
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _minute_floor_dt(value: datetime | None) -> datetime | None:
+    return value.replace(second=0, microsecond=0) if isinstance(value, datetime) else None
+
+
+def _operblock_time_minutes_from_text(value: str) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    colon_match = re.fullmatch(r"\s*(\d{1,2})\s*:\s*(\d{0,2})\s*", raw)
+    if colon_match:
+        hour = int(colon_match.group(1))
+        minute = int(colon_match.group(2) or "0")
+    else:
+        digits = re.sub(r"\D", "", raw)
+        if not digits:
+            return None
+        if len(digits) <= 2:
+            hour = int(digits)
+            minute = 0
+        elif len(digits) == 3:
+            hour = int(digits[:1])
+            minute = int(digits[1:])
+        else:
+            hour = int(digits[:2])
+            minute = int(digits[2:4])
+    if hour == 24 and minute == 0:
+        return 0
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour * 60 + minute
+    return None
+
+
+def _operblock_format_time_edit_text(value: str) -> str:
+    raw = str(value or "")
+    digits = re.sub(r"\D", "", raw)[:4]
+    if not digits:
+        return ""
+    if ":" in raw:
+        parts = raw.split(":", 1)
+        hour_digits = re.sub(r"\D", "", parts[0])[:2]
+        minute_digits = re.sub(r"\D", "", parts[1])[:2]
+        return f"{hour_digits}:{minute_digits}" if minute_digits else f"{hour_digits}:"
+    if len(digits) == 1:
+        if int(digits) > 2:
+            return f"0{digits}:"
+        return digits
+    if len(digits) == 2:
+        if int(digits) <= 23:
+            return f"{digits}:"
+        return f"0{digits[0]}:{digits[1]}"
+    if len(digits) == 3:
+        if int(digits[:2]) <= 23:
+            return f"{digits[:2]}:{digits[2]}"
+        return f"0{digits[0]}:{digits[1:]}"
+    return f"{digits[:2]}:{digits[2:4]}"
+
+
+def _operblock_time_text_from_minutes(minutes: int) -> str:
+    normalized = int(minutes) % (24 * 60)
+    return f"{normalized // 60:02d}:{normalized % 60:02d}"
+
+
+def _format_protocol_started_at(value) -> str:
+    parsed = _parse_datetime_value(value)
+    return parsed.strftime("%d.%m.%Y %H:%M") if parsed else "-"
+
+
+def _format_main_remcard_status_text(started_at, *, active: bool = True) -> tuple[str, str]:
+    parsed = _parse_datetime_value(started_at)
+    time_str = parsed.strftime("%H:%M") if parsed else "--:--"
+    if active:
+        return f"🔴 Опер. {time_str}", "#e74c3c"
+    return f"⚫ Закрыт {time_str}", "#968c8c"
+
+
+def normalize_operblock_birth_date_text(value: str, *, final: bool = True) -> str:
+    text = str(value or "").strip().replace(",", ".").replace("/", ".").replace("\\", ".")
+    if not text:
+        return ""
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        return ""
+    day = digits[:2]
+    rest = digits[2:]
+    if len(digits) <= 2:
+        return day
+    if not rest:
+        return day
+
+    month_len = 1
+    if len(rest) >= 2:
+        two_digit_month = int(rest[:2])
+        month_len = 2 if 1 <= two_digit_month <= 12 else 1
+    month = rest[:month_len]
+    year = rest[month_len:]
+
+    if final and len(month) == 1:
+        month = month.zfill(2)
+    if final and len(year) in (1, 2):
+        year_num = int(year)
+        pivot = datetime.now().year % 100
+        century = 1900 if year_num > pivot else 2000
+        year = f"{century + year_num:04d}"
+
+    result = f"{day}.{month}"
+    if year:
+        result = f"{result}.{year[:4]}"
+    return result[:10]
+
+
+def _safe_int(value) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+OPERBLOCK_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _normalize_operblock_card_color(value) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if OPERBLOCK_HEX_COLOR_RE.fullmatch(text):
+        return text.lower()
+    return None
+
+
+def _contrast_text_color(hex_color: str | None, *, default: str = OPERBLOCK_ORDERS_TEXT) -> str:
+    color = _normalize_operblock_card_color(hex_color)
+    if not color:
+        return default
+    qcolor = QColor(color)
+    return "#000000" if qcolor.lightness() > 150 else "#FFFFFF"
+
+
+def _operblock_preset_card_color(preset: dict) -> str | None:
+    source = preset or {}
+    for key in ("card_color", "card_color_hex", "color"):
+        if key in source:
+            return _normalize_operblock_card_color(source.get(key))
+    return None
+
+
+def _stable_ui_hash(payload) -> str:
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _normalize_operblock_table_filter(table_code: str | None) -> str | None:
+    code = str(table_code or "").strip().lower()
+    if not code:
+        return None
+    allowed = {str(table["code"]) for table in OPERBLOCK_TABLES}
+    if code not in allowed:
+        raise ValueError("Неизвестная операционная.")
+    return code
+
+
+def _operblock_table_display_name(table_code: str | None) -> str:
+    code = str(table_code or "").strip().lower()
+    for table in OPERBLOCK_TABLES:
+        if str(table.get("code") or "") == code:
+            return str(table.get("display_name") or "")
+    return ""
+
+
+_IMPLICIT_DOSE_UNIT_PATTERN = (
+    r"(?:мкгр|мкг|мг|мл|гр|г|ед|ме|ME|IU|mcg|mkg|mg|ml|ug|g|ed)"
+)
+_IMPLICIT_DOSE_COMPONENT_PATTERN = (
+    rf"\d+(?:[.,]\d+)?\s*{_IMPLICIT_DOSE_UNIT_PATTERN}(?![A-Za-zА-Яа-яЁёµ/])"
+)
+_IMPLICIT_TRAILING_DOSE_RE = re.compile(
+    rf"(?P<dose>{_IMPLICIT_DOSE_COMPONENT_PATTERN}"
+    rf"(?:\s*(?:[,;+]|и|\s+)\s*{_IMPLICIT_DOSE_COMPONENT_PATTERN})*"
+    rf"(?:\s*\([^)]*\))*\s*)$",
+    flags=re.IGNORECASE,
+)
+
+
+def _split_order_drug_and_dose(text: str) -> tuple[str, str]:
+    clean = re.sub(r"\s+", " ", str(text or "").strip())
+    if " - " in clean:
+        drug, dose = clean.split(" - ", 1)
+        return drug.strip() or "Без названия", dose.strip()
+
+    match = _IMPLICIT_TRAILING_DOSE_RE.search(clean)
+    if match:
+        drug = clean[: match.start()].strip()
+        if drug and not re.search(r"\d+\s*[-–—]\s*$", drug):
+            drug = re.sub(r"\s*[:;,–—-]\s*$", "", drug).strip()
+            if drug:
+                return drug, match.group("dose").strip()
+    return clean or "Без названия", ""
+
+
+def _build_order_text_for_display(drug_name: str, dose_text: str) -> str:
+    drug = str(drug_name or "").strip()
+    dose = str(dose_text or "").strip()
+    return f"{drug} {dose}".strip() if dose else drug
+
+
+_BOLUS_MASS_DOSE_RE = re.compile(
+    r"^(?P<value>\d+(?:[.,]\d+)?)(?:\s*(?P<unit>мкгр|мкг|mcg|mkg|ug|мг|mg|гр|г|g))?$",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_bolus_dose_text(value: str) -> str:
+    clean = re.sub(r"\s+", " ", str(value or "").strip())
+    if not clean:
+        return ""
+
+    single_match = _BOLUS_MASS_DOSE_RE.fullmatch(clean)
+    if single_match:
+        try:
+            amount = Decimal(single_match.group("value").replace(",", "."))
+        except (InvalidOperation, AttributeError):
+            return clean
+        _unit_key, unit_label = _normalize_dose_unit(single_match.group("unit") or "мг")
+        return f"{_format_decimal_ru(amount)} {unit_label}"
+
+    def normalize_component(match: re.Match) -> str:
+        try:
+            amount = Decimal(match.group("value").replace(",", "."))
+        except (InvalidOperation, AttributeError):
+            return match.group(0)
+        _unit_key, unit_label = _normalize_dose_unit(match.group("unit"))
+        return f"{_format_decimal_ru(amount)} {unit_label}"
+
+    normalized = _DOSE_COMPONENT_RE.sub(normalize_component, clean)
+    return normalized if _order_dose_components(normalized) else clean
+
+
+def _normalize_order_route_code(value) -> str:
+    return normalize_operblock_route_code(value)
+
+
+def _order_route_code_from_comment(comment: str) -> str:
+    return operblock_route_from_comment(comment) or OPERBLOCK_ORDER_ROUTE_DEFAULT
+
+
+def _order_comment_with_route(comment: str, route_code: str) -> str:
+    return operblock_comment_with_route(comment, route_code)
+
+
+def _order_route_code(row: dict) -> str:
+    route = str((row or {}).get("route") or "").strip()
+    if route:
+        return _normalize_order_route_code(route)
+    payload = (row or {}).get("payload")
+    if isinstance(payload, dict) and payload.get("route"):
+        return _normalize_order_route_code(payload.get("route"))
+    return _order_route_code_from_comment(str((row or {}).get("comment") or ""))
+
+
+def _stored_order_route_value(route_code: str | None) -> str | None:
+    normalized = _normalize_order_route_code(route_code)
+    return None if normalized == OPERBLOCK_ORDER_ROUTE_DEFAULT else normalized
+
+
+def _order_route_suffix(row: dict, *, short: bool = False) -> str:
+    route_code = _order_route_code(row)
+    if route_code == OPERBLOCK_ORDER_ROUTE_DEFAULT:
+        return ""
+    label = operblock_route_label(route_code, short=short)
+    return f"({label})" if label else ""
+
+
+def _order_dose_text_with_route(dose_text: str, row: dict, *, short: bool = False) -> str:
+    clean = re.sub(r"\s+", " ", str(dose_text or "").strip())
+    suffix = _order_route_suffix(row, short=short)
+    return f"{clean} {suffix}".strip() if clean and suffix else clean
+
+
+def _clean_operblock_marker_drug_name(drug_name: str) -> str:
+    clean = re.sub(r"\s+", " ", str(drug_name or "").strip())
+    clean = re.sub(r"\s+\d+(?:[.,]\d+)?\s*%$", "", clean).strip()
+    return clean or "Без названия"
+
+
+def _preferred_operblock_marker_dose(dose_text: str) -> str:
+    components = _order_dose_components(dose_text)
+    priorities = (
+        lambda item: bool(item.get("parenthesized")) and item.get("unit_key") in {"мг", "мкг"},
+        lambda item: item.get("unit_key") in {"мг", "мкг"},
+        lambda item: item.get("unit_key") == "мл",
+    )
+    for predicate in priorities:
+        for component in components:
+            if predicate(component):
+                return f"{_format_decimal_ru(component['value'])} {component['unit_label']}"
+    return str(dose_text or "").strip()
+
+
+def _format_operblock_order_marker_text(text: str) -> str:
+    return format_operblock_medication_display_label(text)
+
+
+def _format_order_day(value) -> str:
+    parsed = _parse_datetime_value(value)
+    return parsed.strftime("%d.%m.%Y") if parsed else "Без даты"
+
+
+def _format_order_time(value) -> str:
+    parsed = _parse_datetime_value(value)
+    return parsed.strftime("%H:%M") if parsed else "--:--"
+
+
+def _split_infusion_rate_text(rate_text: str) -> tuple[str, str]:
+    text = re.sub(r"\s+", " ", str(rate_text or "").strip())
+    match = re.match(r"^(?P<value>\d+(?:[.,]\d+)?)\s*(?P<unit>.*)$", text)
+    if not match:
+        return "", ""
+    value = match.group("value").strip()
+    try:
+        value = _format_decimal_ru(Decimal(value.replace(",", ".")))
+    except (InvalidOperation, ValueError):
+        pass
+    return value, OPERBLOCK_INFUSION_RATE_UNIT
+
+
+def _format_infusion_rate(value, unit) -> str:
+    value_text = str(value or "").strip()
+    if not value_text:
+        return ""
+    try:
+        value_text = _format_decimal_ru(Decimal(value_text.replace(",", ".")))
+    except (InvalidOperation, ValueError):
+        pass
+    unit_text = OPERBLOCK_INFUSION_RATE_UNIT
+    return f"{value_text} {unit_text}".strip()
+
+
+def _compact_infusion_rate_display_text(rate_text: str) -> str:
+    value, _unit = _split_infusion_rate_text(rate_text)
+    if value:
+        return f"{value} мл/ч"
+    text = re.sub(r"\s+", " ", str(rate_text or "").strip())
+    return text.replace("мл/час", "мл/ч")
+
+
+def _compact_infusion_rate_texts(rate_texts: list[str]) -> str:
+    cleaned = [re.sub(r"\s+", " ", str(text or "").strip()) for text in rate_texts]
+    cleaned = [text for text in cleaned if text]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+
+    parsed: list[tuple[str, str]] = []
+
+    def normalize_unit(unit_text: str) -> str:
+        raw_unit = re.sub(r"\s+", "", str(unit_text or "").strip().casefold())
+        if raw_unit in {"мл", "ml"}:
+            return "мл"
+        if raw_unit in {"мл/час", "мл/ч", "ml/h", "ml/hr", "ml/hour"}:
+            return OPERBLOCK_INFUSION_RATE_UNIT
+        if raw_unit in {"mac", "мак"}:
+            return "MAC"
+        return re.sub(r"\s+", " ", str(unit_text or "").strip())
+
+    for text in cleaned:
+        match = re.match(r"^(?P<value>\d+(?:[.,]\d+)?)\s*(?P<unit>.*)$", text)
+        if not match:
+            return " - ".join(cleaned)
+        value = match.group("value").strip()
+        try:
+            value = _format_decimal_ru(Decimal(value.replace(",", ".")))
+        except (InvalidOperation, ValueError):
+            pass
+        unit = normalize_unit(match.group("unit"))
+        if not value or not unit:
+            return " - ".join(cleaned)
+        parsed.append((value, unit))
+
+    units = {unit for _value, unit in parsed}
+    if len(units) != 1:
+        return " - ".join(cleaned)
+
+    values: list[str] = []
+    for value, _unit in parsed:
+        if not values or values[-1] != value:
+            values.append(value)
+    return f"{'-'.join(values)} {parsed[0][1]}"
+
+
+def _decimal_from_ru_number(value) -> Decimal | None:
+    text = str(value or "").strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _format_infusion_volume_ml(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    rounded = max(Decimal("0"), value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if rounded == rounded.to_integral_value():
+        text = str(int(rounded))
+    else:
+        text = format(rounded.normalize(), "f").rstrip("0").rstrip(".").replace(".", ",")
+    return f"{text} мл"
+
+
+def _round_timed_infusion_volume_ml(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    rounded = max(Decimal("0"), value).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return rounded if rounded > 0 else None
+
+
+def _normalize_volume_ml_text(value) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    text = re.sub(r"\s*мл\s*$", "", text, flags=re.IGNORECASE).strip()
+    volume = _decimal_from_ru_number(text)
+    if volume is None or volume <= 0:
+        return ""
+    return _format_infusion_volume_ml(volume).replace(" мл", "")
+
+
+def _volume_decimal_ml(value) -> Decimal | None:
+    return _decimal_from_ru_number(_normalize_volume_ml_text(value))
+
+
+def _volume_text_without_unit(value: Decimal | None) -> str:
+    return _format_infusion_volume_ml(value).replace(" мл", "") if value is not None else ""
+
+
+def _solution_display_label(value) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+    lowered = text.casefold()
+    if lowered.startswith("s. "):
+        return text
+    if lowered.startswith("sol. "):
+        return f"S. {text[5:].strip()}".strip()
+    return f"S. {text}"
+
+
+def _source_has_solvent(source: dict | None) -> bool:
+    source = source or {}
+    return bool(str(source.get("solvent_id") or "").strip() or str(source.get("solvent_label") or "").strip())
+
+
+def _source_solvent_volume_ml(source: dict | None) -> Decimal | None:
+    if not _source_has_solvent(source):
+        return None
+    return _volume_decimal_ml((source or {}).get("solvent_volume_ml"))
+
+
+def _infusion_declared_volume_ml(interval: dict) -> Decimal | None:
+    if _is_gas_infusion(interval):
+        return None
+    payload = interval.get("payload") if isinstance(interval.get("payload"), dict) else {}
+
+    def declared(value: Decimal | None) -> Decimal | None:
+        if _infusion_has_rate(interval):
+            return value
+        return _round_timed_infusion_volume_ml(value)
+
+    declared_total = _volume_decimal_ml(
+        (payload or {}).get("declared_total_volume_ml") or (payload or {}).get("total_volume_ml")
+    )
+    if declared_total is not None:
+        return declared(declared_total)
+
+    event_volume = _volume_decimal_ml(interval.get("volume_ml"))
+    payload_volume = _volume_decimal_ml((payload or {}).get("volume_ml"))
+    base_volume = event_volume if event_volume is not None else payload_volume
+    calculated_volume = _volume_decimal_ml((payload or {}).get("calculated_volume_ml"))
+    solvent_volume = _source_solvent_volume_ml(payload)
+    if solvent_volume is not None:
+        if calculated_volume is not None:
+            if base_volume is None or abs(base_volume - calculated_volume) <= Decimal("0.01"):
+                return declared(calculated_volume + solvent_volume)
+            return declared(base_volume)
+        return declared(base_volume if base_volume is not None else solvent_volume)
+    if base_volume is not None:
+        return declared(base_volume)
+    return declared(_volume_decimal_ml((payload or {}).get("solvent_volume_ml")))
+
+
+def _format_infusion_declared_volume(interval: dict) -> str:
+    return _format_infusion_volume_ml(_infusion_declared_volume_ml(interval))
+
+
+def _is_gas_infusion(interval: dict) -> bool:
+    payload = interval.get("payload") if isinstance(interval.get("payload"), dict) else {}
+    kind = str((payload or {}).get("kind") or "").strip().casefold()
+    return kind == "gas"
+
+
+OXYGEN_ICON_FILE = "oxygen.png"
+OXYGEN_FLOW_UNIT = "л/мин"
+OXYGEN_FLOW_MIN_LPM = Decimal("0.1")
+OXYGEN_FLOW_STEP_LPM = Decimal("0.1")
+
+
+def _text_is_oxygen(value) -> bool:
+    text = str(value or "").strip().casefold().replace("ё", "е")
+    if not text:
+        return False
+    if "кислород" in text or re.search(r"(?<![0-9a-zа-я])oxygen(?![0-9a-zа-я])", text):
+        return True
+    return bool(re.search(r"(?<![0-9a-zа-я])(?:o|о)\s*2(?![0-9a-zа-я])", text))
+
+
+def _payload_is_oxygen(payload: dict | None) -> bool:
+    data = payload if isinstance(payload, dict) else {}
+    subtype = str(data.get("gas_subtype") or data.get("gas_kind") or data.get("subtype") or "").strip()
+    if subtype and _text_is_oxygen(subtype):
+        return True
+    explicit = data.get("is_oxygen")
+    if isinstance(explicit, bool) and explicit:
+        return True
+    for key in (
+        "preset_id",
+        "source_drug_id",
+        "label",
+        "display_name",
+        "latin",
+        "drug_label",
+        "display_label",
+        "raw_text",
+    ):
+        if _text_is_oxygen(data.get(key)):
+            return True
+    return False
+
+
+def _payload_or_text_is_oxygen(payload: dict | None, *texts) -> bool:
+    if _payload_is_oxygen(payload):
+        return True
+    return any(_text_is_oxygen(text) for text in texts)
+
+
+def _strip_oxygen_token_for_number(value: str) -> str:
+    return re.sub(
+        r"(?<![0-9a-zа-я])(?:o|о)\s*2(?![0-9a-zа-я])",
+        " ",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+
+
+def _oxygen_flow_value_lpm(value) -> Decimal | None:
+    text = _strip_oxygen_token_for_number(str(value or ""))
+    match = re.search(r"(?P<value>\d+(?:[,.]\d+)?|[,.]\d+)", text)
+    if not match:
+        return None
+    raw_value = match.group("value").replace(",", ".")
+    if raw_value.startswith("."):
+        raw_value = f"0{raw_value}"
+    try:
+        flow = Decimal(raw_value)
+    except (InvalidOperation, ValueError):
+        return None
+    if flow < OXYGEN_FLOW_MIN_LPM:
+        return None
+    return flow.quantize(OXYGEN_FLOW_STEP_LPM, rounding=ROUND_HALF_UP)
+
+
+def _normalize_oxygen_flow_text(value) -> str:
+    flow = _oxygen_flow_value_lpm(value)
+    if flow is None:
+        return ""
+    return f"{_format_decimal_ru(flow)} {OXYGEN_FLOW_UNIT}"
+
+
+def _oxygen_payload_fields(payload: dict, flow_text: str) -> dict:
+    data = dict(payload or {})
+    flow = _oxygen_flow_value_lpm(flow_text)
+    data["kind"] = "gas"
+    data["gas_subtype"] = "oxygen"
+    data["is_oxygen"] = True
+    data["oxygen_flow_unit"] = OXYGEN_FLOW_UNIT
+    if flow is not None:
+        data["oxygen_flow_lpm"] = _format_decimal_ru(flow)
+    return data
+
+
+def _format_oxygen_liters(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    rounded = max(Decimal("0"), value).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    if rounded == rounded.to_integral_value():
+        text = str(int(rounded))
+    else:
+        text = format(rounded.normalize(), "f").rstrip("0").rstrip(".").replace(".", ",")
+    return f"{text} л"
+
+
+def _infusion_display_drug_name(interval: dict, fallback: str = "Дозатор") -> str:
+    data = interval or {}
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    clean_fallback = str(fallback or "").strip() or ("Газ" if _is_gas_infusion(data) else "Дозатор")
+    raw_name = (
+        str((payload or {}).get("display_name") or "").strip()
+        or str((payload or {}).get("label") or "").strip()
+        or str(data.get("drug_label") or "").strip()
+        or str(data.get("display_label") or "").strip()
+        or clean_fallback
+    )
+    name = re.sub(r"\s+", " ", raw_name).strip() or clean_fallback
+    name = re.sub(
+        (
+            r"\s+\d+(?:[,.]\d+)?\s*"
+            r"(?:мл/час|мл/ч|ml/h|ml/hr|мл|ml|MAC|мак|л/мин|л/м|l/min|lpm|лит/мин|литр(?:ов)?(?:/мин)?)\s*$"
+        ),
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip() or clean_fallback
+    concentration = re.sub(
+        r"\s+",
+        " ",
+        str((payload or {}).get("concentration") or data.get("concentration_text") or "").strip(),
+    )
+    has_percentage_in_name = bool(re.search(r"\d+(?:[.,]\d+)?\s*%", name))
+    if concentration and not has_percentage_in_name and concentration.casefold() not in name.casefold():
+        name = f"{name} {concentration}".strip()
+    return name
+
+
+def _is_oxygen_infusion(interval: dict) -> bool:
+    if not _is_gas_infusion(interval or {}):
+        return False
+    data = interval or {}
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    return _payload_or_text_is_oxygen(
+        payload,
+        data.get("drug_label"),
+        data.get("display_label"),
+        _infusion_display_drug_name(data, ""),
+    )
+
+
+def _oxygen_consumed_liters(interval: dict, *, now: datetime | None = None) -> Decimal | None:
+    if not _is_oxygen_infusion(interval or {}):
+        return None
+    start_dt = _minute_floor_dt(_parse_datetime_value((interval or {}).get("start_time")))
+    if start_dt is None:
+        return None
+    end_dt = _minute_floor_dt(_parse_datetime_value((interval or {}).get("end_time")))
+    if end_dt is None:
+        end_dt = _minute_floor_dt(now or datetime.now())
+    if end_dt is None:
+        return None
+    current_dose = _gas_dose_text(interval or {})
+    if end_dt <= start_dt:
+        return Decimal("0") if _oxygen_flow_value_lpm(current_dose) is not None else None
+
+    events = [
+        event
+        for event in _gas_dose_events(interval or {})
+        if _minute_floor_dt(_parse_datetime_value((event or {}).get("event_time"))) is not None
+    ]
+    events.sort(key=lambda item: _minute_floor_dt(_parse_datetime_value(item.get("event_time"))) or datetime.min)
+    for event in events:
+        event_dt = _minute_floor_dt(_parse_datetime_value(event.get("event_time")))
+        if event_dt is not None and event_dt <= start_dt:
+            current_dose = str(event.get("dose_text") or "").strip()
+        elif event_dt is not None:
+            break
+    if not current_dose and events:
+        current_dose = str(events[0].get("dose_text") or "").strip()
+
+    total = Decimal("0")
+    has_flow = False
+    cursor_dt = start_dt
+
+    def add_segment(flow_text: str, from_dt: datetime, to_dt: datetime) -> None:
+        nonlocal total, has_flow
+        if to_dt <= from_dt:
+            return
+        flow = _oxygen_flow_value_lpm(flow_text)
+        if flow is None:
+            return
+        minutes = Decimal(str((to_dt - from_dt).total_seconds())) / Decimal("60")
+        total += flow * minutes
+        has_flow = True
+
+    for event in events:
+        event_dt = _minute_floor_dt(_parse_datetime_value(event.get("event_time")))
+        if event_dt is None or event_dt <= start_dt:
+            continue
+        if event_dt >= end_dt:
+            break
+        add_segment(current_dose, cursor_dt, event_dt)
+        current_dose = str(event.get("dose_text") or "").strip()
+        cursor_dt = event_dt
+    add_segment(current_dose, cursor_dt, end_dt)
+    return total if has_flow else None
+
+
+def _format_oxygen_consumed_liters(interval: dict, *, now: datetime | None = None) -> str:
+    return _format_oxygen_liters(_oxygen_consumed_liters(interval or {}, now=now))
+
+
+def _normalize_gas_identity_text(value: str) -> str:
+    clean = re.sub(r"\s+", " ", str(value or "").strip())
+    clean = re.sub(r"^(?:s|sol)\.\s+", "", clean, flags=re.IGNORECASE).strip()
+    clean = re.sub(r"\s+\d+(?:[.,]\d+)?\s*%$", "", clean).strip()
+    return clean.casefold().replace("ё", "е")
+
+
+def _gas_display_name_for_payload(drug_name: str, payload: dict | None) -> str:
+    gas_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+    gas_payload["kind"] = "gas"
+    return _infusion_display_drug_name({"drug_label": drug_name, "payload": gas_payload}, "Газ")
+
+
+def _gas_identity_matches(active_interval: dict, drug_name: str, payload: dict | None) -> bool:
+    active_payload = active_interval.get("payload") if isinstance(active_interval.get("payload"), dict) else {}
+    requested_payload = payload if isinstance(payload, dict) else {}
+    if _is_oxygen_infusion(active_interval) and _payload_or_text_is_oxygen(requested_payload, drug_name):
+        return True
+    for key in ("preset_id", "source_drug_id"):
+        active_value = str((active_payload or {}).get(key) or "").strip()
+        requested_value = str((requested_payload or {}).get(key) or "").strip()
+        if active_value and requested_value and active_value == requested_value:
+            return True
+    active_name = _normalize_gas_identity_text(_infusion_display_drug_name(active_interval, "Газ"))
+    requested_name = _normalize_gas_identity_text(_gas_display_name_for_payload(drug_name, requested_payload))
+    return bool(active_name and requested_name and active_name == requested_name)
+
+
+def _normalize_gas_dose_text(value: str) -> str:
+    clean = re.sub(r"\s+", " ", str(value or "").strip())
+    if not clean:
+        return ""
+    value_only = re.sub(r"(?i)(?:mac|мак)", " ", clean)
+    value_only = re.sub(r"\s+", " ", value_only).strip()
+    match = re.fullmatch(
+        r"(?P<first>\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*(?P<second>\d+(?:[.,]\d+)?))?",
+        value_only,
+    )
+    if match:
+        values = []
+        for group_name in ("first", "second"):
+            raw_value = match.group(group_name)
+            if not raw_value:
+                continue
+            try:
+                values.append(_format_decimal_ru(Decimal(raw_value.replace(",", "."))))
+            except (InvalidOperation, ValueError):
+                values.append(raw_value.replace(".", ","))
+        return f"{'-'.join(values)} MAC"
+    clean = re.sub(r"(?i)(?:mac|мак)", " MAC ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    clean = re.sub(r"(?i)(?:\s+MAC)+$", " MAC", clean)
+    if "mac" not in clean.casefold():
+        clean = f"{clean} MAC"
+    return clean
+
+
+def _gas_dose_text(interval: dict) -> str:
+    payload = interval.get("payload") if isinstance(interval.get("payload"), dict) else {}
+    dose_text = str((payload or {}).get("display_dose_text") or (payload or {}).get("dose_text") or "")
+    if _is_oxygen_infusion(interval or {}):
+        return _normalize_oxygen_flow_text(dose_text)
+    return _normalize_gas_dose_text(dose_text)
+
+
+def _gas_dose_events(interval: dict) -> list[dict]:
+    events: list[dict] = []
+    normalize_dose = _normalize_oxygen_flow_text if _is_oxygen_infusion(interval or {}) else _normalize_gas_dose_text
+    for item in list((interval or {}).get("dose_history") or []):
+        event_dt = _minute_floor_dt(_parse_datetime_value((item or {}).get("event_time")))
+        dose_text = normalize_dose(str((item or {}).get("dose_text") or ""))
+        if event_dt is None or not dose_text:
+            continue
+        events.append(
+            {
+                "event_id": (item or {}).get("event_id"),
+                "event_time": event_dt,
+                "dose_text": dose_text,
+                "revision": (item or {}).get("revision"),
+            }
+        )
+    if not events:
+        start_dt = _minute_floor_dt(_parse_datetime_value((interval or {}).get("start_time")))
+        dose_text = _gas_dose_text(interval or {})
+        if start_dt is not None and dose_text:
+            events.append({"event_time": start_dt, "dose_text": dose_text})
+    events.sort(key=lambda item: item["event_time"])
+    deduped: list[dict] = []
+    for event in events:
+        if deduped and deduped[-1]["event_time"] == event["event_time"]:
+            deduped[-1] = event
+        else:
+            deduped.append(event)
+    return deduped
+
+
+def _is_volume_only_infusion(interval: dict) -> bool:
+    if _is_gas_infusion(interval):
+        return False
+    return bool(_infusion_declared_volume_ml(interval) is not None and not _infusion_has_rate(interval))
+
+
+def _counted_infusion_volume_ml(interval: dict, *, now: datetime | None = None) -> Decimal | None:
+    if _infusion_has_rate(interval):
+        return _infusion_volume_ml(interval, now=now)
+    if _infusion_declared_volume_ml(interval) is None:
+        return None
+    if str(interval.get("status") or "") == "active" and not interval.get("end_time"):
+        return None
+    return _infusion_declared_volume_ml(interval)
+
+
+def _infusion_rate_events(interval: dict) -> list[dict]:
+    events = []
+    for item in list(interval.get("rate_history") or []):
+        event_dt = _minute_floor_dt(_parse_datetime_value((item or {}).get("event_time")))
+        rate_value = _decimal_from_ru_number((item or {}).get("rate_value"))
+        if event_dt is None or rate_value is None:
+            continue
+        events.append({"event_time": event_dt, "rate_value": rate_value})
+    if not events:
+        start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+        rate_value = _decimal_from_ru_number(interval.get("current_rate_value"))
+        if start_dt is not None and rate_value is not None:
+            events.append({"event_time": start_dt, "rate_value": rate_value})
+    events.sort(key=lambda item: item["event_time"])
+    deduped: list[dict] = []
+    for event in events:
+        if deduped and deduped[-1]["event_time"] == event["event_time"]:
+            deduped[-1] = event
+        else:
+            deduped.append(event)
+    return deduped
+
+
+def _infusion_volume_ml(interval: dict, *, now: datetime | None = None) -> Decimal | None:
+    start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+    if start_dt is None:
+        return None
+    current_time = _minute_floor_dt(now or datetime.now())
+    end_dt = _minute_floor_dt(_parse_datetime_value(interval.get("end_time")))
+    if end_dt is None and str(interval.get("status") or "") != "active":
+        end_dt = current_time
+    effective_end = end_dt or current_time
+    if effective_end <= start_dt:
+        return Decimal("0")
+
+    events = [event for event in _infusion_rate_events(interval) if event["event_time"] <= effective_end]
+    if not events:
+        return None
+    if events[0]["event_time"] > start_dt:
+        events.insert(0, {"event_time": start_dt, "rate_value": events[0]["rate_value"]})
+
+    total = Decimal("0")
+    for index, event in enumerate(events):
+        segment_start = max(start_dt, event["event_time"])
+        next_start = events[index + 1]["event_time"] if index + 1 < len(events) else effective_end
+        segment_end = min(effective_end, next_start)
+        if segment_end <= segment_start:
+            continue
+        minutes = Decimal(int((segment_end - segment_start).total_seconds() // 60))
+        total += event["rate_value"] * minutes / Decimal("60")
+    return total
+
+
+def _format_infusion_executed_volume(interval: dict, *, now: datetime | None = None) -> str:
+    volume = _infusion_volume_ml(interval, now=now)
+    return _format_infusion_volume_ml(volume)
+
+
+def _infusion_has_rate(interval: dict) -> bool:
+    if _is_gas_infusion(interval or {}):
+        return False
+    if _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit")):
+        return True
+    return bool(_infusion_rate_events(interval))
+
+
+def _normalize_infusion_rate_option(rate_text: str) -> str:
+    value, unit = _split_infusion_rate_text(rate_text)
+    return _format_infusion_rate(value, unit) if value else ""
+
+
+def _normalize_infusion_rate_options(rates) -> list[str]:
+    result: list[str] = []
+    for rate in rates or []:
+        text = _normalize_infusion_rate_option(str(rate or ""))
+        if text and text not in result:
+            result.append(text)
+    return result or list(OPERBLOCK_DEFAULT_INFUSION_RATES)
+
+
+def _dose_option_with_unit(value, unit) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+    if _order_dose_components(text):
+        return text
+    _unit_key, unit_label = _normalize_dose_unit(str(unit or ""))
+    return f"{text} {unit_label}".strip() if unit_label else text
+
+
+def _timed_infusion_dose_options(preset: dict) -> list[str]:
+    result: list[str] = []
+
+    def add_option(value) -> None:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        if text and text not in result:
+            result.append(text)
+
+    for dose in preset.get("doses") or []:
+        add_option(dose)
+
+    if not result:
+        add_option(_dose_option_with_unit(preset.get("default_dose"), preset.get("unit")))
+
+    if not result:
+        for value in (preset.get("solvent_volume_ml"), preset.get("volume_ml")):
+            volume = _normalize_volume_ml_text(value)
+            if volume:
+                add_option(f"{volume} мл")
+    return result
+
+
+def _quick_order_title_and_concentration(title: str, concentration_text: str = "") -> tuple[str, str]:
+    clean_title = re.sub(r"\s+", " ", str(title or "").strip())
+    clean_concentration = re.sub(r"\s+", " ", str(concentration_text or "").strip())
+    return clean_title or str(title or "").strip(), clean_concentration
+
+
+def _quick_order_solvent_text(source: dict) -> str:
+    solvent = _solution_display_label((source or {}).get("solvent_label") or (source or {}).get("solvent_id"))
+    volume = _normalize_volume_ml_text((source or {}).get("solvent_volume_ml"))
+    if solvent and volume:
+        return f"{solvent} - {volume} мл"
+    return solvent or (f"{volume} мл" if volume else "")
+
+
+def _split_semicolon_list(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(";") if item.strip()]
+
+
+def _join_semicolon_list(values) -> str:
+    return "; ".join(str(value or "").strip() for value in values or [] if str(value or "").strip())
+
+
+def _format_infusion_duration(start_time) -> str:
+    start_dt = _parse_datetime_value(start_time)
+    if start_dt is None:
+        return ""
+    delta = max(timedelta(0), datetime.now().replace(second=0, microsecond=0) - _minute_floor_dt(start_dt))
+    minutes = int(delta.total_seconds() // 60)
+    hours, mins = divmod(minutes, 60)
+    if hours:
+        return f"{hours}ч {mins:02d}мин"
+    return f"{mins}мин"
+
+
+def _format_infusion_interval_duration(start_time, end_time=None) -> str:
+    start_dt = _minute_floor_dt(_parse_datetime_value(start_time))
+    if start_dt is None:
+        return ""
+    end_dt = _minute_floor_dt(_parse_datetime_value(end_time)) or datetime.now().replace(second=0, microsecond=0)
+    delta = max(timedelta(0), end_dt - start_dt)
+    minutes = int(delta.total_seconds() // 60)
+    hours, mins = divmod(minutes, 60)
+    if hours:
+        return f"{hours}ч {mins:02d}мин"
+    return f"{mins}мин"
+
+
+def _order_sort_dt(row: dict) -> datetime:
+    return _parse_datetime_value(row.get("datetime")) or datetime.min
+
+
+_DOSE_COMPONENT_RE = re.compile(r"(?P<value>\d+(?:[.,]\d+)?)\s*(?P<unit>[A-Za-zА-Яа-яЁёµ%./]+)")
+
+
+def _normalize_dose_unit(unit: str) -> tuple[str, str]:
+    raw = str(unit or "").strip().lower().replace("ё", "е").replace("µ", "мк")
+    raw = raw.replace(".", "")
+    aliases = {
+        "ml": "мл",
+        "мл": "мл",
+        "миллилитр": "мл",
+        "миллилитра": "мл",
+        "миллилитры": "мл",
+        "миллилитров": "мл",
+        "mg": "мг",
+        "мг": "мг",
+        "миллиграмм": "мг",
+        "миллиграмма": "мг",
+        "миллиграммы": "мг",
+        "миллиграммов": "мг",
+        "миллиграмы": "мг",
+        "mcg": "мкг",
+        "mkg": "мкг",
+        "мкг": "мкг",
+        "мкгр": "мкг",
+        "микрограмм": "мкг",
+        "микрограмма": "мкг",
+        "микрограммы": "мкг",
+        "микрограммов": "мкг",
+        "ug": "мкг",
+        "g": "г",
+        "гр": "г",
+        "г": "г",
+        "грам": "г",
+        "грамм": "г",
+        "грама": "г",
+        "грамма": "г",
+        "грамы": "г",
+        "граммы": "г",
+        "граммов": "г",
+        "ed": "ед",
+        "ед": "ед",
+        "me": "МЕ",
+        "ме": "МЕ",
+        "mac": "MAC",
+        "мак": "MAC",
+        "%": "%",
+    }
+    label = aliases.get(raw, raw or unit)
+    return label.casefold(), label
+
+
+def _parse_dose_components(text: str, *, parenthesized: bool) -> list[dict]:
+    components: list[dict] = []
+    for match in _DOSE_COMPONENT_RE.finditer(str(text or "")):
+        try:
+            value = Decimal(match.group("value").replace(",", "."))
+        except (InvalidOperation, AttributeError):
+            continue
+        unit_key, unit_label = _normalize_dose_unit(match.group("unit"))
+        if not unit_key:
+            continue
+        components.append(
+            {
+                "value": value,
+                "unit_key": unit_key,
+                "unit_label": unit_label,
+                "parenthesized": parenthesized,
+            }
+        )
+    return components
+
+
+def _order_dose_components(dose_text: str) -> list[dict]:
+    clean = str(dose_text or "")
+    parenthetical_parts = re.findall(r"\(([^)]*)\)", clean)
+    main_text = re.sub(r"\([^)]*\)", " ", clean)
+    components = _parse_dose_components(main_text, parenthesized=False)
+    for part in parenthetical_parts:
+        components.extend(_parse_dose_components(part, parenthesized=True))
+    return components
+
+
+def _format_decimal_ru(value: Decimal) -> str:
+    if value == value.to_integral_value():
+        return str(int(value))
+    text = format(value.normalize(), "f").rstrip("0").rstrip(".")
+    return text.replace(".", ",")
+
+
+def _mass_to_micrograms(value: Decimal, unit_key: str) -> Decimal | None:
+    if unit_key == "мкг":
+        return value
+    if unit_key == "мг":
+        return value * Decimal("1000")
+    if unit_key == "г":
+        return value * Decimal("1000000")
+    return None
+
+
+def _parse_concentration_mass_per_ml(concentration_text: str) -> Decimal | None:
+    text = re.sub(r"\s+", " ", str(concentration_text or "").strip())
+    match = re.search(
+        r"(?P<mass>\d+(?:[.,]\d+)?)\s*(?P<mass_unit>мкгр|мкг|mcg|mkg|ug|мг|mg|гр|г|g)"
+        r"\s*/\s*(?:(?P<volume>\d+(?:[.,]\d+)?)\s*)?(?P<volume_unit>мл|ml)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    mass_value = _decimal_from_ru_number(match.group("mass"))
+    volume_value = _decimal_from_ru_number(match.group("volume") or "1")
+    if mass_value is None or volume_value is None or mass_value <= 0 or volume_value <= 0:
+        return None
+    mass_unit_key, _mass_unit_label = _normalize_dose_unit(match.group("mass_unit"))
+    mass_micrograms = _mass_to_micrograms(mass_value, mass_unit_key)
+    if mass_micrograms is None:
+        return None
+    return mass_micrograms / volume_value
+
+
+def _quick_order_explicit_volume_ml(dose_text: str) -> Decimal | None:
+    for component in _order_dose_components(dose_text):
+        if component.get("unit_key") == "мл" and component.get("value") > 0:
+            return component["value"]
+    return None
+
+
+def _quick_order_mass_dose_component(dose_text: str) -> dict | None:
+    return next(
+        (
+            item
+            for item in _order_dose_components(dose_text)
+            if not bool(item.get("parenthesized")) and item.get("unit_key") in {"мг", "мкг", "г"}
+        ),
+        None,
+    )
+
+
+def _quick_order_mass_dose_volume_ml(dose_text: str, concentration_text: str) -> Decimal | None:
+    concentration_per_ml = _parse_concentration_mass_per_ml(concentration_text)
+    if concentration_per_ml is None or concentration_per_ml <= 0:
+        return None
+    dose_component = _quick_order_mass_dose_component(dose_text)
+    if not dose_component:
+        return None
+    dose_micrograms = _mass_to_micrograms(dose_component["value"], str(dose_component.get("unit_key") or ""))
+    if dose_micrograms is None or dose_micrograms <= 0:
+        return None
+    return dose_micrograms / concentration_per_ml
+
+
+def _quick_order_dose_volume_ml(dose_text: str, concentration_text: str) -> Decimal | None:
+    explicit_volume = _quick_order_explicit_volume_ml(dose_text)
+    if explicit_volume is not None:
+        return explicit_volume
+    return _quick_order_mass_dose_volume_ml(dose_text, concentration_text)
+
+
+def _quick_order_dose_volume_ml_text(dose_text: str, concentration_text: str) -> str:
+    volume = _quick_order_dose_volume_ml(dose_text, concentration_text)
+    return _format_infusion_volume_ml(volume).replace(" мл", "") if volume is not None else ""
+
+
+def _timed_infusion_total_volume_ml(
+    preset: dict,
+    dose_text: str,
+    concentration_text: str,
+) -> Decimal | None:
+    dose_volume = _quick_order_dose_volume_ml(dose_text, concentration_text)
+    solvent_volume = _source_solvent_volume_ml(preset)
+    if solvent_volume is not None:
+        return _round_timed_infusion_volume_ml((dose_volume or Decimal("0")) + solvent_volume)
+    if dose_volume is not None:
+        return _round_timed_infusion_volume_ml(dose_volume)
+    return _round_timed_infusion_volume_ml(
+        _volume_decimal_ml((preset or {}).get("volume_ml") or (preset or {}).get("solvent_volume_ml"))
+    )
+
+
+def _quick_order_dose_display_text(dose_text: str, concentration_text: str) -> str:
+    clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
+    if not clean_dose or re.search(r"\([^)]*\b(?:мл|ml)\b[^)]*\)", clean_dose, flags=re.IGNORECASE):
+        return clean_dose
+    volume_text = _format_infusion_volume_ml(_quick_order_mass_dose_volume_ml(clean_dose, concentration_text))
+    return f"{clean_dose} ({volume_text})" if volume_text else clean_dose
+
+
+def _dose_text_with_computed_volume(dose_text: str, concentration_text: str) -> str:
+    clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
+    if not clean_dose or _quick_order_explicit_volume_ml(clean_dose) is not None:
+        return clean_dose
+    volume_text = _format_infusion_volume_ml(_quick_order_mass_dose_volume_ml(clean_dose, concentration_text))
+    return f"{clean_dose} ({volume_text})" if volume_text else clean_dose
+
+
+def _summarize_dose_texts(dose_texts: list[str], *, include_unparsed: bool = True) -> str:
+    totals: dict[tuple[bool, str], dict] = {}
+    order: list[tuple[bool, str]] = []
+    unparsed: list[str] = []
+    for dose_text in dose_texts:
+        clean_text = re.sub(r"\s+", " ", str(dose_text or "").strip())
+        if not clean_text:
+            continue
+        components = _order_dose_components(clean_text)
+        if not components:
+            unparsed.append(clean_text)
+            continue
+        for component in components:
+            key = (bool(component["parenthesized"]), str(component["unit_key"]))
+            if key not in totals:
+                totals[key] = {"value": Decimal("0"), "unit_label": component["unit_label"], "count": 0}
+                order.append(key)
+            totals[key]["value"] += component["value"]
+            totals[key]["count"] += 1
+
+    main_parts: list[str] = []
+    parenthetical_parts: list[str] = []
+    for key in order:
+        total = totals[key]
+        if key[1] == "mac":
+            value = total["value"] / max(1, int(total.get("count") or 0))
+            part = f"среднее {_format_decimal_ru(value)} {total['unit_label']}"
+        else:
+            part = f"{_format_decimal_ru(total['value'])} {total['unit_label']}"
+        if key[0]:
+            parenthetical_parts.append(part)
+        else:
+            main_parts.append(part)
+
+    summary = ", ".join(main_parts) if main_parts else ""
+    if parenthetical_parts:
+        parens = ", ".join(parenthetical_parts)
+        summary = f"{summary} ({parens})" if summary else f"({parens})"
+
+    unique_unparsed = list(dict.fromkeys(unparsed))
+    if include_unparsed and unique_unparsed:
+        unparsed_text = ", ".join(unique_unparsed)
+        summary = f"{summary}, {unparsed_text}" if summary else unparsed_text
+    return summary
+
+
+def _summarize_order_total(rows: list[dict], *, concentration_for_row=None) -> str:
+    dose_texts: list[str] = []
+    for row in rows:
+        dose_text = str((row or {}).get("dose_text") or "")
+        concentration_text = ""
+        if callable(concentration_for_row):
+            try:
+                concentration_text = str(concentration_for_row(row or {}) or "")
+            except Exception:
+                concentration_text = ""
+        dose_texts.append(_dose_text_with_computed_volume(dose_text, concentration_text))
+    summary = _summarize_dose_texts(
+        dose_texts,
+        include_unparsed=False,
+    )
+    if not summary:
+        return f"внесено: {len(rows)}"
+    return f"Итого: {summary}"
+
+
+class OperBlockSector8Panel(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.icon_dir = get_icon_dir()
+        self._protocol_mode = False
+        self._launcher_back = False
+        self._display_visible: dict[str, bool] = {}
+        self._display_order: list[str] = []
+        self._init_ui()
+
+    def _init_ui(self):
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(10, 0, 10, 0)
+        self.layout.setSpacing(10)
+
+        self.btn_archive = self._button(" Архив", "binder.png")
+        self.btn_refresh = self._button(" Обновить", "refresh.png")
+        self.btn_user_report = self._button(" Репорт", "warning.png")
+        self.btn_user_reports = self._button(" Репорты", "reports.png")
+        self.btn_settings = self._button(" Настройки", "settings.png")
+        self.btn_back = self._button(" Назад", "back.png")
+        self.btn_exit = self._button(" Выход", "exit.png")
+        self._button_widgets = {
+            "archive": self.btn_archive,
+            "refresh": self.btn_refresh,
+            "user_report": self.btn_user_report,
+            "user_reports": self.btn_user_reports,
+            "settings": self.btn_settings,
+            "back": self.btn_back,
+            "exit": self.btn_exit,
+        }
+        self._reports_count_timer = QTimer(self)
+        self._reports_count_timer.timeout.connect(self.refresh_user_reports_count)
+        self._reports_count_timer.start(60000)
+        self.apply_display_settings()
+        QTimer.singleShot(0, self.refresh_user_reports_count)
+
+    def _button(self, text: str, icon_name: str) -> QPushButton:
+        button = QPushButton(text, self)
+        icon_path = os.path.join(self.icon_dir, icon_name)
+        if os.path.exists(icon_path):
+            button.setIcon(QIcon(icon_path))
+            button.setIconSize(button.iconSize())
+        button.setMinimumHeight(32)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        return button
+
+    def _clear_layout(self):
+        while self.layout.count():
+            self.layout.takeAt(0)
+
+    def apply_display_settings(self):
+        try:
+            payload = DisplaySettingsStorage().load()
+            settings = role_display_settings_from_payload(payload, "operblock")
+            section = settings["sector8_buttons"]
+            order = list(section["order"])
+            visible = dict(section["visible"])
+            left_order = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_LEFT)
+            right_order = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_RIGHT)
+        except Exception:
+            order = list(getattr(self, "_button_widgets", {}).keys())
+            visible = {button_id: True for button_id in order}
+            left_order = [
+                button_id
+                for button_id in order
+                if button_id in {"user_report", "user_reports"} and bool(visible.get(button_id, True))
+            ]
+            right_order = [
+                button_id
+                for button_id in order
+                if button_id not in {"user_report", "user_reports"} and bool(visible.get(button_id, True))
+            ]
+
+        self._display_order = [button_id for button_id in order if button_id in self._button_widgets]
+        for button_id in self._button_widgets:
+            if button_id not in self._display_order:
+                self._display_order.append(button_id)
+        self._display_visible = {
+            button_id: bool(visible.get(button_id, True))
+            for button_id in self._button_widgets
+        }
+
+        self._clear_layout()
+        for button in self._button_widgets.values():
+            button.setVisible(False)
+        for button_id in left_order:
+            button = self._button_widgets.get(button_id)
+            if button is None:
+                continue
+            if self._display_visible.get(button_id, True):
+                self.layout.addWidget(button)
+                button.setVisible(True)
+        self.layout.addStretch(1)
+        for button_id in right_order:
+            button = self._button_widgets.get(button_id)
+            if button is None:
+                continue
+            if self._display_visible.get(button_id, True):
+                self.layout.addWidget(button)
+                button.setVisible(True)
+        self._apply_back_visibility()
+        self.updateGeometry()
+
+    def _apply_back_visibility(self):
+        visible_by_settings = bool(self._display_visible.get("back", True))
+        should_show = visible_by_settings and (self._protocol_mode or self._launcher_back)
+        self.btn_back.setVisible(should_show)
+
+    def set_protocol_mode(self, enabled: bool, *, launcher_back: bool = False):
+        self._protocol_mode = bool(enabled)
+        self._launcher_back = bool(launcher_back)
+        self._apply_back_visibility()
+
+    def refresh_user_reports_count(self):
+        button = getattr(self, "btn_user_reports", None)
+        if button is None:
+            return
+        try:
+            from rem_card.services.user_reports import UserReportsService
+
+            count = UserReportsService().count_new_reports()
+        except Exception:
+            count = 0
+        button.setText(f" Репорты ({count})" if count else " Репорты")
+        button.setToolTip(f"Новых репортов: {count}" if count else "Новых репортов нет")
+
+
+class ElidedTooltipLabel(QLabel):
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(parent)
+        self._full_text = ""
+        self.setWordWrap(False)
+        self.setMinimumWidth(80)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.set_full_text(text)
+
+    def set_full_text(self, text: str):
+        self._full_text = str(text or "")
+        self.setToolTip(self._full_text)
+        self._apply_elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def _apply_elide(self):
+        width = max(0, self.contentsRect().width())
+        text = self._full_text
+        if width > 0:
+            text = self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, width)
+        if self.text() != text:
+            super().setText(text)
+
+
+class FittingSingleLineLabel(QLabel):
+    def __init__(
+        self,
+        text: str = "",
+        *,
+        max_pixel_size: int = 16,
+        min_pixel_size: int = 16,
+        weight: int = 700,
+        color: str = TEXT_PRIMARY,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._full_text = ""
+        self._max_pixel_size = max(1, int(max_pixel_size))
+        self._min_pixel_size = max(1, min(int(min_pixel_size), self._max_pixel_size))
+        self._weight = int(weight)
+        self._current_pixel_size = 0
+        self.setWordWrap(False)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.setMinimumWidth(220)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setStyleSheet(f"color: {color}; background: transparent; border: none;")
+        self.set_full_text(text)
+
+    def setText(self, text: str):
+        self.set_full_text(text)
+
+    def set_full_text(self, text: str):
+        self._full_text = str(text or "")
+        self.setToolTip(self._full_text)
+        if self.text() != self._full_text:
+            super().setText(self._full_text)
+        self._fit_font_to_width()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_font_to_width()
+
+    def _fit_font_to_width(self):
+        width = max(0, self.contentsRect().width())
+        target_size = self._max_pixel_size
+        if width > 0 and self._full_text:
+            target_size = self._min_pixel_size
+            for size in range(self._max_pixel_size, self._min_pixel_size - 1, -1):
+                font = QFont(self.font())
+                font.setPixelSize(size)
+                font.setBold(self._weight >= 600)
+                if QFontMetrics(font).horizontalAdvance(self._full_text) <= width:
+                    target_size = size
+                    break
+        if self._current_pixel_size == target_size:
+            return
+        font = QFont(self.font())
+        font.setPixelSize(target_size)
+        font.setBold(self._weight >= 600)
+        self.setFont(font)
+        self._current_pixel_size = target_size
+
+
+class OperBlockClickableLabel(QLabel):
+    def __init__(self, text: str = "", click_callback=None, parent=None):
+        super().__init__(text, parent)
+        self._click_callback = click_callback
+        if callable(click_callback):
+            self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and callable(self._click_callback):
+            self._click_callback()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class OperBlockStyledDialog(SavedFramelessDialogMixin, QDialog):
+    embedded_accept_requested = Signal()
+    embedded_reject_requested = Signal()
+
+    def __init__(
+        self,
+        title: str,
+        settings_key: str,
+        parent=None,
+        *,
+        minimum_size: tuple[int, int] | None = None,
+        initial_size: tuple[int, int] | None = None,
+        drag_area_height: int = 58,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        _apply_operblock_window_icon(self)
+        if minimum_size:
+            self.setMinimumSize(*minimum_size)
+        if initial_size:
+            self.resize(*initial_size)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setMouseTracking(True)
+        self._init_saved_frameless_dialog(f"operblock/{settings_key}", drag_area_height=drag_area_height)
+        self._init_dialog_chrome(title)
+
+    def _init_dialog_chrome(self, title: str):
+        apply_custom_dialog_style(self)
+
+        self.layout_container = QVBoxLayout(self)
+        self.layout_container.setContentsMargins(0, 0, 0, 0)
+
+        self.bg_container = QFrame(self)
+        self.bg_container.setObjectName("DialogMainFrame")
+        self.bg_container.setMouseTracking(True)
+        self.layout_container.addWidget(self.bg_container)
+
+        self.main_layout = QVBoxLayout(self.bg_container)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        header_panel = QFrame(self.bg_container)
+        header_panel.setObjectName("DialogTitleBar")
+        header_panel.setFixedHeight(30)
+        header_layout = QHBoxLayout(header_panel)
+        header_layout.setContentsMargins(5, 0, 0, 0)
+        header_layout.setSpacing(0)
+
+        icon_label = _create_operblock_title_icon(20)
+        if icon_label is not None:
+            header_layout.addWidget(icon_label)
+            header_layout.addSpacing(8)
+
+        title_label = QLabel(str(title or ""))
+        title_label.setObjectName("DialogTitleText")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch(1)
+
+        self.close_button = QPushButton("✕")
+        self.close_button.setObjectName("DialogCloseBtn")
+        self.close_button.setFixedSize(30, 30)
+        self.close_button.setCursor(Qt.PointingHandCursor)
+        self.close_button.clicked.connect(self.reject)
+        header_layout.addWidget(self.close_button)
+        self.main_layout.addWidget(header_panel)
+
+        self.content_widget = QFrame(self.bg_container)
+        self.content_widget.setStyleSheet(STYLE_PATIENT_FORM_TAB)
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(20, 16, 20, 20)
+        self.content_layout.setSpacing(10)
+        self.main_layout.addWidget(self.content_widget, 1)
+
+    def _finalize_dialog_chrome(self):
+        self._restore_saved_geometry()
+
+    def accept(self) -> None:
+        if bool(self.property("settingsEmbedded")):
+            self.embedded_accept_requested.emit()
+            return
+        super().accept()
+
+    def reject(self) -> None:
+        if bool(self.property("settingsEmbedded")):
+            self.embedded_reject_requested.emit()
+            return
+        super().reject()
+
+    def _configure_enter_accept_button(self, cancel_button: QPushButton, save_button: QPushButton) -> None:
+        cancel_button.setAutoDefault(False)
+        cancel_button.setDefault(False)
+        save_button.setAutoDefault(True)
+        save_button.setDefault(True)
+
+
+class OperBlockSettingsDialog(OperBlockStyledDialog):
+    def __init__(self, parent=None):
+        super().__init__(
+            "Настройки оперблока",
+            "settings_menu_geometry",
+            parent,
+            minimum_size=(420, 220),
+            initial_size=(520, 280),
+        )
+        self._init_ui()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self):
+        layout = self.content_layout
+        layout.setSpacing(12)
+
+        self.medications_button = self._menu_button("Настройки препаратов")
+        self.anesthesia_types_button = self._menu_button("Виды пособия")
+        self.team_button = self._menu_button("Опер. бригада")
+        layout.addWidget(self.medications_button)
+        layout.addWidget(self.anesthesia_types_button)
+        layout.addWidget(self.team_button)
+        layout.addStretch(1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close_button = QPushButton("Закрыть")
+        close_button.setMinimumHeight(34)
+        close_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        close_button.clicked.connect(self.reject)
+        footer.addWidget(close_button)
+        layout.addLayout(footer)
+
+    @staticmethod
+    def _menu_button(text: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setMinimumHeight(42)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        return button
+
+
+class _OperBlockNoFocusRectDelegate(QStyledItemDelegate):
+    """Paint selected cells without the native dotted current-item frame."""
+
+    def paint(self, painter, option, index) -> None:
+        clean_option = QStyleOptionViewItem(option)
+        clean_option.state &= ~QStyle.State_HasFocus
+        super().paint(painter, clean_option, index)
+
+
+class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
+    def __init__(self, items: list[dict], parent=None):
+        self._working_items = [dict(item or {}) for item in (items or [])]
+        super().__init__(
+            "Виды пособия",
+            "anesthesia_types_settings_geometry",
+            parent,
+            minimum_size=(520, 360),
+            initial_size=(640, 460),
+        )
+        self._init_ui()
+        self._render_table()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self):
+        layout = self.content_layout
+        layout.setSpacing(10)
+
+        self.table = QTableWidget()
+        self.table.setObjectName("OperBlockAnesthesiaTypesTable")
+        self.table.setColumnCount(1)
+        self.table.setHorizontalHeaderLabels(["Вид пособия"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setItemDelegate(_OperBlockNoFocusRectDelegate(self.table))
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._apply_table_scrollbar_style()
+        self.table.setStyleSheet(
+            """
+            QTableWidget#OperBlockAnesthesiaTypesTable {
+                background: #f3f6fa;
+                alternate-background-color: #e9eef5;
+                gridline-color: #cbd5e1;
+                selection-background-color: #dbeafe;
+                selection-color: #172033;
+                outline: 0;
+            }
+            QTableWidget#OperBlockAnesthesiaTypesTable::item {
+                padding: 5px 7px;
+            }
+            QTableWidget#OperBlockAnesthesiaTypesTable::item:focus {
+                border: none;
+                outline: none;
+            }
+            QHeaderView::section {
+                background-color: #d9e2ec;
+                color: #243b53;
+                border: 1px solid #b8c4d3;
+                padding: 5px 7px;
+                font-weight: bold;
+            }
+            QHeaderView::section:hover {
+                background-color: #cbd7e5;
+            }
+            """
+        )
+        self.table.itemSelectionChanged.connect(self._sync_input_from_selection)
+        self.table.itemDoubleClicked.connect(lambda _item: self.type_input.setFocus())
+        layout.addWidget(self.table, 1)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self.type_input = QLineEdit()
+        self.type_input.setPlaceholderText("Название вида пособия")
+        form.addRow("Вид пособия:", self.type_input)
+        layout.addLayout(form)
+
+        edit_actions = QHBoxLayout()
+        self.add_button = QPushButton("Добавить")
+        self.update_button = QPushButton("Сохранить изменение")
+        self.move_up_button = QPushButton("Выше")
+        self.move_down_button = QPushButton("Ниже")
+        self.delete_button = QPushButton("Удалить")
+        for button in (self.add_button, self.update_button, self.move_up_button, self.move_down_button):
+            button.setMinimumHeight(34)
+            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.delete_button.setMinimumHeight(34)
+        self.delete_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.add_button.clicked.connect(self._add_item)
+        self.update_button.clicked.connect(self._update_selected_item)
+        self.move_up_button.clicked.connect(lambda: self._move_selected_item(-1))
+        self.move_down_button.clicked.connect(lambda: self._move_selected_item(1))
+        self.delete_button.clicked.connect(self._delete_selected_item)
+        edit_actions.addWidget(self.add_button)
+        edit_actions.addWidget(self.update_button)
+        edit_actions.addWidget(self.move_up_button)
+        edit_actions.addWidget(self.move_down_button)
+        edit_actions.addWidget(self.delete_button)
+        layout.addLayout(edit_actions)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.save_button = QPushButton("Сохранить")
+        self.save_button.setMinimumHeight(34)
+        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.save_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.save_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.save_button)
+        layout.addLayout(footer)
+
+    def _apply_table_scrollbar_style(self) -> None:
+        scrollbar = self.table.verticalScrollBar()
+        if scrollbar is None:
+            return
+        scrollbar.setObjectName("OperBlockAnesthesiaTypesTableScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(34)
+        scrollbar.setPageStep(136)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockAnesthesiaTypesTableScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+
+    def _render_table(self, select_id: str | None = None):
+        selected_id = select_id or self._selected_item_id()
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(0)
+            for row, item in enumerate(self._working_items):
+                self.table.insertRow(row)
+                table_item = QTableWidgetItem(str((item or {}).get("label") or ""))
+                table_item.setData(Qt.UserRole, str((item or {}).get("id") or ""))
+                self.table.setItem(row, 0, table_item)
+            if self.table.rowCount():
+                target_row = 0
+                if selected_id:
+                    for row in range(self.table.rowCount()):
+                        item = self.table.item(row, 0)
+                        if item and str(item.data(Qt.UserRole) or "") == selected_id:
+                            target_row = row
+                            break
+                self.table.selectRow(target_row)
+        finally:
+            self.table.blockSignals(False)
+        self._sync_input_from_selection()
+
+    def _selected_row(self) -> int:
+        indexes = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not indexes:
+            return -1
+        return int(indexes[0].row())
+
+    def _selected_item_id(self) -> str:
+        row = self._selected_row()
+        if row < 0:
+            return ""
+        item = self.table.item(row, 0)
+        return str(item.data(Qt.UserRole) or "") if item is not None else ""
+
+    def _sync_input_from_selection(self):
+        row = self._selected_row()
+        if 0 <= row < len(self._working_items):
+            self.type_input.setText(str(self._working_items[row].get("label") or ""))
+        else:
+            self.type_input.clear()
+        self.update_button.setEnabled(row >= 0)
+        self.delete_button.setEnabled(row >= 0)
+        self.move_up_button.setEnabled(row > 0)
+        self.move_down_button.setEnabled(0 <= row < len(self._working_items) - 1)
+
+    def _input_label(self) -> str:
+        return normalize_operblock_anesthesia_type_label(self.type_input.text())
+
+    def _label_exists(self, label: str, *, ignore_row: int = -1) -> bool:
+        key = label.casefold()
+        for row, item in enumerate(self._working_items):
+            if row == ignore_row:
+                continue
+            if str((item or {}).get("label") or "").casefold() == key:
+                return True
+        return False
+
+    def _add_item(self):
+        label = self._input_label()
+        if not label:
+            CustomMessageBox.warning(self, "Виды пособия", "Укажите вид пособия.")
+            return
+        if self._label_exists(label):
+            CustomMessageBox.warning(self, "Виды пособия", "Такой вид пособия уже есть.")
+            return
+        item_id = f"manual_{int(time.time() * 1000)}"
+        self._working_items.append({"id": item_id, "label": label, "sort_order": len(self._working_items) * 10 + 10})
+        self._render_table(item_id)
+        self.type_input.clear()
+
+    def _update_selected_item(self):
+        row = self._selected_row()
+        if not (0 <= row < len(self._working_items)):
+            return
+        label = self._input_label()
+        if not label:
+            CustomMessageBox.warning(self, "Виды пособия", "Укажите вид пособия.")
+            return
+        if self._label_exists(label, ignore_row=row):
+            CustomMessageBox.warning(self, "Виды пособия", "Такой вид пособия уже есть.")
+            return
+        self._working_items[row]["label"] = label
+        self._render_table(str(self._working_items[row].get("id") or ""))
+
+    def _delete_selected_item(self):
+        row = self._selected_row()
+        if not (0 <= row < len(self._working_items)):
+            return
+        self._working_items.pop(row)
+        self._render_table()
+
+    def _move_selected_item(self, direction: int):
+        row = self._selected_row()
+        target_row = row + int(direction)
+        if not (0 <= row < len(self._working_items)) or not (0 <= target_row < len(self._working_items)):
+            return
+        self._working_items[row], self._working_items[target_row] = (
+            self._working_items[target_row],
+            self._working_items[row],
+        )
+        self._render_table(str(self._working_items[target_row].get("id") or ""))
+
+    def items(self) -> list[dict]:
+        result: list[dict] = []
+        for index, item in enumerate(self._working_items, start=1):
+            label = normalize_operblock_anesthesia_type_label((item or {}).get("label"))
+            if not label:
+                continue
+            result.append(
+                {
+                    "id": str((item or {}).get("id") or ""),
+                    "label": label,
+                    "sort_order": index * 10,
+                }
+            )
+        return result
+
+
+class OperBlockTeamDialog(OperBlockStyledDialog):
+    def __init__(self, items: list[dict], parent=None):
+        self._working_items = [dict(item or {}) for item in (items or [])]
+        super().__init__(
+            "Опер. бригада",
+            "team_settings_geometry",
+            parent,
+            minimum_size=(640, 420),
+            initial_size=(760, 520),
+        )
+        self._init_ui()
+        self._render_table()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self):
+        layout = self.content_layout
+        layout.setSpacing(10)
+
+        self.table = QTableWidget()
+        self.table.setObjectName("OperBlockTeamTable")
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["ФИО", "Должность"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setItemDelegate(_OperBlockNoFocusRectDelegate(self.table))
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setStyleSheet(
+            """
+            QTableWidget#OperBlockTeamTable {
+                background: #f3f6fa;
+                alternate-background-color: #e9eef5;
+                gridline-color: #cbd5e1;
+                selection-background-color: #dbeafe;
+                selection-color: #172033;
+                outline: 0;
+            }
+            QTableWidget#OperBlockTeamTable::item {
+                padding: 5px 7px;
+            }
+            QTableWidget#OperBlockTeamTable::item:focus {
+                border: none;
+                outline: none;
+            }
+            QHeaderView::section {
+                background-color: #d9e2ec;
+                color: #243b53;
+                border: 1px solid #b8c4d3;
+                padding: 5px 7px;
+                font-weight: bold;
+            }
+            QHeaderView::section:hover {
+                background-color: #cbd7e5;
+            }
+            """
+        )
+        self.table.itemSelectionChanged.connect(self._sync_inputs_from_selection)
+        layout.addWidget(self.table, 1)
+
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("ФИО")
+        self.name_input.setMinimumWidth(360)
+        self.position_combo = QComboBox()
+        self.position_combo.setEditable(True)
+        self.position_combo.setMinimumWidth(260)
+        for position in OPERBLOCK_TEAM_DEFAULT_POSITIONS:
+            self.position_combo.addItem(position, position)
+        self.position_combo.setCurrentIndex(-1)
+        self.position_combo.setEditText("")
+        form.addRow("ФИО:", self.name_input)
+        form.addRow("Должность:", self.position_combo)
+        layout.addLayout(form)
+
+        edit_actions = QHBoxLayout()
+        self.add_button = QPushButton("Добавить")
+        self.update_button = QPushButton("Сохранить изменение")
+        self.delete_button = QPushButton("Удалить")
+        for button in (self.add_button, self.update_button):
+            button.setMinimumHeight(34)
+            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.delete_button.setMinimumHeight(34)
+        self.delete_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.add_button.clicked.connect(self._add_item)
+        self.update_button.clicked.connect(self._update_selected_item)
+        self.delete_button.clicked.connect(self._delete_selected_item)
+        edit_actions.addWidget(self.add_button)
+        edit_actions.addWidget(self.update_button)
+        edit_actions.addWidget(self.delete_button)
+        layout.addLayout(edit_actions)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.save_button = QPushButton("Сохранить")
+        self.save_button.setMinimumHeight(34)
+        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.save_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.save_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.save_button)
+        layout.addLayout(footer)
+
+    def _render_table(self, select_id: str | None = None):
+        selected_id = select_id or self._selected_item_id()
+        self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(0)
+            for row, item in enumerate(self._working_items):
+                self.table.insertRow(row)
+                name_item = QTableWidgetItem(str((item or {}).get("name") or ""))
+                name_item.setData(Qt.UserRole, str((item or {}).get("id") or ""))
+                position_item = QTableWidgetItem(str((item or {}).get("position") or ""))
+                self.table.setItem(row, 0, name_item)
+                self.table.setItem(row, 1, position_item)
+            if self.table.rowCount():
+                target_row = 0
+                if selected_id:
+                    for row in range(self.table.rowCount()):
+                        item = self.table.item(row, 0)
+                        if item and str(item.data(Qt.UserRole) or "") == selected_id:
+                            target_row = row
+                            break
+                self.table.selectRow(target_row)
+        finally:
+            self.table.blockSignals(False)
+        self._sync_inputs_from_selection()
+
+    def _selected_row(self) -> int:
+        indexes = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not indexes:
+            return -1
+        return int(indexes[0].row())
+
+    def _selected_item_id(self) -> str:
+        row = self._selected_row()
+        if row < 0:
+            return ""
+        item = self.table.item(row, 0)
+        return str(item.data(Qt.UserRole) or "") if item is not None else ""
+
+    def _sync_inputs_from_selection(self):
+        row = self._selected_row()
+        if 0 <= row < len(self._working_items):
+            item = self._working_items[row]
+            self.name_input.setText(str(item.get("name") or ""))
+            self.position_combo.setEditText(str(item.get("position") or ""))
+        else:
+            self.name_input.clear()
+            self.position_combo.setCurrentIndex(-1)
+            self.position_combo.setEditText("")
+        self.update_button.setEnabled(row >= 0)
+        self.delete_button.setEnabled(row >= 0)
+
+    def _input_name(self) -> str:
+        return normalize_operblock_team_text(self.name_input.text())
+
+    def _input_position(self) -> str:
+        return normalize_operblock_team_text(self.position_combo.currentText())
+
+    def _member_exists(self, name: str, position: str, *, ignore_row: int = -1) -> bool:
+        key = (name.casefold(), position.casefold())
+        for row, item in enumerate(self._working_items):
+            if row == ignore_row:
+                continue
+            existing_key = (
+                str((item or {}).get("name") or "").casefold(),
+                str((item or {}).get("position") or "").casefold(),
+            )
+            if existing_key == key:
+                return True
+        return False
+
+    def _validate_inputs(self, *, ignore_row: int = -1) -> tuple[str, str] | None:
+        name = self._input_name()
+        position = self._input_position()
+        if not name:
+            CustomMessageBox.warning(self, "Опер. бригада", "Укажите ФИО.")
+            return None
+        if not position:
+            CustomMessageBox.warning(self, "Опер. бригада", "Укажите должность.")
+            return None
+        if self._member_exists(name, position, ignore_row=ignore_row):
+            CustomMessageBox.warning(self, "Опер. бригада", "Такой сотрудник с этой должностью уже есть.")
+            return None
+        return name, position
+
+    def _add_item(self):
+        values = self._validate_inputs()
+        if values is None:
+            return
+        name, position = values
+        item_id = f"member_{int(time.time() * 1000)}"
+        self._working_items.append(
+            {
+                "id": item_id,
+                "name": name,
+                "position": position,
+                "sort_order": len(self._working_items) * 10 + 10,
+            }
+        )
+        self._render_table(item_id)
+        self.name_input.clear()
+        self.position_combo.setCurrentIndex(-1)
+        self.position_combo.setEditText("")
+
+    def _update_selected_item(self):
+        row = self._selected_row()
+        if not (0 <= row < len(self._working_items)):
+            return
+        values = self._validate_inputs(ignore_row=row)
+        if values is None:
+            return
+        name, position = values
+        self._working_items[row]["name"] = name
+        self._working_items[row]["position"] = position
+        self._render_table(str(self._working_items[row].get("id") or ""))
+
+    def _delete_selected_item(self):
+        row = self._selected_row()
+        if not (0 <= row < len(self._working_items)):
+            return
+        self._working_items.pop(row)
+        self._render_table()
+
+    def items(self) -> list[dict]:
+        result: list[dict] = []
+        for index, item in enumerate(self._working_items, start=1):
+            name = normalize_operblock_team_text((item or {}).get("name"))
+            position = normalize_operblock_team_text((item or {}).get("position"))
+            if not name or not position:
+                continue
+            result.append(
+                {
+                    "id": str((item or {}).get("id") or ""),
+                    "name": name,
+                    "position": position,
+                    "sort_order": index * 10,
+                }
+            )
+        return result
+
+
+class OperBlockDialogTimeInput(QFrame):
+    def __init__(
+        self,
+        initial_datetime: datetime | None = None,
+        parent=None,
+        *,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+        object_prefix: str = "OperBlockDialogTime",
+    ):
+        super().__init__(parent)
+        self._object_prefix = re.sub(r"\W+", "", str(object_prefix or "OperBlockDialogTime")) or "OperBlockDialogTime"
+        self._start_datetime = _minute_floor_dt(initial_datetime) or datetime.now().replace(second=0, microsecond=0)
+        self._time_min_datetime = _minute_floor_dt(min_datetime)
+        self._time_max_datetime = _minute_floor_dt(max_datetime)
+        if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
+            self._time_max_datetime = None
+        self._time_text_updating = False
+        self._init_ui()
+
+    def _init_ui(self) -> None:
+        frame_name = f"{self._object_prefix}InputFrame"
+        input_name = f"{self._object_prefix}Input"
+        stepper_name = f"{self._object_prefix}StepperColumn"
+        button_name = f"{self._object_prefix}StepButton"
+        self.setObjectName(frame_name)
+        self.setFixedHeight(52)
+        self.setMinimumWidth(170)
+        self.setMaximumWidth(240)
+        self.setProperty("focused", False)
+        self.setStyleSheet(
+            f"""
+            QFrame#{frame_name} {{
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }}
+            QFrame#{frame_name}[focused="true"] {{
+                border: 1px solid #6366F1;
+            }}
+            QLineEdit#{input_name} {{
+                background-color: transparent;
+                color: #111827;
+                border: none;
+                font-size: 18px;
+                font-weight: 400;
+                padding: 0 14px;
+                selection-background-color: #C7D2FE;
+            }}
+            QFrame#{stepper_name} {{
+                background-color: transparent;
+                border: none;
+            }}
+            """
+            + operblock_arrow_button_style(f"QPushButton#{button_name}")
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName(input_name)
+        start_dt = self._coerce_time_datetime(self._start_datetime)
+        self.time_input.setText(f"{start_dt.hour:02d}:{start_dt.minute:02d}")
+        self.time_input.setPlaceholderText("09:10")
+        self.time_input.setMaxLength(5)
+        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        self.time_input.editingFinished.connect(self._commit_time_text)
+        self.time_input.installEventFilter(self)
+        layout.addWidget(self.time_input, 1)
+
+        stepper = QFrame()
+        stepper.setObjectName(stepper_name)
+        stepper.setFixedWidth(42)
+        stepper_layout = QVBoxLayout(stepper)
+        stepper_layout.setContentsMargins(6, 4, 6, 4)
+        stepper_layout.setSpacing(4)
+
+        up_button = QPushButton()
+        up_button.setObjectName(button_name)
+        up_button.setFixedSize(30, 20)
+        up_button.setIcon(_gas_time_step_icon(up=True))
+        up_button.setIconSize(QSize(14, 14))
+        up_button.setCursor(Qt.PointingHandCursor)
+        up_button.clicked.connect(lambda _=False: self._step_time(1))
+        down_button = QPushButton()
+        down_button.setObjectName(button_name)
+        down_button.setFixedSize(30, 20)
+        down_button.setIcon(_gas_time_step_icon(up=False))
+        down_button.setIconSize(QSize(14, 14))
+        down_button.setCursor(Qt.PointingHandCursor)
+        down_button.clicked.connect(lambda _=False: self._step_time(-1))
+        stepper_layout.addWidget(up_button)
+        stepper_layout.addWidget(down_button)
+        layout.addWidget(stepper, 0)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "time_input", None):
+            if event.type() == QEvent.FocusIn:
+                self._set_time_focus(True)
+            elif event.type() == QEvent.FocusOut:
+                self._set_time_focus(False)
+        return super().eventFilter(obj, event)
+
+    def _set_time_focus(self, focused: bool) -> None:
+        self.setProperty("focused", bool(focused))
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def _on_time_text_edited(self, text: str) -> None:
+        if self._time_text_updating:
+            return
+        digits = re.sub(r"\D", "", str(text or ""))
+        if len(digits) < 4:
+            return
+        event_dt = self._time_datetime_from_text(digits[:4])
+        if event_dt is None:
+            return
+        self._set_time_input_text(self._time_text_from_datetime(self._coerce_time_datetime(event_dt)), select_all=False)
+
+    def _commit_time_text(self) -> str:
+        raw_text = self.time_input.text()
+        event_dt = self._time_datetime_from_text(raw_text)
+        if event_dt is None:
+            event_dt = self._fallback_time_datetime()
+        normalized = self._time_text_from_datetime(self._coerce_time_datetime(event_dt))
+        self._set_time_input_text(normalized, select_all=False)
+        return normalized
+
+    def _step_time(self, delta_minutes: int) -> None:
+        current_dt = self._time_datetime_from_text(self.time_input.text())
+        if current_dt is None:
+            current_dt = self._fallback_time_datetime()
+        stepped = self._coerce_time_datetime(current_dt + timedelta(minutes=int(delta_minutes)))
+        self._set_time_input_text(self._time_text_from_datetime(stepped), select_all=True)
+
+    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
+        self._time_text_updating = True
+        try:
+            self.time_input.setText(text)
+            if select_all:
+                self.time_input.setFocus(Qt.OtherFocusReason)
+                self.time_input.selectAll()
+            else:
+                self.time_input.setCursorPosition(len(text))
+        finally:
+            self._time_text_updating = False
+
+    def _fallback_time_datetime(self) -> datetime:
+        return self._coerce_time_datetime(self._start_datetime)
+
+    def _time_datetime_from_text(self, value: str) -> datetime | None:
+        minutes = OperationStageTimeEditDialog._time_minutes_from_text(value)
+        if minutes is None:
+            return None
+        hour = minutes // 60
+        minute = minutes % 60
+        base_dt = self._start_datetime or self._time_min_datetime or datetime.now().replace(second=0, microsecond=0)
+        same_day = datetime.combine(base_dt.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        candidates = [same_day]
+        if hour < 6:
+            candidates.append(same_day + timedelta(days=1))
+        previous_day_is_plausible = (
+            base_dt.hour < 6
+            or (self._time_min_datetime and self._time_min_datetime.date() < base_dt.date())
+        )
+        if hour >= 12 and previous_day_is_plausible:
+            candidates.append(same_day - timedelta(days=1))
+
+        def in_bounds(candidate: datetime) -> bool:
+            if self._time_min_datetime and candidate < self._time_min_datetime:
+                return False
+            if self._time_max_datetime and candidate > self._time_max_datetime:
+                return False
+            return True
+
+        bounded = [candidate for candidate in candidates if in_bounds(candidate)]
+        source = bounded or candidates
+        return min(source, key=lambda candidate: abs((candidate - base_dt).total_seconds()))
+
+    def _coerce_time_datetime(self, value: datetime) -> datetime:
+        event_dt = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        if self._time_min_datetime and event_dt < self._time_min_datetime:
+            return self._time_min_datetime
+        if self._time_max_datetime and event_dt > self._time_max_datetime:
+            return self._time_max_datetime
+        return event_dt
+
+    @staticmethod
+    def _time_text_from_datetime(value: datetime) -> str:
+        return f"{value.hour:02d}:{value.minute:02d}"
+
+    def datetime_text(self) -> str:
+        selected_text = self._commit_time_text()
+        selected_dt = self._time_datetime_from_text(selected_text) or self._fallback_time_datetime()
+        return self._coerce_time_datetime(selected_dt).isoformat(timespec="seconds")
+
+
+class StartAnesthesiaDialog(OperBlockStyledDialog):
+    def __init__(
+        self,
+        anesthesia_types: list[dict],
+        anesthesiologists: list[str] | None = None,
+        anesthetists: list[str] | None = None,
+        parent=None,
+        *,
+        initial_assistance_type: str = "",
+        initial_anesthesiologist: str = "",
+        initial_anesthetist: str = "",
+        initial_start_datetime: datetime | None = None,
+        min_start_datetime: datetime | None = None,
+        max_start_datetime: datetime | None = None,
+    ):
+        self._start_datetime = _minute_floor_dt(initial_start_datetime) or datetime.now().replace(second=0, microsecond=0)
+        self._time_min_datetime = _minute_floor_dt(min_start_datetime)
+        self._time_max_datetime = _minute_floor_dt(max_start_datetime)
+        if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
+            self._time_max_datetime = None
+        super().__init__(
+            "Начать пособие",
+            "start_anesthesia_dialog_geometry",
+            parent,
+            minimum_size=(560, 330),
+            initial_size=(660, 380),
+        )
+        self._init_ui(anesthesia_types, anesthesiologists or [], anesthetists or [])
+        if initial_assistance_type:
+            self.assistance_combo.setEditText(normalize_operblock_anesthesia_type_label(initial_assistance_type))
+        if initial_anesthesiologist:
+            self.anesthesiologist_combo.setEditText(normalize_operblock_team_text(initial_anesthesiologist))
+        if initial_anesthetist:
+            self.anesthetist_combo.setEditText(normalize_operblock_team_text(initial_anesthetist))
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self, anesthesia_types: list[dict], anesthesiologists: list[str], anesthetists: list[str]):
+        layout = self.content_layout
+
+        def add_labeled_row(caption: str, widget: QWidget, *, expand: bool = True) -> None:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(10)
+            label = QLabel(caption)
+            label.setFixedWidth(120)
+            label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            row.addWidget(label)
+            row.addWidget(widget, 1 if expand else 0)
+            if not expand:
+                row.addStretch(1)
+            layout.addLayout(row)
+
+        self.assistance_combo = QComboBox()
+        self.assistance_combo.setEditable(True)
+        self.assistance_combo.setMinimumWidth(260)
+        self.assistance_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.assistance_combo.setMinimumContentsLength(38)
+        self.assistance_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.assistance_combo.setStyleSheet(_operblock_combo_box_style())
+        line_edit = self.assistance_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Не выбрано")
+        for item in anesthesia_types or []:
+            label = normalize_operblock_anesthesia_type_label((item or {}).get("label"))
+            if label:
+                self.assistance_combo.addItem(label, label)
+        self.assistance_combo.setCurrentIndex(-1)
+        self.assistance_combo.setEditText("")
+        add_labeled_row("Вид пособия:", self.assistance_combo)
+
+        self.anesthesiologist_combo = self._staff_combo(anesthesiologists)
+        self.anesthesiologist_combo.setMinimumWidth(260)
+        self.anesthesiologist_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        add_labeled_row("Анестезиолог:", self.anesthesiologist_combo)
+
+        self.anesthetist_combo = self._staff_combo(anesthetists)
+        self.anesthetist_combo.setMinimumWidth(260)
+        self.anesthetist_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        add_labeled_row("Анестезист:", self.anesthetist_combo)
+
+        self.start_time_input = OperBlockDialogTimeInput(
+            self._start_datetime,
+            self,
+            min_datetime=self._time_min_datetime,
+            max_datetime=self._time_max_datetime,
+            object_prefix="StartAnesthesiaTime",
+        )
+        self.time_frame = self.start_time_input
+        self.time_input = self.start_time_input.time_input
+        add_labeled_row("Время начала:", self.start_time_input, expand=False)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.start_button = QPushButton("Начать")
+        self.start_button.setMinimumHeight(34)
+        self.start_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.start_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.start_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.start_button)
+        layout.addStretch(1)
+        layout.addLayout(footer)
+
+    @staticmethod
+    def _apply_staff_combo_popup_scrollbar(combo: QComboBox) -> None:
+        view = combo.view()
+        if view is None:
+            return
+        view.setObjectName("OperBlockStaffComboPopup")
+        scrollbar = view.verticalScrollBar()
+        if scrollbar is None:
+            return
+        scrollbar.setObjectName("OperBlockStaffComboPopupScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(36)
+        scrollbar.setPageStep(144)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockStaffComboPopupScrollBar",
+                width_px=14,
+                left_margin_px=2,
+                right_margin_px=1,
+            )
+        )
+
+    @staticmethod
+    def _staff_combo(items: list[str]) -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setFixedHeight(36)
+        combo.setMinimumWidth(430)
+        combo.setMinimumContentsLength(38)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.setStyleSheet(_operblock_combo_box_style())
+        StartAnesthesiaDialog._apply_staff_combo_popup_scrollbar(combo)
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Не выбрано")
+        seen: set[str] = set()
+        for item in items or []:
+            label = normalize_operblock_team_text(item)
+            key = label.casefold()
+            if label and key not in seen:
+                seen.add(key)
+                combo.addItem(label, label)
+        combo.setCurrentIndex(-1)
+        combo.setEditText("")
+        return combo
+
+    def selected_assistance_type(self) -> str:
+        return normalize_operblock_anesthesia_type_label(self.assistance_combo.currentText())
+
+    def selected_anesthesiologist(self) -> str:
+        return normalize_operblock_team_text(self.anesthesiologist_combo.currentText())
+
+    def selected_anesthetist(self) -> str:
+        return normalize_operblock_team_text(self.anesthetist_combo.currentText())
+
+    def start_datetime_text(self) -> str:
+        return self.start_time_input.datetime_text()
+
+    def accept(self) -> None:
+        if not self.selected_assistance_type():
+            CustomMessageBox.warning(self, "Начать пособие", "Укажите вид пособия.")
+            return
+        self.start_time_input.datetime_text()
+        super().accept()
+
+
+class EndSurgeryDialog(OperBlockStyledDialog):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        initial_end_datetime: datetime | None = None,
+        min_end_datetime: datetime | None = None,
+        max_end_datetime: datetime | None = None,
+    ):
+        super().__init__(
+            "Завершить операцию",
+            "end_surgery_dialog_geometry",
+            parent,
+            minimum_size=(430, 190),
+            initial_size=(520, 230),
+        )
+        self._init_ui(initial_end_datetime, min_end_datetime, max_end_datetime)
+        self._finalize_dialog_chrome()
+
+    def _init_ui(
+        self,
+        initial_end_datetime: datetime | None,
+        min_end_datetime: datetime | None,
+        max_end_datetime: datetime | None,
+    ):
+        layout = self.content_layout
+        label_width = 120
+        row_spacing = 10
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(row_spacing)
+        label = QLabel("Время завершения:")
+        label.setFixedWidth(label_width)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.end_time_input = OperBlockDialogTimeInput(
+            initial_end_datetime,
+            self,
+            min_datetime=min_end_datetime,
+            max_datetime=max_end_datetime,
+            object_prefix="EndSurgeryTime",
+        )
+        row.addWidget(label)
+        row.addWidget(self.end_time_input, 0)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        footer_frame = QFrame()
+        footer_frame.setObjectName("EndSurgeryDialogFooter")
+        footer_frame.setStyleSheet("QFrame#EndSurgeryDialogFooter { background: transparent; border: none; }")
+        footer_frame.setFixedWidth(label_width + row_spacing + self.end_time_input.maximumWidth())
+        footer_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        footer = QHBoxLayout(footer_frame)
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(row_spacing)
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.finish_button = QPushButton("Завершить")
+        self.finish_button.setMinimumHeight(34)
+        self.finish_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.finish_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.finish_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.finish_button)
+        layout.addStretch(1)
+        layout.addWidget(footer_frame, 0, Qt.AlignLeft)
+
+    def end_datetime_text(self) -> str:
+        return self.end_time_input.datetime_text()
+
+
+class EndAnesthesiaTransferDialog(OperBlockStyledDialog):
+    def __init__(
+        self,
+        departments: list[str],
+        parent=None,
+        *,
+        initial_department: str = "",
+        initial_end_datetime: datetime | None = None,
+        min_end_datetime: datetime | None = None,
+        max_end_datetime: datetime | None = None,
+    ):
+        super().__init__(
+            "Завершить пособие",
+            "end_anesthesia_transfer_dialog_geometry",
+            parent,
+            minimum_size=(520, 260),
+            initial_size=(620, 300),
+        )
+        self._init_ui(departments, initial_department, initial_end_datetime, min_end_datetime, max_end_datetime)
+        self._finalize_dialog_chrome()
+
+    def _init_ui(
+        self,
+        departments: list[str],
+        initial_department: str,
+        initial_end_datetime: datetime | None,
+        min_end_datetime: datetime | None,
+        max_end_datetime: datetime | None,
+    ):
+        layout = self.content_layout
+        time_row = QHBoxLayout()
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.setSpacing(10)
+        time_label = QLabel("Время завершения:")
+        time_label.setFixedWidth(120)
+        time_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        time_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.end_time_input = OperBlockDialogTimeInput(
+            initial_end_datetime,
+            self,
+            min_datetime=min_end_datetime,
+            max_datetime=max_end_datetime,
+            object_prefix="EndAnesthesiaTime",
+        )
+        time_row.addWidget(time_label)
+        time_row.addWidget(self.end_time_input, 0)
+        time_row.addStretch(1)
+        layout.addLayout(time_row)
+
+        transfer_row = QHBoxLayout()
+        transfer_row.setContentsMargins(0, 0, 0, 0)
+        transfer_row.setSpacing(10)
+        transfer_label = QLabel("Переводится в:")
+        transfer_label.setFixedWidth(120)
+        transfer_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        transfer_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.department_combo = QComboBox()
+        self.department_combo.setEditable(True)
+        self.department_combo.setFixedHeight(36)
+        self.department_combo.setMinimumWidth(260)
+        self.department_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.department_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
+        self.department_combo.setStyleSheet(_operblock_combo_box_style())
+        line_edit = self.department_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Куда переводится пациент")
+
+        seen: set[str] = set()
+        for department in departments or []:
+            label = normalize_operblock_transfer_department(department)
+            key = label.casefold()
+            if label and key not in seen:
+                seen.add(key)
+                self.department_combo.addItem(label, label)
+        self.department_combo.setCurrentIndex(-1)
+        self.department_combo.setEditText(normalize_operblock_transfer_department(initial_department))
+        transfer_row.addWidget(transfer_label)
+        transfer_row.addWidget(self.department_combo, 1)
+        layout.addLayout(transfer_row)
+
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(10)
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.finish_button = QPushButton("Завершить")
+        self.finish_button.setMinimumHeight(34)
+        self.finish_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.finish_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.finish_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.finish_button)
+        layout.addStretch(1)
+        layout.addLayout(footer)
+
+    def selected_department(self) -> str:
+        return normalize_operblock_transfer_department(self.department_combo.currentText())
+
+    def end_datetime_text(self) -> str:
+        return self.end_time_input.datetime_text()
+
+    def accept(self) -> None:
+        if not self.selected_department():
+            CustomMessageBox.warning(self, "Завершить пособие", "Укажите, куда переводится пациент.")
+            return
+        super().accept()
+
+
+class StartSurgeryDialog(OperBlockStyledDialog):
+    def __init__(
+        self,
+        surgeons: list[str] | None = None,
+        operating_nurses: list[str] | None = None,
+        parent=None,
+        *,
+        initial_operation_name: str = "",
+        initial_surgeons: list[str] | None = None,
+        initial_operating_nurse: str = "",
+        initial_start_datetime: datetime | None = None,
+        min_start_datetime: datetime | None = None,
+        max_start_datetime: datetime | None = None,
+    ):
+        self._start_datetime = _minute_floor_dt(initial_start_datetime) or datetime.now().replace(second=0, microsecond=0)
+        self._time_min_datetime = _minute_floor_dt(min_start_datetime)
+        self._time_max_datetime = _minute_floor_dt(max_start_datetime)
+        if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
+            self._time_max_datetime = None
+        super().__init__(
+            "Начать операцию",
+            "start_surgery_dialog_geometry",
+            parent,
+            minimum_size=(560, 390),
+            initial_size=(660, 460),
+        )
+        self._surgeon_options = list(surgeons or [])
+        self._surgeon_combos: list[QComboBox] = []
+        self._syncing_surgeon_fields = False
+        self._initial_operation_name = normalize_operblock_team_text(initial_operation_name)
+        self._initial_surgeons = [
+            normalize_operblock_team_text(item)
+            for item in (initial_surgeons or [])
+            if normalize_operblock_team_text(item)
+        ]
+        self._initial_operating_nurse = normalize_operblock_team_text(initial_operating_nurse)
+        self._init_ui(surgeons or [], operating_nurses or [])
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self, surgeons: list[str], operating_nurses: list[str]):
+        layout = self.content_layout
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        self.operation_name_edit = QLineEdit()
+        self.operation_name_edit.setMinimumWidth(430)
+        self.operation_name_edit.setPlaceholderText("Название операции")
+        if self._initial_operation_name:
+            self.operation_name_edit.setText(self._initial_operation_name)
+        form.addRow("Название операции:", self.operation_name_edit)
+
+        self.start_time_input = OperBlockDialogTimeInput(
+            self._start_datetime,
+            self,
+            min_datetime=self._time_min_datetime,
+            max_datetime=self._time_max_datetime,
+            object_prefix="StartSurgeryTime",
+        )
+        self.time_input = self.start_time_input.time_input
+        form.addRow("Время начала:", self.start_time_input)
+
+        self.surgeons_scroll = QScrollArea()
+        self.surgeons_scroll.setObjectName("OperBlockSurgeryTeamScroll")
+        self.surgeons_scroll.setWidgetResizable(True)
+        self.surgeons_scroll.setFrameShape(QFrame.NoFrame)
+        self.surgeons_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.surgeons_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.surgeons_scroll.setMinimumHeight(190)
+        self.surgeons_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        surgeons_scrollbar = self.surgeons_scroll.verticalScrollBar()
+        surgeons_scrollbar.setObjectName("OperBlockSurgeryTeamScrollBar")
+        surgeons_scrollbar.setFixedWidth(14)
+        surgeons_scrollbar.setSingleStep(36)
+        surgeons_scrollbar.setPageStep(108)
+        surgeons_scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockSurgeryTeamScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+
+        self.surgeons_widget = QWidget()
+        self.surgeons_widget.setObjectName("OperBlockSurgeryTeamContent")
+        self.surgeons_widget.setStyleSheet(
+            "QWidget#OperBlockSurgeryTeamContent { background: transparent; border: none; }"
+        )
+        self.surgeons_layout = QFormLayout(self.surgeons_widget)
+        self.surgeons_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self.surgeons_layout.setContentsMargins(0, 0, 0, 0)
+        self.surgeons_layout.setHorizontalSpacing(10)
+        self.surgeons_layout.setVerticalSpacing(6)
+        if self._initial_surgeons:
+            for surgeon in self._initial_surgeons:
+                self._add_surgeon_combo(surgeon)
+        else:
+            self._add_surgeon_combo()
+        self.operating_nurse_combo = StartAnesthesiaDialog._staff_combo(operating_nurses)
+        if self._initial_operating_nurse:
+            self.operating_nurse_combo.setEditText(self._initial_operating_nurse)
+        self._install_surgery_team_combo_event_filter(self.operating_nurse_combo)
+        self.surgeons_layout.addRow("Опер. сестра:", self.operating_nurse_combo)
+        self.surgeons_scroll.setWidget(self.surgeons_widget)
+        self.surgeons_scroll.setStyleSheet(
+            """
+            QScrollArea#OperBlockSurgeryTeamScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#OperBlockSurgeryTeamScroll > QWidget > QWidget {
+                background: transparent;
+            }
+            """
+        )
+        form.addRow(self.surgeons_scroll)
+        layout.addLayout(form, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.start_button = QPushButton("Начать")
+        self.start_button.setMinimumHeight(34)
+        self.start_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.start_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.start_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.start_button)
+        layout.addLayout(footer)
+
+    def _add_surgeon_combo(self, text: str = "") -> QComboBox:
+        combo = StartAnesthesiaDialog._staff_combo(self._surgeon_options)
+        if text:
+            combo.setEditText(text)
+        combo.currentTextChanged.connect(lambda *_args: self._sync_surgeon_fields())
+        self._install_surgery_team_combo_event_filter(combo)
+        insert_row = self._operating_nurse_row()
+        self._surgeon_combos.append(combo)
+        self.surgeons_layout.insertRow(insert_row, "Хирург:" if len(self._surgeon_combos) == 1 else "", combo)
+        self._refresh_surgeon_row_labels()
+        self._scroll_surgeons_to_bottom_later()
+        return combo
+
+    def _install_surgery_team_combo_event_filter(self, combo: QComboBox) -> None:
+        combo.installEventFilter(self)
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.installEventFilter(self)
+
+    def _operating_nurse_row(self) -> int:
+        combo = getattr(self, "operating_nurse_combo", None)
+        if combo is None:
+            return self.surgeons_layout.rowCount()
+        row, _role = self.surgeons_layout.getWidgetPosition(combo)
+        if row < 0:
+            return self.surgeons_layout.rowCount()
+        return row
+
+    def _refresh_surgeon_row_labels(self) -> None:
+        for index, combo in enumerate(self._surgeon_combos):
+            label = self.surgeons_layout.labelForField(combo)
+            if isinstance(label, QLabel):
+                label.setText("Хирург:" if index == 0 else "")
+
+    def _scroll_surgeons_to_bottom_later(self) -> None:
+        scroll = getattr(self, "surgeons_scroll", None)
+        if scroll is None:
+            return
+
+        def scroll_to_bottom():
+            try:
+                bar = scroll.verticalScrollBar()
+                bar.setValue(bar.maximum())
+            except RuntimeError:
+                return
+
+        QTimer.singleShot(0, scroll_to_bottom)
+
+    def _scroll_surgeon_combo_wheel(self, event) -> bool:
+        scroll = getattr(self, "surgeons_scroll", None)
+        if scroll is None:
+            return False
+        bar = scroll.verticalScrollBar()
+        if bar.maximum() <= bar.minimum():
+            return False
+        pixel_delta = event.pixelDelta().y() if hasattr(event, "pixelDelta") else 0
+        angle_delta = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+        delta = pixel_delta or angle_delta
+        if not delta:
+            return False
+        steps = max(1, int(round(abs(angle_delta) / 120))) if angle_delta else 1
+        direction = -1 if delta > 0 else 1
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), bar.value() + direction * bar.singleStep() * steps)))
+        event.accept()
+        return True
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and self._is_surgery_team_wheel_widget(watched):
+            if self._scroll_surgeon_combo_wheel(event):
+                return True
+        return super().eventFilter(watched, event)
+
+    def _is_surgery_team_wheel_widget(self, watched) -> bool:
+        team_combos = list(getattr(self, "_surgeon_combos", []))
+        operating_nurse_combo = getattr(self, "operating_nurse_combo", None)
+        if operating_nurse_combo is not None:
+            team_combos.append(operating_nurse_combo)
+        for combo in team_combos:
+            if watched is combo:
+                return True
+            line_edit = combo.lineEdit()
+            if line_edit is not None and watched is line_edit:
+                return True
+        return False
+
+    def _sync_surgeon_fields(self) -> None:
+        if self._syncing_surgeon_fields:
+            return
+        self._syncing_surgeon_fields = True
+        try:
+            if not self._surgeon_combos:
+                self._add_surgeon_combo()
+
+            if self._surgeon_combos and normalize_operblock_team_text(self._surgeon_combos[-1].currentText()):
+                self._add_surgeon_combo()
+
+            for combo in list(self._surgeon_combos[:-1]):
+                if normalize_operblock_team_text(combo.currentText()):
+                    continue
+                self._surgeon_combos.remove(combo)
+                self.surgeons_layout.removeRow(combo)
+
+            if not self._surgeon_combos:
+                self._add_surgeon_combo()
+            self._refresh_surgeon_row_labels()
+        finally:
+            self._syncing_surgeon_fields = False
+
+    def operation_name(self) -> str:
+        return normalize_operblock_team_text(self.operation_name_edit.text())
+
+    def selected_surgeons(self) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for combo in self._surgeon_combos:
+            name = normalize_operblock_team_text(combo.currentText())
+            key = name.casefold()
+            if name and key not in seen:
+                seen.add(key)
+                result.append(name)
+        return result
+
+    def selected_surgeon(self) -> str:
+        surgeons = self.selected_surgeons()
+        return surgeons[0] if surgeons else ""
+
+    def selected_operating_nurse(self) -> str:
+        return normalize_operblock_team_text(self.operating_nurse_combo.currentText())
+
+    def start_datetime_text(self) -> str:
+        return self.start_time_input.datetime_text()
+
+    def accept(self) -> None:
+        if not self.operation_name():
+            CustomMessageBox.warning(self, "Начать операцию", "Укажите название операции.")
+            self.operation_name_edit.setFocus(Qt.OtherFocusReason)
+            return
+        self.start_datetime_text()
+        super().accept()
+
+
+class OperationStagesDialog(OperBlockStyledDialog):
+    saveRequested = Signal(object)
+    timeEditRequested = Signal(object)
+
+    AUTO_STAGE_KINDS = {"anesthesia_start", "surgery_start"}
+    CUSTOM_STAGE_KIND = "custom"
+
+    def __init__(self, stages: list[dict], parent=None):
+        super().__init__(
+            "Этапы",
+            "operation_stages_dialog_geometry",
+            parent,
+            minimum_size=(620, 380),
+            initial_size=(760, 540),
+        )
+        self._rows: list[dict] = []
+        self._row_widgets: dict[str, dict] = {}
+        self._init_ui(stages)
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self, stages: list[dict]):
+        layout = self.content_layout
+        layout.setSpacing(10)
+
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("OperBlockOperationStagesScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scrollbar = self.scroll.verticalScrollBar()
+        scrollbar.setObjectName("OperBlockOperationStagesScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(38)
+        scrollbar.setPageStep(152)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockOperationStagesScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+
+        self.rows_widget = QWidget()
+        self.rows_widget.setObjectName("OperBlockOperationStagesContent")
+        self.rows_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOperationStagesContent {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        self.rows_layout = QVBoxLayout(self.rows_widget)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(7)
+        self.scroll.setWidget(self.rows_widget)
+        self.scroll.setStyleSheet(
+            """
+            QScrollArea#OperBlockOperationStagesScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#OperBlockOperationStagesScroll > QWidget > QWidget {
+                background: transparent;
+            }
+            """
+        )
+        layout.addWidget(self.scroll, 1)
+
+        note_label = QLabel(
+            "Начало пособия и начало операции добавляются автоматически. "
+            "Конец операции и конец пособия также будут установлены автоматически."
+        )
+        note_label.setWordWrap(True)
+        note_label.setStyleSheet(
+            f"font-size: 12px; color: {TEXT_SECONDARY}; background: transparent; border: none;"
+        )
+        layout.addWidget(note_label, 0)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close_button = QPushButton("Закрыть")
+        close_button.setMinimumHeight(34)
+        close_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        close_button.clicked.connect(self.accept)
+        footer.addWidget(close_button)
+        layout.addLayout(footer)
+
+        self.set_stages(stages)
+
+    @staticmethod
+    def _row_key(row: dict) -> str:
+        event_id = _safe_int((row or {}).get("event_id") or (row or {}).get("source_id"))
+        if event_id:
+            return f"event:{event_id}"
+        return "new"
+
+    @staticmethod
+    def _clean_label(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    @classmethod
+    def _stage_label(cls, row: dict) -> str:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        return cls._clean_label(
+            row.get("label")
+            or row.get("display_label")
+            or row.get("raw_text")
+            or (payload or {}).get("label")
+        )
+
+    @staticmethod
+    def _stage_sort_key(row: dict) -> tuple[datetime, int]:
+        return (
+            _minute_floor_dt(_parse_datetime_value((row or {}).get("event_time"))) or datetime.max,
+            _safe_int((row or {}).get("event_id") or (row or {}).get("source_id")) or 0,
+        )
+
+    @staticmethod
+    def _default_new_stage_time() -> str:
+        return datetime.now().replace(second=0, microsecond=0).isoformat(timespec="seconds")
+
+    @classmethod
+    def _normalized_stage_rows(cls, stages: list[dict]) -> list[dict]:
+        rows = []
+        seen_auto: set[str] = set()
+        for item in stages or []:
+            row = dict(item or {})
+            kind = str(row.get("kind") or row.get("stage_kind") or "").strip()
+            row["kind"] = kind
+            row["label"] = cls._stage_label(row)
+            row["event_id"] = _safe_int(row.get("event_id") or row.get("source_id"))
+            row["revision"] = int(row.get("revision") or 0)
+            if kind in cls.AUTO_STAGE_KINDS:
+                if kind in seen_auto:
+                    continue
+                row["readonly"] = True
+                seen_auto.add(kind)
+                rows.append(row)
+            elif kind == cls.CUSTOM_STAGE_KIND:
+                row["readonly"] = False
+                rows.append(row)
+        rows.sort(key=cls._stage_sort_key)
+        return rows
+
+    def set_stages(self, stages: list[dict]) -> None:
+        self._rows = self._normalized_stage_rows(stages)
+        self._ensure_blank_row()
+        self._render_rows()
+
+    def _ensure_blank_row(self) -> None:
+        self._rows = [row for row in self._rows if self._row_key(row) != "new"]
+        self._rows.append(
+            {
+                "kind": self.CUSTOM_STAGE_KIND,
+                "label": "",
+                "event_id": None,
+                "event_time": self._default_new_stage_time(),
+                "revision": 0,
+                "readonly": False,
+                "new": True,
+            }
+        )
+
+    def _clear_rows_layout(self) -> None:
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._row_widgets = {}
+
+    def _render_rows(self) -> None:
+        self._clear_rows_layout()
+        for index, row in enumerate(self._rows, start=1):
+            frame = self._create_row_widget(index, row)
+            self.rows_layout.addWidget(frame)
+        self.rows_layout.addStretch(1)
+
+    def _create_row_widget(self, index: int, row: dict) -> QWidget:
+        row_key = self._row_key(row)
+        frame = QFrame()
+        frame.setObjectName("OperBlockOperationStageRow")
+        frame.setStyleSheet(
+            f"""
+            QFrame#OperBlockOperationStageRow {{
+                background: #ffffff;
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: 6px;
+            }}
+            """
+        )
+        frame.setMinimumHeight(46)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(8)
+
+        number_label = QLabel(str(index))
+        number_label.setFixedWidth(28)
+        number_label.setAlignment(Qt.AlignCenter)
+        number_label.setStyleSheet(f"font-size: 13px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
+        layout.addWidget(number_label)
+
+        can_edit_time = not bool(row.get("readonly")) and bool(row.get("event_time"))
+        time_text = _format_order_time(row.get("event_time")) if row.get("event_time") else ""
+        if can_edit_time:
+            time_label = OperBlockClickableLabel(time_text, click_callback=lambda key=row_key: self._request_time_edit(key))
+            time_label.setToolTip("Изменить время этапа")
+        else:
+            time_label = QLabel(time_text)
+        time_label.setFixedWidth(46)
+        time_label.setAlignment(Qt.AlignCenter)
+        time_style = (
+            f"font-size: 12px; color: {COLOR_PRIMARY_DARK}; font-weight: 700; text-decoration: underline;"
+            if can_edit_time
+            else f"font-size: 12px; color: {TEXT_SECONDARY};"
+        )
+        time_label.setStyleSheet(time_style)
+        layout.addWidget(time_label)
+
+        edit = QLineEdit()
+        edit.setText(str(row.get("label") or ""))
+        edit.setPlaceholderText("Название этапа")
+        edit.setMinimumHeight(32)
+        edit.setReadOnly(bool(row.get("readonly")))
+        edit.setProperty("row_key", row_key)
+        edit.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background: {'#f8fafc' if row.get('readonly') else '#ffffff'};
+                border: 1px solid {BORDER_COLOR};
+                border-radius: 5px;
+                padding: 5px 8px;
+                color: {TEXT_PRIMARY};
+            }}
+            QLineEdit:read-only {{
+                color: {TEXT_SECONDARY};
+            }}
+            """
+        )
+        layout.addWidget(edit, 1)
+        edit.returnPressed.connect(lambda key=row_key: self._request_save(key))
+
+        save_button = QPushButton("Сохранить")
+        save_button.setFixedWidth(104)
+        save_button.setMinimumHeight(30)
+        save_button.setCursor(Qt.PointingHandCursor)
+        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE + "QPushButton { padding: 4px 8px; }")
+        save_button.setProperty("row_key", row_key)
+        save_button.clicked.connect(lambda _=False, key=row_key: self._request_save(key))
+        layout.addWidget(save_button, 0)
+
+        self._row_widgets[row_key] = {
+            "frame": frame,
+            "edit": edit,
+            "button": save_button,
+            "time_label": time_label,
+            "row": row,
+        }
+        edit.textChanged.connect(lambda _text="", key=row_key: self._sync_row_button(key))
+        self._sync_row_button(row_key, initial=True)
+        return frame
+
+    def _sync_row_button(self, row_key: str, *, initial: bool = False) -> None:
+        widgets = self._row_widgets.get(row_key) or {}
+        row = widgets.get("row") or {}
+        button = widgets.get("button")
+        edit = widgets.get("edit")
+        if button is None or edit is None:
+            return
+        if row.get("readonly"):
+            button.setText("Авто")
+            button.setEnabled(False)
+            return
+        current = self._clean_label(edit.text())
+        original = self._clean_label(row.get("label") or "")
+        if row.get("new"):
+            button.setText("Сохранить")
+            button.setEnabled(bool(current))
+            return
+        if initial:
+            button.setText("Сохранено")
+            button.setEnabled(False)
+            return
+        button.setText("Сохранить")
+        button.setEnabled(bool(current) and current != original)
+
+    def _request_save(self, row_key: str) -> None:
+        widgets = self._row_widgets.get(row_key) or {}
+        row = dict(widgets.get("row") or {})
+        edit = widgets.get("edit")
+        button = widgets.get("button")
+        if edit is None or button is None:
+            return
+        if row.get("readonly"):
+            return
+        label = self._clean_label(edit.text())
+        if not label:
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
+            edit.setFocus(Qt.OtherFocusReason)
+            return
+        button.setText("Сохранение...")
+        button.setEnabled(False)
+        edit.setEnabled(False)
+        self.saveRequested.emit(
+            {
+                "row_key": row_key,
+                "event_id": _safe_int(row.get("event_id")),
+                "expected_revision": int(row.get("revision") or 0),
+                "label": label,
+                "event_time": row.get("event_time"),
+                "is_new": bool(row.get("new")),
+            }
+        )
+
+    def _request_time_edit(self, row_key: str) -> None:
+        widgets = self._row_widgets.get(row_key) or {}
+        row = dict(widgets.get("row") or {})
+        if row.get("readonly"):
+            return
+        event_id = _safe_int(row.get("event_id"))
+        is_new = bool(row.get("new"))
+        if not is_new and not event_id:
+            return
+        edit = widgets.get("edit")
+        label = self._clean_label(edit.text()) if edit is not None else self._stage_label(row)
+        if not label and not is_new:
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
+            if edit is not None:
+                edit.setFocus(Qt.OtherFocusReason)
+            return
+        self.timeEditRequested.emit(
+            {
+                "row_key": row_key,
+                "event_id": event_id,
+                "expected_revision": int(row.get("revision") or 0),
+                "label": label,
+                "event_time": row.get("event_time"),
+                "is_new": is_new,
+            }
+        )
+
+    def apply_save_error(self, row_key: str) -> None:
+        widgets = self._row_widgets.get(str(row_key or "")) or {}
+        edit = widgets.get("edit")
+        if edit is not None:
+            edit.setEnabled(True)
+        time_label = widgets.get("time_label")
+        if time_label is not None:
+            time_label.setEnabled(True)
+        self._sync_row_button(str(row_key or ""))
+
+    def apply_pending_stage_time(self, row_key: str, event_time: str) -> None:
+        key = str(row_key or "")
+        parsed = _minute_floor_dt(_parse_datetime_value(event_time))
+        if parsed is None:
+            return
+        normalized = parsed.isoformat(timespec="seconds")
+        for row in self._rows:
+            if self._row_key(row) == key:
+                row["event_time"] = normalized
+                break
+        widgets = self._row_widgets.get(key) or {}
+        row = widgets.get("row")
+        if isinstance(row, dict):
+            row["event_time"] = normalized
+        time_label = widgets.get("time_label")
+        if time_label is not None:
+            time_label.setText(_format_order_time(normalized))
+            time_label.setEnabled(True)
+        self._sync_row_button(key)
+
+    def apply_saved_stage(self, row_key: str, stage: dict) -> None:
+        event_id = _safe_int((stage or {}).get("source_id") or (stage or {}).get("event_id"))
+        if not event_id:
+            self.apply_save_error(row_key)
+            return
+        updated = {
+            "kind": self.CUSTOM_STAGE_KIND,
+            "label": self._stage_label(stage),
+            "event_id": event_id,
+            "event_time": (stage or {}).get("event_time"),
+            "revision": int((stage or {}).get("revision") or 0),
+            "readonly": False,
+            "new": False,
+            "payload": dict((stage or {}).get("payload") or {}),
+        }
+        if self._apply_saved_stage_in_place(row_key, updated):
+            return
+        replaced = False
+        rows = []
+        for row in self._rows:
+            if self._row_key(row) == str(row_key or "") or _safe_int(row.get("event_id")) == event_id:
+                if not replaced:
+                    rows.append(updated)
+                    replaced = True
+                continue
+            if self._row_key(row) != "new":
+                rows.append(row)
+        if not replaced:
+            rows.append(updated)
+        self.set_stages(rows)
+        target_key = self._row_key(updated)
+        widgets = self._row_widgets.get(target_key) or {}
+        button = widgets.get("button")
+        if button is not None:
+            button.setText("Сохранено")
+            button.setEnabled(False)
+
+    def _apply_saved_stage_in_place(self, row_key: str, updated: dict) -> bool:
+        if self._row_key(updated) == "new":
+            return False
+        old_key = str(row_key or "")
+        target_key = self._row_key(updated)
+        target_event_id = _safe_int(updated.get("event_id"))
+        if old_key == "new" or not target_event_id:
+            return False
+
+        rows_without_blank = [dict(row or {}) for row in self._rows if self._row_key(row) != "new"]
+        candidate_rows: list[dict] = []
+        replaced = False
+        for row in rows_without_blank:
+            current_key = self._row_key(row)
+            if current_key == old_key or _safe_int(row.get("event_id")) == target_event_id:
+                if not replaced:
+                    candidate_rows.append(dict(updated))
+                    replaced = True
+                continue
+            candidate_rows.append(row)
+        if not replaced:
+            return False
+
+        current_order = [self._row_key(row) for row in rows_without_blank]
+        next_order = [self._row_key(row) for row in self._normalized_stage_rows(candidate_rows)]
+        if current_order != next_order:
+            return False
+
+        widgets = self._row_widgets.get(old_key) or self._row_widgets.get(target_key) or {}
+        if not widgets:
+            return False
+        for index, row in enumerate(self._rows):
+            if self._row_key(row) == old_key or _safe_int(row.get("event_id")) == target_event_id:
+                self._rows[index] = dict(updated)
+                break
+
+        if old_key != target_key:
+            self._row_widgets[target_key] = widgets
+            self._row_widgets.pop(old_key, None)
+        widgets["row"] = dict(updated)
+        edit = widgets.get("edit")
+        if edit is not None:
+            was_blocked = edit.blockSignals(True)
+            try:
+                edit.setProperty("row_key", target_key)
+                edit.setText(str(updated.get("label") or ""))
+                edit.setEnabled(True)
+            finally:
+                edit.blockSignals(was_blocked)
+        time_label = widgets.get("time_label")
+        if time_label is not None:
+            time_label.setProperty("row_key", target_key)
+            time_label.setText(_format_order_time(updated.get("event_time")) if updated.get("event_time") else "")
+            time_label.setEnabled(True)
+        button = widgets.get("button")
+        if button is not None:
+            button.setProperty("row_key", target_key)
+            button.setText("Сохранено")
+            button.setEnabled(False)
+        return True
+
+
+class EditOperBlockStaffDialog(OperBlockStyledDialog):
+    def __init__(
+        self,
+        *,
+        surgeon_options: list[str] | None = None,
+        operating_nurse_options: list[str] | None = None,
+        anesthesiologist_options: list[str] | None = None,
+        anesthetist_options: list[str] | None = None,
+        current_surgeons: list[str] | None = None,
+        current_operating_nurse: str = "",
+        current_anesthesiologist: str = "",
+        current_anesthetist: str = "",
+        surgery_enabled: bool = True,
+        anesthesia_enabled: bool = True,
+        parent=None,
+    ):
+        super().__init__(
+            "Изменить состав",
+            "edit_staff_dialog_geometry",
+            parent,
+            minimum_size=(560, 380),
+            initial_size=(660, 460),
+        )
+        self._surgeon_options = list(surgeon_options or [])
+        self._surgeon_combos: list[QComboBox] = []
+        self._syncing_surgeon_fields = False
+        self._surgery_enabled = bool(surgery_enabled)
+        self._anesthesia_enabled = bool(anesthesia_enabled)
+        self._init_ui(
+            operating_nurse_options or [],
+            anesthesiologist_options or [],
+            anesthetist_options or [],
+            current_surgeons or [],
+            current_operating_nurse,
+            current_anesthesiologist,
+            current_anesthetist,
+        )
+        self._finalize_dialog_chrome()
+
+    def _init_ui(
+        self,
+        operating_nurse_options: list[str],
+        anesthesiologist_options: list[str],
+        anesthetist_options: list[str],
+        current_surgeons: list[str],
+        current_operating_nurse: str,
+        current_anesthesiologist: str,
+        current_anesthetist: str,
+    ) -> None:
+        layout = self.content_layout
+
+        self.team_scroll = QScrollArea()
+        self.team_scroll.setObjectName("OperBlockEditStaffScroll")
+        self.team_scroll.setWidgetResizable(True)
+        self.team_scroll.setFrameShape(QFrame.NoFrame)
+        self.team_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.team_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.team_scroll.setMinimumHeight(250)
+        self.team_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        scrollbar = self.team_scroll.verticalScrollBar()
+        scrollbar.setObjectName("OperBlockEditStaffScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(36)
+        scrollbar.setPageStep(108)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockEditStaffScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+
+        self.team_widget = QWidget()
+        self.team_widget.setObjectName("OperBlockEditStaffContent")
+        self.team_widget.setStyleSheet("QWidget#OperBlockEditStaffContent { background: transparent; border: none; }")
+        self.team_layout = QFormLayout(self.team_widget)
+        self.team_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self.team_layout.setContentsMargins(0, 0, 0, 0)
+        self.team_layout.setHorizontalSpacing(10)
+        self.team_layout.setVerticalSpacing(8)
+
+        self._syncing_surgeon_fields = True
+        try:
+            for surgeon in current_surgeons:
+                self._add_surgeon_combo(surgeon)
+            if not self._surgeon_combos:
+                self._add_surgeon_combo()
+            if self._surgeon_combos and normalize_operblock_team_text(self._surgeon_combos[-1].currentText()):
+                self._add_surgeon_combo()
+        finally:
+            self._syncing_surgeon_fields = False
+
+        self.operating_nurse_combo = StartAnesthesiaDialog._staff_combo(operating_nurse_options)
+        self.operating_nurse_combo.setEditText(normalize_operblock_team_text(current_operating_nurse))
+        self._install_team_combo_event_filter(self.operating_nurse_combo)
+        self.team_layout.addRow("Операционная медсестра:", self.operating_nurse_combo)
+
+        self.anesthesiologist_combo = StartAnesthesiaDialog._staff_combo(anesthesiologist_options)
+        self.anesthesiologist_combo.setEditText(normalize_operblock_team_text(current_anesthesiologist))
+        self._install_team_combo_event_filter(self.anesthesiologist_combo)
+        self.team_layout.addRow("Анестезиолог:", self.anesthesiologist_combo)
+
+        self.anesthetist_combo = StartAnesthesiaDialog._staff_combo(anesthetist_options)
+        self.anesthetist_combo.setEditText(normalize_operblock_team_text(current_anesthetist))
+        self._install_team_combo_event_filter(self.anesthetist_combo)
+        self.team_layout.addRow("Анестезист:", self.anesthetist_combo)
+
+        for combo in self._surgeon_combos + [self.operating_nurse_combo]:
+            combo.setEnabled(self._surgery_enabled)
+        for combo in (self.anesthesiologist_combo, self.anesthetist_combo):
+            combo.setEnabled(self._anesthesia_enabled)
+
+        self.team_scroll.setWidget(self.team_widget)
+        self.team_scroll.setStyleSheet(
+            """
+            QScrollArea#OperBlockEditStaffScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#OperBlockEditStaffScroll > QWidget > QWidget {
+                background: transparent;
+            }
+            """
+        )
+        layout.addWidget(self.team_scroll, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.save_button = QPushButton("Сохранить")
+        self.save_button.setMinimumHeight(34)
+        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.save_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.save_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.save_button)
+        layout.addLayout(footer)
+        self._refresh_surgeon_row_labels()
+
+    def _add_surgeon_combo(self, text: str = "") -> QComboBox:
+        combo = StartAnesthesiaDialog._staff_combo(self._surgeon_options)
+        combo.setEnabled(self._surgery_enabled)
+        clean_text = normalize_operblock_team_text(text)
+        if clean_text:
+            combo.setEditText(clean_text)
+        combo.currentTextChanged.connect(lambda *_args: self._sync_surgeon_fields())
+        self._install_team_combo_event_filter(combo)
+        insert_row = self._first_static_staff_row()
+        self._surgeon_combos.append(combo)
+        self.team_layout.insertRow(insert_row, "Хирург:" if len(self._surgeon_combos) == 1 else "", combo)
+        self._refresh_surgeon_row_labels()
+        self._scroll_team_to_bottom_later()
+        return combo
+
+    def _install_team_combo_event_filter(self, combo: QComboBox) -> None:
+        combo.installEventFilter(self)
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.installEventFilter(self)
+
+    def _first_static_staff_row(self) -> int:
+        for attr in ("operating_nurse_combo", "anesthesiologist_combo", "anesthetist_combo"):
+            combo = getattr(self, attr, None)
+            if combo is None:
+                continue
+            row, _role = self.team_layout.getWidgetPosition(combo)
+            if row >= 0:
+                return row
+        return self.team_layout.rowCount()
+
+    def _refresh_surgeon_row_labels(self) -> None:
+        for index, combo in enumerate(self._surgeon_combos):
+            label = self.team_layout.labelForField(combo)
+            if isinstance(label, QLabel):
+                label.setText("Хирург:" if index == 0 else "")
+
+    def _scroll_team_to_bottom_later(self) -> None:
+        scroll = getattr(self, "team_scroll", None)
+        if scroll is None:
+            return
+
+        def scroll_to_bottom():
+            try:
+                bar = scroll.verticalScrollBar()
+                bar.setValue(bar.maximum())
+            except RuntimeError:
+                return
+
+        QTimer.singleShot(0, scroll_to_bottom)
+
+    def _scroll_team_wheel(self, event) -> bool:
+        scroll = getattr(self, "team_scroll", None)
+        if scroll is None:
+            return False
+        bar = scroll.verticalScrollBar()
+        if bar.maximum() <= bar.minimum():
+            return False
+        pixel_delta = event.pixelDelta().y() if hasattr(event, "pixelDelta") else 0
+        angle_delta = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+        delta = pixel_delta or angle_delta
+        if not delta:
+            return False
+        steps = max(1, int(round(abs(angle_delta) / 120))) if angle_delta else 1
+        direction = -1 if delta > 0 else 1
+        bar.setValue(max(bar.minimum(), min(bar.maximum(), bar.value() + direction * bar.singleStep() * steps)))
+        event.accept()
+        return True
+
+    def _is_team_wheel_widget(self, watched) -> bool:
+        combos = list(getattr(self, "_surgeon_combos", [])) + [
+            self.operating_nurse_combo,
+            self.anesthesiologist_combo,
+            self.anesthetist_combo,
+        ]
+        for combo in combos:
+            if watched is combo:
+                return True
+            line_edit = combo.lineEdit()
+            if line_edit is not None and watched is line_edit:
+                return True
+        return False
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and self._is_team_wheel_widget(watched):
+            if self._scroll_team_wheel(event):
+                return True
+        return super().eventFilter(watched, event)
+
+    def _sync_surgeon_fields(self) -> None:
+        if self._syncing_surgeon_fields or not self._surgery_enabled:
+            return
+        self._syncing_surgeon_fields = True
+        try:
+            if not self._surgeon_combos:
+                self._add_surgeon_combo()
+
+            if self._surgeon_combos and normalize_operblock_team_text(self._surgeon_combos[-1].currentText()):
+                self._add_surgeon_combo()
+
+            for combo in list(self._surgeon_combos[:-1]):
+                if normalize_operblock_team_text(combo.currentText()):
+                    continue
+                self._surgeon_combos.remove(combo)
+                self.team_layout.removeRow(combo)
+
+            if not self._surgeon_combos:
+                self._add_surgeon_combo()
+            self._refresh_surgeon_row_labels()
+        finally:
+            self._syncing_surgeon_fields = False
+
+    def selected_surgeons(self) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for combo in self._surgeon_combos:
+            name = normalize_operblock_team_text(combo.currentText())
+            key = name.casefold()
+            if name and key not in seen:
+                seen.add(key)
+                result.append(name)
+        return result
+
+    def selected_operating_nurse(self) -> str:
+        return normalize_operblock_team_text(self.operating_nurse_combo.currentText())
+
+    def selected_anesthesiologist(self) -> str:
+        return normalize_operblock_team_text(self.anesthesiologist_combo.currentText())
+
+    def selected_anesthetist(self) -> str:
+        return normalize_operblock_team_text(self.anesthetist_combo.currentText())
+
+
+class QuickOrdersSettingsDialog(OperBlockStyledDialog):
+    def __init__(self, templates: list[dict], parent=None):
+        self._rows: list[dict] = []
+        self._templates: list[dict] = []
+        super().__init__(
+            "Быстрые назначения оперблока",
+            "quick_orders_settings_geometry",
+            parent,
+            minimum_size=(900, 420),
+            initial_size=(980, 520),
+        )
+        self._init_ui()
+        for template in templates or []:
+            self._add_row(template)
+        if not self._rows:
+            self._add_row()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self):
+        layout = self.content_layout
+
+        hint = QLabel(
+            "Укажите препарат, группу 1-4 для колонки назначений и до четырех быстрых дозировок. "
+            "Пустые дозировки в секторе не показываются."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
+        layout.addWidget(hint)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QScrollArea.NoFrame)
+        self.scroll.setStyleSheet(STYLE_PATIENT_FORM_SCROLL)
+        self.rows_host = QWidget()
+        self.rows_host.setStyleSheet(STYLE_PATIENT_FORM_PAGE)
+        self.rows_layout = QVBoxLayout(self.rows_host)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(6)
+        self.rows_layout.addStretch(1)
+        self.scroll.setWidget(self.rows_host)
+        layout.addWidget(self.scroll, 1)
+
+        actions = QHBoxLayout()
+        self.add_row_button = QPushButton("Добавить препарат")
+        self.add_row_button.setMinimumHeight(34)
+        self.add_row_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.add_row_button.clicked.connect(lambda: self._add_row())
+        self.cancel_button = QPushButton("Отменить")
+        self.cancel_button.setMinimumHeight(34)
+        self.cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button = QPushButton("Сохранить")
+        self.save_button.setMinimumHeight(34)
+        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.save_button.clicked.connect(self.accept)
+        actions.addWidget(self.add_row_button)
+        actions.addStretch(1)
+        actions.addWidget(self.cancel_button)
+        actions.addWidget(self.save_button)
+        layout.addLayout(actions)
+
+    def _add_row(self, template: dict | None = None):
+        template = template or {}
+        row = QFrame()
+        row.setObjectName("quickOrderSettingsRow")
+        row.setStyleSheet(
+            f"""
+            QFrame#quickOrderSettingsRow {{
+                background-color: {BG_LIGHT};
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: {CUSTOM_DIALOG_RADIUS};
+            }}
+            QLineEdit, QComboBox {{
+                padding: 8px;
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: {CUSTOM_DIALOG_RADIUS};
+                background: {BG_CARD};
+                color: {TEXT_PRIMARY};
+            }}
+            QLineEdit:focus, QComboBox:focus {{
+                border: 1px solid {BORDER_COLOR};
+                background: {BG_CARD};
+            }}
+            """
+        )
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(8, 6, 8, 6)
+        row_layout.setSpacing(6)
+
+        drug_edit = QLineEdit()
+        drug_edit.setPlaceholderText("Препарат")
+        drug_edit.setText(str(template.get("drug_name") or ""))
+        drug_edit.setMinimumHeight(32)
+        row_layout.addWidget(drug_edit, 2)
+
+        group_combo = QComboBox()
+        group_combo.setMinimumHeight(32)
+        group_combo.setFixedWidth(100)
+        for group_number in range(1, 5):
+            group_combo.addItem(f"Группа {group_number}", group_number)
+        group_combo.setCurrentIndex(normalize_operblock_quick_order_group(template.get("group")) - 1)
+        row_layout.addWidget(group_combo, 0)
+
+        dose_edits: list[QLineEdit] = []
+        doses = list(template.get("doses") or [])
+        for index in range(4):
+            edit = QLineEdit()
+            edit.setPlaceholderText(f"Дозировка {index + 1}")
+            edit.setText(str(doses[index]) if index < len(doses) else "")
+            edit.setMinimumHeight(32)
+            edit.setFixedWidth(105)
+            dose_edits.append(edit)
+            row_layout.addWidget(edit, 0)
+
+        remove_button = QPushButton("Удалить")
+        remove_button.setMinimumHeight(32)
+        remove_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        remove_button.clicked.connect(lambda _=False, widget=row: self._remove_row(widget))
+        row_layout.addWidget(remove_button, 0)
+
+        extra = {
+            key: value
+            for key, value in dict(template).items()
+            if key not in {"drug_name", "drug", "label", "group", "doses"}
+        }
+        record = {"widget": row, "drug": drug_edit, "group": group_combo, "doses": dose_edits, "extra": extra}
+        self._rows.append(record)
+        self.rows_layout.insertWidget(max(0, self.rows_layout.count() - 1), row)
+
+    def _remove_row(self, widget: QWidget):
+        self._rows = [row for row in self._rows if row.get("widget") is not widget]
+        widget.setParent(None)
+        widget.deleteLater()
+        if not self._rows:
+            self._add_row()
+
+    def templates(self) -> list[dict]:
+        return list(self._templates)
+
+    def accept(self):
+        templates: list[dict] = []
+        seen: set[str] = set()
+        for row in self._rows:
+            drug_name = row["drug"].text().strip()
+            doses = [edit.text().strip() for edit in row["doses"] if edit.text().strip()]
+            if not drug_name and not doses:
+                continue
+            if not drug_name:
+                CustomMessageBox.warning(self, "Ошибка", "Укажите название препарата.")
+                return
+            key = drug_name.casefold()
+            if key in seen:
+                CustomMessageBox.warning(self, "Ошибка", f"Препарат '{drug_name}' указан дважды.")
+                return
+            seen.add(key)
+            item = dict(row.get("extra") or {})
+            item.update(
+                {
+                    "drug_name": drug_name,
+                    "label": str(item.get("label") or drug_name).strip() or drug_name,
+                    "group": normalize_operblock_quick_order_group(row["group"].currentData()),
+                    "kind": normalize_operblock_quick_order_kind(item.get("kind")),
+                    "doses": doses[:4],
+                }
+            )
+            templates.append(item)
+        self._templates = templates
+        super().accept()
+
+
+def _operblock_table_editor_style() -> str:
+    return f"""
+        QLineEdit {{
+            padding: 1px 4px;
+            border: 1px solid {BORDER_COLOR};
+            border-radius: 3px;
+            background: {BG_CARD};
+            color: {TEXT_PRIMARY};
+            selection-background-color: #DCEBFF;
+            selection-color: {TEXT_PRIMARY};
+        }}
+        QLineEdit:focus {{
+            border: 1px solid {OPERBLOCK_ORDERS_ACCENT};
+            background: {BG_CARD};
+            color: {TEXT_PRIMARY};
+        }}
+    """
+
+
+class _OperBlockTableTextDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if isinstance(editor, QLineEdit):
+            editor.setStyleSheet(_operblock_table_editor_style())
+            editor.setTextMargins(2, 0, 2, 0)
+            editor.setMinimumHeight(20)
+        return editor
+
+    def updateEditorGeometry(self, editor, option, index):
+        if isinstance(editor, QLineEdit):
+            editor.setGeometry(option.rect.adjusted(1, 2, -1, -2))
+            return
+        super().updateEditorGeometry(editor, option, index)
+
+
+class _OperBlockComboBoxDelegate(QStyledItemDelegate):
+    def __init__(self, options_provider, parent=None):
+        super().__init__(parent)
+        self._options_provider = options_provider
+
+    def createEditor(self, parent, _option, _index):
+        combo = QComboBox(parent)
+        combo.setEditable(False)
+        combo.setStyleSheet(_operblock_combo_box_style())
+        combo.addItems(self._option_labels())
+        QTimer.singleShot(0, combo.showPopup)
+        return combo
+
+    def setEditorData(self, editor, index):
+        if not isinstance(editor, QComboBox):
+            return super().setEditorData(editor, index)
+        current_text = str(index.data(Qt.ItemDataRole.EditRole) or index.data(Qt.ItemDataRole.DisplayRole) or "")
+        match_index = -1
+        for option_index in range(editor.count()):
+            if editor.itemText(option_index).casefold() == current_text.casefold():
+                match_index = option_index
+                break
+        if match_index < 0 and current_text:
+            editor.addItem(current_text)
+            match_index = editor.count() - 1
+        editor.setCurrentIndex(max(0, match_index))
+
+    def setModelData(self, editor, model, index):
+        if not isinstance(editor, QComboBox):
+            return super().setModelData(editor, model, index)
+        model.setData(index, editor.currentText(), Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, _index):
+        editor.setGeometry(option.rect)
+
+    def _option_labels(self) -> list[str]:
+        try:
+            raw_options = self._options_provider()
+        except Exception:
+            raw_options = []
+        labels: list[str] = []
+        for option in raw_options or []:
+            if isinstance(option, tuple):
+                label = str(option[0] or "").strip()
+            else:
+                label = str(option or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+
+class _QuickOrderPresetCard(QFrame):
+    def __init__(self, preset_id: str, owner, parent=None):
+        super().__init__(parent)
+        self._preset_id = str(preset_id or "")
+        self._owner = owner
+        self._drag_start_global_pos = None
+        self.setAcceptDrops(True)
+        self.setCursor(Qt.OpenHandCursor)
+
+    @staticmethod
+    def _event_global_pos(event):
+        try:
+            return event.globalPosition().toPoint()
+        except Exception:
+            try:
+                return event.globalPos()
+            except Exception:
+                return None
+
+    @staticmethod
+    def _is_drag_source_widget(widget) -> bool:
+        while widget is not None:
+            if isinstance(widget, QPushButton):
+                return False
+            widget = widget.parentWidget() if hasattr(widget, "parentWidget") else None
+        return True
+
+    def bind_drag_sources(self) -> None:
+        for child in self.findChildren(QWidget):
+            if child is self or isinstance(child, QPushButton):
+                continue
+            child.installEventFilter(self)
+
+    def eventFilter(self, source, event):
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            self._remember_drag_start(event, source)
+        elif event.type() == QEvent.MouseMove:
+            if self._maybe_start_drag(event, source):
+                return True
+        elif event.type() in (QEvent.MouseButtonRelease, QEvent.Leave):
+            self._drag_start_global_pos = None
+        return super().eventFilter(source, event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._remember_drag_start(event, self)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._maybe_start_drag(event, self):
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_global_pos = None
+        super().mouseReleaseEvent(event)
+
+    def _remember_drag_start(self, event, source) -> None:
+        if not self._preset_id or not self._is_drag_source_widget(source):
+            self._drag_start_global_pos = None
+            return
+        self._drag_start_global_pos = self._event_global_pos(event)
+
+    def _maybe_start_drag(self, event, source) -> bool:
+        if not self._preset_id or not self._is_drag_source_widget(source) or self._drag_start_global_pos is None:
+            return False
+        current_pos = self._event_global_pos(event)
+        if current_pos is None:
+            return False
+        distance = (current_pos - self._drag_start_global_pos).manhattanLength()
+        if distance < QApplication.startDragDistance():
+            return False
+        self._drag_start_global_pos = None
+        self._start_drag()
+        return True
+
+    def _drag_preset_id(self, event) -> str:
+        mime = event.mimeData()
+        if not mime or not mime.hasFormat(OPERBLOCK_QUICK_ORDER_DRAG_MIME):
+            return ""
+        try:
+            return bytes(mime.data(OPERBLOCK_QUICK_ORDER_DRAG_MIME)).decode("utf-8")
+        except Exception:
+            return ""
+
+    def _start_drag(self) -> None:
+        pixmap = self.grab()
+        if not self._owner._begin_quick_order_drag(self._preset_id):
+            return
+        mime = QMimeData()
+        mime.setData(OPERBLOCK_QUICK_ORDER_DRAG_MIME, self._preset_id.encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        if not pixmap.isNull():
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(pixmap.rect().center())
+        self.setCursor(Qt.ClosedHandCursor)
+        try:
+            action = drag.exec(Qt.MoveAction)
+        finally:
+            self.setCursor(Qt.OpenHandCursor)
+        if action != Qt.MoveAction or not self._owner._quick_order_drag_committed:
+            self._owner._cancel_quick_order_drag()
+
+    def dragEnterEvent(self, event):
+        source_id = self._drag_preset_id(event)
+        if source_id and source_id != self._preset_id:
+            self._owner._preview_quick_order_drag(source_id, self._preset_id, after=False)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        source_id = self._drag_preset_id(event)
+        if source_id and source_id != self._preset_id:
+            try:
+                local_y = float(event.position().y())
+            except Exception:
+                local_y = float(event.pos().y())
+            self._owner._preview_quick_order_drag(source_id, self._preset_id, after=local_y > self.height() / 2)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event):
+        source_id = self._drag_preset_id(event)
+        if source_id and source_id != self._preset_id:
+            try:
+                local_y = float(event.position().y())
+            except Exception:
+                local_y = float(event.pos().y())
+            self._owner._preview_quick_order_drag(source_id, self._preset_id, after=local_y > self.height() / 2)
+            if self._owner._commit_quick_order_drag():
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+
+class _QuickOrderPresetListWidget(QWidget):
+    def __init__(self, owner, parent=None):
+        super().__init__(parent)
+        self._owner = owner
+        self.setAcceptDrops(True)
+
+    @staticmethod
+    def _drag_preset_id(event) -> str:
+        mime = event.mimeData()
+        if not mime or not mime.hasFormat(OPERBLOCK_QUICK_ORDER_DRAG_MIME):
+            return ""
+        try:
+            return bytes(mime.data(OPERBLOCK_QUICK_ORDER_DRAG_MIME)).decode("utf-8")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _event_y(event) -> float:
+        try:
+            return float(event.position().y())
+        except Exception:
+            return float(event.pos().y())
+
+    def dragEnterEvent(self, event):
+        source_id = self._drag_preset_id(event)
+        if source_id:
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        source_id = self._drag_preset_id(event)
+        if source_id and self._owner._preview_quick_order_drag_at_y(source_id, self._event_y(event)):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event):
+        source_id = self._drag_preset_id(event)
+        if source_id:
+            self._owner._preview_quick_order_drag_at_y(source_id, self._event_y(event))
+            if self._owner._commit_quick_order_drag():
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+
+class OperBlockExtraQuickTypesDialog(OperBlockStyledDialog):
+    def __init__(self, options: list[dict], selected_keys: list[str], parent=None):
+        self._options = [dict(option or {}) for option in options or []]
+        self._selected_keys = set(str(key or "").strip() for key in selected_keys or [] if str(key or "").strip())
+        self._checkboxes: dict[str, QCheckBox] = {}
+        self._result_keys: list[str] = []
+        super().__init__(
+            "Доп типы",
+            "extra_quick_types_dialog_geometry",
+            parent,
+            minimum_size=(360, 260),
+            initial_size=(420, 340),
+        )
+        self._init_ui()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self):
+        layout = self.content_layout
+        layout.setSpacing(10)
+
+        if not self._options:
+            empty_label = QLabel("Дополнительные типы не настроены.")
+            empty_label.setWordWrap(True)
+            empty_label.setStyleSheet(f"font-size: 13px; color: {TEXT_SECONDARY};")
+            layout.addWidget(empty_label)
+            layout.addStretch(1)
+        else:
+            for option in self._options:
+                key = str((option or {}).get("key") or "").strip()
+                label = str((option or {}).get("label") or key).strip()
+                if not key or not label:
+                    continue
+                checkbox = QCheckBox(label)
+                checkbox.setChecked(key in self._selected_keys)
+                checkbox.setStyleSheet(
+                    f"""
+                    QCheckBox {{
+                        color: {TEXT_PRIMARY};
+                        font-size: 13px;
+                        padding: 4px 2px;
+                    }}
+                    QCheckBox::indicator {{
+                        width: 16px;
+                        height: 16px;
+                    }}
+                    """
+                )
+                self._checkboxes[key] = checkbox
+                layout.addWidget(checkbox)
+            layout.addStretch(1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton("Отменить")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        save_button = QPushButton("Сохранить")
+        save_button.setMinimumHeight(34)
+        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        save_button.clicked.connect(self.accept)
+        actions.addWidget(cancel_button)
+        actions.addWidget(save_button)
+        layout.addLayout(actions)
+
+    def selected_keys(self) -> list[str]:
+        return list(self._result_keys)
+
+    def accept(self):
+        self._result_keys = [key for key, checkbox in self._checkboxes.items() if checkbox.isChecked()]
+        super().accept()
+
+
+class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
+    COL_ENABLED = 0
+    COL_NARCOTIC_SHEET = 1
+    COL_LABEL = 2
+    COL_DISPLAY = 3
+    COL_ALIASES = 4
+    COL_KIND = 5
+    COL_EXTRA_TYPES = 6
+    COL_GROUP = 7
+    COL_DRUG_GROUP = 8
+    COL_DOSES = 9
+    COL_RATES = 10
+    COL_CONCENTRATION = 11
+    COL_SOLVENT = 12
+    COL_VOLUME = 13
+    COL_COLOR = 14
+    COL_FAVORITE = 15
+    TABLE_HEADERS = (
+        "Вкл",
+        "Лист НС",
+        "Истинное название",
+        "Отображаемое",
+        "Алиасы",
+        "Тип",
+        "Доп тип",
+        "Группа",
+        "Группа препарата",
+        "Дозы",
+        "Скорости",
+        "Конц.",
+        "Растворитель",
+        "мл",
+        "Цвет",
+        "Избр.",
+    )
+
+    def __init__(self, presets: list[dict], parent=None, *, save_handler=None):
+        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v7"
+        self._restoring_table_header = False
+        self._fitting_table_header = False
+        self._working_templates: list[dict | None] = [dict(preset or {}) for preset in (presets or [])]
+        self._visible_template_indexes: list[int] = []
+        self._templates: list[dict] = []
+        self._table_rendering = True
+        self._save_handler = save_handler or save_operblock_medication_presets
+        self._save_in_progress = False
+        self._favorite_icon_cache: dict[bool, QIcon] = {}
+        self._extra_quick_type_options = self._load_extra_quick_type_options()
+        self._diluent_options = self._load_diluent_options()
+        self._group_options = self._build_group_options([item for item in self._working_templates if item is not None])
+        self._drug_group_options = self._load_drug_group_options()
+        minimum_width = self._bounded_dialog_width(parent, preferred=640, min_width=420)
+        initial_width = self._bounded_dialog_width(parent, preferred=1180, min_width=minimum_width)
+        super().__init__(
+            "Настроить препараты",
+            "medication_presets_settings_geometry",
+            parent,
+            minimum_size=(minimum_width, 520),
+            initial_size=(initial_width, 680),
+        )
+        self._save_table_header_timer = QTimer(self)
+        self._save_table_header_timer.setSingleShot(True)
+        self._save_table_header_timer.timeout.connect(self._save_table_header_state)
+        self._init_ui()
+        self._table_rendering = False
+        self._render_table()
+        self._finalize_dialog_chrome()
+        QTimer.singleShot(0, self._fit_table_columns_to_viewport)
+
+    @staticmethod
+    def _bounded_dialog_width(parent, *, preferred: int, min_width: int) -> int:
+        width = int(preferred)
+        parent_width = 0
+        try:
+            parent_width = int(parent.width()) if parent is not None else 0
+        except Exception:
+            parent_width = 0
+        if parent_width > 0:
+            available_width = max(360, parent_width - 32)
+            width = min(width, available_width)
+        return max(int(min_width), width)
+
+    def _load_diluent_options(self) -> list[dict]:
+        try:
+            return load_operblock_diluent_options()
+        except Exception:
+            logger.exception("Не удалось загрузить растворители для настроек препаратов оперблока")
+            return []
+
+    def _load_extra_quick_type_options(self) -> list[dict]:
+        try:
+            return load_operblock_extra_quick_type_buttons()
+        except Exception:
+            logger.exception("Не удалось загрузить дополнительные типы быстрых назначений")
+            return []
+
+    def _load_drug_group_options(self) -> list[dict[str, str]]:
+        try:
+            return load_operblock_drug_groups()
+        except Exception:
+            logger.exception("Не удалось загрузить группы препаратов для настроек оперблока")
+            return []
+
+    @staticmethod
+    def _build_group_options(presets: list[dict]) -> list[str]:
+        groups: list[str] = []
+
+        def add_group(value) -> None:
+            text = OperBlockMedicationPresetsDialog._group_display_text(value)
+            if text and text not in groups:
+                groups.append(text)
+
+        for group in OPERBLOCK_PRESET_GROUP_OPTIONS:
+            add_group(group)
+        for preset in presets or []:
+            add_group((preset or {}).get("group"))
+        return groups
+
+    @staticmethod
+    def _group_display_text(value) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        folded = text.casefold()
+        if folded in {"газ", "газы"}:
+            return "Газы"
+        if folded in {"инфузии / перфузор", "инфузии", "перфузор", "перфузоры"}:
+            return "Дозатор"
+        return text
+
+    @staticmethod
+    def _is_seed_preset(preset: dict) -> bool:
+        payload = preset.get("payload") if isinstance(preset, dict) else {}
+        return bool(
+            preset.get("source_drug_id")
+            or str(preset.get("preset_id") or "").startswith("drug:")
+            or (isinstance(payload, dict) and payload.get("source") == "drugs.seed.json")
+            or (isinstance(payload, dict) and payload.get("opblock_seed"))
+        )
+
+    def _init_ui(self):
+        layout = self.content_layout
+        self.content_widget.setStyleSheet(f"{STYLE_PATIENT_FORM_TAB}\n{_operblock_combo_box_style()}")
+
+        hint = QLabel(
+            "Таблица редактирует только шаблоны оперблока. Основной справочник doctor/nurse не меняется."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
+        layout.addWidget(hint)
+
+        filters = QHBoxLayout()
+        filters.setContentsMargins(0, 0, 0, 0)
+        filters.setSpacing(8)
+        self.filter_input = _line_edit()
+        self.filter_input.setPlaceholderText("Фильтр")
+        self.filter_input.textChanged.connect(self._apply_filter)
+        self.kind_filter = QComboBox()
+        self.kind_filter.setFixedHeight(34)
+        self.kind_filter.addItem("Все типы", "")
+        for kind, title in OPERBLOCK_PRESET_KIND_TITLES.items():
+            self.kind_filter.addItem(title, kind)
+        self.kind_filter.currentIndexChanged.connect(self._apply_filter)
+        self.enabled_filter = QComboBox()
+        self.enabled_filter.setFixedHeight(34)
+        self.enabled_filter.addItem("Все", "")
+        self.enabled_filter.addItem("Включенные", "enabled")
+        self.enabled_filter.addItem("Скрытые", "disabled")
+        self.enabled_filter.setCurrentIndex(1)
+        self.enabled_filter.currentIndexChanged.connect(self._apply_filter)
+        import_button = QPushButton("Импорт из справочника")
+        import_button.setFixedHeight(34)
+        import_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        import_button.clicked.connect(self._show_disabled_presets)
+        filters.addWidget(self.filter_input, 2)
+        filters.addWidget(self.kind_filter, 1)
+        filters.addWidget(self.enabled_filter, 1)
+        filters.addWidget(import_button, 0)
+        layout.addLayout(filters)
+
+        self.table = QTableWidget()
+        self.table.setObjectName("medicationPresetSettingsTable")
+        self.table.setColumnCount(len(self.TABLE_HEADERS))
+        self.table.setHorizontalHeaderLabels(self.TABLE_HEADERS)
+        narcotic_header = self.table.horizontalHeaderItem(self.COL_NARCOTIC_SHEET)
+        if narcotic_header is not None:
+            narcotic_header.setToolTip("Печатать каждое введение препарата во втором листе НС")
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
+        self.table.setEditTriggers(
+            QTableWidget.DoubleClicked | QTableWidget.EditKeyPressed | QTableWidget.AnyKeyPressed
+        )
+        self.table.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        self.table.setMinimumWidth(0)
+        self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.table.setItemDelegate(_OperBlockTableTextDelegate(self.table))
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(30)
+        self._apply_table_scrollbar_style()
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionsMovable(True)
+        if hasattr(header, "setFirstSectionMovable"):
+            header.setFirstSectionMovable(True)
+        header.setMinimumSectionSize(24)
+        for column in range(len(self.TABLE_HEADERS)):
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
+        self._apply_default_table_column_widths()
+        self._restore_table_header_state()
+        self._apply_table_column_visibility()
+        header.sectionResized.connect(self._on_table_header_changed)
+        header.sectionMoved.connect(self._on_table_header_changed)
+        self.table.setStyleSheet(
+            f"""
+            QTableWidget#medicationPresetSettingsTable {{
+                background-color: {BG_CARD};
+                alternate-background-color: #F8FAFC;
+                gridline-color: {BORDER_LIGHT};
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: {CUSTOM_DIALOG_RADIUS};
+                color: {TEXT_PRIMARY};
+            }}
+            QTableWidget#medicationPresetSettingsTable::item {{
+                padding: 3px 5px;
+                border: none;
+            }}
+            QTableWidget#medicationPresetSettingsTable::item:selected {{
+                background-color: #EAF2FF;
+                color: {TEXT_PRIMARY};
+            }}
+            QHeaderView::section {{
+                background-color: {BG_LIGHT};
+                color: {TEXT_PRIMARY};
+                border: none;
+                border-right: 1px solid {BORDER_LIGHT};
+                border-bottom: 1px solid {BORDER_LIGHT};
+                padding: 5px 6px;
+                font-weight: 700;
+            }}
+            """
+        )
+        self.table.setItemDelegateForColumn(
+            self.COL_KIND,
+            _OperBlockComboBoxDelegate(self._kind_combo_options, self.table),
+        )
+        self.table.setItemDelegateForColumn(
+            self.COL_GROUP,
+            _OperBlockComboBoxDelegate(self._group_combo_options, self.table),
+        )
+        self.table.setItemDelegateForColumn(
+            self.COL_DRUG_GROUP,
+            _OperBlockComboBoxDelegate(self._drug_group_combo_options, self.table),
+        )
+        self.table.setItemDelegateForColumn(
+            self.COL_SOLVENT,
+            _OperBlockComboBoxDelegate(self._solvent_combo_options, self.table),
+        )
+        self.table.itemChanged.connect(self._on_table_item_changed)
+        self.table.cellClicked.connect(self._open_combo_cell_editor)
+        layout.addWidget(self.table, 1)
+
+        actions = QHBoxLayout()
+        self.add_row_button = QPushButton("Добавить препарат")
+        self.add_row_button.setMinimumHeight(34)
+        self.add_row_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.add_row_button.clicked.connect(lambda: self._add_row({"enabled": True, "kind": "bolus"}))
+        self.toggle_visible_button = QPushButton("Вкл/Выкл все")
+        self.toggle_visible_button.setMinimumHeight(34)
+        self.toggle_visible_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.toggle_visible_button.clicked.connect(self._toggle_visible_enabled)
+        self.delete_selected_button = QPushButton("Удалить выбранные")
+        self.delete_selected_button.setMinimumHeight(34)
+        self.delete_selected_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.delete_selected_button.clicked.connect(self._delete_selected_rows)
+        self.cancel_button = QPushButton("Отменить")
+        self.cancel_button.setMinimumHeight(34)
+        self.cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button = QPushButton("Сохранить")
+        self.save_button.setMinimumHeight(34)
+        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.save_button.clicked.connect(self.save)
+        actions.addWidget(self.add_row_button)
+        actions.addWidget(self.toggle_visible_button)
+        actions.addWidget(self.delete_selected_button)
+        actions.addStretch(1)
+        actions.addWidget(self.cancel_button)
+        actions.addWidget(self.save_button)
+        layout.addLayout(actions)
+
+    def _apply_table_scrollbar_style(self) -> None:
+        scrollbar = self.table.verticalScrollBar()
+        if scrollbar is None:
+            return
+        scrollbar.setObjectName("OperBlockMedicationPresetsTableScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(34)
+        scrollbar.setPageStep(136)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockMedicationPresetsTableScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+
+    def _apply_default_table_column_widths(self):
+        defaults = {
+            self.COL_ENABLED: 48,
+            self.COL_NARCOTIC_SHEET: 68,
+            self.COL_LABEL: 210,
+            self.COL_DISPLAY: 180,
+            self.COL_ALIASES: 150,
+            self.COL_KIND: 138,
+            self.COL_EXTRA_TYPES: 130,
+            self.COL_GROUP: 1,
+            self.COL_DRUG_GROUP: 150,
+            self.COL_DOSES: 170,
+            self.COL_RATES: 170,
+            self.COL_CONCENTRATION: 82,
+            self.COL_SOLVENT: 130,
+            self.COL_VOLUME: 62,
+            self.COL_COLOR: 84,
+            self.COL_FAVORITE: 58,
+        }
+        header = self.table.horizontalHeader()
+        for column in range(len(self.TABLE_HEADERS)):
+            header.resizeSection(column, int(defaults.get(column, 110)))
+
+    def _apply_table_column_visibility(self) -> None:
+        if not hasattr(self, "table"):
+            return
+        self.table.setColumnHidden(self.COL_GROUP, True)
+        self.table.setColumnHidden(self.COL_DRUG_GROUP, False)
+        self.table.horizontalHeader().resizeSection(self.COL_NARCOTIC_SHEET, 68)
+        self.table.horizontalHeader().resizeSection(self.COL_FAVORITE, 58)
+
+    def _restore_table_header_state(self):
+        value = self._settings().value(self._table_header_settings_key)
+        if value is None:
+            return
+        header = self.table.horizontalHeader()
+        self._restoring_table_header = True
+        try:
+            header.restoreState(value)
+        except Exception:
+            return
+        finally:
+            self._restoring_table_header = False
+        header.setStretchLastSection(False)
+        header.setSectionsMovable(True)
+        if hasattr(header, "setFirstSectionMovable"):
+            header.setFirstSectionMovable(True)
+        for column in range(len(self.TABLE_HEADERS)):
+            header.setSectionResizeMode(column, QHeaderView.Interactive)
+        self._apply_table_column_visibility()
+        self._fit_table_columns_to_viewport()
+
+    def _on_table_header_changed(self, *_args):
+        if getattr(self, "_restoring_table_header", False) or getattr(self, "_fitting_table_header", False):
+            return
+        self._fit_table_columns_to_viewport()
+        timer = getattr(self, "_save_table_header_timer", None)
+        if timer is not None:
+            timer.start(500)
+        else:
+            self._save_table_header_state()
+
+    def _table_header_available_width(self) -> int:
+        viewport = self.table.viewport()
+        width = viewport.width() if viewport is not None else 0
+        if width <= 0:
+            width = self.table.contentsRect().width()
+        return max(0, int(width) - 2)
+
+    def _fit_table_columns_to_viewport(self):
+        if not hasattr(self, "table") or getattr(self, "_fitting_table_header", False):
+            return
+        header = self.table.horizontalHeader()
+        column_count = self.table.columnCount()
+        if column_count <= 0:
+            return
+        visible_columns = [column for column in range(column_count) if not self.table.isColumnHidden(column)]
+        if not visible_columns:
+            return
+        available_width = self._table_header_available_width()
+        if available_width <= 0:
+            return
+        base_min_width = max(24, int(header.minimumSectionSize() or 24))
+        min_width = base_min_width
+        if available_width < min_width * len(visible_columns):
+            min_width = max(1, available_width // len(visible_columns))
+        widths = {
+            column: max(min_width, int(header.sectionSize(column) or min_width))
+            for column in visible_columns
+        }
+        total_width = sum(widths.values())
+        if total_width <= 0 or abs(total_width - available_width) <= 1:
+            return
+        scale = available_width / total_width
+        fitted = {column: max(min_width, int(round(width * scale))) for column, width in widths.items()}
+        delta = available_width - sum(fitted.values())
+        guard = 0
+        while delta != 0 and guard < len(visible_columns) * 4:
+            guard += 1
+            if delta > 0:
+                index = max(visible_columns, key=lambda column: fitted[column])
+                fitted[index] += 1
+                delta -= 1
+                continue
+            candidates = [column for column, width in fitted.items() if width > min_width]
+            if not candidates:
+                break
+            index = max(candidates, key=lambda column: fitted[column])
+            fitted[index] -= 1
+            delta += 1
+        self._fitting_table_header = True
+        try:
+            for column, width in fitted.items():
+                if header.sectionSize(column) != width:
+                    header.resizeSection(column, width)
+        finally:
+            self._fitting_table_header = False
+
+    def _save_table_header_state(self):
+        if not hasattr(self, "table"):
+            return
+        settings = self._settings()
+        settings.setValue(self._table_header_settings_key, self.table.horizontalHeader().saveState())
+        settings.sync()
+
+    def _set_save_button_saved(self, saved: bool) -> None:
+        if hasattr(self, "save_button"):
+            self.save_button.setText("Сохранено" if saved else "Сохранить")
+
+    def _mark_dirty(self) -> None:
+        if getattr(self, "_table_rendering", False):
+            return
+        self._set_save_button_saved(False)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_table_columns_to_viewport)
+
+    def done(self, result: int) -> None:
+        self._fit_table_columns_to_viewport()
+        self._save_table_header_state()
+        super().done(result)
+
+    def _add_row(self, preset: dict | None = None, *, source_index: int | None = None):
+        item = dict(preset or {})
+        item.setdefault("enabled", True)
+        item.setdefault("kind", "bolus")
+        if source_index is not None and 0 <= int(source_index) < len(self._working_templates):
+            self._working_templates[int(source_index)] = item
+            target_index = int(source_index)
+        else:
+            self._working_templates.append(item)
+            target_index = len(self._working_templates) - 1
+        self._render_table()
+        self._mark_dirty()
+        if target_index in self._visible_template_indexes:
+            row = self._visible_template_indexes.index(target_index)
+            self.table.selectRow(row)
+            self.table.scrollToItem(self.table.item(row, self.COL_LABEL))
+
+    def _delete_selected_rows(self):
+        selected_indexes = {
+            self._visible_template_indexes[index.row()]
+            for index in self.table.selectionModel().selectedRows()
+            if 0 <= index.row() < len(self._visible_template_indexes)
+        }
+        if not selected_indexes:
+            CustomMessageBox.warning(self, "Удаление", "Выберите препараты для удаления.")
+            return
+        for template_index in selected_indexes:
+            self._working_templates[template_index] = None
+        if not any(item is not None for item in self._working_templates):
+            self._working_templates.append({"enabled": True, "kind": "bolus"})
+        self._render_table()
+        self._mark_dirty()
+
+    def _kind_combo_options(self) -> list[str]:
+        return list(OPERBLOCK_PRESET_KIND_TITLES.values())
+
+    def _group_combo_options(self) -> list[str]:
+        return list(self._group_options)
+
+    def _drug_group_combo_options(self) -> list[str]:
+        labels = ["Без группы"]
+        for option in self._drug_group_options:
+            label = str((option or {}).get("label") or (option or {}).get("code") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
+    def _solvent_combo_options(self) -> list[str]:
+        labels = ["Без растворителя"]
+        for option in self._diluent_options:
+            option_id = str((option or {}).get("id") or "").strip()
+            option_label = str((option or {}).get("label") or (option or {}).get("display") or option_id).strip()
+            if option_label and option_label not in labels:
+                labels.append(option_label)
+        return labels
+
+    def _extra_quick_types_display_text(self, preset: dict) -> str:
+        keys = normalize_operblock_extra_quick_type_keys(
+            (preset or {}).get("extra_quick_types"),
+            buttons=self._extra_quick_type_options,
+            include_unknown=True,
+        )
+        labels = operblock_quick_order_button_label_map(self._extra_quick_type_options)
+        return _join_semicolon_list([labels.get(key, key) for key in keys])
+
+    def _open_extra_quick_types_editor(self, row: int):
+        if row < 0 or row >= len(self._visible_template_indexes):
+            return
+        template_index = self._visible_template_indexes[row]
+        template = self._working_templates[template_index]
+        if template is None:
+            return
+        self._extra_quick_type_options = self._load_extra_quick_type_options()
+        if not self._extra_quick_type_options:
+            CustomMessageBox.information(
+                self,
+                "Доп тип",
+                "Дополнительные кнопки быстрых назначений не настроены.",
+            )
+            return
+        current_keys = normalize_operblock_extra_quick_type_keys(
+            template.get("extra_quick_types"),
+            buttons=self._extra_quick_type_options,
+            include_unknown=True,
+        )
+        dialog = OperBlockExtraQuickTypesDialog(self._extra_quick_type_options, current_keys, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        template["extra_quick_types"] = dialog.selected_keys()
+        self._render_table()
+        self._mark_dirty()
+
+    @staticmethod
+    def _grayscale_pixmap(pixmap: QPixmap) -> QPixmap:
+        image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        result = QImage(image.size(), QImage.Format.Format_ARGB32)
+        result.fill(Qt.GlobalColor.transparent)
+        for y in range(image.height()):
+            for x in range(image.width()):
+                color = image.pixelColor(x, y)
+                gray = int(color.red() * 0.299 + color.green() * 0.587 + color.blue() * 0.114)
+                result.setPixelColor(x, y, QColor(gray, gray, gray, color.alpha()))
+        return QPixmap.fromImage(result)
+
+    def _favorite_icon(self, active: bool) -> QIcon:
+        key = bool(active)
+        cached = self._favorite_icon_cache.get(key)
+        if cached is not None:
+            return cached
+        icon_path = os.path.join(get_icon_dir(), "remcardicon.png")
+        pixmap = QPixmap(icon_path)
+        if pixmap.isNull():
+            icon = QIcon()
+        else:
+            pixmap = pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            icon = QIcon(pixmap if key else self._grayscale_pixmap(pixmap))
+        self._favorite_icon_cache[key] = icon
+        return icon
+
+    def _favorite_button(self, template_index: int, preset: dict) -> QPushButton:
+        enabled = bool((preset or {}).get("enabled"))
+        favorite = bool((preset or {}).get("favorite")) and enabled
+        button = QPushButton()
+        button.setObjectName("OperBlockFavoritePresetButton")
+        button.setProperty("settingsSurfaceSkip", True)
+        button.setFocusPolicy(Qt.NoFocus)
+        button.setFixedSize(26, 24)
+        button.setIcon(self._favorite_icon(favorite))
+        button.setIconSize(QSize(18, 18))
+        button.setEnabled(enabled)
+        button.setCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor)
+        button.setToolTip(
+            "Добавить в избранное" if enabled and not favorite
+            else "Убрать из избранного" if enabled
+            else "Сначала включите препарат"
+        )
+        button.setStyleSheet(
+            f"""
+            QPushButton#OperBlockFavoritePresetButton {{
+                background: transparent;
+                border: none;
+                padding: 2px;
+            }}
+            QPushButton#OperBlockFavoritePresetButton:hover {{
+                background: #EEF3FF;
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 5px;
+            }}
+            QPushButton#OperBlockFavoritePresetButton:disabled {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        button.clicked.connect(lambda _=False, index=int(template_index): self._toggle_favorite(index))
+        return button
+
+    def _toggle_favorite(self, template_index: int) -> None:
+        if not (0 <= int(template_index) < len(self._working_templates)):
+            return
+        template = self._working_templates[int(template_index)]
+        if template is None or not bool(template.get("enabled")):
+            return
+        template["favorite"] = not bool(template.get("favorite"))
+        self._render_table()
+        self._mark_dirty()
+
+    def _open_combo_cell_editor(self, row: int, column: int):
+        if column == self.COL_EXTRA_TYPES:
+            self._open_extra_quick_types_editor(row)
+            return
+        if column not in {self.COL_KIND, self.COL_GROUP, self.COL_DRUG_GROUP, self.COL_SOLVENT}:
+            return
+        item = self.table.item(row, column)
+        if item is not None and item.flags() & Qt.ItemFlag.ItemIsEditable:
+            self.table.editItem(item)
+
+    def _show_disabled_presets(self):
+        self.enabled_filter.setCurrentIndex(2)
+        self.filter_input.clear()
+        self._apply_filter()
+
+    def _toggle_visible_enabled(self):
+        visible_indexes = list(self._visible_template_indexes)
+        if not visible_indexes:
+            return
+        target_checked = any(
+            not bool(self._working_templates[index].get("enabled"))
+            for index in visible_indexes
+            if self._working_templates[index] is not None
+        )
+        for index in visible_indexes:
+            template = self._working_templates[index]
+            if template is not None:
+                template["enabled"] = target_checked
+        self._render_table()
+        self._mark_dirty()
+
+    def _apply_filter(self, *_args):
+        if getattr(self, "_table_rendering", False):
+            return
+        self._render_table()
+
+    def _render_table(self):
+        query = self.filter_input.text().strip().casefold() if hasattr(self, "filter_input") else ""
+        kind_filter = self.kind_filter.currentData() if hasattr(self, "kind_filter") else ""
+        enabled_filter = self.enabled_filter.currentData() if hasattr(self, "enabled_filter") else "enabled"
+        visible_indexes = [
+            index
+            for index, preset in enumerate(self._working_templates)
+            if preset is not None and self._preset_matches_filter(preset, query, kind_filter, enabled_filter)
+        ]
+        self._visible_template_indexes = visible_indexes
+        previous_block = self.table.blockSignals(True)
+        previous_updates = self.table.updatesEnabled()
+        self._table_rendering = True
+        self.table.setUpdatesEnabled(False)
+        try:
+            self.table.setRowCount(len(visible_indexes))
+            for row, template_index in enumerate(visible_indexes):
+                preset = self._working_templates[template_index] or {}
+                self._populate_table_row(row, template_index, preset)
+        finally:
+            self.table.setUpdatesEnabled(previous_updates)
+            self.table.blockSignals(previous_block)
+            self._table_rendering = False
+
+    def _populate_table_row(self, row: int, template_index: int, preset: dict):
+        self.table.setItem(row, self.COL_ENABLED, self._enabled_item(template_index, bool(preset.get("enabled"))))
+        self.table.setItem(
+            row,
+            self.COL_NARCOTIC_SHEET,
+            self._narcotic_sheet_item(template_index, bool(preset.get("requires_narcotic_sheet"))),
+        )
+        self.table.setItem(
+            row,
+            self.COL_LABEL,
+            self._text_item(
+                str(preset.get("label") or preset.get("drug_name") or ""),
+                template_index,
+                editable=not self._is_seed_preset(preset),
+            ),
+        )
+        self.table.setItem(
+            row,
+            self.COL_DISPLAY,
+            self._text_item(str(preset.get("display_name") or preset.get("label") or ""), template_index),
+        )
+        self.table.setItem(
+            row,
+            self.COL_ALIASES,
+            self._text_item(_join_semicolon_list(preset.get("aliases") or []), template_index),
+        )
+        kind = self._kind_from_value(preset.get("kind"), allow_invalid=True)
+        kind_title = OPERBLOCK_PRESET_KIND_TITLES.get(kind, kind)
+        self.table.setItem(
+            row,
+            self.COL_KIND,
+            self._text_item(kind_title, template_index),
+        )
+        extra_types_item = self._text_item(self._extra_quick_types_display_text(preset), template_index, editable=False)
+        extra_types_item.setToolTip("Нажмите для выбора")
+        self.table.setItem(row, self.COL_EXTRA_TYPES, extra_types_item)
+        default_group = OPERBLOCK_PRESET_KIND_GROUP_TITLES.get(kind, "Болюсы")
+        self.table.setItem(
+            row,
+            self.COL_GROUP,
+            self._text_item(self._group_display_text(preset.get("group") or default_group), template_index),
+        )
+        self.table.setItem(
+            row,
+            self.COL_DRUG_GROUP,
+            self._text_item(self._drug_group_display_text(preset.get("drug_group")), template_index),
+        )
+        doses = self._dose_list_for_kind(kind, preset.get("doses") or [])
+        self.table.setItem(row, self.COL_DOSES, self._text_item(_join_semicolon_list(doses), template_index))
+        self.table.setItem(row, self.COL_RATES, self._text_item(_join_semicolon_list(preset.get("rates") or []), template_index))
+        self.table.setItem(row, self.COL_CONCENTRATION, self._text_item(str(preset.get("concentration") or ""), template_index))
+        self.table.setItem(row, self.COL_SOLVENT, self._text_item(self._solvent_display_text(preset), template_index))
+        self.table.setItem(row, self.COL_VOLUME, self._text_item(str(preset.get("solvent_volume_ml") or ""), template_index))
+        self.table.setItem(row, self.COL_COLOR, self._color_item(preset, template_index))
+        self.table.setItem(row, self.COL_FAVORITE, self._favorite_item(template_index))
+        self.table.setCellWidget(row, self.COL_FAVORITE, self._favorite_button(template_index, preset))
+
+    @staticmethod
+    def _enabled_item(template_index: int, enabled: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem("")
+        item.setData(Qt.ItemDataRole.UserRole, template_index)
+        item.setFlags(
+            Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsUserCheckable
+        )
+        item.setCheckState(Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        return item
+
+    @staticmethod
+    def _narcotic_sheet_item(template_index: int, checked: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem("")
+        item.setData(Qt.ItemDataRole.UserRole, template_index)
+        item.setFlags(
+            Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsUserCheckable
+        )
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item.setToolTip("Печатать каждое введение препарата во втором листе НС")
+        return item
+
+    @staticmethod
+    def _text_item(text: str, template_index: int, *, editable: bool = True) -> QTableWidgetItem:
+        item = QTableWidgetItem(str(text or ""))
+        item.setData(Qt.ItemDataRole.UserRole, template_index)
+        flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+        if editable:
+            flags |= Qt.ItemFlag.ItemIsEditable
+        item.setFlags(flags)
+        return item
+
+    @staticmethod
+    def _preset_card_color(preset: dict) -> str | None:
+        return _operblock_preset_card_color(preset)
+
+    @classmethod
+    def _color_item(cls, preset: dict, template_index: int) -> QTableWidgetItem:
+        color = cls._preset_card_color(preset)
+        item = cls._text_item(color or "", template_index)
+        if color:
+            item.setBackground(QColor(color))
+            item.setForeground(QColor(_contrast_text_color(color)))
+            item.setToolTip(color)
+        else:
+            item.setToolTip("Пусто = цвета нет")
+        return item
+
+    @staticmethod
+    def _favorite_item(template_index: int) -> QTableWidgetItem:
+        item = QTableWidgetItem("")
+        item.setData(Qt.ItemDataRole.UserRole, template_index)
+        item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        return item
+
+    def _on_table_item_changed(self, item: QTableWidgetItem):
+        if getattr(self, "_table_rendering", False) or item is None:
+            return
+        row = item.row()
+        if row < 0 or row >= len(self._visible_template_indexes):
+            return
+        template_index = self._visible_template_indexes[row]
+        template = self._working_templates[template_index]
+        if template is None:
+            return
+        column = item.column()
+        if column == self.COL_ENABLED:
+            enabled = item.checkState() == Qt.CheckState.Checked
+            template["enabled"] = enabled
+            if not enabled:
+                template["favorite"] = False
+            self._mark_dirty()
+            QTimer.singleShot(0, self._render_table)
+            return
+        if column == self.COL_NARCOTIC_SHEET:
+            template["requires_narcotic_sheet"] = item.checkState() == Qt.CheckState.Checked
+            self._mark_dirty()
+            return
+        if column == self.COL_LABEL and not self._is_seed_preset(template):
+            template["label"] = item.text().strip()
+        elif column == self.COL_DISPLAY:
+            template["display_name"] = item.text().strip()
+        elif column == self.COL_ALIASES:
+            template["aliases"] = _split_semicolon_list(item.text())
+        elif column == self.COL_KIND:
+            template["kind"] = self._kind_from_value(item.text(), allow_invalid=True)
+            if template["kind"] == "continuous_infusion":
+                template["doses"] = self._dose_list_for_kind(template["kind"], template.get("doses") or [])
+            QTimer.singleShot(0, self._render_table)
+        elif column == self.COL_GROUP:
+            template["group"] = item.text().strip()
+        elif column == self.COL_DRUG_GROUP:
+            template["drug_group"] = self._resolve_drug_group_text(item.text())
+        elif column == self.COL_DOSES:
+            doses = _split_semicolon_list(item.text())
+            if self._kind_from_value(template.get("kind")) == "continuous_infusion" and len(doses) > 1:
+                doses = doses[:1]
+                previous_block = self.table.blockSignals(True)
+                try:
+                    item.setText(_join_semicolon_list(doses))
+                finally:
+                    self.table.blockSignals(previous_block)
+                CustomMessageBox.warning(
+                    self,
+                    "Дозы",
+                    "Для типа «Дозатор» можно указать только одну дозу.",
+                )
+            template["doses"] = doses
+        elif column == self.COL_RATES:
+            template["rates"] = _split_semicolon_list(item.text())
+        elif column == self.COL_CONCENTRATION:
+            template["concentration"] = item.text().strip() or None
+        elif column == self.COL_SOLVENT:
+            solvent_id, solvent_label = self._resolve_solvent_text(item.text(), template)
+            template["solvent_id"] = solvent_id
+            template["solvent_label"] = solvent_label
+        elif column == self.COL_VOLUME:
+            template["solvent_volume_ml"] = item.text().strip() or None
+        elif column == self.COL_COLOR:
+            raw_color = item.text().strip()
+            color = _normalize_operblock_card_color(raw_color)
+            if raw_color and color is None:
+                previous_color = self._preset_card_color(template) or ""
+                CustomMessageBox.warning(
+                    self,
+                    "Неверный формат",
+                    "Цвет должен быть в HEX-формате #000000. Оставьте ячейку пустой, если цвет не нужен.",
+                )
+                previous_block = self.table.blockSignals(True)
+                try:
+                    item.setText(previous_color)
+                finally:
+                    self.table.blockSignals(previous_block)
+                return
+            template["card_color"] = color
+            template.pop("card_color_hex", None)
+            template.pop("color", None)
+            QTimer.singleShot(0, self._render_table)
+        elif column == self.COL_FAVORITE:
+            return
+        self._mark_dirty()
+
+    @staticmethod
+    def _kind_from_value(value, *, allow_invalid: bool = False) -> str:
+        text = str(value or "").strip()
+        folded = text.casefold()
+        for kind, title in OPERBLOCK_PRESET_KIND_TITLES.items():
+            if folded in {kind.casefold(), title.casefold()}:
+                return kind
+        legacy = {
+            "болюс": "bolus",
+            "болюсы": "bolus",
+            "gas": "gas",
+            "газ": "gas",
+            "газы": "gas",
+            "ингаляция": "gas",
+            "ингаляции": "gas",
+            "inhalation": "gas",
+            "infusion": "continuous_infusion",
+            "continuous": "continuous_infusion",
+            "дозатор": "continuous_infusion",
+            "перфузор": "continuous_infusion",
+            "перфузоры": "continuous_infusion",
+            "инфузия": "continuous_infusion",
+            "инфузии": "continuous_infusion",
+            "инфузии / перфузор": "continuous_infusion",
+            "timed": "timed_infusion",
+            "капельница": "timed_infusion",
+            "капельницы": "timed_infusion",
+            "solvent": "timed_infusion",
+            "раствор": "timed_infusion",
+            "растворы": "timed_infusion",
+            "event": "bolus",
+            "событие": "bolus",
+            "события": "bolus",
+        }
+        if folded in legacy:
+            return legacy[folded]
+        if allow_invalid and text:
+            return text
+        return normalize_operblock_medication_preset_kind(text)
+
+    @staticmethod
+    def _dose_list_for_kind(kind: str, values) -> list[str]:
+        if isinstance(values, str):
+            doses = _split_semicolon_list(values)
+        else:
+            doses = _split_semicolon_list(_join_semicolon_list(values or []))
+        if kind == "continuous_infusion":
+            return doses[:1]
+        return doses
+
+    def _solvent_display_text(self, preset: dict) -> str:
+        solvent_id = str(preset.get("solvent_id") or "").strip()
+        solvent_label = str(preset.get("solvent_label") or "").strip()
+        if solvent_id:
+            for option in self._diluent_options:
+                option_id = str((option or {}).get("id") or "").strip()
+                option_label = str((option or {}).get("label") or (option or {}).get("display") or option_id).strip()
+                if option_id == solvent_id:
+                    return option_label or solvent_label or solvent_id
+        return solvent_label
+
+    def _drug_group_display_text(self, value) -> str:
+        clean = str(value or "").strip()
+        if not clean:
+            return "Без группы"
+        for option in self._drug_group_options:
+            option_code = str((option or {}).get("code") or "").strip()
+            option_label = str((option or {}).get("label") or option_code).strip()
+            if clean.casefold() in {option_code.casefold(), option_label.casefold()}:
+                return option_label or option_code
+        return clean
+
+    def _resolve_drug_group_text(self, text: str) -> str | None:
+        clean = str(text or "").strip()
+        if not clean or clean.casefold() == "без группы":
+            return None
+        for option in self._drug_group_options:
+            option_code = str((option or {}).get("code") or "").strip()
+            option_label = str((option or {}).get("label") or option_code).strip()
+            if clean.casefold() in {option_code.casefold(), option_label.casefold()}:
+                return option_code or None
+        return clean
+
+    def _resolve_solvent_text(self, text: str, current: dict) -> tuple[str | None, str | None]:
+        clean = str(text or "").strip()
+        if not clean or clean.casefold() == "без растворителя":
+            return None, None
+        for option in self._diluent_options:
+            option_id = str((option or {}).get("id") or "").strip()
+            option_label = str((option or {}).get("label") or (option or {}).get("display") or option_id).strip()
+            if clean.casefold() in {option_id.casefold(), option_label.casefold()}:
+                return option_id or None, option_label or None
+        current_id = str(current.get("solvent_id") or "").strip()
+        current_label = str(current.get("solvent_label") or "").strip()
+        if current_id and current_label and clean.casefold() == current_label.casefold():
+            return current_id, current_label
+        return None, clean
+
+    def _preset_matches_filter(self, preset: dict, query: str, kind_filter: str, enabled_filter: str) -> bool:
+        kind = self._kind_from_value((preset or {}).get("kind"))
+        enabled = bool((preset or {}).get("enabled"))
+        if kind_filter and kind != kind_filter:
+            return False
+        if enabled_filter == "enabled" and not enabled:
+            return False
+        if enabled_filter == "disabled" and enabled:
+            return False
+        if query:
+            haystack = " ".join(
+                (
+                    str((preset or {}).get("label") or ""),
+                    str((preset or {}).get("display_name") or ""),
+                    _join_semicolon_list((preset or {}).get("aliases") or []),
+                    str((preset or {}).get("group") or ""),
+                    self._extra_quick_types_display_text(preset or {}),
+                    self._drug_group_display_text((preset or {}).get("drug_group")),
+                    self._solvent_display_text(preset or {}),
+                    str((preset or {}).get("solvent_id") or ""),
+                )
+            ).casefold()
+            if query not in haystack:
+                return False
+        return True
+
+    @staticmethod
+    def _manual_preset_id(kind: str, label: str) -> str:
+        slug = re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", "_", str(label or "").casefold()).strip("_") or "preset"
+        return f"manual:{kind}:{slug}"
+
+    def templates(self) -> list[dict]:
+        return list(self._templates)
+
+    def _template_from_preset(self, preset: dict) -> dict | None:
+        label = str(preset.get("label") or preset.get("drug_name") or "").strip()
+        if not label:
+            CustomMessageBox.warning(self, "Ошибка", "Укажите название препарата.")
+            return None
+        kind = self._kind_from_value(preset.get("kind"), allow_invalid=True)
+        if kind not in OPERBLOCK_MEDICATION_PRESET_KINDS:
+            CustomMessageBox.warning(self, "Ошибка", f"Недопустимый тип препарата: {kind}.")
+            return None
+        item = dict(preset or {})
+        preset_id = str(item.get("preset_id") or "").strip() or self._manual_preset_id(kind, label)
+        solvent_id, solvent_label = self._resolve_solvent_text(self._solvent_display_text(item), item)
+        raw_color_value = None
+        for color_key in ("card_color", "card_color_hex", "color"):
+            if color_key in item:
+                raw_color_value = item.get(color_key)
+                break
+        raw_color = str(raw_color_value or "").strip()
+        card_color = _normalize_operblock_card_color(raw_color)
+        if raw_color and card_color is None:
+            CustomMessageBox.warning(
+                self,
+                "Неверный формат",
+                f"Для препарата «{label}» укажите цвет в HEX-формате #000000 или оставьте ячейку пустой.",
+            )
+            return None
+        item.update(
+            {
+                "preset_id": preset_id,
+                "label": label,
+                "display_name": str(item.get("display_name") or "").strip() or label,
+                "aliases": _split_semicolon_list(_join_semicolon_list(item.get("aliases") or [])),
+                "kind": kind,
+                "group": self._group_display_text(item.get("group"))
+                or OPERBLOCK_PRESET_KIND_GROUP_TITLES.get(kind, "Болюсы"),
+                "extra_quick_types": normalize_operblock_extra_quick_type_keys(
+                    item.get("extra_quick_types"),
+                    buttons=self._extra_quick_type_options,
+                    include_unknown=True,
+                ),
+                "drug_group": self._resolve_drug_group_text(self._drug_group_display_text(item.get("drug_group"))),
+                "doses": self._dose_list_for_kind(kind, item.get("doses") or []),
+                "rates": _split_semicolon_list(_join_semicolon_list(item.get("rates") or [])),
+                "concentration": str(item.get("concentration") or "").strip() or None,
+                "solvent_id": solvent_id,
+                "solvent_label": solvent_label,
+                "solvent_volume_ml": str(item.get("solvent_volume_ml") or "").strip() or None,
+                "duration_min": _safe_int(item.get("duration_min")),
+                "card_color": card_color,
+                "requires_narcotic_sheet": bool(item.get("requires_narcotic_sheet")),
+                "enabled": bool(item.get("enabled")),
+                "favorite": bool(item.get("favorite")) and bool(item.get("enabled")),
+            }
+        )
+        return item
+
+    def _collect_templates(self) -> bool:
+        current_item = self.table.currentItem()
+        if current_item is not None:
+            self.table.closePersistentEditor(current_item)
+        templates: list[dict] = []
+        seen_ids: set[str] = set()
+        labels: dict[str, str] = {}
+        duplicate_labels: set[str] = set()
+        for preset in self._working_templates:
+            if preset is None:
+                continue
+            item = self._template_from_preset(preset)
+            if item is None:
+                return
+            preset_id = str(item.get("preset_id") or "").strip()
+            if preset_id in seen_ids:
+                CustomMessageBox.warning(self, "Ошибка", f"preset_id '{preset_id}' указан дважды.")
+                return
+            seen_ids.add(preset_id)
+            label = str(item.get("label") or "").strip()
+            label_key = label.casefold()
+            if label_key in labels:
+                duplicate_labels.add(label)
+            labels[label_key] = label
+            templates.append(item)
+        if duplicate_labels:
+            CustomMessageBox.warning(
+                self,
+                "Дубликаты названий",
+                "Есть повторяющиеся названия препаратов. Они будут сохранены, но лучше уточнить отображаемое название.",
+            )
+        self._templates = templates
+        return True
+
+    def save(self):
+        if self._save_in_progress:
+            return
+        if not self._collect_templates():
+            return
+        self._save_in_progress = True
+        self.save_button.setEnabled(False)
+        self.save_button.setText("Сохранение...")
+        try:
+            saved_items = self._save_handler(list(self._templates))
+            if saved_items is None:
+                saved_items = list(self._templates)
+            self._templates = [dict(item or {}) for item in saved_items]
+            self._working_templates = [dict(item or {}) for item in self._templates]
+            self._group_options = self._build_group_options(
+                [item for item in self._working_templates if item is not None]
+            )
+            self._drug_group_options = self._load_drug_group_options()
+            self._render_table()
+            self._set_save_button_saved(True)
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Ошибка сохранения", f"Не удалось сохранить препараты оперблока: {exc}")
+            self._set_save_button_saved(False)
+        finally:
+            self._save_in_progress = False
+            self.save_button.setEnabled(True)
+
+    def accept(self):
+        if not self._collect_templates():
+            return
+        super().accept()
+
+
+class EditOrderDialog(OperBlockStyledDialog):
+    def __init__(self, text: str, parent=None, *, base_datetime=None, route_code: str = OPERBLOCK_ORDER_ROUTE_DEFAULT):
+        self._base_datetime = _minute_floor_dt(_parse_datetime_value(base_datetime)) if base_datetime else None
+        self._route_code = _normalize_order_route_code(route_code)
+        height = 290 if self._base_datetime else 235
+        super().__init__(
+            "Редактировать назначение",
+            "edit_order_dialog_geometry",
+            parent,
+            minimum_size=(620, height),
+            initial_size=(660, height + 25),
+        )
+        self._init_ui(str(text or ""))
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self, text: str):
+        layout = self.content_layout
+
+        text_label = QLabel("Назначение")
+        text_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
+        layout.addWidget(text_label)
+
+        self.text_input = _line_edit()
+        self.text_input.setText(text)
+        self.text_input.selectAll()
+        layout.addWidget(self.text_input)
+
+        if self._base_datetime is not None:
+            time_row = QHBoxLayout()
+            time_row.setContentsMargins(0, 0, 0, 0)
+            time_row.setSpacing(10)
+            time_label = QLabel("Время введения")
+            time_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
+            self.time_input = QTimeEdit()
+            self.time_input.setDisplayFormat("HH:mm")
+            self.time_input.setFixedHeight(34)
+            self.time_input.setTime(QTime(self._base_datetime.hour, self._base_datetime.minute))
+            self.time_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
+            time_row.addWidget(time_label, 0)
+            time_row.addWidget(self.time_input, 0)
+            time_row.addStretch(1)
+            layout.addLayout(time_row)
+
+        route_label = QLabel("Место введения")
+        route_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
+        layout.addWidget(route_label)
+
+        route_row = QHBoxLayout()
+        route_row.setContentsMargins(0, 0, 0, 0)
+        route_row.setSpacing(8)
+        self.route_button_group = QButtonGroup(self)
+        self.route_button_group.setExclusive(True)
+        self.route_iv_button = self._route_button("в/в", OPERBLOCK_ORDER_ROUTE_DEFAULT)
+        self.route_im_button = self._route_button("в/м", OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR)
+        route_row.addWidget(self.route_iv_button, 0)
+        route_row.addWidget(self.route_im_button, 0)
+        route_row.addStretch(1)
+        layout.addLayout(route_row)
+        if self._route_code == OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR:
+            self.route_im_button.setChecked(True)
+        else:
+            self.route_iv_button.setChecked(True)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton("Отменить")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        cancel_button.clicked.connect(self.reject)
+        save_button = QPushButton("Сохранить")
+        save_button.setMinimumHeight(34)
+        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        save_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, save_button)
+        actions.addWidget(cancel_button)
+        actions.addWidget(save_button)
+        layout.addLayout(actions)
+
+    def _route_button(self, text: str, route_code: str) -> QPushButton:
+        button = QPushButton(text)
+        button.setCheckable(True)
+        button.setMinimumSize(70, 32)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setProperty("route_code", route_code)
+        button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: #F1F5F9;
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: 5px;
+                color: {TEXT_SECONDARY};
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            QPushButton:checked {{
+                background-color: #DFF4E8;
+                border-color: #2F8A57;
+                color: #17633A;
+            }}
+            """
+        )
+        self.route_button_group.addButton(button)
+        return button
+
+    def text(self) -> str:
+        return self.text_input.text().strip()
+
+    def route_code(self) -> str:
+        checked = self.route_button_group.checkedButton()
+        if checked is None:
+            return OPERBLOCK_ORDER_ROUTE_DEFAULT
+        return _normalize_order_route_code(checked.property("route_code"))
+
+    def datetime_text(self) -> str:
+        if self._base_datetime is None:
+            return ""
+        selected = self.time_input.time()
+        value = self._base_datetime.replace(
+            hour=selected.hour(),
+            minute=selected.minute(),
+            second=0,
+            microsecond=0,
+        )
+        return value.isoformat(timespec="seconds")
+
+
+GAS_MAC_HINT_TEXT = (
+    "MAC (минимальная альвеолярная концентрация) — стандартная мера силы "
+    "ингаляционного анестетика. 1,0 MAC соответствует концентрации газа, "
+    "при которой 50% пациентов не реагируют на хирургический разрез."
+)
+GAS_MAC_HINT_TOOLTIP = (
+    "<div style='width: 340px; white-space: normal;'>"
+    "<b>MAC (минимальная альвеолярная концентрация)</b><br>"
+    "Стандартная мера силы ингаляционного анестетика.<br><br>"
+    "1,0 MAC соответствует концентрации газа, при которой 50% пациентов "
+    "не реагируют на хирургический разрез."
+    "</div>"
+)
+
+
+def _create_gas_dialog_image_icon(
+    icon_ref,
+    *,
+    frame_size: int,
+    icon_size: int,
+    background: str,
+    parent=None,
+    fallback_file: str = "",
+) -> QFrame:
+    frame = QFrame(parent)
+    frame.setFixedSize(frame_size, frame_size)
+    frame.setStyleSheet(
+        f"background-color: {background}; border: none; border-radius: {frame_size // 2}px;"
+    )
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(0, 0, 0, 0)
+    icon_label = QLabel(frame)
+    icon_label.setAlignment(Qt.AlignCenter)
+    fallback = str(fallback_file or "").strip()
+    if not fallback and isinstance(icon_ref, str) and os.path.splitext(icon_ref)[1]:
+        fallback = icon_ref
+    pixmap = request_operblock_icon_pixmap(
+        icon_label,
+        icon_ref,
+        fallback_file=fallback,
+        target_size=(icon_size, icon_size),
+    )
+    if not pixmap.isNull():
+        icon_label.setPixmap(pixmap)
+    layout.addWidget(icon_label, 1)
+    return frame
+
+
+def _create_gas_dialog_plain_icon(icon_ref, *, icon_size: int, parent=None, fallback_file: str = "") -> QLabel:
+    icon_label = QLabel(parent)
+    icon_label.setFixedSize(icon_size, icon_size)
+    icon_label.setAlignment(Qt.AlignCenter)
+    fallback = str(fallback_file or "").strip()
+    if not fallback and isinstance(icon_ref, str) and os.path.splitext(icon_ref)[1]:
+        fallback = icon_ref
+    pixmap = request_operblock_icon_pixmap(
+        icon_label,
+        icon_ref,
+        fallback_file=fallback,
+        target_size=(icon_size, icon_size),
+    )
+    if not pixmap.isNull():
+        icon_label.setPixmap(pixmap)
+    return icon_label
+
+
+def _gas_time_step_icon(*, up: bool) -> QIcon:
+    return operblock_arrow_icon(up=up)
+
+
+class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
+    def __init__(
+        self,
+        *,
+        title: str,
+        drug_name: str,
+        subtitle: str,
+        value_label: str,
+        value_text: str = "",
+        placeholder: str = "",
+        left_icon_file: str,
+        left_icon_background: str,
+        right_icon_file,
+        geometry_key: str,
+        parent=None,
+        start_datetime: datetime | None = None,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+        show_time: bool = True,
+        show_route: bool = False,
+        show_value: bool = True,
+        time_label: str = "Время начала",
+        route_code: str = OPERBLOCK_ORDER_ROUTE_DEFAULT,
+        route_options: list[dict[str, str]] | None = None,
+        action_text: str = "Сохранить",
+        minimum_width: int | None = None,
+        right_icon_fallback_file: str = "",
+    ):
+        super().__init__(parent)
+        self._dialog_title = str(title or "Изменить назначение").strip() or "Изменить назначение"
+        self._drug_name = re.sub(r"\s+", " ", str(drug_name or "Назначение").strip()) or "Назначение"
+        self._subtitle = str(subtitle or "").strip()
+        self._value_label = str(value_label or "Доза").strip()
+        self._value_text = str(value_text or "").strip()
+        self._placeholder = str(placeholder or "").strip()
+        self._left_icon_file = str(left_icon_file or "").strip()
+        self._left_icon_background = str(left_icon_background or "#EEF2FF").strip()
+        self._right_icon_file = right_icon_file
+        self._right_icon_fallback_file = str(right_icon_fallback_file or "").strip()
+        self._start_datetime = _minute_floor_dt(start_datetime)
+        self._time_min_datetime = _minute_floor_dt(min_datetime)
+        self._time_max_datetime = _minute_floor_dt(max_datetime)
+        if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
+            self._time_max_datetime = None
+        self._show_time = bool(show_time)
+        self._show_value = bool(show_value)
+        self._time_label = str(time_label or "Время").strip() or "Время"
+        self._route_code = _normalize_order_route_code(route_code)
+        self._route_options = self._normalize_route_options(route_options, self._route_code)
+        if self._route_code not in {option["code"] for option in self._route_options} and self._route_options:
+            self._route_code = self._route_options[0]["code"]
+        self._show_route = bool(show_route and len(self._route_options) > 1)
+        self._action_text = str(action_text or "Сохранить")
+        self._time_text_updating = False
+
+        if minimum_width is not None:
+            width = int(minimum_width)
+        elif self._show_route and self._show_time:
+            width = 720
+        elif self._show_time and self._show_value:
+            width = 650
+        elif self._show_time:
+            width = 540
+        else:
+            width = 560
+        height = 342 if self._show_time and (self._show_value or self._show_route) else 292
+        self.setWindowTitle(self._dialog_title)
+        _apply_operblock_window_icon(self)
+        self.setMinimumSize(width, height)
+        self.resize(width, height)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setMouseTracking(True)
+        self._init_saved_frameless_dialog(geometry_key, drag_area_height=44)
+        self._init_ui()
+        self._restore_saved_geometry()
+
+    @staticmethod
+    def _normalize_route_options(route_options: list[dict[str, str]] | None, current_code: str = "") -> list[dict[str, str]]:
+        source = route_options
+        if source is None:
+            source = [
+                {"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": "в/в"},
+                {"code": OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR, "label": "в/м"},
+            ]
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        label_indexes: dict[str, int] = {}
+        current_code = _normalize_order_route_code(current_code)
+        for option in source or []:
+            code = _normalize_order_route_code((option or {}).get("code"))
+            if not code or code in seen:
+                continue
+            raw_label = str((option or {}).get("label") or "").strip()
+            label_routes = [{"code": code, "label": raw_label}] if raw_label else None
+            label = str(operblock_route_label(code, short=True, routes=label_routes) or raw_label or code).strip()
+            label_key = label.casefold()
+            if label_key in label_indexes:
+                index = label_indexes[label_key]
+                existing_code = result[index]["code"]
+                if code == current_code or (existing_code != current_code and code == OPERBLOCK_ORDER_ROUTE_DEFAULT):
+                    result[index] = {"code": code, "label": label}
+                    seen.add(code)
+                continue
+            result.append({"code": code, "label": label})
+            label_indexes[label_key] = len(result) - 1
+            seen.add(code)
+        if not result:
+            result.append({"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": operblock_route_label(OPERBLOCK_ORDER_ROUTE_DEFAULT, short=True)})
+        return result
+
+    def _init_ui(self) -> None:
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: transparent;
+                font-family: "Segoe UI", "Inter", Arial, sans-serif;
+            }
+            QFrame#MedDialogFrame {
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+                border-radius: 12px;
+            }
+            QFrame#MedDialogHeader {
+                background-color: #F8FAFC;
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
+                border-bottom: 1px solid #E5E7EB;
+            }
+            QLabel#MedDialogTitle {
+                color: #111827;
+                font-size: 16px;
+                font-weight: 600;
+                background: transparent;
+            }
+            QPushButton#MedDialogClose {
+                background-color: transparent;
+                color: #1F2937;
+                border: none;
+                border-radius: 6px;
+                font-size: 18px;
+                font-weight: 300;
+                padding-bottom: 1px;
+            }
+            QPushButton#MedDialogClose:hover {
+                background-color: #e74c3c;
+                color: white;
+            }
+            QFrame#MedDialogBody {
+                background-color: #F8FAFC;
+                border: none;
+            }
+            QLabel#MedDrugName {
+                color: #111827;
+                font-size: 19px;
+                font-weight: 700;
+                background: transparent;
+            }
+            QLabel#MedDrugSubtitle {
+                color: #6B7280;
+                font-size: 12px;
+                font-weight: 400;
+                background: transparent;
+            }
+            QFrame#MedSeparator {
+                background-color: #E5E7EB;
+                border: none;
+                max-height: 1px;
+                min-height: 1px;
+            }
+            QFrame#MedFieldCard {
+                background-color: #FFFFFF;
+                border: 1px solid #E5E7EB;
+                border-radius: 14px;
+            }
+            QLabel#MedFieldTitle {
+                color: #6B7280;
+                font-size: 12px;
+                font-weight: 500;
+                background: transparent;
+            }
+            QLineEdit#MedValueInput {
+                background-color: #FFFFFF;
+                color: #111827;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                font-size: 18px;
+                font-weight: 400;
+                padding: 0 14px;
+                selection-background-color: #C7D2FE;
+            }
+            QLineEdit#MedValueInput:focus {
+                border: 1px solid #6366F1;
+            }
+            QFrame#MedTimeInputFrame {
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }
+            QFrame#MedTimeInputFrame[focused="true"] {
+                border: 1px solid #6366F1;
+            }
+            QLineEdit#MedTimeInput {
+                background-color: transparent;
+                color: #111827;
+                border: none;
+                font-size: 18px;
+                font-weight: 400;
+                padding: 0 14px;
+                selection-background-color: #C7D2FE;
+            }
+            QFrame#MedTimeStepperColumn {
+                background-color: transparent;
+                border: none;
+            }
+            """
+            + operblock_arrow_button_style("QPushButton#MedTimeStepButton")
+            + """
+            QPushButton#MedRouteButton {
+                background-color: #F1F5F9;
+                color: #64748B;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton#MedRouteButton:checked {
+                background-color: #DFF4E8;
+                border-color: #2F8A57;
+                color: #17633A;
+            }
+            QPushButton#MedRouteButton:hover {
+                border-color: #94A3B8;
+            }
+            QFrame#MedDialogFooter {
+                background-color: #F8FAFC;
+                border-bottom-left-radius: 12px;
+                border-bottom-right-radius: 12px;
+                border-top: 1px solid #E5E7EB;
+            }
+            """
+            + operblock_med_action_button_style("QPushButton#MedCancelButton", "QPushButton#MedSaveButton")
+        )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(0)
+
+        self.bg_container = QFrame(self)
+        self.bg_container.setObjectName("MedDialogFrame")
+        shadow = QGraphicsDropShadowEffect(self.bg_container)
+        shadow.setBlurRadius(26)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(15, 23, 42, 38))
+        self.bg_container.setGraphicsEffect(shadow)
+        outer.addWidget(self.bg_container)
+
+        main = QVBoxLayout(self.bg_container)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+
+        header = QFrame(self.bg_container)
+        header.setObjectName("MedDialogHeader")
+        header.setFixedHeight(34)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(8, 0, 0, 0)
+        header_layout.setSpacing(8)
+        header_icon = _create_operblock_title_icon(20)
+        if header_icon is not None:
+            header_layout.addWidget(header_icon, 0, Qt.AlignVCenter)
+        title = QLabel(self._dialog_title)
+        title.setObjectName("MedDialogTitle")
+        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        header_layout.addWidget(title, 1)
+        close_button = QPushButton("×")
+        close_button.setObjectName("MedDialogClose")
+        close_button.setFixedSize(34, 34)
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.clicked.connect(self.reject)
+        header_layout.addWidget(close_button, 0, Qt.AlignVCenter)
+        main.addWidget(header)
+
+        body = QFrame(self.bg_container)
+        body.setObjectName("MedDialogBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(22, 12, 22, 10)
+        body_layout.setSpacing(10)
+
+        drug_row = QFrame(body)
+        drug_layout = QHBoxLayout(drug_row)
+        drug_layout.setContentsMargins(0, 0, 0, 0)
+        drug_layout.setSpacing(16)
+        drug_layout.addWidget(
+            _create_gas_dialog_image_icon(
+                self._left_icon_file,
+                frame_size=52,
+                icon_size=32,
+                background=self._left_icon_background,
+                parent=drug_row,
+            ),
+            0,
+            Qt.AlignVCenter,
+        )
+        drug_text_col = QVBoxLayout()
+        drug_text_col.setContentsMargins(0, 0, 0, 0)
+        drug_text_col.setSpacing(3)
+        drug_name = QLabel(self._drug_name)
+        drug_name.setObjectName("MedDrugName")
+        drug_subtitle = QLabel(self._subtitle)
+        drug_subtitle.setObjectName("MedDrugSubtitle")
+        drug_text_col.addStretch(1)
+        drug_text_col.addWidget(drug_name)
+        drug_text_col.addWidget(drug_subtitle)
+        drug_text_col.addStretch(1)
+        drug_layout.addLayout(drug_text_col, 1)
+        if self._right_icon_file:
+            drug_layout.addWidget(
+                _create_gas_dialog_plain_icon(
+                    self._right_icon_file,
+                    icon_size=92,
+                    parent=drug_row,
+                    fallback_file=self._right_icon_fallback_file,
+                ),
+                0,
+                Qt.AlignRight | Qt.AlignVCenter,
+            )
+        body_layout.addWidget(drug_row)
+
+        separator = QFrame(body)
+        separator.setObjectName("MedSeparator")
+        body_layout.addWidget(separator)
+
+        fields = QHBoxLayout()
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setSpacing(14)
+        if self._show_value:
+            fields.addWidget(self._value_card(body), 1)
+        if self._show_time:
+            fields.addWidget(self._time_card(body), 1)
+        if self._show_route:
+            fields.addWidget(self._route_card(body), 0)
+        body_layout.addLayout(fields)
+        main.addWidget(body, 1)
+
+        footer = QFrame(self.bg_container)
+        footer.setObjectName("MedDialogFooter")
+        footer.setFixedHeight(54)
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(22, 0, 22, 0)
+        footer_layout.setSpacing(10)
+        footer_layout.addStretch(1)
+        cancel_button = QPushButton("Отменить")
+        cancel_button.setObjectName("MedCancelButton")
+        cancel_button.setFixedSize(118, 38)
+        cancel_button.setCursor(Qt.PointingHandCursor)
+        cancel_button.clicked.connect(self.reject)
+        save_button = QPushButton(self._action_text)
+        save_button.setObjectName("MedSaveButton")
+        save_button.setFixedSize(138, 38)
+        save_button.setCursor(Qt.PointingHandCursor)
+        save_button.clicked.connect(self.accept)
+        cancel_button.setAutoDefault(False)
+        cancel_button.setDefault(False)
+        save_button.setAutoDefault(True)
+        save_button.setDefault(True)
+        footer_layout.addWidget(cancel_button)
+        footer_layout.addWidget(save_button)
+        main.addWidget(footer)
+
+    def _field_card(self, parent=None, *, minimum_width: int = 220) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame(parent)
+        card.setObjectName("MedFieldCard")
+        card.setMinimumHeight(100)
+        card.setMinimumWidth(int(minimum_width))
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 14)
+        layout.setSpacing(6)
+        return card, layout
+
+    def _value_card(self, parent=None) -> QFrame:
+        card, layout = self._field_card(parent)
+        title = QLabel(self._value_label)
+        title.setObjectName("MedFieldTitle")
+        layout.addWidget(title)
+        self.value_input = QLineEdit()
+        self.value_input.setObjectName("MedValueInput")
+        self.value_input.setFixedHeight(52)
+        self.value_input.setText(self._value_text)
+        self.value_input.setPlaceholderText(self._placeholder)
+        self.value_input.selectAll()
+        layout.addWidget(self.value_input)
+        return card
+
+    def _time_card(self, parent=None) -> QFrame:
+        card, layout = self._field_card(parent)
+        title = QLabel(self._time_label)
+        title.setObjectName("MedFieldTitle")
+        layout.addWidget(title)
+
+        self.time_frame = QFrame()
+        self.time_frame.setObjectName("MedTimeInputFrame")
+        self.time_frame.setFixedHeight(52)
+        self.time_frame.setProperty("focused", False)
+        time_layout = QHBoxLayout(self.time_frame)
+        time_layout.setContentsMargins(0, 0, 0, 0)
+        time_layout.setSpacing(0)
+
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName("MedTimeInput")
+        start_dt = self._coerce_time_datetime(self._start_datetime or datetime.now().replace(second=0, microsecond=0))
+        self.time_input.setText(f"{start_dt.hour:02d}:{start_dt.minute:02d}")
+        self.time_input.setPlaceholderText("09:10")
+        self.time_input.setMaxLength(5)
+        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        self.time_input.editingFinished.connect(self._commit_time_text)
+        self.time_input.installEventFilter(self)
+        time_layout.addWidget(self.time_input, 1)
+
+        stepper = QFrame()
+        stepper.setObjectName("MedTimeStepperColumn")
+        stepper.setFixedWidth(42)
+        stepper_layout = QVBoxLayout(stepper)
+        stepper_layout.setContentsMargins(6, 4, 6, 4)
+        stepper_layout.setSpacing(4)
+
+        up_button = QPushButton()
+        up_button.setObjectName("MedTimeStepButton")
+        up_button.setFixedSize(30, 20)
+        up_button.setIcon(_gas_time_step_icon(up=True))
+        up_button.setIconSize(QSize(14, 14))
+        up_button.setCursor(Qt.PointingHandCursor)
+        up_button.clicked.connect(lambda _=False: self._step_time(1))
+        down_button = QPushButton()
+        down_button.setObjectName("MedTimeStepButton")
+        down_button.setFixedSize(30, 20)
+        down_button.setIcon(_gas_time_step_icon(up=False))
+        down_button.setIconSize(QSize(14, 14))
+        down_button.setCursor(Qt.PointingHandCursor)
+        down_button.clicked.connect(lambda _=False: self._step_time(-1))
+        stepper_layout.addWidget(up_button)
+        stepper_layout.addWidget(down_button)
+        time_layout.addWidget(stepper, 0)
+
+        layout.addWidget(self.time_frame)
+        return card
+
+    def _route_card(self, parent=None) -> QFrame:
+        max_label_len = max((len(str(option.get("label") or "")) for option in self._route_options), default=0)
+        button_width = max(70, min(132, 12 + max_label_len * 7))
+        card_width = max(142, min(520, 24 + (button_width + 8) * len(self._route_options)))
+        card, layout = self._field_card(parent, minimum_width=card_width)
+        card.setMaximumWidth(card_width + 10)
+        title = QLabel("Место")
+        title.setObjectName("MedFieldTitle")
+        layout.addWidget(title)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self.route_button_group = QButtonGroup(self)
+        self.route_button_group.setExclusive(True)
+        checked_any = False
+        for option in self._route_options:
+            route_code = _normalize_order_route_code((option or {}).get("code"))
+            raw_label = str((option or {}).get("label") or "").strip()
+            label_routes = [{"code": route_code, "label": raw_label}] if raw_label else None
+            label = str(operblock_route_label(route_code, short=True, routes=label_routes) or raw_label or route_code).strip()
+            button = QPushButton(label)
+            button.setObjectName("MedRouteButton")
+            button.setCheckable(True)
+            button.setFixedSize(button_width, 52)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setProperty("route_code", route_code)
+            self.route_button_group.addButton(button)
+            row.addWidget(button)
+            if route_code == self._route_code:
+                button.setChecked(True)
+                checked_any = True
+        if not checked_any and self.route_button_group.buttons():
+            self.route_button_group.buttons()[0].setChecked(True)
+        layout.addLayout(row)
+        return card
+
+    def value_text(self) -> str:
+        return self.value_input.text().strip()
+
+    def route_code(self) -> str:
+        group = getattr(self, "route_button_group", None)
+        if group is None:
+            return self._route_code or OPERBLOCK_ORDER_ROUTE_DEFAULT
+        checked = group.checkedButton()
+        if checked is None:
+            return self._route_code or OPERBLOCK_ORDER_ROUTE_DEFAULT
+        return _normalize_order_route_code(checked.property("route_code"))
+
+    def start_time_text(self) -> str:
+        if not getattr(self, "_show_time", True):
+            return ""
+        return self._commit_time_text()
+
+    def accept(self) -> None:
+        if getattr(self, "_show_time", True):
+            self._commit_time_text()
+        super().accept()
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "time_input", None):
+            if event.type() == QEvent.FocusIn:
+                self._set_time_focus(True)
+            elif event.type() == QEvent.FocusOut:
+                self._set_time_focus(False)
+        return super().eventFilter(obj, event)
+
+    def _set_time_focus(self, focused: bool) -> None:
+        frame = getattr(self, "time_frame", None)
+        if frame is None:
+            return
+        frame.setProperty("focused", bool(focused))
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
+
+    def _on_time_text_edited(self, text: str) -> None:
+        if self._time_text_updating:
+            return
+        digits = re.sub(r"\D", "", str(text or ""))
+        if len(digits) < 4:
+            return
+        event_dt = self._time_datetime_from_text(digits[:4])
+        if event_dt is None:
+            return
+        self._set_time_input_text(self._time_text_from_datetime(self._coerce_time_datetime(event_dt)), select_all=False)
+
+    def _commit_time_text(self) -> str:
+        raw_text = self.time_input.text()
+        event_dt = self._time_datetime_from_text(raw_text)
+        if event_dt is None:
+            event_dt = self._fallback_time_datetime()
+        normalized = self._time_text_from_datetime(self._coerce_time_datetime(event_dt))
+        self._set_time_input_text(normalized, select_all=False)
+        return normalized
+
+    def _step_time(self, delta_minutes: int) -> None:
+        current_dt = self._time_datetime_from_text(self.time_input.text())
+        if current_dt is None:
+            current_dt = self._fallback_time_datetime()
+        stepped = self._coerce_time_datetime(current_dt + timedelta(minutes=int(delta_minutes)))
+        self._set_time_input_text(self._time_text_from_datetime(stepped), select_all=True)
+
+    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
+        self._time_text_updating = True
+        try:
+            self.time_input.setText(text)
+            if select_all:
+                self.time_input.setFocus(Qt.OtherFocusReason)
+                self.time_input.selectAll()
+            else:
+                self.time_input.setCursorPosition(len(text))
+        finally:
+            self._time_text_updating = False
+
+    def _fallback_time_datetime(self) -> datetime:
+        fallback_dt = self._start_datetime or self._time_min_datetime or datetime.now().replace(second=0, microsecond=0)
+        return self._coerce_time_datetime(fallback_dt)
+
+    def _time_base_datetime(self) -> datetime:
+        return self._time_min_datetime or self._start_datetime or datetime.now().replace(second=0, microsecond=0)
+
+    def _time_datetime_from_text(self, value: str) -> datetime | None:
+        minutes = self._time_minutes_from_text(value)
+        if minutes is None:
+            return None
+        hour = minutes // 60
+        minute = minutes % 60
+        base_dt = self._time_base_datetime()
+        same_day = datetime.combine(base_dt.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        if same_day >= base_dt:
+            return same_day
+        crosses_midnight = hour < 6 or (base_dt.hour >= 12 and hour < base_dt.hour)
+        return same_day + timedelta(days=1) if crosses_midnight else same_day
+
+    def _coerce_time_datetime(self, value: datetime) -> datetime:
+        event_dt = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        if self._time_min_datetime and event_dt < self._time_min_datetime:
+            return self._time_min_datetime
+        if self._time_max_datetime and event_dt > self._time_max_datetime:
+            return self._time_max_datetime
+        return event_dt
+
+    @staticmethod
+    def _time_text_from_datetime(value: datetime) -> str:
+        return f"{value.hour:02d}:{value.minute:02d}"
+
+    @staticmethod
+    def _time_minutes_from_text(value: str) -> int | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        colon_match = re.fullmatch(r"(\d{1,2})\s*:\s*(\d{1,2})", raw)
+        if colon_match:
+            hour = int(colon_match.group(1))
+            minute = int(colon_match.group(2))
+        else:
+            digits = re.sub(r"\D", "", raw)
+            if len(digits) == 4:
+                hour = int(digits[:2])
+                minute = int(digits[2:])
+            elif len(digits) == 3:
+                hour = int(digits[:1])
+                minute = int(digits[1:])
+            else:
+                return None
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour * 60 + minute
+        return None
+
+
+class BolusEditDialog(MedicationEditDialogBase):
+    def __init__(
+        self,
+        drug_name: str,
+        dose_text: str = "",
+        parent=None,
+        *,
+        base_datetime: datetime | None = None,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+        route_code: str = OPERBLOCK_ORDER_ROUTE_DEFAULT,
+        route_options: list[dict[str, str]] | None = None,
+        action_text: str = "Сохранить",
+    ):
+        clean_name = re.sub(r"\s+", " ", str(drug_name or "Препарат").strip()) or "Препарат"
+        super().__init__(
+            title=f"Изменить препарат: {clean_name}",
+            drug_name=clean_name,
+            subtitle="Болюсное введение",
+            value_label="Доза. (г; мг; мкг)",
+            value_text=_normalize_bolus_dose_text(dose_text),
+            placeholder="200 мг",
+            left_icon_file=type_icon_key("bolus"),
+            left_icon_background="#EAFBF5",
+            right_icon_file=edit_icon_key("bolus"),
+            geometry_key="operblock/bolus_edit_dialog_geometry_v2",
+            parent=parent,
+            start_datetime=base_datetime,
+            min_datetime=min_datetime,
+            max_datetime=max_datetime,
+            show_time=base_datetime is not None,
+            show_route=True,
+            route_code=route_code,
+            route_options=route_options,
+            action_text=action_text,
+            minimum_width=724 if base_datetime is not None else 610,
+        )
+
+    def dose_text(self) -> str:
+        return _normalize_bolus_dose_text(self.value_text())
+
+    def text(self) -> str:
+        return _build_order_text_for_display(self._drug_name, self.dose_text())
+
+    def datetime_text(self) -> str:
+        if not getattr(self, "_show_time", False):
+            return ""
+        selected_text = self.start_time_text()
+        selected_dt = self._time_datetime_from_text(selected_text) or self._fallback_time_datetime()
+        return self._coerce_time_datetime(selected_dt).isoformat(timespec="seconds")
+
+
+class InfusionRateDialog(MedicationEditDialogBase):
+    def __init__(
+        self,
+        title: str,
+        rate_text: str = "",
+        parent=None,
+        *,
+        drug_name: str = "Дозатор",
+        start_datetime: datetime | None = None,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+        action_text: str = "Сохранить",
+    ):
+        clean_name = re.sub(r"\s+", " ", str(drug_name or "Дозатор").strip()) or "Дозатор"
+        super().__init__(
+            title=title,
+            drug_name=clean_name,
+            subtitle="Длительная инфузия",
+            value_label="Скорость: мл/ч",
+            value_text=_compact_infusion_rate_display_text(rate_text),
+            placeholder="1 мл/ч",
+            left_icon_file=type_icon_key("continuous_infusion"),
+            left_icon_background="#FFF7ED",
+            right_icon_file=edit_icon_key("continuous_infusion"),
+            geometry_key="operblock/infusion_rate_dialog_geometry_v2",
+            parent=parent,
+            start_datetime=start_datetime,
+            min_datetime=min_datetime,
+            max_datetime=max_datetime,
+            show_time=start_datetime is not None,
+            show_route=False,
+            action_text=action_text,
+            minimum_width=650 if start_datetime is not None else 560,
+        )
+
+    def rate_text(self) -> str:
+        value, unit = _split_infusion_rate_text(self.value_text())
+        return _format_infusion_rate(value, unit) if value else self.value_text()
+
+
+class InfusionVolumeDialog(MedicationEditDialogBase):
+    def __init__(
+        self,
+        title: str,
+        volume_text: str = "",
+        parent=None,
+        *,
+        drug_name: str = "Капельница",
+        start_datetime: datetime | None = None,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+        show_time: bool = True,
+        action_text: str = "Сохранить",
+        field_label: str = "Объем: мл",
+        placeholder: str = "200 мл",
+    ):
+        clean_name = re.sub(r"\s+", " ", str(drug_name or "Капельница").strip()) or "Капельница"
+        super().__init__(
+            title=title,
+            drug_name=clean_name,
+            subtitle="Капельная инфузия",
+            value_label=field_label,
+            value_text=_normalize_volume_ml_text(volume_text),
+            placeholder=placeholder,
+            left_icon_file=type_icon_key("timed_infusion"),
+            left_icon_background="#EAF3FF",
+            right_icon_file=edit_icon_key("timed_infusion"),
+            geometry_key="operblock/infusion_volume_dialog_geometry_v2",
+            parent=parent,
+            start_datetime=start_datetime,
+            min_datetime=min_datetime,
+            max_datetime=max_datetime,
+            show_time=show_time,
+            show_route=False,
+            action_text=action_text,
+            minimum_width=650 if show_time else 560,
+        )
+
+    def volume_text(self) -> str:
+        return _normalize_volume_ml_text(self.value_text())
+
+
+class InfusionStopDialog(MedicationEditDialogBase):
+    def __init__(
+        self,
+        drug_name: str,
+        parent=None,
+        *,
+        start_datetime: datetime | None = None,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+        infusion_kind: str = "rate",
+        payload: dict | None = None,
+    ):
+        clean_name = re.sub(r"\s+", " ", str(drug_name or "Назначение").strip()) or "Назначение"
+        kind = str(infusion_kind or "").strip().casefold()
+        if kind == "gas":
+            payload_data = payload if isinstance(payload, dict) else {}
+            is_oxygen = _payload_or_text_is_oxygen(payload_data, clean_name)
+            subtitle = "Кислород" if is_oxygen else "Ингаляционный анестетик"
+            left_icon_file = OXYGEN_ICON_FILE if is_oxygen else type_icon_key("gas")
+            left_icon_background = "#E0F2FE" if is_oxygen else "#EEF2FF"
+            right_icon_file = drug_icon_candidate_keys_from_payload(payload_data, clean_name)
+            if not right_icon_file:
+                right_icon_file = [] if is_oxygen else [edit_icon_key("gas")]
+            right_icon_fallback = OXYGEN_ICON_FILE if is_oxygen else default_drug_icon_file("gas")
+        elif kind == "volume":
+            subtitle = "Капельная инфузия"
+            left_icon_file = type_icon_key("timed_infusion")
+            left_icon_background = "#EAF3FF"
+            right_icon_file = edit_icon_key("timed_infusion")
+            right_icon_fallback = default_drug_icon_file("timed_infusion")
+        else:
+            subtitle = "Длительная инфузия"
+            left_icon_file = type_icon_key("continuous_infusion")
+            left_icon_background = "#FFF7ED"
+            right_icon_file = edit_icon_key("continuous_infusion")
+            right_icon_fallback = default_drug_icon_file("continuous_infusion")
+        super().__init__(
+            title=f"Остановить назначение: {clean_name}",
+            drug_name=clean_name,
+            subtitle=subtitle,
+            value_label="",
+            value_text="",
+            placeholder="",
+            left_icon_file=left_icon_file,
+            left_icon_background=left_icon_background,
+            right_icon_file=right_icon_file,
+            right_icon_fallback_file=right_icon_fallback,
+            geometry_key="operblock/infusion_stop_dialog_geometry_v1",
+            parent=parent,
+            start_datetime=start_datetime,
+            min_datetime=min_datetime,
+            max_datetime=max_datetime,
+            show_time=True,
+            show_route=False,
+            show_value=False,
+            time_label="Время окончания",
+            action_text="Остановить",
+            minimum_width=540,
+        )
+
+    def datetime_text(self) -> str:
+        selected_text = self.start_time_text()
+        selected_dt = self._time_datetime_from_text(selected_text) or self._fallback_time_datetime()
+        return self._coerce_time_datetime(selected_dt).isoformat(timespec="seconds")
+
+
+class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
+    def __init__(
+        self,
+        gas_name: str,
+        concentration_text: str = "",
+        parent=None,
+        *,
+        start_datetime: datetime | None = None,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+        show_time: bool = True,
+        action_text: str = "Сохранить",
+        payload: dict | None = None,
+        is_oxygen: bool = False,
+    ):
+        super().__init__(parent)
+        self._gas_name = re.sub(r"\s+", " ", str(gas_name or "Газ").strip()) or "Газ"
+        self._is_oxygen = bool(is_oxygen or _payload_or_text_is_oxygen(payload if isinstance(payload, dict) else {}, self._gas_name))
+        self._concentration_text = (
+            _normalize_oxygen_flow_text(concentration_text)
+            if self._is_oxygen
+            else str(concentration_text or "").strip()
+        )
+        self._start_datetime = _minute_floor_dt(start_datetime)
+        self._time_min_datetime = _minute_floor_dt(min_datetime)
+        self._time_max_datetime = _minute_floor_dt(max_datetime)
+        if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
+            self._time_max_datetime = None
+        self._show_time = bool(show_time)
+        self._action_text = str(action_text or "Сохранить")
+        self._payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        self._time_text_updating = False
+        self._dialog_title = f"Изменить кислород: {self._gas_name}" if self._is_oxygen else f"Изменить газ: {self._gas_name}"
+        self.setWindowTitle(self._dialog_title)
+        _apply_operblock_window_icon(self)
+        self.setMinimumSize(610, 342 if self._show_time else 292)
+        self.resize(610, 342 if self._show_time else 292)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setMouseTracking(True)
+        self._init_saved_frameless_dialog("operblock/gas_dose_dialog_geometry_v3", drag_area_height=44)
+        self._init_ui()
+        self._restore_saved_geometry()
+
+    def _init_ui(self):
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: transparent;
+                font-family: "Segoe UI", "Inter", Arial, sans-serif;
+            }
+            QFrame#GasDialogFrame {
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+                border-radius: 12px;
+            }
+            QFrame#GasDialogHeader {
+                background-color: #F8FAFC;
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
+                border-bottom: 1px solid #E5E7EB;
+            }
+            QLabel#GasDialogTitle {
+                color: #111827;
+                font-size: 16px;
+                font-weight: 600;
+                background: transparent;
+            }
+            QPushButton#GasDialogClose {
+                background-color: transparent;
+                color: #1F2937;
+                border: none;
+                border-radius: 6px;
+                font-size: 18px;
+                font-weight: 300;
+                padding-bottom: 1px;
+            }
+            QPushButton#GasDialogClose:hover {
+                background-color: #e74c3c;
+                color: white;
+            }
+            QFrame#GasDialogBody {
+                background-color: #F8FAFC;
+                border: none;
+            }
+            QLabel#GasDrugName {
+                color: #111827;
+                font-size: 19px;
+                font-weight: 700;
+                background: transparent;
+            }
+            QLabel#GasDrugSubtitle {
+                color: #6B7280;
+                font-size: 12px;
+                font-weight: 400;
+                background: transparent;
+            }
+            QFrame#GasSeparator {
+                background-color: #E5E7EB;
+                border: none;
+                max-height: 1px;
+                min-height: 1px;
+            }
+            QFrame#GasFieldCard {
+                background-color: #FFFFFF;
+                border: 1px solid #E5E7EB;
+                border-radius: 14px;
+            }
+            QLabel#GasFieldTitle {
+                color: #6B7280;
+                font-size: 12px;
+                font-weight: 500;
+                background: transparent;
+            }
+            QPushButton#GasInfoButton {
+                color: #9CA3AF;
+                font-size: 12px;
+                font-weight: 700;
+                border: 2px solid #9CA3AF;
+                border-radius: 8px;
+                background: transparent;
+                padding: 0;
+            }
+            QPushButton#GasInfoButton:hover {
+                color: #4F46E5;
+                border-color: #6366F1;
+                background-color: #EEF2FF;
+            }
+            QLineEdit#GasDoseInput {
+                background-color: #FFFFFF;
+                color: #111827;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                font-size: 18px;
+                font-weight: 400;
+                padding: 0 14px;
+                selection-background-color: #C7D2FE;
+            }
+            QLineEdit#GasDoseInput:focus {
+                border: 1px solid #6366F1;
+            }
+            QFrame#GasTimeInputFrame {
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }
+            QFrame#GasTimeInputFrame[focused="true"] {
+                border: 1px solid #6366F1;
+            }
+            QLineEdit#GasTimeInput {
+                background-color: transparent;
+                color: #111827;
+                border: none;
+                font-size: 18px;
+                font-weight: 400;
+                padding: 0 14px;
+                selection-background-color: #C7D2FE;
+            }
+            QFrame#GasTimeStepperColumn {
+                background-color: transparent;
+                border: none;
+            }
+            """
+            + operblock_arrow_button_style("QPushButton#GasTimeStepButton")
+            + """
+            QFrame#GasDialogFooter {
+                background-color: #F8FAFC;
+                border-bottom-left-radius: 12px;
+                border-bottom-right-radius: 12px;
+                border-top: 1px solid #E5E7EB;
+            }
+            QPushButton#GasCancelButton {
+                background-color: #FFFFFF;
+                color: #111827;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton#GasCancelButton:hover {
+                background-color: #F3F4F6;
+                border-color: #B8C0CC;
+            }
+            QPushButton#GasSaveButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6366F1, stop:1 #4F46E5);
+                color: #FFFFFF;
+                border: 1px solid #4F46E5;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton#GasSaveButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7377F7, stop:1 #5B52EA);
+                border-color: #6366F1;
+            }
+            """
+        )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(0)
+
+        self.bg_container = QFrame(self)
+        self.bg_container.setObjectName("GasDialogFrame")
+        shadow = QGraphicsDropShadowEffect(self.bg_container)
+        shadow.setBlurRadius(26)
+        shadow.setOffset(0, 8)
+        shadow.setColor(QColor(15, 23, 42, 38))
+        self.bg_container.setGraphicsEffect(shadow)
+        outer.addWidget(self.bg_container)
+
+        main = QVBoxLayout(self.bg_container)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+
+        header = QFrame(self.bg_container)
+        header.setObjectName("GasDialogHeader")
+        header.setFixedHeight(34)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(8, 0, 0, 0)
+        header_layout.setSpacing(8)
+        header_icon = _create_operblock_title_icon(20)
+        if header_icon is not None:
+            header_layout.addWidget(header_icon, 0, Qt.AlignVCenter)
+        title = QLabel(self._dialog_title)
+        title.setObjectName("GasDialogTitle")
+        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        header_layout.addWidget(title, 1)
+        close_button = QPushButton("×")
+        close_button.setObjectName("GasDialogClose")
+        close_button.setFixedSize(34, 34)
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.clicked.connect(self.reject)
+        header_layout.addWidget(close_button, 0, Qt.AlignVCenter)
+        main.addWidget(header)
+
+        body = QFrame(self.bg_container)
+        body.setObjectName("GasDialogBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(22, 12, 22, 10)
+        body_layout.setSpacing(10)
+
+        drug_row = QFrame(body)
+        drug_row.setObjectName("GasDrugCard")
+        drug_layout = QHBoxLayout(drug_row)
+        drug_layout.setContentsMargins(0, 0, 0, 0)
+        drug_layout.setSpacing(16)
+        drug_layout.addWidget(
+            _create_gas_dialog_image_icon(
+                OXYGEN_ICON_FILE if self._is_oxygen else type_icon_key("gas"),
+                frame_size=52,
+                icon_size=32,
+                background="#E0F2FE" if self._is_oxygen else "#EEF2FF",
+                parent=drug_row,
+                fallback_file=OXYGEN_ICON_FILE if self._is_oxygen else "",
+            ),
+            0,
+            Qt.AlignVCenter,
+        )
+        drug_text_col = QVBoxLayout()
+        drug_text_col.setContentsMargins(0, 0, 0, 0)
+        drug_text_col.setSpacing(3)
+        drug_name = QLabel(self._gas_name)
+        drug_name.setObjectName("GasDrugName")
+        drug_subtitle = QLabel("Кислород" if self._is_oxygen else "Ингаляционный анестетик")
+        drug_subtitle.setObjectName("GasDrugSubtitle")
+        drug_text_col.addStretch(1)
+        drug_text_col.addWidget(drug_name)
+        drug_text_col.addWidget(drug_subtitle)
+        drug_text_col.addStretch(1)
+        drug_layout.addLayout(drug_text_col, 1)
+        drug_layout.addWidget(
+            _create_gas_dialog_plain_icon(
+                drug_icon_candidate_keys_from_payload(self._payload, self._gas_name),
+                icon_size=92,
+                parent=drug_row,
+                fallback_file=OXYGEN_ICON_FILE if self._is_oxygen else default_drug_icon_file("gas"),
+            ),
+            0,
+            Qt.AlignRight | Qt.AlignVCenter,
+        )
+        body_layout.addWidget(drug_row)
+
+        separator = QFrame(body)
+        separator.setObjectName("GasSeparator")
+        body_layout.addWidget(separator)
+
+        fields = QHBoxLayout()
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setSpacing(14)
+        fields.addWidget(self._concentration_card(body), 1)
+        if self._show_time:
+            fields.addWidget(self._time_card(body), 1)
+        body_layout.addLayout(fields)
+        main.addWidget(body, 1)
+
+        footer = QFrame(self.bg_container)
+        footer.setObjectName("GasDialogFooter")
+        footer.setFixedHeight(54)
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(22, 0, 22, 0)
+        footer_layout.setSpacing(10)
+        footer_layout.addStretch(1)
+        cancel_button = QPushButton("Отменить")
+        cancel_button.setObjectName("GasCancelButton")
+        cancel_button.setFixedSize(118, 38)
+        cancel_button.setCursor(Qt.PointingHandCursor)
+        cancel_button.clicked.connect(self.reject)
+        save_button = QPushButton(self._action_text)
+        save_button.setObjectName("GasSaveButton")
+        save_button.setFixedSize(138, 38)
+        save_button.setCursor(Qt.PointingHandCursor)
+        save_button.clicked.connect(self.accept)
+        cancel_button.setAutoDefault(False)
+        cancel_button.setDefault(False)
+        save_button.setAutoDefault(True)
+        save_button.setDefault(True)
+        footer_layout.addWidget(cancel_button)
+        footer_layout.addWidget(save_button)
+        main.addWidget(footer)
+
+    def _field_card(self, parent=None) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame(parent)
+        card.setObjectName("GasFieldCard")
+        card.setMinimumHeight(100)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 12, 16, 14)
+        layout.setSpacing(6)
+        return card, layout
+
+    def _concentration_card(self, parent=None) -> QFrame:
+        card, layout = self._field_card(parent)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(8)
+        title = QLabel("Поток: л/мин" if self._is_oxygen else "Концентрация / MAC")
+        title.setObjectName("GasFieldTitle")
+        title_row.addWidget(title)
+        if not self._is_oxygen:
+            info = QPushButton("!")
+            info.setObjectName("GasInfoButton")
+            info.setToolTip(GAS_MAC_HINT_TOOLTIP)
+            info.setFixedSize(18, 18)
+            info.setCursor(Qt.PointingHandCursor)
+            info.clicked.connect(lambda _=False, button=info: self._show_mac_hint(button))
+            title_row.addWidget(info, 0, Qt.AlignVCenter)
+        title_row.addStretch(1)
+        layout.addLayout(title_row)
+
+        self.volume_input = QLineEdit()
+        self.volume_input.setObjectName("GasDoseInput")
+        self.volume_input.setFixedHeight(52)
+        self.volume_input.setText(self._concentration_text)
+        self.volume_input.setPlaceholderText("10 л/мин" if self._is_oxygen else "0,8 MAC")
+        self.volume_input.selectAll()
+        layout.addWidget(self.volume_input)
+        return card
+
+    def _time_card(self, parent=None) -> QFrame:
+        card, layout = self._field_card(parent)
+        title = QLabel("Время начала")
+        title.setObjectName("GasFieldTitle")
+        layout.addWidget(title)
+
+        self.time_frame = QFrame()
+        self.time_frame.setObjectName("GasTimeInputFrame")
+        self.time_frame.setFixedHeight(52)
+        self.time_frame.setProperty("focused", False)
+        time_layout = QHBoxLayout(self.time_frame)
+        time_layout.setContentsMargins(0, 0, 0, 0)
+        time_layout.setSpacing(0)
+
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName("GasTimeInput")
+        start_dt = self._start_datetime or datetime.now().replace(second=0, microsecond=0)
+        start_dt = self._coerce_time_datetime(start_dt)
+        self.time_input.setText(f"{start_dt.hour:02d}:{start_dt.minute:02d}")
+        self.time_input.setPlaceholderText("09:10")
+        self.time_input.setMaxLength(5)
+        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        self.time_input.editingFinished.connect(self._commit_time_text)
+        self.time_input.installEventFilter(self)
+        time_layout.addWidget(self.time_input, 1)
+
+        stepper = QFrame()
+        stepper.setObjectName("GasTimeStepperColumn")
+        stepper.setFixedWidth(42)
+        stepper_layout = QVBoxLayout(stepper)
+        stepper_layout.setContentsMargins(6, 4, 6, 4)
+        stepper_layout.setSpacing(4)
+
+        up_button = QPushButton()
+        up_button.setObjectName("GasTimeStepButton")
+        up_button.setFixedSize(30, 20)
+        up_button.setIcon(_gas_time_step_icon(up=True))
+        up_button.setIconSize(QSize(14, 14))
+        up_button.setCursor(Qt.PointingHandCursor)
+        up_button.clicked.connect(lambda _=False: self._step_time(1))
+        down_button = QPushButton()
+        down_button.setObjectName("GasTimeStepButton")
+        down_button.setFixedSize(30, 20)
+        down_button.setIcon(_gas_time_step_icon(up=False))
+        down_button.setIconSize(QSize(14, 14))
+        down_button.setCursor(Qt.PointingHandCursor)
+        down_button.clicked.connect(lambda _=False: self._step_time(-1))
+        stepper_layout.addWidget(up_button)
+        stepper_layout.addWidget(down_button)
+        time_layout.addWidget(stepper, 0)
+
+        layout.addWidget(self.time_frame)
+        return card
+
+    def volume_text(self) -> str:
+        if getattr(self, "_is_oxygen", False):
+            return _normalize_oxygen_flow_text(self.volume_input.text())
+        return self.volume_input.text().strip()
+
+    def start_time_text(self) -> str:
+        if not getattr(self, "_show_time", True):
+            return ""
+        return self._commit_time_text()
+
+    def accept(self) -> None:
+        if getattr(self, "_show_time", True):
+            self._commit_time_text()
+        if getattr(self, "_is_oxygen", False):
+            normalized_flow = _normalize_oxygen_flow_text(self.volume_input.text())
+            if normalized_flow:
+                self.volume_input.setText(normalized_flow)
+        super().accept()
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "time_input", None):
+            if event.type() == QEvent.FocusIn:
+                self._set_time_focus(True)
+            elif event.type() == QEvent.FocusOut:
+                self._set_time_focus(False)
+        return super().eventFilter(obj, event)
+
+    def _set_time_focus(self, focused: bool) -> None:
+        frame = getattr(self, "time_frame", None)
+        if frame is None:
+            return
+        frame.setProperty("focused", bool(focused))
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
+
+    def _show_mac_hint(self, button: QWidget) -> None:
+        QToolTip.showText(
+            button.mapToGlobal(button.rect().bottomLeft()),
+            GAS_MAC_HINT_TOOLTIP,
+            button,
+            button.rect(),
+            12000,
+        )
+
+    def _on_time_text_edited(self, text: str) -> None:
+        if self._time_text_updating:
+            return
+        digits = re.sub(r"\D", "", str(text or ""))
+        if len(digits) < 4:
+            return
+        event_dt = self._time_datetime_from_text(digits[:4])
+        if event_dt is None:
+            return
+        self._set_time_input_text(self._time_text_from_datetime(self._coerce_time_datetime(event_dt)), select_all=False)
+
+    def _commit_time_text(self) -> str:
+        raw_text = self.time_input.text()
+        event_dt = self._time_datetime_from_text(raw_text)
+        if event_dt is None:
+            event_dt = self._fallback_time_datetime()
+        normalized = self._time_text_from_datetime(self._coerce_time_datetime(event_dt))
+        self._set_time_input_text(normalized, select_all=False)
+        return normalized
+
+    def _step_time(self, delta_minutes: int) -> None:
+        current_dt = self._time_datetime_from_text(self.time_input.text())
+        if current_dt is None:
+            current_dt = self._fallback_time_datetime()
+        stepped = self._coerce_time_datetime(current_dt + timedelta(minutes=int(delta_minutes)))
+        self._set_time_input_text(self._time_text_from_datetime(stepped), select_all=True)
+
+    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
+        self._time_text_updating = True
+        try:
+            self.time_input.setText(text)
+            if select_all:
+                self.time_input.setFocus(Qt.OtherFocusReason)
+                self.time_input.selectAll()
+            else:
+                self.time_input.setCursorPosition(len(text))
+        finally:
+            self._time_text_updating = False
+
+    def _fallback_time_datetime(self) -> datetime:
+        fallback_dt = (
+            self._start_datetime
+            or self._time_min_datetime
+            or datetime.now().replace(second=0, microsecond=0)
+        )
+        return self._coerce_time_datetime(fallback_dt)
+
+    def _time_base_datetime(self) -> datetime:
+        return (
+            self._time_min_datetime
+            or self._start_datetime
+            or datetime.now().replace(second=0, microsecond=0)
+        )
+
+    def _time_datetime_from_text(self, value: str) -> datetime | None:
+        minutes = self._time_minutes_from_text(value)
+        if minutes is None:
+            return None
+        hour = minutes // 60
+        minute = minutes % 60
+        base_dt = self._time_base_datetime()
+        same_day = datetime.combine(base_dt.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        if same_day >= base_dt:
+            return same_day
+        crosses_midnight = hour < 6 or (base_dt.hour >= 12 and hour < base_dt.hour)
+        return same_day + timedelta(days=1) if crosses_midnight else same_day
+
+    def _coerce_time_datetime(self, value: datetime) -> datetime:
+        event_dt = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        if self._time_min_datetime and event_dt < self._time_min_datetime:
+            return self._time_min_datetime
+        if self._time_max_datetime and event_dt > self._time_max_datetime:
+            return self._time_max_datetime
+        return event_dt
+
+    @staticmethod
+    def _time_text_from_datetime(value: datetime) -> str:
+        return f"{value.hour:02d}:{value.minute:02d}"
+
+    @staticmethod
+    def _time_minutes_from_text(value: str) -> int | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+
+        colon_match = re.fullmatch(r"(\d{1,2})\s*:\s*(\d{1,2})", raw)
+        if colon_match:
+            hour = int(colon_match.group(1))
+            minute = int(colon_match.group(2))
+        else:
+            digits = re.sub(r"\D", "", raw)
+            if len(digits) == 4:
+                hour = int(digits[:2])
+                minute = int(digits[2:])
+            elif len(digits) == 3:
+                hour = int(digits[:1])
+                minute = int(digits[1:])
+            else:
+                return None
+
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour * 60 + minute
+        return None
+
+
+class TimeEditDialog(OperBlockStyledDialog):
+    def __init__(self, title: str, base_datetime, parent=None, *, field_label: str = "Время"):
+        self._base_datetime = _minute_floor_dt(_parse_datetime_value(base_datetime)) or datetime.now().replace(
+            second=0,
+            microsecond=0,
+        )
+        self._field_label = str(field_label or "Время")
+        super().__init__(
+            title,
+            "time_edit_dialog_geometry",
+            parent,
+            minimum_size=(360, 140),
+            initial_size=(400, 155),
+        )
+        self._init_ui()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self):
+        layout = self.content_layout
+        time_row = QHBoxLayout()
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.setSpacing(10)
+        time_label = QLabel(self._field_label)
+        time_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
+        self.time_input = QTimeEdit()
+        self.time_input.setDisplayFormat("HH:mm")
+        self.time_input.setFixedHeight(34)
+        self.time_input.setTime(QTime(self._base_datetime.hour, self._base_datetime.minute))
+        self.time_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
+        time_row.addWidget(time_label, 0)
+        time_row.addWidget(self.time_input, 0)
+        time_row.addStretch(1)
+        layout.addLayout(time_row)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton("Отменить")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        cancel_button.clicked.connect(self.reject)
+        save_button = QPushButton("Сохранить")
+        save_button.setMinimumHeight(34)
+        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        save_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, save_button)
+        actions.addWidget(cancel_button)
+        actions.addWidget(save_button)
+        layout.addLayout(actions)
+
+    def start_time_text(self) -> str:
+        selected = self.time_input.time()
+        return f"{selected.hour():02d}:{selected.minute():02d}"
+
+    def datetime_text(self) -> str:
+        selected = self.time_input.time()
+        value = self._base_datetime.replace(
+            hour=selected.hour(),
+            minute=selected.minute(),
+            second=0,
+            microsecond=0,
+        )
+        return value.isoformat(timespec="seconds")
+
+
+class OperationStageTimeEditDialog(MedicationEditDialogBase):
+    def __init__(
+        self,
+        base_datetime,
+        parent=None,
+        *,
+        stage_label: str = "",
+        field_label: str = "Время этапа",
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+    ):
+        base_dt = _minute_floor_dt(_parse_datetime_value(base_datetime)) or datetime.now().replace(second=0, microsecond=0)
+        clean_label = re.sub(r"\s+", " ", str(stage_label or "").strip()) or "Этап операции"
+        super().__init__(
+            title="Время этапа операции",
+            drug_name=clean_label,
+            subtitle="Этап операции",
+            value_label="",
+            value_text="",
+            placeholder="",
+            left_icon_file=type_icon_key("operation_stage"),
+            left_icon_background="#EAFBF5",
+            right_icon_file=edit_icon_key("operation_stage"),
+            right_icon_fallback_file="etap2.png",
+            geometry_key="operblock/operation_stage_time_edit_dialog_geometry_v2",
+            parent=parent,
+            start_datetime=base_dt,
+            min_datetime=min_datetime,
+            max_datetime=max_datetime,
+            show_time=True,
+            show_value=False,
+            show_route=False,
+            time_label=field_label,
+            action_text="Сохранить",
+            minimum_width=540,
+        )
+        self.setMinimumSize(max(self.minimumWidth(), 540), max(self.minimumHeight(), 342))
+        if self.height() < 342:
+            self.resize(max(self.width(), 540), 342)
+
+    def _time_datetime_from_text(self, value: str) -> datetime | None:
+        minutes = self._time_minutes_from_text(value)
+        if minutes is None:
+            return None
+        hour = minutes // 60
+        minute = minutes % 60
+        base_dt = self._start_datetime or self._time_min_datetime or datetime.now().replace(second=0, microsecond=0)
+        same_day = datetime.combine(base_dt.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        candidates = [same_day]
+        if hour < 6:
+            candidates.append(same_day + timedelta(days=1))
+        previous_day_is_plausible = (
+            base_dt.hour < 6
+            or (self._time_min_datetime and self._time_min_datetime.date() < base_dt.date())
+        )
+        if hour >= 12 and previous_day_is_plausible:
+            candidates.append(same_day - timedelta(days=1))
+
+        def in_bounds(candidate: datetime) -> bool:
+            if self._time_min_datetime and candidate < self._time_min_datetime:
+                return False
+            if self._time_max_datetime and candidate > self._time_max_datetime:
+                return False
+            return True
+
+        bounded = [candidate for candidate in candidates if in_bounds(candidate)]
+        source = bounded or candidates
+        return min(source, key=lambda candidate: abs((candidate - base_dt).total_seconds()))
+
+    def datetime_text(self) -> str:
+        selected_text = self.start_time_text()
+        selected_dt = self._time_datetime_from_text(selected_text) or self._fallback_time_datetime()
+        return self._coerce_time_datetime(selected_dt).isoformat(timespec="seconds")
+
+
+class OperBlockVitalsServiceAdapter:
+    status_service = None
+
+    def __init__(self, remcard_service, operblock_service: OperBlockService):
+        self._remcard_service = remcard_service
+        self._operblock_service = operblock_service
+        self._operation_case_id: int | None = None
+        self._admission_id: int | None = None
+        self._started_at: datetime | None = None
+        self._ended_at: datetime | None = None
+
+    def set_operation_context(
+        self,
+        *,
+        operation_case_id: int | None,
+        admission_id: int | None,
+        started_at: datetime | None,
+        ended_at: datetime | None,
+    ):
+        self._operation_case_id = int(operation_case_id) if operation_case_id else None
+        self._admission_id = int(admission_id) if admission_id else None
+        self._started_at = _minute_floor_dt(started_at)
+        self._ended_at = ended_at
+
+    def normalize_time(self, value: str, fallback_time: str | None = None) -> str:
+        return self._remcard_service.normalize_time(value, fallback_time)
+
+    def is_time_input_valid(self, value: str) -> bool:
+        return self._remcard_service.is_time_input_valid(value)
+
+    def resolve_datetime(self, time: str, shift_date: datetime) -> datetime:
+        normalized = self.normalize_time(time)
+        hour, minute = map(int, normalized.split(":"))
+        start = _minute_floor_dt(self._started_at or shift_date or datetime.now())
+        same_day = datetime.combine(start.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        if same_day >= start:
+            return same_day
+        crosses_midnight = hour < 6 or (start.hour >= 12 and hour < start.hour)
+        if crosses_midnight:
+            return same_day + timedelta(days=1)
+        return same_day
+
+    def get_day_period(self, date: datetime):
+        start = self._started_at or date
+        end = self._ended_at or (start + timedelta(hours=OPERBLOCK_INITIAL_CHART_HOURS))
+        return start, max(end, start)
+
+    def get_effective_bounds(self, admission_id: int, date: datetime):
+        return self.get_day_period(date)
+
+    def get_patient(self, admission_id: int):
+        return self._remcard_service.get_patient(admission_id)
+
+    def get_vitals(self, admission_id: int, date: datetime):
+        if self._operation_case_id:
+            return self._operblock_service.list_operation_vitals(self._operation_case_id)
+        return self._remcard_service.get_vitals(admission_id, date)
+
+    def get_vitals_extended(self, admission_id: int, date: datetime):
+        return self.get_vitals(admission_id, date)
+
+    def suggest_vital_time(self, shift_date: datetime, **_kwargs) -> str:
+        vitals = self.get_vitals(self._admission_id or 0, shift_date)
+        if vitals:
+            return vitals[-1].timestamp.strftime("%H:%M")
+        start = self._started_at or shift_date or datetime.now()
+        return start.strftime("%H:%M")
+
+    def next_full_hour(self, time: str, shift_date: datetime) -> str:
+        current_dt = self.resolve_datetime(time, shift_date)
+        return (current_dt + timedelta(minutes=OPERBLOCK_VITAL_TIME_STEP_MINUTES)).strftime("%H:%M")
+
+    def now_time(self, current_dt: datetime, shift_date: datetime) -> str:
+        _ = shift_date
+        return current_dt.strftime("%H:%M")
+
+    def current_shift_time(self, shift_date: datetime) -> str:
+        return self.now_time(datetime.now(), shift_date)
+
+    def apply_offset(self, time: str, shift_date: datetime, delta_minutes: int) -> str:
+        current_dt = self.resolve_datetime(time, shift_date)
+        target_dt = current_dt + timedelta(minutes=int(delta_minutes))
+        start = self._started_at or shift_date
+        if target_dt < start:
+            target_dt = start
+        return target_dt.strftime("%H:%M")
+
+    def display_hint(self, time: str, shift_date: datetime) -> dict:
+        resolved = self.resolve_datetime(time, shift_date)
+        start = self._started_at or shift_date
+        day_offset = max(0, (resolved.date() - start.date()).days)
+        return {
+            "label": resolved.strftime("%H:%M"),
+            "day_offset": day_offset,
+            "text": f"операция +{day_offset} день" if day_offset else "операция",
+        }
+
+    def add_vital(self, dto, shift_date: datetime | None = None, force: bool = False, expected_revision=None):
+        _ = shift_date, force
+        timestamp = getattr(dto, "timestamp", None)
+        if self._started_at and isinstance(timestamp, datetime):
+            start_minute = self._started_at.replace(second=0, microsecond=0)
+            vital_minute = timestamp.replace(second=0, microsecond=0)
+            if vital_minute < start_minute:
+                raise ValueError(
+                    f"Пациент поступил в операционную в {start_minute.strftime('%H:%M')}. "
+                    "Ввод данных ранее этого времени невозможен."
+                )
+        if self._ended_at and isinstance(timestamp, datetime):
+            end_minute = self._ended_at.replace(second=0, microsecond=0)
+            vital_minute = timestamp.replace(second=0, microsecond=0)
+            if vital_minute > end_minute:
+                raise ValueError(
+                    f"Операция завершена в {end_minute.strftime('%H:%M')}. "
+                    "Ввод данных позже этого времени невозможен."
+                )
+        return self._operblock_service.add_vital_record(dto, expected_revision=expected_revision)
+
+    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision=None):
+        _ = date
+        return self._operblock_service.delete_last_vital_record(
+            admission_id,
+            expected_revision=expected_revision,
+        )
+
+    def enqueue_write(self, *args, **kwargs):
+        return self._remcard_service.enqueue_write(*args, **kwargs)
+
+
+OPERBLOCK_STARTED_AT_LOCK_TOOLTIP = (
+    "Есть изменения в карте. Отмените их, чтобы изменить время поступления пациента в оперблок."
+)
+
+
+def _sanitize_diagnostic_message(exc: Exception, *, limit: int = 240) -> str:
+    return re.sub(r"\s+", " ", str(exc or "")).strip()[:limit]
+
+
+class OperBlockAdmissionTimeInput(QFrame):
+    def __init__(self, initial_datetime: datetime | None = None, parent=None):
+        super().__init__(parent)
+        initial = _minute_floor_dt(initial_datetime) or datetime.now().replace(second=0, microsecond=0)
+        self._base_datetime = initial
+        self._min_datetime: datetime | None = None
+        self._max_datetime = datetime.now().replace(second=0, microsecond=0)
+        self._max_datetime_fixed = False
+        self._time_text_updating = False
+        self._locked = False
+        self._lock_reason = ""
+        self._init_ui()
+        self.set_datetime(initial)
+
+    def _init_ui(self) -> None:
+        self.setObjectName("OperBlockAdmissionTimeInput")
+        self.setStyleSheet(
+            f"""
+            QFrame#OperBlockAdmissionTimeInput {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#OperBlockAdmissionTimeFrame {{
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }}
+            QFrame#OperBlockAdmissionTimeFrame[focused="true"] {{
+                border: 1px solid #6366F1;
+            }}
+            QFrame#OperBlockAdmissionTimeFrame[locked="true"] {{
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+            }}
+            QLineEdit#OperBlockAdmissionTimeLineEdit {{
+                background: transparent;
+                border: none;
+                color: #111827;
+                font-size: 17px;
+                font-weight: 700;
+                padding: 0 12px;
+                selection-background-color: #C7D2FE;
+            }}
+            QLineEdit#OperBlockAdmissionTimeLineEdit[locked="true"] {{
+                color: #64748B;
+            }}
+            QFrame#OperBlockAdmissionTimeStepper {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton#OperBlockAdmissionTimeInfoButton {{
+                background-color: #FFF7ED;
+                border: 1px solid #FDBA74;
+                border-radius: 10px;
+                color: #C2410C;
+                font-size: 13px;
+                font-weight: 900;
+                padding: 0;
+            }}
+            QLabel#OperBlockAdmissionTimeNote {{
+                color: {TEXT_SECONDARY};
+                font-size: 11px;
+                line-height: 14px;
+                background: transparent;
+                border: none;
+            }}
+            QLabel#OperBlockAdmissionTimeNote[locked="true"] {{
+                color: #B45309;
+            }}
+            """
+            + operblock_arrow_button_style("QPushButton#OperBlockAdmissionTimeStepButton")
+        )
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(10)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        self.time_frame = QFrame()
+        self.time_frame.setObjectName("OperBlockAdmissionTimeFrame")
+        self.time_frame.setFixedHeight(40)
+        self.time_frame.setMinimumWidth(170)
+        self.time_frame.setMaximumWidth(240)
+        self.time_frame.setProperty("focused", False)
+        self.time_frame.setProperty("locked", False)
+        frame_layout = QHBoxLayout(self.time_frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setSpacing(0)
+
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName("OperBlockAdmissionTimeLineEdit")
+        self.time_input.setPlaceholderText("06:40")
+        self.time_input.setMaxLength(5)
+        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        self.time_input.editingFinished.connect(self._commit_time_text)
+        self.time_input.installEventFilter(self)
+        frame_layout.addWidget(self.time_input, 1)
+
+        stepper = QFrame()
+        stepper.setObjectName("OperBlockAdmissionTimeStepper")
+        stepper.setFixedWidth(42)
+        stepper_layout = QVBoxLayout(stepper)
+        stepper_layout.setContentsMargins(6, 4, 6, 4)
+        stepper_layout.setSpacing(4)
+
+        self.up_button = QPushButton()
+        self.up_button.setObjectName("OperBlockAdmissionTimeStepButton")
+        self.up_button.setFixedSize(30, 14)
+        self.up_button.setIcon(operblock_arrow_icon(up=True))
+        self.up_button.setIconSize(QSize(12, 12))
+        self.up_button.setCursor(Qt.PointingHandCursor)
+        self.up_button.clicked.connect(lambda _=False: self._step_time(1))
+
+        self.down_button = QPushButton()
+        self.down_button.setObjectName("OperBlockAdmissionTimeStepButton")
+        self.down_button.setFixedSize(30, 14)
+        self.down_button.setIcon(operblock_arrow_icon(up=False))
+        self.down_button.setIconSize(QSize(12, 12))
+        self.down_button.setCursor(Qt.PointingHandCursor)
+        self.down_button.clicked.connect(lambda _=False: self._step_time(-1))
+
+        stepper_layout.addWidget(self.up_button)
+        stepper_layout.addWidget(self.down_button)
+        frame_layout.addWidget(stepper, 0)
+        row.addWidget(self.time_frame, 0)
+
+        self.info_button = QPushButton("!")
+        self.info_button.setObjectName("OperBlockAdmissionTimeInfoButton")
+        self.info_button.setFixedSize(20, 20)
+        self.info_button.setCursor(Qt.PointingHandCursor)
+        self.info_button.setToolTip(OPERBLOCK_STARTED_AT_LOCK_TOOLTIP)
+        self.info_button.clicked.connect(self._show_lock_tooltip)
+        self.info_button.hide()
+        row.addWidget(self.info_button, 0, Qt.AlignVCenter)
+        root.addLayout(row, 0)
+
+        self.note_label = QLabel(
+            "Время можно изменить до внесения данных в карту. После начала пособия, операции, назначений "
+            "или дополнительных витальных показателей сначала отмените эти изменения."
+        )
+        self.note_label.setObjectName("OperBlockAdmissionTimeNote")
+        self.note_label.setWordWrap(True)
+        self.note_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.note_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        root.addWidget(self.note_label, 1)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "time_input", None):
+            if event.type() == QEvent.FocusIn:
+                self._set_time_focus(True)
+            elif event.type() == QEvent.FocusOut:
+                self._set_time_focus(False)
+        return super().eventFilter(obj, event)
+
+    def _set_time_focus(self, focused: bool) -> None:
+        self.time_frame.setProperty("focused", bool(focused))
+        self._refresh_widget_style(self.time_frame)
+
+    @staticmethod
+    def _refresh_widget_style(widget: QWidget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _on_time_text_edited(self, text: str) -> None:
+        if self._time_text_updating:
+            return
+        formatted = _operblock_format_time_edit_text(text)
+        self._set_time_input_text(formatted, select_all=False)
+
+    def _commit_time_text(self) -> str:
+        minutes = _operblock_time_minutes_from_text(self.time_input.text())
+        if minutes is None:
+            minutes = self._base_datetime.hour * 60 + self._base_datetime.minute
+        selected_dt = self._coerce_datetime(self._datetime_from_minutes(minutes))
+        self._base_datetime = selected_dt
+        normalized = _operblock_time_text_from_minutes(selected_dt.hour * 60 + selected_dt.minute)
+        self._set_time_input_text(normalized, select_all=False)
+        return normalized
+
+    def _datetime_from_minutes(self, minutes: int) -> datetime:
+        hour = int(minutes) // 60
+        minute = int(minutes) % 60
+        base = self._base_datetime or datetime.now().replace(second=0, microsecond=0)
+        candidates = [
+            datetime.combine(base.date() + timedelta(days=offset), datetime.min.time()).replace(hour=hour, minute=minute)
+            for offset in (-1, 0, 1)
+        ]
+        bounded = [
+            item
+            for item in candidates
+            if (self._min_datetime is None or item >= self._min_datetime)
+            and (self._max_datetime is None or item <= self._max_datetime)
+        ]
+        source = bounded or candidates
+        return min(source, key=lambda item: abs((item - base).total_seconds()))
+
+    def _coerce_datetime(self, value: datetime) -> datetime:
+        selected = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        current_minute = datetime.now().replace(second=0, microsecond=0)
+        if not self._max_datetime_fixed and (
+            self._max_datetime is None or current_minute > self._max_datetime
+        ):
+            self._max_datetime = current_minute
+        if self._max_datetime is not None and selected > self._max_datetime:
+            selected = self._max_datetime
+        if self._min_datetime is not None and selected < self._min_datetime:
+            selected = self._min_datetime
+        return selected
+
+    def _step_time(self, delta_minutes: int) -> None:
+        if self._locked:
+            return
+        minutes = _operblock_time_minutes_from_text(self.time_input.text())
+        current_dt = self._datetime_from_minutes(minutes) if minutes is not None else self._base_datetime
+        selected_dt = self._coerce_datetime(current_dt + timedelta(minutes=int(delta_minutes)))
+        self._base_datetime = selected_dt
+        self._set_time_input_text(selected_dt.strftime("%H:%M"), select_all=True)
+
+    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
+        self._time_text_updating = True
+        try:
+            self.time_input.setText(str(text or "")[:5])
+            if select_all:
+                self.time_input.setFocus(Qt.OtherFocusReason)
+                self.time_input.selectAll()
+            else:
+                self.time_input.setCursorPosition(len(self.time_input.text()))
+        finally:
+            self._time_text_updating = False
+
+    def set_datetime(self, value: datetime | str | None) -> None:
+        parsed = _minute_floor_dt(_parse_datetime_value(value)) if not isinstance(value, datetime) else _minute_floor_dt(value)
+        selected = self._coerce_datetime(parsed or datetime.now().replace(second=0, microsecond=0))
+        self._base_datetime = selected
+        self._set_time_input_text(selected.strftime("%H:%M"), select_all=False)
+
+    def set_bounds(
+        self,
+        minimum: datetime | str | None = None,
+        maximum: datetime | str | None = None,
+    ) -> None:
+        self._min_datetime = _minute_floor_dt(_parse_datetime_value(minimum))
+        parsed_maximum = _minute_floor_dt(_parse_datetime_value(maximum))
+        self._max_datetime_fixed = parsed_maximum is not None
+        self._max_datetime = parsed_maximum or datetime.now().replace(second=0, microsecond=0)
+        if (
+            self._min_datetime is not None
+            and self._max_datetime is not None
+            and self._max_datetime < self._min_datetime
+        ):
+            self._max_datetime = self._min_datetime
+        self.set_datetime(self._base_datetime)
+
+    def set_locked(self, locked: bool, reason: str = "") -> None:
+        self._locked = bool(locked)
+        self._lock_reason = str(reason or "").strip()
+        tooltip = (
+            f"{OPERBLOCK_STARTED_AT_LOCK_TOOLTIP}\nПричина: {self._lock_reason}"
+            if self._lock_reason
+            else OPERBLOCK_STARTED_AT_LOCK_TOOLTIP
+        )
+        self.time_input.setReadOnly(self._locked)
+        self.time_input.setProperty("locked", self._locked)
+        self.time_frame.setProperty("locked", self._locked)
+        self.up_button.setEnabled(not self._locked)
+        self.down_button.setEnabled(not self._locked)
+        self.info_button.setVisible(self._locked)
+        self.info_button.setToolTip(tooltip)
+        self.note_label.setProperty("locked", self._locked)
+        if self._locked:
+            self.note_label.setText(
+                "Время поступления заблокировано. Отмените внесённые изменения в карте, чтобы снова изменить это время."
+            )
+        elif self._min_datetime is not None:
+            maximum_text = (
+                f" до {self._max_datetime.strftime('%H:%M')}"
+                if self._max_datetime is not None
+                else ""
+            )
+            self.note_label.setText(
+                "Время поступления можно указать с "
+                f"{self._min_datetime.strftime('%H:%M')} (время отправки из РАО)"
+                f"{maximum_text}."
+            )
+        else:
+            self.note_label.setText(
+                "Время можно изменить до внесения данных в карту. После начала пособия, операции, назначений "
+                "или дополнительных витальных показателей сначала отмените эти изменения."
+            )
+        self._refresh_widget_style(self.time_input)
+        self._refresh_widget_style(self.time_frame)
+        self._refresh_widget_style(self.note_label)
+
+    def _show_lock_tooltip(self) -> None:
+        QToolTip.showText(
+            self.info_button.mapToGlobal(self.info_button.rect().bottomRight()),
+            self.info_button.toolTip() or OPERBLOCK_STARTED_AT_LOCK_TOOLTIP,
+            self.info_button,
+            self.info_button.rect(),
+            9000,
+        )
+
+    def datetime_value(self) -> datetime:
+        self._commit_time_text()
+        return self._base_datetime
+
+    def datetime_text(self) -> str:
+        return self.datetime_value().isoformat(timespec="seconds")
+
+
+class OperBlockQueueDialog(OperBlockStyledDialog):
+    def __init__(self, loader, parent=None):
+        self._loader = loader
+        self._rows: list[dict[str, Any]] = []
+        self.selected_handoff_id: int | None = None
+        super().__init__(
+            "Очередь пациентов из РАО",
+            "rao_queue_dialog_geometry",
+            parent,
+            minimum_size=(720, 420),
+            initial_size=(920, 560),
+        )
+        self._init_ui()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self) -> None:
+        intro = QLabel(
+            "Список запрашивается только при открытии этого окна и по кнопке «Обновить»."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
+        self.content_layout.addWidget(intro)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setObjectName("OperBlockRaoQueueTable")
+        self.table.setHorizontalHeaderLabels(
+            ["Отправлен", "Ожидается", "ФИО", "История", "Койка", "Диагноз", "Профиль"]
+        )
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        self.table.itemSelectionChanged.connect(self._update_selection)
+        self.table.itemDoubleClicked.connect(lambda *_args: self._choose_selected())
+        self.content_layout.addWidget(self.table, 1)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        self.content_layout.addWidget(self.status_label)
+
+        actions = QHBoxLayout()
+        self.refresh_button = QPushButton("Обновить")
+        self.refresh_button.setMinimumHeight(36)
+        self.refresh_button.setCursor(Qt.PointingHandCursor)
+        self.refresh_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.refresh_button.clicked.connect(self.refresh_rows)
+        actions.addWidget(self.refresh_button)
+        actions.addStretch(1)
+        close_button = QPushButton("Закрыть")
+        close_button.setMinimumHeight(36)
+        close_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        close_button.clicked.connect(self.reject)
+        actions.addWidget(close_button)
+        self.choose_button = QPushButton("Занять стол")
+        self.choose_button.setMinimumHeight(36)
+        self.choose_button.setEnabled(False)
+        self.choose_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.choose_button.clicked.connect(self._choose_selected)
+        actions.addWidget(self.choose_button)
+        self.content_layout.addLayout(actions)
+
+    @staticmethod
+    def _display_time(value: Any) -> str:
+        parsed = _parse_datetime_value(value)
+        return parsed.strftime("%d.%m.%Y %H:%M") if parsed is not None else str(value or "")
+
+    def refresh_rows(self) -> None:
+        self.refresh_button.setEnabled(False)
+        self.choose_button.setEnabled(False)
+        self.status_label.setText("Загрузка…")
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        try:
+            self._rows = [dict(row or {}) for row in (self._loader() or [])]
+        except Exception as exc:
+            self._rows = []
+            self.table.setRowCount(0)
+            self.status_label.setText("Не удалось обновить очередь.")
+            CustomMessageBox.warning(self, "Очередь", str(exc))
+        else:
+            self._fill_table()
+        finally:
+            self.refresh_button.setEnabled(True)
+
+    def _fill_table(self) -> None:
+        self.table.setRowCount(len(self._rows))
+        for row_index, row in enumerate(self._rows):
+            patient = dict(row.get("patient_snapshot") or {})
+            values = (
+                self._display_time(row.get("dispatched_at")),
+                self._display_time(row.get("expected_arrival_at")),
+                str(patient.get("full_name") or ""),
+                str(patient.get("history_number") or ""),
+                str(row.get("current_bed_number") or row.get("bed_number_at_dispatch") or ""),
+                str(patient.get("diagnosis_text") or patient.get("diagnosis_code") or ""),
+                str(patient.get("department_profile") or ""),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.UserRole, int(row["id"]))
+                self.table.setItem(row_index, column, item)
+        if self._rows:
+            self.status_label.setText(f"Ожидают операционную: {len(self._rows)}")
+            self.table.selectRow(0)
+        else:
+            self.status_label.setText("Пациентов, ожидающих операционную, нет.")
+        self._update_selection()
+
+    def _selected_id(self) -> int | None:
+        row = self.table.currentRow()
+        item = self.table.item(row, 0) if row >= 0 else None
+        value = item.data(Qt.UserRole) if item is not None else None
+        return int(value) if value is not None else None
+
+    def _update_selection(self) -> None:
+        self.choose_button.setEnabled(self._selected_id() is not None)
+
+    def _choose_selected(self) -> None:
+        handoff_id = self._selected_id()
+        if handoff_id is None:
+            return
+        self.selected_handoff_id = handoff_id
+        self.accept()
+
+
+class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
+    EMPTY_BIRTH_DATE = QDate(1900, 1, 1)
+
+    def __init__(
+        self,
+        table_code: str,
+        table_name: str,
+        parent=None,
+        *,
+        mode: str = "create",
+        initial_data: dict | None = None,
+        operation_case_id: int | None = None,
+    ):
+        super().__init__(parent)
+        self.table_code = table_code
+        self.table_name = table_name or _operblock_table_display_name(table_code)
+        self.operation_case_id = int(operation_case_id) if operation_case_id else None
+        self.handoff_id: int | None = None
+        self.source_rao_admission_id: int | None = None
+        self.is_edit_mode = str(mode or "").strip().lower() == "edit"
+        self.mkb_service = MKBService()
+        self._surgeon_rows: list[tuple[QWidget, QComboBox]] = []
+        try:
+            self._anesthesia_type_options = load_operblock_anesthesia_types()
+        except Exception as exc:
+            logger.error("operblock anesthesia types load failed: %s", exc, exc_info=True)
+            self._anesthesia_type_options = []
+        try:
+            self._surgeon_options = load_operblock_surgeons()
+        except Exception as exc:
+            logger.error("operblock surgeons load failed: %s", exc, exc_info=True)
+            self._surgeon_options = []
+        try:
+            self._operating_nurse_options = load_operblock_operating_nurses()
+        except Exception as exc:
+            logger.error("operblock operating nurses load failed: %s", exc, exc_info=True)
+            self._operating_nurse_options = []
+        try:
+            self._anesthesiologist_options = load_operblock_anesthesiologists()
+        except Exception as exc:
+            logger.error("operblock anesthesiologists load failed: %s", exc, exc_info=True)
+            self._anesthesiologist_options = []
+        try:
+            self._anesthetist_options = load_operblock_anesthetists()
+        except Exception as exc:
+            logger.error("operblock anesthetists load failed: %s", exc, exc_info=True)
+            self._anesthetist_options = []
+        self._save_button_text = (
+            "СОХРАНИТЬ ИЗМЕНЕНИЯ" if self.is_edit_mode else "СОЗДАТЬ КАРТОЧКУ ПАЦИЕНТА"
+        )
+        self.setWindowTitle("Редактировать пациента" if self.is_edit_mode else "Занять стол")
+        _apply_operblock_window_icon(self)
+        self.setMinimumSize(780, 620)
+        self.resize(900, 760)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
+        self.setMouseTracking(True)
+        self._init_saved_frameless_dialog("operblock/occupy_table_dialog_geometry", drag_area_height=70)
+        self._init_ui()
+        if initial_data:
+            self.set_data(initial_data)
+        self._restore_saved_geometry()
+
+    def _section(self, title: str) -> tuple[QFrame, QFormLayout]:
+        frame = QFrame()
+        frame.setObjectName("OperBlockPatientFormSection")
+        frame.setStyleSheet(
+            f"""
+            QFrame#OperBlockPatientFormSection {{
+                background-color: {BG_CARD};
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: 8px;
+            }}
+            QFrame#OperBlockPatientFormSection QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(10)
+        title_label = QLabel(title)
+        title_label.setStyleSheet(STYLE_PATIENT_FORM_SECTION_TITLE)
+        layout.addWidget(title_label)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        layout.addLayout(form)
+        return frame, form
+
+    @staticmethod
+    def _composite_form_label(text: str, object_name: str, *, top_offset: int = 27) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName(object_name)
+        label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        label.setContentsMargins(0, int(top_offset), 0, 0)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        return label
+
+    def _init_ui(self):
+        apply_custom_dialog_style(self)
+
+        self.bg_container = QFrame(self)
+        self.bg_container.setObjectName("DialogMainFrame")
+        self.bg_container.setMouseTracking(True)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.bg_container)
+
+        main = QVBoxLayout(self.bg_container)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+
+        header = QFrame(self.bg_container)
+        header.setObjectName("DialogTitleBar")
+        header.setFixedHeight(30)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(5, 0, 0, 0)
+        header_layout.setSpacing(0)
+        icon_label = _create_operblock_title_icon(20)
+        if icon_label is not None:
+            header_layout.addWidget(icon_label)
+            header_layout.addSpacing(8)
+        header_text = (
+            f"РЕДАКТИРОВАТЬ ПАЦИЕНТА — {self.table_name.upper()}"
+            if self.is_edit_mode
+            else f"ЗАНЯТЬ СТОЛ — {self.table_name.upper()}"
+        )
+        title = QLabel(header_text)
+        title.setObjectName("DialogTitleText")
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        self.close_button = QPushButton("✕")
+        self.close_button.setObjectName("DialogCloseBtn")
+        self.close_button.setFixedSize(30, 30)
+        self.close_button.setCursor(Qt.PointingHandCursor)
+        self.close_button.clicked.connect(self.reject)
+        header_layout.addWidget(self.close_button)
+        main.addWidget(header)
+
+        content = QFrame(self.bg_container)
+        content.setObjectName("OperBlockOccupyFormContent")
+        content.setStyleSheet(
+            f"""
+            {STYLE_PATIENT_FORM_TAB}
+            QFrame#OperBlockOccupyFormContent {{
+                background-color: {BG_MAIN};
+            }}
+            """
+        )
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(20, 16, 20, 20)
+        content_layout.setSpacing(10)
+
+        self.form_scroll = QScrollArea()
+        self.form_scroll.setObjectName("OperBlockOccupyFormScroll")
+        self.form_scroll.setWidgetResizable(True)
+        self.form_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.form_scroll.setStyleSheet(
+            f"""
+            QScrollArea#OperBlockOccupyFormScroll {{
+                border: none;
+                background: {BG_MAIN};
+            }}
+            QScrollArea#OperBlockOccupyFormScroll > QWidget {{
+                background: {BG_MAIN};
+            }}
+            QScrollArea#OperBlockOccupyFormScroll > QWidget > QWidget {{
+                background: {BG_MAIN};
+            }}
+            """
+        )
+        self.form_scroll.viewport().setObjectName("OperBlockOccupyFormViewport")
+        self.form_scroll.viewport().setStyleSheet(f"background: {BG_MAIN};")
+        form_scrollbar = self.form_scroll.verticalScrollBar()
+        form_scrollbar.setObjectName("OperBlockPatientFormScrollBar")
+        form_scrollbar.setFixedWidth(14)
+        form_scrollbar.setSingleStep(36)
+        form_scrollbar.setPageStep(180)
+        form_scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockPatientFormScrollBar",
+                width_px=14,
+                left_margin_px=2,
+                right_margin_px=1,
+            )
+        )
+
+        self.form_page = QWidget()
+        self.form_page.setObjectName("OperBlockOccupyFormPage")
+        self.form_page.setStyleSheet(
+            f"""
+            {STYLE_PATIENT_FORM_PAGE}
+            QWidget#OperBlockOccupyFormPage {{
+                background-color: {BG_MAIN};
+            }}
+            """
+        )
+        page_layout = QVBoxLayout(self.form_page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        general, general_form = self._section("1. ОБЩИЕ ДАННЫЕ ПАЦИЕНТА")
+        self.history_input = _line_edit()
+        self.history_input.setPlaceholderText("12345, АБ123 или 123/456")
+        self.full_name_input = _line_edit()
+        self.full_name_input.setPlaceholderText("Фамилия Имя Отчество")
+        self.gender_combo = QComboBox()
+        self.gender_combo.setFixedHeight(34)
+        self.gender_combo.addItems(["Мужской", "Женский"])
+        self.gender_combo.setStyleSheet(_operblock_combo_box_style())
+        self._install_occupy_combo_wheel_redirect(self.gender_combo)
+        self.birth_date_input = _line_edit()
+        self.birth_date_input.setObjectName("OperBlockOccupyBirthDateInput")
+        self.birth_date_input.setFixedHeight(34)
+        self.birth_date_input.setPlaceholderText("дд.мм.гггг")
+        self.birth_date_input.setMaxLength(10)
+        self.birth_date_input.setValidator(QRegularExpressionValidator(QRegularExpression(r"^[0-9.,/\\]*$")))
+        self.birth_date_input.textEdited.connect(self._on_birth_date_text_edited)
+        self.birth_date_input.editingFinished.connect(self._normalize_birth_date_field)
+        general_form.addRow("Номер истории болезни *:", self.history_input)
+        general_form.addRow("ФИО пациента *:", self.full_name_input)
+        general_form.addRow("Пол *:", self.gender_combo)
+        general_form.addRow("Дата рождения *:", self.birth_date_input)
+        page_layout.addWidget(general)
+
+        diagnosis, diagnosis_form = self._section("2. ДИАГНОЗ")
+        self.diagnosis_code_input = _line_edit()
+        self.diagnosis_code_input.setPlaceholderText("Код МКБ-10")
+        self.diagnosis_code_input.setMaxLength(6)
+        self.diagnosis_code_input.textEdited.connect(self._on_mkb_code_text_edited)
+        self.diagnosis_code_input.editingFinished.connect(self._validate_mkb_code)
+        self.diagnosis_name = _label("", size=12, color=TEXT_SECONDARY)
+        self.diagnosis_text_input = _line_edit()
+        self._set_manual_diagnosis_enabled(False, clear=True, placeholder="Сначала введите код МКБ-10")
+        code_line = QHBoxLayout()
+        code_line.setContentsMargins(0, 0, 0, 0)
+        code_line.setSpacing(12)
+        code_line.addWidget(self.diagnosis_code_input, 0)
+        code_line.addWidget(self.diagnosis_name, 1)
+        diagnosis_form.addRow("Код диагноза МКБ-10 *:", code_line)
+        diagnosis_form.addRow("Диагноз *:", self.diagnosis_text_input)
+        self.department_profile_combo = self._profile_department_combo()
+        self._install_occupy_combo_wheel_redirect(self.department_profile_combo)
+        diagnosis_form.addRow("Профильное отделение:", self.department_profile_combo)
+        page_layout.addWidget(diagnosis)
+
+        operation, operation_form = self._section("3. ОПЕРАЦИОННАЯ ИНФОРМАЦИЯ")
+        self.operation_name_input = _line_edit()
+        self.operation_name_input.setPlaceholderText("Название операции")
+        self.operation_name_input.setMinimumWidth(430)
+        self.operation_name_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.admission_time_input = OperBlockAdmissionTimeInput(datetime.now(), self)
+        self.anesthesia_assistance_type_combo = QComboBox()
+        self.anesthesia_assistance_type_combo.setEditable(True)
+        self.anesthesia_assistance_type_combo.setFixedHeight(34)
+        self.anesthesia_assistance_type_combo.setMinimumWidth(430)
+        self.anesthesia_assistance_type_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.anesthesia_assistance_type_combo.setMinimumContentsLength(38)
+        self.anesthesia_assistance_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.anesthesia_assistance_type_combo.setStyleSheet(_operblock_combo_box_style())
+        assistance_line_edit = self.anesthesia_assistance_type_combo.lineEdit()
+        if assistance_line_edit is not None:
+            assistance_line_edit.setPlaceholderText("Вид пособия")
+        seen_assistance_types: set[str] = set()
+        for item in self._anesthesia_type_options or []:
+            label = normalize_operblock_anesthesia_type_label((item or {}).get("label"))
+            key = label.casefold()
+            if label and key not in seen_assistance_types:
+                seen_assistance_types.add(key)
+                self.anesthesia_assistance_type_combo.addItem(label, label)
+        self.anesthesia_assistance_type_combo.setCurrentIndex(-1)
+        self.anesthesia_assistance_type_combo.setEditText("")
+        self._install_occupy_combo_wheel_redirect(self.anesthesia_assistance_type_combo)
+        self.height_input = _line_edit()
+        self.height_input.setPlaceholderText("см")
+        self.height_input.setValidator(QIntValidator(1, 260, self.height_input))
+        self.weight_input = _line_edit()
+        self.weight_input.setPlaceholderText("кг")
+        height_weight_widget = QWidget()
+        height_weight_widget.setObjectName("OperBlockOccupyHeightWeightFields")
+        height_weight_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOccupyHeightWeightFields {
+                background: transparent;
+                border: none;
+            }
+            QWidget#OperBlockOccupyHeightWeightFields QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        height_weight_layout = QGridLayout(height_weight_widget)
+        height_weight_layout.setContentsMargins(0, 0, 0, 0)
+        height_weight_layout.setHorizontalSpacing(12)
+        height_weight_layout.setVerticalSpacing(4)
+        height_label = QLabel("Рост (см)")
+        weight_label = QLabel("Вес (кг)")
+        for label in (height_label, weight_label):
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+        height_weight_layout.addWidget(height_label, 0, 0)
+        height_weight_layout.addWidget(weight_label, 0, 1)
+        height_weight_layout.addWidget(self.height_input, 1, 0)
+        height_weight_layout.addWidget(self.weight_input, 1, 1)
+        height_weight_layout.setColumnStretch(0, 1)
+        height_weight_layout.setColumnStretch(1, 1)
+        self.allergies_input = _line_edit()
+        self.allergies_input.setPlaceholderText("Нет данных")
+        self.blood_group_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_GROUP_OPTIONS)
+        self.blood_rh_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_RH_OPTIONS)
+        self._install_occupy_combo_wheel_redirect(self.blood_group_combo)
+        self._install_occupy_combo_wheel_redirect(self.blood_rh_combo)
+        blood_widget = QWidget()
+        blood_widget.setObjectName("OperBlockOccupyBloodFields")
+        blood_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOccupyBloodFields {
+                background: transparent;
+                border: none;
+            }
+            QWidget#OperBlockOccupyBloodFields QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        blood_layout = QGridLayout(blood_widget)
+        blood_layout.setContentsMargins(0, 0, 0, 0)
+        blood_layout.setHorizontalSpacing(12)
+        blood_layout.setVerticalSpacing(4)
+        blood_group_label = QLabel("Группа крови")
+        blood_rh_label = QLabel("Резус")
+        for label in (blood_group_label, blood_rh_label):
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+        blood_layout.addWidget(blood_group_label, 0, 0)
+        blood_layout.addWidget(blood_rh_label, 0, 1)
+        blood_layout.addWidget(self.blood_group_combo, 1, 0)
+        blood_layout.addWidget(self.blood_rh_combo, 1, 1)
+        blood_layout.setColumnStretch(0, 1)
+        blood_layout.setColumnStretch(1, 1)
+        surgery_team_widget = QWidget()
+        surgery_team_widget.setObjectName("OperBlockOccupySurgeryFields")
+        surgery_team_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOccupySurgeryFields {
+                background: transparent;
+                border: none;
+            }
+            QWidget#OperBlockOccupySurgeryFields QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        surgery_team_layout = QGridLayout(surgery_team_widget)
+        surgery_team_layout.setContentsMargins(0, 0, 0, 0)
+        surgery_team_layout.setHorizontalSpacing(12)
+        surgery_team_layout.setVerticalSpacing(6)
+        self.surgery_team_layout = surgery_team_layout
+        surgeon_label = QLabel("Хирург")
+        operating_nurse_label = QLabel("Опер. сестра")
+        for label in (surgeon_label, operating_nurse_label):
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+        surgery_team_layout.addWidget(surgeon_label, 0, 0)
+        surgery_team_layout.addWidget(operating_nurse_label, 0, 1)
+
+        self.operating_nurse_combo = StartAnesthesiaDialog._staff_combo(self._operating_nurse_options)
+        self._configure_occupy_team_combo(self.operating_nurse_combo)
+        self._install_occupy_combo_wheel_redirect(self.operating_nurse_combo)
+        self.add_surgeon_button = QPushButton("+ Добавить хирурга")
+        self.add_surgeon_button.setCursor(Qt.PointingHandCursor)
+        self.add_surgeon_button.setFixedHeight(32)
+        self.add_surgeon_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.add_surgeon_button.clicked.connect(lambda: self._add_surgeon_row())
+        surgery_team_layout.setColumnStretch(0, 1)
+        surgery_team_layout.setColumnStretch(1, 1)
+        surgery_team_layout.setColumnStretch(2, 0)
+        self._add_surgeon_row()
+        self.anesthesiologist_combo = StartAnesthesiaDialog._staff_combo(self._anesthesiologist_options)
+        self.anesthetist_combo = StartAnesthesiaDialog._staff_combo(self._anesthetist_options)
+        for combo in (self.anesthesiologist_combo, self.anesthetist_combo):
+            self._configure_occupy_team_combo(combo)
+            self._install_occupy_combo_wheel_redirect(combo)
+        anesthesia_team_widget = QWidget()
+        anesthesia_team_widget.setObjectName("OperBlockOccupyAnesthesiaFields")
+        anesthesia_team_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOccupyAnesthesiaFields {
+                background: transparent;
+                border: none;
+            }
+            QWidget#OperBlockOccupyAnesthesiaFields QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        anesthesia_team_layout = QGridLayout(anesthesia_team_widget)
+        anesthesia_team_layout.setContentsMargins(0, 0, 0, 0)
+        anesthesia_team_layout.setHorizontalSpacing(12)
+        anesthesia_team_layout.setVerticalSpacing(4)
+        anesthesiologist_label = QLabel("Анестезиолог")
+        anesthetist_label = QLabel("Анестезистка")
+        for label in (anesthesiologist_label, anesthetist_label):
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+        anesthesia_team_layout.addWidget(anesthesiologist_label, 0, 0)
+        anesthesia_team_layout.addWidget(anesthetist_label, 0, 1)
+        anesthesia_team_layout.addWidget(self.anesthesiologist_combo, 1, 0)
+        anesthesia_team_layout.addWidget(self.anesthetist_combo, 1, 1)
+        anesthesia_team_layout.setColumnStretch(0, 1)
+        anesthesia_team_layout.setColumnStretch(1, 1)
+        operation_form.addRow("Время поступления в оперблок:", self.admission_time_input)
+        operation_form.addRow("Название операции:", self.operation_name_input)
+        operation_form.addRow("Вид анест. пособия:", self.anesthesia_assistance_type_combo)
+        self.height_weight_row_label = self._composite_form_label(
+            "Рост / вес:",
+            "OperBlockOccupyHeightWeightRowLabel",
+        )
+        operation_form.addRow(self.height_weight_row_label, height_weight_widget)
+        operation_form.addRow("Аллергии:", self.allergies_input)
+        self.blood_row_label = self._composite_form_label(
+            "Кровь:",
+            "OperBlockOccupyBloodRowLabel",
+        )
+        operation_form.addRow(self.blood_row_label, blood_widget)
+        self.surgery_team_row_label = self._composite_form_label(
+            "Хирургия:",
+            "OperBlockOccupySurgeryRowLabel",
+            top_offset=30,
+        )
+        operation_form.addRow(self.surgery_team_row_label, surgery_team_widget)
+        self.anesthesia_team_row_label = self._composite_form_label(
+            "Анестезия:",
+            "OperBlockOccupyAnesthesiaRowLabel",
+        )
+        operation_form.addRow(self.anesthesia_team_row_label, anesthesia_team_widget)
+        page_layout.addWidget(operation)
+
+        vitals, vitals_form = self._section("4. ИСХОДНЫЕ ВИТАЛЬНЫЕ ПОКАЗАТЕЛИ")
+        self.sys_input = _line_edit()
+        self.sys_input.setPlaceholderText("Систолическое")
+        self.sys_input.setValidator(QIntValidator(0, 300, self.sys_input))
+        self.sys_input.installEventFilter(self)
+        self.dia_input = _line_edit()
+        self.dia_input.setPlaceholderText("Диастолическое")
+        self.dia_input.setValidator(QIntValidator(0, 300, self.dia_input))
+        self.pulse_input = _line_edit()
+        self.pulse_input.setPlaceholderText("ЧСС")
+        self.pulse_input.setValidator(QIntValidator(0, 300, self.pulse_input))
+        self.spo2_input = _line_edit()
+        self.spo2_input.setPlaceholderText("%")
+        self.spo2_input.setValidator(QIntValidator(0, 100, self.spo2_input))
+        ad_row = QHBoxLayout()
+        ad_row.setContentsMargins(0, 0, 0, 0)
+        ad_row.setSpacing(8)
+        slash = QLabel("/")
+        slash.setAlignment(Qt.AlignCenter)
+        slash.setStyleSheet(f"font-size: 18px; font-weight: 800; color: {TEXT_SECONDARY}; background: transparent;")
+        ad_row.addWidget(self.sys_input, 1)
+        ad_row.addWidget(slash, 0)
+        ad_row.addWidget(self.dia_input, 1)
+        vitals_form.addRow("АД:", ad_row)
+        vitals_form.addRow("ЧСС:", self.pulse_input)
+        vitals_form.addRow("SpO₂:", self.spo2_input)
+        page_layout.addWidget(vitals)
+        page_layout.addStretch(1)
+
+        self.form_scroll.setWidget(self.form_page)
+        content_layout.addWidget(self.form_scroll, 1)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 10, 0, 0)
+        self.cancel_button = QPushButton("ОТМЕНИТЬ")
+        self.cancel_button.setCursor(Qt.PointingHandCursor)
+        self.cancel_button.setFixedHeight(45)
+        self.cancel_button.setAutoDefault(False)
+        self.cancel_button.setDefault(False)
+        self.cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button = QPushButton(self._save_button_text)
+        self.save_button.setCursor(Qt.PointingHandCursor)
+        self.save_button.setFixedHeight(45)
+        self.save_button.setAutoDefault(True)
+        self.save_button.setDefault(True)
+        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        buttons.addWidget(self.cancel_button, 1)
+        buttons.addWidget(self.save_button, 2)
+        content_layout.addLayout(buttons)
+        main.addWidget(content, 1)
+
+    @staticmethod
+    def _configure_occupy_team_combo(combo: QComboBox) -> None:
+        combo.setMinimumWidth(0)
+        combo.setMinimumContentsLength(18)
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def _install_occupy_combo_wheel_redirect(self, combo: QComboBox) -> None:
+        combo.installEventFilter(self)
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.installEventFilter(self)
+
+    def _add_surgeon_row(self, text: str = "") -> QComboBox:
+        combo = StartAnesthesiaDialog._staff_combo(self._surgeon_options)
+        self._configure_occupy_team_combo(combo)
+        self._install_occupy_combo_wheel_redirect(combo)
+        if text:
+            combo.setEditText(text)
+        remove_button = QPushButton("Удалить")
+        remove_button.setObjectName("OperBlockOccupyRemoveSurgeonButton")
+        remove_button.setFixedHeight(32)
+        remove_button.setFixedWidth(remove_button.sizeHint().width() + 20)
+        remove_button.setCursor(Qt.PointingHandCursor)
+        remove_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        row = QWidget()
+        row.setObjectName("OperBlockOccupySurgeonRow")
+        row.setStyleSheet("QWidget#OperBlockOccupySurgeonRow { background: transparent; border: none; }")
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(0)
+        row_layout.addWidget(combo)
+        row._remove_button = remove_button
+        remove_button.clicked.connect(lambda _=False, widget=row: self._remove_surgeon_row(widget))
+        self._surgeon_rows.append((row, combo))
+        self._refresh_surgery_team_layout()
+        return combo
+
+    def _remove_surgeon_row(self, row: QWidget) -> None:
+        for index, (widget, combo) in enumerate(list(self._surgeon_rows)):
+            if widget is not row:
+                continue
+            self._surgeon_rows.pop(index)
+            button = getattr(widget, "_remove_button", None)
+            self.surgery_team_layout.removeWidget(widget)
+            if button is not None:
+                self.surgery_team_layout.removeWidget(button)
+                button.deleteLater()
+            widget.deleteLater()
+            break
+        if not self._surgeon_rows:
+            self._add_surgeon_row()
+            return
+        self._refresh_surgery_team_layout()
+
+    def _refresh_surgeon_remove_buttons(self) -> None:
+        single = len(self._surgeon_rows) <= 1
+        for widget, _combo in self._surgeon_rows:
+            button = getattr(widget, "_remove_button", None)
+            if button is not None:
+                button.setVisible(not single)
+
+    def _refresh_surgery_team_layout(self) -> None:
+        for index, (widget, _combo) in enumerate(self._surgeon_rows):
+            row_index = index + 1
+            button = getattr(widget, "_remove_button", None)
+            self.surgery_team_layout.addWidget(widget, row_index, 0)
+            if button is not None:
+                self.surgery_team_layout.addWidget(button, row_index, 2, Qt.AlignTop)
+        self.surgery_team_layout.addWidget(self.operating_nurse_combo, 1, 1, Qt.AlignTop)
+        self.surgery_team_layout.addWidget(self.add_surgeon_button, len(self._surgeon_rows) + 1, 0, 1, 2)
+        self._refresh_surgeon_remove_buttons()
+
+    @staticmethod
+    def _fixed_option_combo(options: tuple[str, ...]) -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(False)
+        combo.setFixedHeight(34)
+        combo.setStyleSheet(_operblock_combo_box_style())
+        combo.addItem("Не указано", "")
+        for option in options:
+            combo.addItem(option, option)
+        combo.setCurrentIndex(0)
+        return combo
+
+    @staticmethod
+    def _profile_department_combo() -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setFixedHeight(34)
+        combo.setMinimumWidth(430)
+        combo.setMinimumContentsLength(38)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.setStyleSheet(_operblock_combo_box_style())
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Не указано")
+        for department in PROFILE_DEPARTMENTS:
+            combo.addItem(department)
+        combo.setCurrentIndex(-1)
+        return combo
+
+    @staticmethod
+    def _set_combo_text(combo: QComboBox, value: str) -> None:
+        text = normalize_operblock_team_text(value)
+        if combo.isEditable():
+            combo.setEditText(text)
+            return
+        for index in range(combo.count()):
+            if combo.itemText(index).casefold() == text.casefold():
+                combo.setCurrentIndex(index)
+                return
+
+    @staticmethod
+    def _set_fixed_combo_text(combo: QComboBox, value: str, normalizer) -> None:
+        try:
+            text = normalizer(value)
+        except ValueError:
+            text = ""
+        for index in range(combo.count()):
+            if str(combo.itemData(index) or "") == text:
+                combo.setCurrentIndex(index)
+                return
+        combo.setCurrentIndex(0)
+
+    def _occupy_combo_wheel_widgets(self) -> list[QComboBox]:
+        combos: list[QComboBox] = []
+        for attr in (
+            "gender_combo",
+            "department_profile_combo",
+            "anesthesia_assistance_type_combo",
+            "blood_group_combo",
+            "blood_rh_combo",
+            "operating_nurse_combo",
+            "anesthesiologist_combo",
+            "anesthetist_combo",
+        ):
+            combo = getattr(self, attr, None)
+            if isinstance(combo, QComboBox):
+                combos.append(combo)
+        combos.extend(combo for _widget, combo in getattr(self, "_surgeon_rows", []))
+        unique: list[QComboBox] = []
+        seen: set[int] = set()
+        for combo in combos:
+            key = id(combo)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(combo)
+        return unique
+
+    def _is_occupy_combo_wheel_widget(self, watched) -> bool:
+        for combo in self._occupy_combo_wheel_widgets():
+            if watched is combo:
+                return True
+            line_edit = combo.lineEdit()
+            if line_edit is not None and watched is line_edit:
+                return True
+        return False
+
+    def _scroll_occupy_form_wheel(self, event) -> bool:
+        scroll = getattr(self, "form_scroll", None)
+        if scroll is None:
+            event.accept()
+            return True
+        pixel_delta = event.pixelDelta().y() if hasattr(event, "pixelDelta") else 0
+        angle_delta = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+        delta = pixel_delta or angle_delta
+        if delta:
+            bar = scroll.verticalScrollBar()
+            if bar.maximum() > bar.minimum():
+                if pixel_delta:
+                    shift = -pixel_delta
+                else:
+                    steps = max(1, int(round(abs(angle_delta) / 120)))
+                    shift = (-1 if angle_delta > 0 else 1) * bar.singleStep() * steps
+                next_value = max(bar.minimum(), min(bar.maximum(), bar.value() + shift))
+                bar.setValue(next_value)
+        event.accept()
+        return True
+
+    def _replace_surgeons(self, surgeons: list[str]) -> None:
+        for widget, _combo in list(self._surgeon_rows):
+            button = getattr(widget, "_remove_button", None)
+            self.surgery_team_layout.removeWidget(widget)
+            if button is not None:
+                self.surgery_team_layout.removeWidget(button)
+                button.deleteLater()
+            widget.deleteLater()
+        self._surgeon_rows.clear()
+        for surgeon in surgeons or [""]:
+            self._add_surgeon_row(surgeon)
+
+    @staticmethod
+    def _expanded_birth_year(year_text: str) -> int | None:
+        text = "".join(ch for ch in str(year_text or "") if ch.isdigit())
+        if not text:
+            return None
+        if len(text) <= 2:
+            year_num = int(text)
+            pivot = datetime.now().year % 100
+            return (1900 if year_num > pivot else 2000) + year_num
+        if len(text) == 4:
+            return int(text)
+        return None
+
+    @classmethod
+    def _date_from_birth_parts(cls, day_text: str, month_text: str, year_text: str) -> date | None:
+        year = cls._expanded_birth_year(year_text)
+        if year is None:
+            return None
+        try:
+            return date(year, int(day_text), int(month_text))
+        except ValueError:
+            return None
+
+    @classmethod
+    def _parse_birth_date_text(cls, text: str) -> date | None:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return None
+
+        direct = parse_date_value(raw_text)
+        if direct is not None:
+            return direct
+
+        normalized = normalize_operblock_birth_date_text(raw_text, final=True)
+        parsed = parse_date_value(normalized)
+        if parsed is not None:
+            return parsed
+
+        groups = re.findall(r"\d+", raw_text)
+        candidates: list[tuple[str, str, str]] = []
+        if len(groups) == 3:
+            candidates.append((groups[0], groups[1], groups[2]))
+
+        digits = "".join(ch for ch in raw_text if ch.isdigit())
+        if len(digits) == 8:
+            candidates.append((digits[:2], digits[2:4], digits[4:]))
+        elif len(digits) == 7:
+            candidates.extend(
+                (
+                    (digits[:2], digits[2:3], digits[3:]),
+                    (digits[:1], digits[1:3], digits[3:]),
+                )
+            )
+        elif len(digits) == 6:
+            candidates.append((digits[:2], digits[2:4], digits[4:]))
+        elif len(digits) == 5:
+            candidates.extend(
+                (
+                    (digits[:2], digits[2:3], digits[3:]),
+                    (digits[:1], digits[1:3], digits[3:]),
+                )
+            )
+
+        for day_text, month_text, year_text in candidates:
+            candidate = cls._date_from_birth_parts(day_text, month_text, year_text)
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _on_birth_date_text_edited(self, text: str):
+        normalized = normalize_operblock_birth_date_text(text, final=False)
+        if normalized == text:
+            return
+        old_cursor_pos = self.birth_date_input.cursorPosition()
+        if old_cursor_pos >= len(text):
+            cursor_pos = len(normalized)
+        else:
+            cursor_pos = min(old_cursor_pos + max(0, len(normalized) - len(text)), len(normalized))
+        self.birth_date_input.blockSignals(True)
+        self.birth_date_input.setText(normalized)
+        self.birth_date_input.setCursorPosition(cursor_pos)
+        self.birth_date_input.blockSignals(False)
+
+    def _normalize_birth_date_field(self):
+        text = self.birth_date_input.text().strip()
+        if not text:
+            return
+        birth_date = self._parse_birth_date_text(text)
+        if birth_date is None:
+            normalized = normalize_operblock_birth_date_text(text, final=True)
+            if normalized != text:
+                self.birth_date_input.setText(normalized)
+            return
+        self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
+
+    def set_data(self, data: dict) -> None:
+        payload = data or {}
+        self.handoff_id = (
+            int(payload.get("handoff_id"))
+            if payload.get("handoff_id") not in (None, "")
+            else None
+        )
+        self.source_rao_admission_id = (
+            int(payload.get("source_rao_admission_id"))
+            if payload.get("source_rao_admission_id") not in (None, "")
+            else None
+        )
+        self.history_input.setText(str(payload.get("history_number") or ""))
+        self.full_name_input.setText(str(payload.get("full_name") or ""))
+        self._set_combo_text(self.gender_combo, str(payload.get("gender") or ""))
+        birth_date = parse_date_value(payload.get("birth_date"))
+        if birth_date is not None:
+            self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
+        else:
+            self.birth_date_input.clear()
+        code = normalize_operblock_mkb_code(str(payload.get("diagnosis_code") or ""))
+        self.diagnosis_code_input.setText(code)
+        diagnosis_text = str(payload.get("diagnosis_text") or "").strip()
+        if code:
+            self._validate_mkb_code()
+        if diagnosis_text and not self.diagnosis_text_input.text().strip():
+            self._set_manual_diagnosis_enabled(True, text=diagnosis_text)
+        elif diagnosis_text and not self.diagnosis_text_input.isReadOnly():
+            self.diagnosis_text_input.setText(diagnosis_text)
+        self.operation_name_input.setText(str(payload.get("operation_name") or ""))
+        started_at = _parse_datetime_value(payload.get("started_at"))
+        self.admission_time_input.set_bounds(
+            payload.get("started_at_min"),
+            payload.get("started_at_max"),
+        )
+        if started_at is not None:
+            self.admission_time_input.set_datetime(started_at)
+        can_edit_started_at = bool(payload.get("can_edit_started_at", True))
+        self.admission_time_input.set_locked(
+            not can_edit_started_at,
+            str(payload.get("started_at_edit_lock_reason") or OPERBLOCK_STARTED_AT_LOCK_TOOLTIP),
+        )
+        self.anesthesia_assistance_type_combo.setEditText(
+            normalize_operblock_anesthesia_type_label(payload.get("anesthesia_assistance_type"))
+        )
+        self.height_input.setText("" if payload.get("height_cm") in (None, "") else str(payload.get("height_cm")))
+        weight = payload.get("weight_kg")
+        self.weight_input.setText("" if weight in (None, "") else str(weight).replace(".", ","))
+        self.allergies_input.setText(str(payload.get("allergies") or ""))
+        self._set_fixed_combo_text(
+            self.blood_group_combo,
+            str(payload.get("blood_group") or ""),
+            normalize_operblock_blood_group,
+        )
+        self._set_fixed_combo_text(
+            self.blood_rh_combo,
+            str(payload.get("blood_rh") or ""),
+            normalize_operblock_blood_rh,
+        )
+        self._replace_surgeons([normalize_operblock_team_text(item) for item in payload.get("surgeons") or []])
+        self._set_combo_text(self.operating_nurse_combo, str(payload.get("operating_nurse") or ""))
+        self._set_combo_text(self.anesthesiologist_combo, str(payload.get("anesthesiologist") or ""))
+        self._set_combo_text(self.anesthetist_combo, str(payload.get("anesthetist") or ""))
+        department_profile = normalize_profile_department(
+            payload.get("department_profile"),
+            clear_legacy_operblock=True,
+        )
+        self.department_profile_combo.setEditText(department_profile)
+        for edit, key in (
+            (self.sys_input, "preop_sys"),
+            (self.dia_input, "preop_dia"),
+            (self.pulse_input, "preop_pulse"),
+            (self.spo2_input, "preop_spo2"),
+        ):
+            value = payload.get(key)
+            edit.setText("" if value in (None, "") else str(value))
+    def _on_mkb_code_text_edited(self, text: str):
+        normalized = normalize_operblock_mkb_code(text)
+        self.diagnosis_code_input.blockSignals(True)
+        self.diagnosis_code_input.setText(normalized)
+        self.diagnosis_code_input.setCursorPosition(len(normalized))
+        self.diagnosis_code_input.blockSignals(False)
+        self.diagnosis_code_input.setStyleSheet("")
+        self.diagnosis_name.setText("")
+        if not is_complete_operblock_mkb_code(normalized):
+            self._set_manual_diagnosis_enabled(False, clear=True, placeholder="Сначала введите полный код МКБ-10")
+
+    def _set_manual_diagnosis_enabled(
+        self,
+        enabled: bool,
+        *,
+        clear: bool = False,
+        text: str | None = None,
+        placeholder: str = "Введите диагноз вручную",
+    ):
+        self.diagnosis_text_input.setEnabled(True)
+        self.diagnosis_text_input.setReadOnly(not bool(enabled))
+        self.diagnosis_text_input.setStyleSheet(
+            STYLE_PATIENT_FORM_MANUAL_FIELD if enabled else STYLE_PATIENT_FORM_READONLY_FIELD
+        )
+        self.diagnosis_text_input.setPlaceholderText(placeholder)
+        if text is not None:
+            self.diagnosis_text_input.setText(text)
+        elif clear:
+            self.diagnosis_text_input.clear()
+
+    def _validate_mkb_code(self):
+        code = normalize_operblock_mkb_code(self.diagnosis_code_input.text())
+        self.diagnosis_code_input.blockSignals(True)
+        self.diagnosis_code_input.setText(code)
+        self.diagnosis_code_input.blockSignals(False)
+        if not code:
+            self.diagnosis_name.setText("")
+            self.diagnosis_code_input.setStyleSheet("")
+            self._set_manual_diagnosis_enabled(False, clear=True, placeholder="Сначала введите код МКБ-10")
+            return False
+        if not is_complete_operblock_mkb_code(code):
+            self.diagnosis_name.setText("Формат кода: X33, S82.0 или S82.01")
+            self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_INVALID_FIELD)
+            self._set_manual_diagnosis_enabled(False, clear=True, placeholder="Сначала введите полный код МКБ-10")
+            return False
+        name = self.mkb_service.get_diagnosis_by_code(code)
+        if name:
+            self.diagnosis_name.setText(name)
+            self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
+            self._set_manual_diagnosis_enabled(False, text=name, placeholder="Диагноз из МКБ-10")
+            return True
+        else:
+            self.diagnosis_name.setText("Код не найден")
+            self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_INVALID_FIELD)
+            self._set_manual_diagnosis_enabled(True, clear=self.diagnosis_text_input.isReadOnly())
+            return True
+
+    def set_saving(self, saving: bool):
+        self.form_page.setEnabled(not saving)
+        self.cancel_button.setEnabled(not saving)
+        self.close_button.setEnabled(not saving)
+        self.save_button.setEnabled(not saving)
+        self.save_button.setText("СОХРАНЕНИЕ..." if saving else self._save_button_text)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and self._is_occupy_combo_wheel_widget(watched):
+            return self._scroll_occupy_form_wheel(event)
+        if watched is getattr(self, "sys_input", None) and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Slash:
+                self.dia_input.setFocus(Qt.TabFocusReason)
+                self.dia_input.selectAll()
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if self.save_button.isEnabled():
+                self.save_button.click()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    @staticmethod
+    def _optional_int(text: str, label: str, minimum: int, maximum: int) -> int | None:
+        value = str(text or "").strip()
+        if not value:
+            return None
+        if not re.fullmatch(r"\d+", value):
+            raise ValueError(f"{label}: укажите целое число.")
+        number = int(value)
+        if number < minimum or number > maximum:
+            raise ValueError(f"{label}: допустимый диапазон {minimum}-{maximum}.")
+        return number
+
+    @staticmethod
+    def _optional_weight(text: str) -> float | None:
+        value = str(text or "").strip().replace(",", ".")
+        if not value:
+            return None
+        try:
+            number = float(Decimal(value))
+        except (InvalidOperation, ValueError):
+            raise ValueError("Вес: укажите число.") from None
+        if number < 0.5 or number > 500:
+            raise ValueError("Вес: допустимый диапазон 0.5-500.")
+        return number
+
+    def selected_surgeons(self) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for _widget, combo in self._surgeon_rows:
+            name = normalize_operblock_team_text(combo.currentText())
+            key = name.casefold()
+            if name and key not in seen:
+                seen.add(key)
+                result.append(name)
+        return result
+
+    def _birth_date_value(self) -> date:
+        text = self.birth_date_input.text().strip()
+        if not text:
+            raise ValueError("Укажите дату рождения.")
+        birth_date = self._parse_birth_date_text(text)
+        if birth_date is None:
+            raise ValueError("Укажите корректную дату рождения.")
+        min_birth_date = date(int(self.EMPTY_BIRTH_DATE.year()), int(self.EMPTY_BIRTH_DATE.month()), int(self.EMPTY_BIRTH_DATE.day()))
+        if birth_date < min_birth_date:
+            raise ValueError("Дата рождения не может быть раньше 01.01.1900.")
+        if birth_date > date.today():
+            raise ValueError("Дата рождения не может быть позже текущей даты.")
+        self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
+        return birth_date
+
+    def get_data(self) -> dict:
+        history_number = normalize_operblock_history_number(self.history_input.text())
+        full_name = self.full_name_input.text().strip()
+        if not full_name:
+            raise ValueError("ФИО пациента не заполнено.")
+        birth_date = self._birth_date_value()
+        diagnosis_code = normalize_operblock_mkb_code(self.diagnosis_code_input.text())
+        if not diagnosis_code:
+            raise ValueError("Введите код МКБ-10.")
+        if not is_complete_operblock_mkb_code(diagnosis_code):
+            raise ValueError("Код МКБ-10 должен быть в формате X33, S82.0 или S82.01.")
+        self._validate_mkb_code()
+        diagnosis_text = self.diagnosis_text_input.text().strip()
+        if not diagnosis_text:
+            raise ValueError("Диагноз не заполнен. Если код МКБ-10 не найден, заполните ручной ввод.")
+        preop_sys = self._optional_int(self.sys_input.text(), "АД систолическое", 0, 300)
+        preop_dia = self._optional_int(self.dia_input.text(), "АД диастолическое", 0, 300)
+        if (preop_sys is None) ^ (preop_dia is None):
+            raise ValueError("АД: заполните систолическое и диастолическое значения.")
+        if preop_sys is not None and preop_dia is not None and preop_dia > preop_sys:
+            raise ValueError("АД диастолическое не может быть выше систолического.")
+        preop_pulse = self._optional_int(self.pulse_input.text(), "ЧСС", 0, 300)
+        preop_spo2 = self._optional_int(self.spo2_input.text(), "SpO₂", 0, 100)
+        if any(value is not None for value in (preop_sys, preop_dia, preop_pulse, preop_spo2)) and any(
+            value is None for value in (preop_sys, preop_dia, preop_pulse, preop_spo2)
+        ):
+            raise ValueError("Исходные витальные показатели заполните полностью: АД, ЧСС и SpO₂.")
+        return {
+            "table_code": self.table_code,
+            "operation_case_id": self.operation_case_id,
+            "history_number": history_number,
+            "full_name": full_name,
+            "gender": self.gender_combo.currentText(),
+            "birth_date": birth_date,
+            "started_at": self.admission_time_input.datetime_text(),
+            "diagnosis_code": diagnosis_code or None,
+            "diagnosis_text": diagnosis_text,
+            "department_profile": normalize_profile_department(self.department_profile_combo.currentText()),
+            "operation_name": normalize_operblock_team_text(self.operation_name_input.text()),
+            "anesthesia_assistance_type": normalize_operblock_anesthesia_type_label(
+                self.anesthesia_assistance_type_combo.currentText()
+            ),
+            "height_cm": self._optional_int(self.height_input.text(), "Рост", 1, 260),
+            "weight_kg": self._optional_weight(self.weight_input.text()),
+            "allergies": normalize_operblock_team_text(self.allergies_input.text()),
+            "blood_group": normalize_operblock_blood_group(self.blood_group_combo.currentData()),
+            "blood_rh": normalize_operblock_blood_rh(self.blood_rh_combo.currentData()),
+            "surgeons": self.selected_surgeons(),
+            "operating_nurse": normalize_operblock_team_text(self.operating_nurse_combo.currentText()),
+            "anesthesiologist": normalize_operblock_team_text(self.anesthesiologist_combo.currentText()),
+            "anesthetist": normalize_operblock_team_text(self.anesthetist_combo.currentText()),
+            "preop_sys": preop_sys,
+            "preop_dia": preop_dia,
+            "preop_pulse": preop_pulse,
+            "preop_spo2": preop_spo2,
+            "handoff_id": self.handoff_id,
+            "source_rao_admission_id": self.source_rao_admission_id,
+        }
+
+
+class OperBlockMainWidget(QWidget):
+    view_back_requested = Signal()
+
+    def __init__(
+        self,
+        patient_service,
+        remcard_service,
+        operblock_service: OperBlockService | None = None,
+        parent=None,
+        *,
+        table_code: str | None = None,
+        view_only: bool = False,
+    ):
+        super().__init__(parent)
+        self.patient_service = patient_service
+        self.remcard_service = remcard_service
+        self.data_service = getattr(remcard_service, "data_service", None)
+        if operblock_service is None:
+            raise RuntimeError("OperBlockService не передан в OperBlockMainWidget.")
+        self.operblock_service = operblock_service
+        self.operblock_vitals_service = OperBlockVitalsServiceAdapter(remcard_service, operblock_service)
+        self._table_filter_code = _normalize_operblock_table_filter(table_code)
+        self._table_filter_name = _operblock_table_display_name(self._table_filter_code)
+        self._view_only_mode = bool(view_only)
+        self._is_closing = False
+        self._board_hash = ""
+        self._board_refresh_worker = None
+        self._board_refresh_pending: dict[str, Any] | None = None
+        self._protocol_hash = ""
+        self._protocol_refresh_worker = None
+        self._protocol_refresh_pending: dict[str, Any] | None = None
+        self._start_anesthesia_prep_worker = None
+        self._start_anesthesia_prep_generation = 0
+        self._start_anesthesia_prep_pending = False
+        self._protocol_tab_ready_pending = False
+        self._chart_module_preload_worker = None
+        self._chart_module_preloaded = False
+        self._chart_module_preload_failed = False
+        self._current_operation_case_id: int | None = None
+        self._current_admission_id: int | None = None
+        self._current_operation_start: datetime | None = None
+        self._current_operation_end: datetime | None = None
+        self._current_case_active = False
+        self._current_operation_has_vitals = False
+        self._archive_return_operation_case_id: int | None = None
+        self._current_stage_state: dict = {}
+        self._current_anesthesia_start: datetime | None = None
+        self._current_anesthesia_end: datetime | None = None
+        self._current_surgery_start: datetime | None = None
+        self._current_surgery_end: datetime | None = None
+        self._current_anesthesia_active = False
+        self._current_surgery_active = False
+        self._current_anesthesia_assistance_type = ""
+        self._current_operation_name = ""
+        self._current_protocol_display = ""
+        self._current_protocol_date = datetime.now()
+        self._vitals_context_key: tuple[int, int, str] | None = None
+        self._refresh_generation = 0
+        self._write_pending = False
+        self._opblock_idle_last_activity_monotonic = time.monotonic()
+        self._opblock_idle_period_reported = False
+        self._active_opblock_action: dict[str, Any] | None = None
+        self._last_opblock_action: dict[str, Any] | None = None
+        self._active_foreground_resume_lease: dict[str, Any] | None = None
+        self._table_cards: dict[str, QFrame] = {}
+        self._board_card_hashes: dict[str, str] = {}
+        self._board_card_states: dict[str, dict] = {}
+        self._board_photo_thumbnail_cache: dict[tuple, QPixmap] = {}
+        self._quick_order_templates: list[dict] = []
+        self._medication_presets: list[dict] = []
+        self._quick_orders_data_loaded = False
+        self._preset_search_text = ""
+        self._preset_kind_filter = "bolus"
+        self._quick_order_filter_buttons: list[dict] = []
+        self._quick_order_filter_keys: list[str] = []
+        self._quick_order_drug_group_label_by_key: dict[str, str] = {}
+        self._quick_order_search_haystack_by_preset_id: dict[str, str] = {}
+        self._orders_filter_kind = "all"
+        self._orders_hide_deleted = True
+        self._quick_order_buttons: list[QPushButton] = []
+        self._quick_order_card_widgets: dict[str, QWidget] = {}
+        self._quick_order_card_signatures: dict[str, str] = {}
+        self._quick_order_visible_preset_ids: list[str] = []
+        self._quick_order_drag_source_id: str | None = None
+        self._quick_order_drag_placeholder: QWidget | None = None
+        self._quick_order_drag_order: list[str] = []
+        self._quick_order_drag_committed = False
+        self._pending_quick_orders_scroll_state: dict | None = None
+        self._order_action_buttons: list[QPushButton] = []
+        self._infusion_action_buttons: list[QPushButton] = []
+        self._orders_force_top_on_next_apply = False
+        self._current_orders_rows: list[dict] = []
+        self._current_timeline_snapshot: dict | None = None
+        self._current_chart_vitals: list[Any] = []
+        self._pending_orders_snapshot: dict | None = None
+        self._route_only_write_suppressions: dict[tuple[int, int], float] = {}
+        self._local_write_refresh_suppressions: dict[str, dict] = {}
+        self._collapsed_order_group_keys: set[str] = set()
+        self._orders_render_signature = ""
+        self._orders_source_signature = ""
+        self._rendered_medication_group_widgets: dict[str, QWidget] = {}
+        self._rendered_medication_group_signatures: dict[str, str] = {}
+        self._rendered_medication_group_order: list[str] = []
+        self._rendered_order_detail_labels: dict[int, ElidedTooltipLabel] = {}
+        self._rendered_medication_group_total_labels: dict[str, ElidedTooltipLabel] = {}
+        self._active_infusions_render_signature = ""
+        self._rendered_active_infusion_widgets: dict[str, QWidget] = {}
+        self._rendered_active_infusion_signatures: dict[str, str] = {}
+        self._rendered_active_infusion_order: list[str] = []
+        self._active_infusions_empty_widget: QWidget | None = None
+        self._orders_empty_widget: QWidget | None = None
+        self._last_infusion_elapsed_refresh_minute = ""
+        self._archive_cases: list[dict] = []
+        self._archive_page_size = 50
+        self._archive_current_page = 1
+        self._archive_total_pages = 1
+        self._archive_total_records = 0
+        self._external_archive_viewer = None
+        self._external_archive_db_manager = None
+        self._role_launcher_mode = False
+        self.protocol_page: QWidget | None = None
+        self.archive_page: QWidget | None = None
+        self.settings_page: QWidget | None = None
+        self._vitals_tab_built = False
+        self._orders_tab_built = False
+        self._settings_return_page = "board"
+        self._settings_return_operation_case_id: int | None = None
+        self.content_stack: QStackedWidget | None = None
+        self.vitals_chart: OperBlockChartWidget | None = None
+        self.vitals_input: VitalsWidget | None = None
+        self._creating_lazy_protocol_page = False
+        self._creating_lazy_archive_page = False
+        self._board_refresh_seq = 0
+        self._board_refresh_count_before_ready = 0
+        self._current_board_apply_metrics: dict | None = None
+        self._operation_report_pdf_worker = None
+        self._operation_report_pdf_buttons: list[tuple[Any, str, bool]] = []
+        init_ui_started = operblock_startup_metrics.timer_start()
+        try:
+            self._init_ui()
+        finally:
+            operblock_startup_metrics.record_since("operblock_init_ui_ms", init_ui_started, source="operblock_widget")
+        self._protocol_clock_timer = QTimer(self)
+        self._protocol_clock_timer.timeout.connect(self._update_protocol_current_time_label)
+        self._protocol_clock_timer.start(1000)
+        self._update_protocol_current_time_label()
+        self._connect_updates()
+
+    def open_archive_protocol(self, operation_case_id: int):
+        self._open_protocol(int(operation_case_id))
+
+    def is_view_only_mode(self) -> bool:
+        return bool(getattr(self, "_view_only_mode", False))
+
+    def _show_operblock_loading(
+        self,
+        message: str | None,
+        *,
+        key: str,
+        auto_hide_ms: int = 20000,
+        process_events: bool = True,
+    ) -> str | None:
+        if not message:
+            return None
+        return show_app_loading(
+            self,
+            message,
+            key=f"operblock-{key}:{id(self)}",
+            auto_hide_ms=auto_hide_ms,
+            process_events=process_events,
+        )
+
+    def _hide_operblock_loading(self, loading_key: str | None, *, delay_ms: int = 350) -> None:
+        if loading_key:
+            hide_app_loading(self, loading_key, delay_ms=delay_ms)
+
+    def _pump_operblock_ui_events(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def _apply_view_only_chrome_state(self):
+        if not self.is_view_only_mode():
+            return
+        panel = getattr(self, "sector_8_panel", None)
+        if panel is None:
+            return
+        for button_name in ("btn_archive", "btn_settings"):
+            button = getattr(panel, button_name, None)
+            if button is not None:
+                button.setVisible(False)
+
+    def _init_ui(self):
+        self.setStyleSheet(f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 2, 0, 0)
+        root.setSpacing(0)
+
+        self.sector_8 = Sector8()
+        self.sector_8.setFixedHeight(38)
+        self.sector_8_panel = OperBlockSector8Panel()
+        self.sector_8_panel.btn_archive.clicked.connect(self._show_operblock_archive)
+        self.sector_8_panel.btn_refresh.clicked.connect(lambda: self.auto_refresh(force=True))
+        self.sector_8_panel.btn_user_report.clicked.connect(self._open_user_report_dialog)
+        self.sector_8_panel.btn_user_reports.clicked.connect(self._open_user_reports_dialog)
+        self.sector_8_panel.btn_settings.clicked.connect(self._open_unified_settings)
+        self.sector_8_panel.btn_back.clicked.connect(self.on_back_clicked)
+        self.sector_8_panel.btn_exit.clicked.connect(lambda: self.window().close())
+        self._apply_view_only_chrome_state()
+        self.sector_8.set_content(self.sector_8_panel)
+        root.addWidget(self.sector_8)
+
+        self.stack = QStackedWidget()
+        self.board_page = self._build_board_page()
+        self.stack.addWidget(self.board_page)
+        root.addWidget(self.stack, 1)
+        self._set_protocol_chrome(False)
+
+    def _open_user_report_dialog(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportDialog
+
+        dialog = UserReportDialog(role="operblock", parent=self)
+        dialog.submitted.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def _open_user_reports_dialog(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportsInboxDialog
+
+        dialog = UserReportsInboxDialog(role="operblock", parent=self)
+        dialog.reports_changed.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def _refresh_user_reports_count(self):
+        panel = getattr(self, "sector_8_panel", None)
+        method = getattr(panel, "refresh_user_reports_count", None)
+        if callable(method):
+            method()
+
+    def _visible_operblock_tables(self) -> list[dict]:
+        if not self._table_filter_code:
+            return [dict(table) for table in OPERBLOCK_TABLES]
+        return [dict(table) for table in OPERBLOCK_TABLES if str(table.get("code") or "") == self._table_filter_code]
+
+    def _filter_board_snapshot(self, snapshot: dict) -> dict:
+        if not self._table_filter_code:
+            return snapshot
+        filtered = dict(snapshot or {})
+        filtered["tables"] = [
+            dict(table or {})
+            for table in list((snapshot or {}).get("tables") or [])
+            if str((table or {}).get("code") or "") == self._table_filter_code
+        ]
+        filtered["table_filter_code"] = self._table_filter_code
+        filtered["content_hash"] = _stable_ui_hash(filtered)
+        return filtered
+
+    def _filter_archive_cases_by_table(self, cases: list[dict]) -> list[dict]:
+        if not self._table_filter_code:
+            return [dict(item or {}) for item in cases]
+        return [
+            dict(item or {})
+            for item in cases
+            if str((item or {}).get("table_code") or "").strip().lower() == self._table_filter_code
+        ]
+
+    def _ensure_protocol_page_created(self) -> bool:
+        if self.protocol_page is not None:
+            return True
+        metric_started = operblock_startup_metrics.timer_start()
+        self._creating_lazy_protocol_page = True
+        try:
+            self.protocol_page = self._build_protocol_page()
+            self.stack.addWidget(self.protocol_page)
+            self._update_protocol_current_time_label()
+            self._apply_protocol_controls_state()
+            return True
+        finally:
+            self._creating_lazy_protocol_page = False
+            operblock_startup_metrics.record_since(
+                "protocol_page_lazy_created_ms",
+                metric_started,
+                source="operblock_widget",
+            )
+
+    def _ensure_archive_page_created(self) -> bool:
+        if self.archive_page is not None:
+            return True
+        metric_started = operblock_startup_metrics.timer_start()
+        self._creating_lazy_archive_page = True
+        try:
+            self.archive_page = self._build_archive_page()
+            self.stack.addWidget(self.archive_page)
+            return True
+        finally:
+            self._creating_lazy_archive_page = False
+            operblock_startup_metrics.record_since(
+                "archive_page_lazy_created_ms",
+                metric_started,
+                source="operblock_widget",
+            )
+
+    def _ensure_settings_page_created(self) -> bool:
+        if self.settings_page is not None:
+            return True
+        try:
+            from rem_card.ui.admin_view.admin_main_widget import AdminMainWidget
+
+            self.settings_page = AdminMainWidget(service=self.remcard_service, role="doctor", parent=self.stack)
+            self.stack.addWidget(self.settings_page)
+            return True
+        except Exception as exc:
+            self.settings_page = None
+            CustomMessageBox.warning(self, "Настройки", f"Не удалось открыть настройки: {exc}")
+            return False
+
+    def _build_board_page(self) -> QWidget:
+        metric_started = operblock_startup_metrics.timer_start()
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(3, 5, 3, 3)
+        layout.setSpacing(6)
+
+        self.cards_layout = QHBoxLayout()
+        self.cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.cards_layout.setSpacing(8)
+        for table in self._visible_operblock_tables():
+            table_code = str(table["code"])
+            card = self._make_empty_table_card(table_code, table["display_name"])
+            self._table_cards[table_code] = card
+            table_payload = self._empty_board_table_payload(table)
+            self._board_card_hashes[table_code] = self._board_table_content_hash(table_payload)
+            self._board_card_states[table_code] = {
+                "kind": "empty",
+                "content_hash": self._board_card_hashes[table_code],
+                "has_photo": True,
+            }
+            self.cards_layout.addWidget(card, 1)
+        layout.addLayout(self.cards_layout, 1)
+        operblock_startup_metrics.record_since("build_board_page_ms", metric_started, source="operblock_widget")
+        return page
+
+    def _build_archive_page(self) -> QWidget:
+        metric_started = operblock_startup_metrics.timer_start()
+        page = QWidget()
+        page.setStyleSheet(f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        archive_title = (
+            f"Архив пациентов: {self._table_filter_name}"
+            if self._table_filter_name
+            else "Архив пациентов операционной"
+        )
+        title = QLabel(archive_title)
+        title.setStyleSheet(f"font-size: 18px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
+        self.archive_search_input = QLineEdit()
+        self.archive_search_input.setPlaceholderText("ФИО, ИБ, диагноз")
+        self.archive_search_input.setMinimumHeight(34)
+        self.archive_search_input.textChanged.connect(
+            lambda _text: self.refresh_operblock_archive(force=True, page=1)
+        )
+        self.archive_refresh_button = QPushButton("Обновить")
+        self.archive_refresh_button.setMinimumHeight(34)
+        self.archive_refresh_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.archive_refresh_button.clicked.connect(
+            lambda: self.refresh_operblock_archive(
+                force=True,
+                loading_message="Обновление архива оперблока...",
+            )
+        )
+        header.addWidget(title, 0)
+        header.addWidget(self.archive_search_input, 1)
+        header.addWidget(self.archive_refresh_button, 0)
+        layout.addLayout(header)
+
+        self.archive_table = QTableWidget()
+        self.archive_table.setColumnCount(7)
+        self.archive_table.setHorizontalHeaderLabels(["Стол", "ФИО", "ИБ №", "Диагноз", "Поступил", "Переведён", "Статус"])
+        self.archive_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.archive_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.archive_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.archive_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.archive_table.itemSelectionChanged.connect(self._update_operblock_archive_buttons)
+        self.archive_table.itemDoubleClicked.connect(lambda _item: self._open_selected_archive_case())
+        layout.addWidget(self.archive_table, 1)
+
+        pagination = QHBoxLayout()
+        pagination.setContentsMargins(0, 0, 0, 0)
+        pagination.setSpacing(6)
+        self.archive_prev_page_button = QPushButton("◀")
+        self.archive_prev_page_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.archive_prev_page_button.clicked.connect(lambda: self._set_operblock_archive_page(self._archive_current_page - 1))
+        pagination.addWidget(self.archive_prev_page_button)
+
+        self.archive_page_buttons_layout = QHBoxLayout()
+        self.archive_page_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.archive_page_buttons_layout.setSpacing(4)
+        pagination.addLayout(self.archive_page_buttons_layout)
+
+        self.archive_next_page_button = QPushButton("▶")
+        self.archive_next_page_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.archive_next_page_button.clicked.connect(lambda: self._set_operblock_archive_page(self._archive_current_page + 1))
+        pagination.addWidget(self.archive_next_page_button)
+
+        self.archive_page_info_label = QLabel("Страница 1 из 1")
+        self.archive_page_info_label.setStyleSheet(f"border: none; color: {TEXT_SECONDARY}; font-weight: 600;")
+        pagination.addWidget(self.archive_page_info_label)
+        pagination.addStretch(1)
+
+        self.archive_page_jump_input = QLineEdit()
+        self.archive_page_jump_input.setPlaceholderText("№")
+        self.archive_page_jump_input.setMaximumWidth(52)
+        self.archive_page_jump_input.returnPressed.connect(self._jump_operblock_archive_page_from_input)
+        pagination.addWidget(self.archive_page_jump_input)
+
+        self.archive_page_jump_button = QPushButton("Перейти")
+        self.archive_page_jump_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.archive_page_jump_button.clicked.connect(self._jump_operblock_archive_page_from_input)
+        pagination.addWidget(self.archive_page_jump_button)
+        layout.addLayout(pagination)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        self.archive_open_button = QPushButton("Открыть карту")
+        self.archive_restore_button = QPushButton("Вернуть на стол")
+        self.archive_delete_button = QPushButton("Удалить анест. карту")
+        self.archive_delete_all_button = QPushButton("Удалить всех")
+        for button in (self.archive_open_button, self.archive_restore_button, self.archive_delete_button, self.archive_delete_all_button):
+            button.setMinimumHeight(36)
+            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+            button.setEnabled(False)
+        self.archive_delete_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.archive_delete_all_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.archive_open_button.clicked.connect(self._open_selected_archive_case)
+        self.archive_restore_button.clicked.connect(self._restore_selected_archive_case)
+        self.archive_delete_button.clicked.connect(self._delete_selected_archive_case)
+        self.archive_delete_all_button.clicked.connect(self._delete_all_archive_cases)
+        actions.addWidget(self.archive_open_button)
+        actions.addWidget(self.archive_restore_button)
+        actions.addWidget(self.archive_delete_button)
+        actions.addWidget(self.archive_delete_all_button)
+        layout.addLayout(actions)
+        operblock_startup_metrics.record_since("build_archive_page_ms", metric_started, source="operblock_widget")
+        if getattr(self, "_creating_lazy_archive_page", False):
+            operblock_startup_metrics.record_since(
+                "archive_page_lazy_build_ms",
+                metric_started,
+                source="operblock_widget",
+            )
+        return page
+
+    def _build_protocol_page(self) -> QWidget:
+        metric_started = operblock_startup_metrics.timer_start()
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(3, 5, 3, 3)
+        layout.setSpacing(0)
+
+        layout.addWidget(self._build_protocol_left_column(), 0)
+
+        right_column = QWidget()
+        right_column.setStyleSheet("background: transparent;")
+        right_layout = QVBoxLayout(right_column)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+
+        self.header_frame = self._build_patient_header_panel()
+        right_layout.addWidget(self.header_frame, 0)
+
+        self.protocol_title_frame = self._build_protocol_title_frame()
+        right_layout.addWidget(self.protocol_title_frame, 0)
+
+        self.tab_bar = self._build_protocol_tab_bar()
+        right_layout.addWidget(self.tab_bar, 0)
+
+        self.content_stack = QStackedWidget()
+        self._vitals_tab_built = False
+        self._orders_tab_built = False
+        self.content_stack.addWidget(self._make_protocol_tab_placeholder("Загрузка графика..."))
+        self.content_stack.addWidget(self._make_protocol_tab_placeholder("Загрузка назначений..."))
+        right_layout.addWidget(self.content_stack, 1)
+        self._apply_protocol_tab_display_settings()
+
+        layout.addWidget(right_column, 1)
+        operblock_startup_metrics.record_since("build_protocol_page_ms", metric_started, source="operblock_widget")
+        if getattr(self, "_creating_lazy_protocol_page", False):
+            operblock_startup_metrics.record_since(
+                "protocol_page_lazy_build_ms",
+                metric_started,
+                source="operblock_widget",
+            )
+        return page
+
+    def _make_protocol_tab_placeholder(self, text: str) -> QWidget:
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"""
+            QFrame {{
+                background-color: {BG_LIGHT};
+                border-left: 1.5px solid {BORDER_COLOR};
+                border-right: 1.5px solid {BORDER_COLOR};
+                border-bottom: 1.5px solid {BORDER_COLOR};
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {TEXT_SECONDARY};
+                font-size: 14px;
+                font-weight: 600;
+            }}
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(str(text or "Загрузка..."))
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label, 1)
+        return frame
+
+    def _replace_protocol_tab_widget(self, index: int, widget: QWidget) -> None:
+        if self.content_stack is None:
+            return
+        current_index = self.content_stack.currentIndex()
+        old_widget = self.content_stack.widget(index)
+        if old_widget is widget:
+            return
+        if old_widget is not None:
+            self.content_stack.removeWidget(old_widget)
+            old_widget.deleteLater()
+        self.content_stack.insertWidget(index, widget)
+        if current_index == index:
+            self.content_stack.setCurrentIndex(index)
+
+    def _ensure_vitals_tab_created(self) -> bool:
+        if self._vitals_tab_built:
+            return True
+        if self.content_stack is None:
+            return False
+        if not self._chart_module_preloaded and not self._chart_module_preload_failed:
+            self._preload_operblock_chart_module()
+            return False
+        self._replace_protocol_tab_widget(0, self._build_vitals_tab())
+        self._vitals_tab_built = True
+        self._update_operblock_staff_legend()
+        self._apply_protocol_controls_state()
+        self._update_vitals_chart()
+        return True
+
+    def _ensure_orders_tab_created(self) -> bool:
+        if self._orders_tab_built:
+            return True
+        if self.content_stack is None:
+            return False
+        self._replace_protocol_tab_widget(1, self._build_orders_tab())
+        self._orders_tab_built = True
+        self._apply_active_infusions()
+        self._apply_orders(getattr(self, "_pending_orders_snapshot", None) or {"orders": self._current_orders_rows})
+        self._apply_protocol_controls_state()
+        QTimer.singleShot(0, self._refresh_quick_orders)
+        return True
+
+    def _ensure_current_protocol_tab_ready(self) -> None:
+        self._protocol_tab_ready_pending = False
+        if self._is_closing or self.protocol_page is None or self.content_stack is None:
+            return
+        if self.stack.currentWidget() != self.protocol_page:
+            return
+        if self.content_stack.currentIndex() == 1:
+            self._ensure_orders_tab_created()
+        else:
+            self._ensure_vitals_tab_created()
+
+    def _schedule_current_protocol_tab_ready(self, delay_ms: int = 0) -> None:
+        if self._protocol_tab_ready_pending:
+            return
+        self._protocol_tab_ready_pending = True
+        QTimer.singleShot(max(0, int(delay_ms or 0)), self._ensure_current_protocol_tab_ready)
+
+    def _preload_operblock_chart_module(self) -> None:
+        if self._chart_module_preloaded or self._chart_module_preload_failed:
+            return
+        worker = getattr(self, "_chart_module_preload_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+
+        def import_chart_module():
+            import importlib
+
+            return importlib.import_module("rem_card.ui.operblock_view.operblock_chart_widget")
+
+        worker = AsyncCallThread(import_chart_module, parent=self)
+        self._chart_module_preload_worker = worker
+        preload_started = operblock_startup_metrics.timer_start()
+
+        def on_preload_ready(_module):
+            self._chart_module_preloaded = True
+            if getattr(self, "_chart_module_preload_worker", None) is worker:
+                self._chart_module_preload_worker = None
+            operblock_startup_metrics.record_since(
+                "operblock_chart_background_import_ms",
+                preload_started,
+                source="operblock_widget",
+            )
+            if (
+                self.protocol_page is not None
+                and self.stack.currentWidget() == self.protocol_page
+                and self.content_stack is not None
+                and self.content_stack.currentIndex() == 0
+            ):
+                self._schedule_current_protocol_tab_ready()
+
+        def on_preload_failed(exc):
+            self._chart_module_preload_failed = True
+            if getattr(self, "_chart_module_preload_worker", None) is worker:
+                self._chart_module_preload_worker = None
+            logger.warning("operblock chart background import failed: %s", exc, exc_info=True)
+            if (
+                self.protocol_page is not None
+                and self.stack.currentWidget() == self.protocol_page
+                and self.content_stack is not None
+                and self.content_stack.currentIndex() == 0
+            ):
+                self._schedule_current_protocol_tab_ready()
+
+        worker.succeeded.connect(on_preload_ready)
+        worker.failed.connect(on_preload_failed)
+        worker.start()
+
+    def _build_protocol_left_column(self) -> QWidget:
+        column = QWidget()
+        column.setFixedWidth(250)
+        column.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._build_protocol_action_sector(), 1)
+        layout.addWidget(self._build_vitals_input_sector(), 0)
+        return column
+
+    def _build_protocol_action_sector(self) -> QWidget:
+        self.protocol_actions_sector = Sector1a()
+        self.protocol_actions_sector.setObjectName("sector_1a_operblock")
+        self.protocol_actions_sector.setFixedWidth(250)
+
+        actions_panel = QWidget()
+        actions_panel.setStyleSheet("background: transparent; border: none;")
+        actions_layout = QVBoxLayout(actions_panel)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(5)
+
+        self.start_anesthesia_button = self._stage_action_button(" Начать пособие")
+        self.end_anesthesia_button = self._stage_action_button(" Завершить пособие", danger=True)
+        self.start_surgery_button = self._stage_action_button(" Начать операцию")
+        self.operation_stages_button = self._stage_action_button(" Этапы")
+        self.close_case_button = self._stage_action_button(" Завершить операцию", danger=True)
+        self.release_table_button = self._stage_action_button(" Освободить стол", danger=True)
+        self.report_button = QPushButton(" Отчет за операцию")
+        report_icon = os.path.join(get_icon_dir(), "allprint.png")
+        if os.path.exists(report_icon):
+            self.report_button.setIcon(QIcon(report_icon))
+        self.report_button.setMinimumHeight(32)
+        self.report_button.setCursor(Qt.PointingHandCursor)
+        self.report_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+
+        self.start_anesthesia_button.clicked.connect(self._start_anesthesia)
+        self.end_anesthesia_button.clicked.connect(self._end_anesthesia)
+        self.start_surgery_button.clicked.connect(self._start_surgery)
+        self.operation_stages_button.clicked.connect(self._open_operation_stages_dialog)
+        self.close_case_button.clicked.connect(self._end_surgery)
+        self.release_table_button.clicked.connect(self._confirm_release_current_case)
+        self.report_button.clicked.connect(lambda _=False: self._build_operation_report_pdf())
+
+        for button in (
+            self.start_anesthesia_button,
+            self.end_anesthesia_button,
+            self.start_surgery_button,
+            self.operation_stages_button,
+            self.close_case_button,
+            self.release_table_button,
+            self.report_button,
+        ):
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            actions_layout.addWidget(button)
+
+        self.protocol_actions_sector.set_content(actions_panel)
+        if self.protocol_actions_sector.layout() is not None:
+            self.protocol_actions_sector.layout().setContentsMargins(3, 0, 5, 4)
+        self.protocol_actions_sector.setMinimumHeight(270)
+        header = self.protocol_actions_sector.findChild(QLabel, "sector_header")
+        if header is not None:
+            header.setText("Управление")
+        if getattr(self.protocol_actions_sector, "content_layout", None) is not None:
+            self.protocol_actions_sector.content_layout.setAlignment(Qt.AlignTop)
+        return self.protocol_actions_sector
+
+    def _build_vitals_input_sector(self) -> QWidget:
+        self.vitals_input_sector = Sector1b()
+        self.vitals_input_sector.setObjectName("sector_1b_operblock")
+        self.vitals_input_sector.setFixedWidth(250)
+        vitals_widget_started = operblock_startup_metrics.timer_start()
+        self.vitals_input = VitalsWidget(
+            self.operblock_vitals_service,
+            None,
+            datetime.now(),
+            forced_settings=OPERBLOCK_VITAL_SETTINGS,
+            allow_inactive_status_input=True,
+            force_vital_status=True,
+            allow_future_input=True,
+            time_quick_actions=OPERBLOCK_VITAL_TIME_QUICK_ACTIONS,
+        )
+        operblock_startup_metrics.record_since(
+            "vitals_widget_create_ms",
+            vitals_widget_started,
+            source="operblock_widget",
+        )
+        self.vitals_input.vital_changed.connect(self._on_standard_vitals_changed)
+        try:
+            self.vitals_input.undo_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.vitals_input.undo_btn.clicked.connect(self._undo_last_action)
+        self.vitals_input_sector.set_content(self.vitals_input)
+        self.vitals_input_sector.content_layout.setAlignment(Qt.AlignTop)
+        return self.vitals_input_sector
+
+    def _build_patient_header_panel(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.protocol_info_header_label = QLabel("Информация")
+        self.protocol_info_header_label.setFixedHeight(28)
+        self.protocol_info_header_label.setAlignment(Qt.AlignCenter)
+        self.protocol_info_header_label.setStyleSheet(SECTOR_HEADER_STYLE)
+        layout.addWidget(self.protocol_info_header_label)
+
+        top_body = QFrame()
+        top_body.setStyleSheet(SECTOR_BODY_STYLE)
+        top_layout = QHBoxLayout(top_body)
+        top_layout.setContentsMargins(6, 2, 6, 4)
+        top_layout.setSpacing(6)
+
+        self.protocol_status_label = QLabel("-")
+        self.protocol_status_label.setFixedWidth(120)
+        self.protocol_status_label.setAlignment(Qt.AlignCenter)
+        self.protocol_status_label.setStyleSheet(
+            """
+            font-weight: bold; font-size: 14px; color: white;
+            background-color: #7f8c8d; border-radius: 4px; padding: 2px 5px;
+            """
+        )
+        self.protocol_history_label = _label("№ -", size=14, weight=700, color=COLOR_PRIMARY_DARK)
+        self.protocol_history_label.setWordWrap(False)
+        self.protocol_patient_label = FittingSingleLineLabel("-", max_pixel_size=16, min_pixel_size=16, weight=700)
+        self.protocol_age_label = _label("—", size=14)
+        self.protocol_age_label.setWordWrap(False)
+        self.protocol_diagnosis_label = ElidedTooltipLabel("Диагноз: -")
+        self.protocol_diagnosis_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.protocol_diagnosis_label.setMinimumWidth(70)
+        self.protocol_diagnosis_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.protocol_diagnosis_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 400; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        top_layout.addWidget(self.protocol_status_label, 0, Qt.AlignVCenter)
+        top_layout.addWidget(self.protocol_history_label, 0, Qt.AlignVCenter)
+        top_layout.addWidget(self.protocol_patient_label, 0, Qt.AlignVCenter)
+        top_layout.addWidget(self.protocol_age_label, 0, Qt.AlignVCenter)
+        top_layout.addWidget(self.protocol_diagnosis_label, 1, Qt.AlignVCenter)
+
+        self.badge_ad = VitalBadge("АД:", "-/-", "#ffdada", COLOR_VITAL_AD_LINE)
+        self.badge_pulse = VitalBadge("ЧСС:", "-", "#dadaff", COLOR_VITAL_PULSE)
+        self.badge_spo2 = VitalBadge("SpO₂:", "-%", "#e1f5fe", COLOR_VITAL_SPO2)
+        for badge in (self.badge_ad, self.badge_pulse, self.badge_spo2):
+            badge.update_style(14, 115)
+            badge.setFixedHeight(28)
+            badge.layout_inner.setContentsMargins(5, 0, 5, 0)
+            top_layout.addWidget(badge, 0, Qt.AlignVCenter)
+        top_body.setFixedHeight(34)
+        layout.addWidget(top_body)
+        return wrapper
+
+    def _build_protocol_title_frame(self) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 5, 0, 0)
+        layout.setSpacing(0)
+
+        body = QFrame()
+        body.setObjectName("operblockProtocolTitle")
+        body.setStyleSheet(
+            f"""
+            QFrame#operblockProtocolTitle {{
+                background-color: {BG_LIGHT};
+                border: 1.5px solid {BORDER_COLOR};
+                border-bottom: 0.5px solid {BORDER_COLOR};
+                border-top-left-radius: {CUSTOM_DIALOG_RADIUS};
+                border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(12, 0, 12, 0)
+        body_layout.setSpacing(14)
+        self.protocol_title_label = ElidedTooltipLabel(self._protocol_title_text())
+        self.protocol_title_label.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY_DARK};")
+        tokens = get_theme_manager().current_tokens()
+        self.protocol_started_label = QLabel("-", body)
+        self.protocol_started_label.setStyleSheet(build_remcard_period_label_style(tokens))
+        self.protocol_current_time_label = QLabel("", body)
+        self.protocol_current_time_label.setStyleSheet(build_remcard_current_time_label_style(tokens))
+        body_layout.addWidget(self.protocol_title_label, 1)
+        body_layout.addWidget(self.protocol_started_label, 0)
+        body_layout.addWidget(self.protocol_current_time_label, 0)
+        body_layout.addStretch(1)
+        body.setFixedHeight(36)
+        layout.addWidget(body)
+        return wrapper
+
+    def _protocol_title_text(self, now: datetime | None = None) -> str:
+        assistance_type = normalize_operblock_anesthesia_type_label(
+            getattr(self, "_current_anesthesia_assistance_type", "")
+        )
+        operation_name = normalize_operblock_team_text(getattr(self, "_current_operation_name", ""))
+        protocol_display = re.sub(r"\s+", " ", str(getattr(self, "_current_protocol_display", "") or "").strip())
+
+        parts: list[str] = []
+        if assistance_type:
+            parts.append(assistance_type)
+        if operation_name:
+            parts.append(operation_name)
+        prefix = f"Протокол анестезии № {protocol_display}" if protocol_display else "Протокол анестезии"
+        if not parts:
+            return prefix
+        return f"{prefix}: {', '.join(parts)}"
+
+    def _update_protocol_title_label(self):
+        label = getattr(self, "protocol_title_label", None)
+        if label is not None:
+            text = self._protocol_title_text()
+            if hasattr(label, "set_full_text"):
+                label.set_full_text(text)
+            else:
+                label.setText(text)
+
+    def _build_protocol_tab_bar(self) -> QWidget:
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"""
+            QFrame {{
+                background: {BG_MAIN};
+                border-left: 1.5px solid {BORDER_COLOR};
+                border-right: 1.5px solid {BORDER_COLOR};
+                border-bottom: 1.5px solid {BORDER_COLOR};
+                border-top: none;
+                border-bottom-left-radius: {CUSTOM_DIALOG_RADIUS};
+                border-bottom-right-radius: {CUSTOM_DIALOG_RADIUS};
+            }}
+            """
+        )
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(5, 0, 5, 0)
+        layout.setSpacing(10)
+        self.protocol_tabs_layout = layout
+        self.tab_group = QButtonGroup(self)
+        self.tab_group.setExclusive(True)
+        self.vitals_tab_button = self._tab_button("Витальные функции", checked=True)
+        self.orders_tab_button = self._tab_button("Назначения")
+        self._protocol_tab_widgets = {
+            "vitals": self.vitals_tab_button,
+            "orders": self.orders_tab_button,
+        }
+        self._protocol_tab_indexes = {
+            "vitals": 0,
+            "orders": 1,
+        }
+        self._protocol_tab_order = ["vitals", "orders"]
+        self._protocol_tab_visible = {"vitals": True, "orders": True}
+        self.tab_group.addButton(self.vitals_tab_button, 0)
+        self.tab_group.addButton(self.orders_tab_button, 1)
+        self.tab_group.idClicked.connect(self._set_protocol_tab)
+        layout.addWidget(self.vitals_tab_button)
+        layout.addWidget(self.orders_tab_button)
+        layout.addStretch(1)
+        frame.setFixedHeight(37)
+        return frame
+
+    def _tab_button(self, text: str, *, checked: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.setCheckable(True)
+        button.setChecked(checked)
+        button.setFixedHeight(32)
+        button.setStyleSheet(build_remcard_tab_button_style(get_theme_manager().current_tokens()))
+        return button
+
+    def _clear_protocol_tabs_layout(self):
+        layout = getattr(self, "protocol_tabs_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            layout.takeAt(0)
+
+    def _apply_protocol_tab_display_settings(self):
+        layout = getattr(self, "protocol_tabs_layout", None)
+        widgets = dict(getattr(self, "_protocol_tab_widgets", {}) or {})
+        if layout is None or not widgets:
+            return
+        try:
+            payload = DisplaySettingsStorage().load()
+            settings = role_display_settings_from_payload(payload, "operblock")
+            section = settings["remcard_tabs"]
+            order = [str(item_id) for item_id in section.get("order", [])]
+            visible = {
+                str(item_id): bool(value)
+                for item_id, value in (section.get("visible") or {}).items()
+            }
+        except Exception:
+            order = ["vitals", "orders"]
+            visible = {"vitals": True, "orders": True}
+
+        ordered_tabs = [tab_id for tab_id in order if tab_id in widgets]
+        for tab_id in ("vitals", "orders"):
+            if tab_id not in ordered_tabs:
+                ordered_tabs.append(tab_id)
+        visible_tabs = [tab_id for tab_id in ordered_tabs if visible.get(tab_id, True)]
+        if not visible_tabs:
+            visible_tabs = [ordered_tabs[0] if ordered_tabs else "vitals"]
+
+        self._protocol_tab_order = ordered_tabs
+        self._protocol_tab_visible = {tab_id: tab_id in visible_tabs for tab_id in widgets}
+        self._clear_protocol_tabs_layout()
+        for button in widgets.values():
+            button.setVisible(False)
+        for tab_id in ordered_tabs:
+            button = widgets.get(tab_id)
+            if button is None or not self._protocol_tab_visible.get(tab_id, False):
+                continue
+            layout.addWidget(button)
+            button.setVisible(True)
+        layout.addStretch(1)
+        self._ensure_visible_protocol_tab()
+
+    def _first_visible_protocol_tab_id(self) -> str:
+        order = list(getattr(self, "_protocol_tab_order", ["vitals", "orders"]) or ["vitals", "orders"])
+        visible = dict(getattr(self, "_protocol_tab_visible", {}) or {})
+        for tab_id in order:
+            if visible.get(tab_id, True):
+                return tab_id
+        return "vitals"
+
+    def _set_protocol_tab_by_id(self, tab_id: str):
+        if self.content_stack is None:
+            return
+        target_id = "orders" if tab_id == "orders" else "vitals"
+        if target_id == "orders" and not self._orders_tab_enabled():
+            target_id = "vitals"
+        target_index = int((getattr(self, "_protocol_tab_indexes", {}) or {}).get(target_id, 0))
+        self.content_stack.setCurrentIndex(target_index)
+        for current_id, button in (getattr(self, "_protocol_tab_widgets", {}) or {}).items():
+            button.setChecked(current_id == target_id)
+        if self.protocol_page is not None and self.stack.currentWidget() == self.protocol_page:
+            self._schedule_current_protocol_tab_ready()
+
+    def _ensure_visible_protocol_tab(self):
+        stack = getattr(self, "content_stack", None)
+        if stack is None:
+            return
+        current_id = "orders" if stack.currentIndex() == 1 else "vitals"
+        visible = dict(getattr(self, "_protocol_tab_visible", {}) or {})
+        if current_id == "orders" and not self._orders_tab_enabled():
+            self._set_protocol_tab_by_id("vitals")
+            return
+        if not visible.get(current_id, True):
+            self._set_protocol_tab_by_id(self._first_visible_protocol_tab_id())
+
+    def _stage_action_button(self, text: str, *, danger: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.setMinimumHeight(32)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            DANGER_BUTTON_STYLE
+            if danger
+            else STYLE_SECTOR8_BUTTON
+        )
+        return button
+
+    def _set_protocol_tab(self, index: int):
+        target = max(0, min(1, int(index)))
+        target_id = "orders" if target == 1 else "vitals"
+        if not getattr(self, "_protocol_tab_visible", {}).get(target_id, True):
+            target_id = self._first_visible_protocol_tab_id()
+        self._set_protocol_tab_by_id(target_id)
+
+    def _orders_tab_enabled(self) -> bool:
+        return bool(getattr(self, "_current_case_active", False) and getattr(self, "_current_anesthesia_active", False))
+
+    def _build_vitals_tab(self) -> QWidget:
+        metric_started = operblock_startup_metrics.timer_start()
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.vitals_legend_sector = Sector2g()
+        self.vitals_legend_sector.update_legend(OPERBLOCK_VITAL_SETTINGS)
+        self.vitals_legend_sector.setFixedWidth(140)
+        self.vitals_staff_legend_panel = self._build_operblock_staff_legend_panel()
+        legend_layout = getattr(self.vitals_legend_sector, "legend_layout", None)
+        if legend_layout is not None:
+            legend_layout.insertWidget(max(0, legend_layout.count() - 1), self.vitals_staff_legend_panel)
+        layout.addWidget(self.vitals_legend_sector, 0)
+
+        self.vitals_chart_sector = Sector2v()
+        chart_import_started = operblock_startup_metrics.timer_start()
+        from rem_card.ui.operblock_view.operblock_chart_widget import OperBlockChartWidget
+
+        chart_import_elapsed = (time.perf_counter() - chart_import_started) * 1000.0 if chart_import_started else 0.0
+        operblock_startup_metrics.record_duration(
+            "operblock_chart_lazy_import_ms",
+            chart_import_elapsed,
+            source="operblock_widget",
+        )
+        operblock_startup_metrics.record_duration(
+            "operblock_chart_module_import_ms",
+            chart_import_elapsed,
+            source="operblock_widget",
+        )
+        chart_started = operblock_startup_metrics.timer_start()
+        self.vitals_chart = OperBlockChartWidget()
+        chart_elapsed = (time.perf_counter() - chart_started) * 1000.0 if chart_started else 0.0
+        operblock_startup_metrics.record_duration(
+            "operblock_chart_create_ms",
+            chart_elapsed,
+            source="operblock_widget",
+        )
+        if getattr(self, "_creating_lazy_protocol_page", False):
+            operblock_startup_metrics.record_duration(
+                "chart_lazy_created_ms",
+                chart_elapsed,
+                source="operblock_widget",
+            )
+        self.vitals_chart.set_visible_hours(OPERBLOCK_INITIAL_CHART_HOURS)
+        self.vitals_chart.set_time_grid_step_minutes(OPERBLOCK_CHART_GRID_STEP_MINUTES)
+        self.vitals_chart.admission_id = None
+        self.vitals_chart_sector.set_content(self.vitals_chart)
+        layout.addWidget(self.vitals_chart_sector, 1)
+        operblock_startup_metrics.record_since("build_vitals_tab_ms", metric_started, source="operblock_widget")
+        return page
+
+    def _build_operblock_staff_legend_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("OperBlockStaffLegendPanel")
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 28, 0, 0)
+        layout.setSpacing(8)
+        self.vitals_staff_legend_layout = layout
+        panel.setStyleSheet(
+            f"""
+            QWidget#OperBlockStaffLegendPanel {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#OperBlockStaffSeparator {{
+                background: {BORDER_COLOR};
+                border: none;
+                min-height: 1px;
+                max-height: 1px;
+                margin: 0 10px 2px 10px;
+            }}
+            QLabel#OperBlockStaffRoleLabel {{
+                background-color: #E8F3FA;
+                color: #2c3e50;
+                font-size: 12px;
+                font-weight: 600;
+                border-left: 6px solid #4E9AC7;
+                border-top-right-radius: 10px;
+                border-bottom-right-radius: 10px;
+                border-top: none;
+                border-right: none;
+                border-bottom: none;
+                margin-left: 0px;
+                padding: 7px 5px 7px 10px;
+            }}
+            QLabel#OperBlockStaffNameLabel {{
+                background: transparent;
+                color: #2c3e50;
+                font-size: 12px;
+                font-weight: 500;
+                border: none;
+                padding: 0 4px 0 18px;
+                margin-left: 0px;
+            }}
+            QWidget#OperBlockStaffNames {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        panel.hide()
+        return panel
+
+    @staticmethod
+    def _normal_staff_name_list(value, *, split_commas: bool = False) -> list[str]:
+        if value is None:
+            raw_items = []
+        elif isinstance(value, str):
+            raw_items = [value]
+        elif isinstance(value, dict):
+            raw_items = []
+        else:
+            try:
+                raw_items = list(value)
+            except TypeError:
+                raw_items = [value]
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            parts = re.split(r"\s*,\s*", item) if split_commas and isinstance(item, str) else [item]
+            for part in parts:
+                name = normalize_operblock_team_text(part)
+                key = name.casefold()
+                if name and key not in seen:
+                    seen.add(key)
+                    result.append(name)
+        return result
+
+    def _staff_names_from_stage_state(self, *keys: str, split_commas: bool = False) -> list[str]:
+        state = getattr(self, "_current_stage_state", {}) or {}
+        for key in keys:
+            names = self._normal_staff_name_list(state.get(key), split_commas=split_commas)
+            if names:
+                return names
+        return []
+
+    @staticmethod
+    def _staff_legend_label(text: str, object_name: str, click_callback=None) -> QLabel:
+        if callable(click_callback):
+            label = OperBlockClickableLabel(str(text or ""), click_callback)
+            label.setToolTip("Изменить состав")
+        else:
+            label = QLabel(str(text or ""))
+        label.setObjectName(object_name)
+        label.setWordWrap(True)
+        label.setMinimumHeight(22 if object_name == "OperBlockStaffNameLabel" else 35)
+        label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        return label
+
+    def _add_staff_legend_section(self, title: str, names: list[str], *, force: bool = False) -> bool:
+        layout = getattr(self, "vitals_staff_legend_layout", None)
+        if layout is None or (not names and not force):
+            return False
+        edit_callback = None if self.is_view_only_mode() else self._open_operblock_staff_editor
+        layout.addWidget(self._staff_legend_label(title, "OperBlockStaffRoleLabel", edit_callback))
+        if names:
+            names_widget = QWidget()
+            names_widget.setObjectName("OperBlockStaffNames")
+            names_layout = QVBoxLayout(names_widget)
+            names_layout.setContentsMargins(0, 0, 0, 2)
+            names_layout.setSpacing(2)
+            for name in names:
+                names_layout.addWidget(self._staff_legend_label(name, "OperBlockStaffNameLabel", edit_callback))
+            layout.addWidget(names_widget)
+        return True
+
+    def _update_operblock_staff_legend(self) -> None:
+        panel = getattr(self, "vitals_staff_legend_panel", None)
+        layout = getattr(self, "vitals_staff_legend_layout", None)
+        if panel is None or layout is None:
+            return
+        self._clear_layout(layout)
+        separator = QFrame()
+        separator.setObjectName("OperBlockStaffSeparator")
+        layout.addWidget(separator)
+
+        state = getattr(self, "_current_stage_state", {}) or {}
+        surgery_active = bool(state.get("surgery_active"))
+        anesthesia_active = bool(state.get("anesthesia_active"))
+        surgeons = self._staff_names_from_stage_state(
+            "current_surgeons",
+            "last_surgeons",
+            "first_surgeons",
+            split_commas=True,
+        )
+        if not surgeons:
+            surgeons = self._staff_names_from_stage_state(
+                "current_surgeon",
+                "last_surgeon",
+                "first_surgeon",
+                split_commas=True,
+            )
+        operating_nurses = self._staff_names_from_stage_state(
+            "current_operating_nurse",
+            "last_operating_nurse",
+            "first_operating_nurse",
+        )
+        anesthesiologists = self._staff_names_from_stage_state(
+            "current_anesthesiologist",
+            "last_anesthesiologist",
+            "first_anesthesiologist",
+        )
+        anesthetists = self._staff_names_from_stage_state(
+            "current_anesthetist",
+            "last_anesthetist",
+            "first_anesthetist",
+        )
+
+        has_content = False
+        has_content = self._add_staff_legend_section("Хирурги:", surgeons, force=surgery_active) or has_content
+        has_content = self._add_staff_legend_section("Опер. сестра:", operating_nurses, force=surgery_active) or has_content
+        has_content = self._add_staff_legend_section("Анестезиолог:", anesthesiologists, force=anesthesia_active) or has_content
+        has_content = self._add_staff_legend_section("Анестезист:", anesthetists, force=anesthesia_active) or has_content
+        panel.setVisible(has_content)
+
+    def _open_operblock_staff_editor(self) -> None:
+        if self.is_view_only_mode():
+            return
+        if self._write_pending:
+            return
+        if not self._current_operation_case_id:
+            return
+        state = getattr(self, "_current_stage_state", {}) or {}
+        surgery_enabled = bool(state.get("surgery_active"))
+        anesthesia_enabled = bool(state.get("anesthesia_active"))
+        if not surgery_enabled and not anesthesia_enabled:
+            CustomMessageBox.warning(
+                self,
+                "Изменить состав",
+                "Изменять состав можно только во время операции или анестезиологического пособия.",
+            )
+            self.refresh_protocol(force=True)
+            return
+
+        loading_key = self._show_operblock_loading(
+            "Загрузка состава бригады...",
+            key="staff-editor",
+            auto_hide_ms=20000,
+        )
+        try:
+            try:
+                surgeon_options = load_operblock_surgeons()
+                operating_nurse_options = load_operblock_operating_nurses()
+                anesthesiologist_options = load_operblock_anesthesiologists()
+                anesthetist_options = load_operblock_anesthetists()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Изменить состав", f"Не удалось загрузить сотрудников: {exc}")
+                return
+        finally:
+            self._hide_operblock_loading(loading_key, delay_ms=0)
+
+        current_surgeons = self._normal_staff_name_list(state.get("current_surgeons"), split_commas=True)
+        if not current_surgeons:
+            current_surgeons = self._normal_staff_name_list(state.get("current_surgeon"), split_commas=True)
+        dialog = EditOperBlockStaffDialog(
+            surgeon_options=surgeon_options,
+            operating_nurse_options=operating_nurse_options,
+            anesthesiologist_options=anesthesiologist_options,
+            anesthetist_options=anesthetist_options,
+            current_surgeons=current_surgeons,
+            current_operating_nurse=normalize_operblock_team_text(state.get("current_operating_nurse")),
+            current_anesthesiologist=normalize_operblock_team_text(state.get("current_anesthesiologist")),
+            current_anesthetist=normalize_operblock_team_text(state.get("current_anesthetist")),
+            surgery_enabled=surgery_enabled,
+            anesthesia_enabled=anesthesia_enabled,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        case_id = int(self._current_operation_case_id)
+        payload: dict[str, object] = {}
+        if surgery_enabled:
+            payload["surgeons"] = dialog.selected_surgeons()
+            payload["operating_nurse"] = dialog.selected_operating_nurse()
+        if anesthesia_enabled:
+            payload["anesthesiologist"] = dialog.selected_anesthesiologist()
+            payload["anesthetist"] = dialog.selected_anesthetist()
+        if not payload:
+            return
+
+        self._run_stage_action(
+            f"operblock_update_staff:{case_id}",
+            lambda: self.operblock_service.update_operation_staff(case_id, **payload),
+        )
+
+    def _orders_panel(self, title: str) -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setObjectName("operblockOrdersPanel")
+        frame.setStyleSheet(
+            f"""
+            QFrame#operblockOrdersPanel {{
+                background-color: {OPERBLOCK_ORDERS_CARD_BG};
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 6px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {OPERBLOCK_ORDERS_TEXT};
+            }}
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(8)
+        if title:
+            label = QLabel(title)
+            label.setStyleSheet(
+                f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; "
+                "background: transparent; border: none;"
+            )
+            layout.addWidget(label)
+        return frame, layout
+
+    def _build_orders_tab(self) -> QWidget:
+        metric_started = operblock_startup_metrics.timer_start()
+        page = QWidget()
+        page.setStyleSheet(f"QWidget {{ background-color: {OPERBLOCK_ORDERS_BG}; color: {OPERBLOCK_ORDERS_TEXT}; }}")
+        outer_layout = QHBoxLayout(page)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        content_column = QWidget()
+        content_column.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(content_column)
+        layout.setContentsMargins(0, 3, 0, 5)
+        layout.setSpacing(3)
+
+        input_panel, input_body = self._orders_panel("")
+        input_panel.setObjectName("operblockNewOrderPanel")
+        input_panel.setStyleSheet(
+            f"""
+            QFrame#operblockNewOrderPanel {{
+                background-color: {OPERBLOCK_ORDERS_BG};
+                border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 5px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {OPERBLOCK_ORDERS_TEXT};
+            }}
+            """
+        )
+        input_body.setContentsMargins(14, 12, 14, 12)
+        input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.setSpacing(10)
+        input_title = QLabel("Новое назначение")
+        input_title.setMinimumWidth(132)
+        input_title.setStyleSheet(
+            f"font-size: 14px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+        )
+        self.order_input = _line_edit()
+        self.order_input.setPlaceholderText("Введите препарат или назначение")
+        self.order_input.setMinimumHeight(40)
+        self.order_input.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background-color: {OPERBLOCK_ORDERS_CARD_BG};
+                color: {OPERBLOCK_ORDERS_TEXT};
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 8px;
+                padding: 0 10px;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {OPERBLOCK_ORDERS_ACCENT};
+            }}
+            """
+        )
+        self._add_line_edit_icon(self.order_input, "search")
+        self.order_dose_input = _line_edit()
+        self.order_dose_input.setPlaceholderText("Доза (мг, мл, %)")
+        self.order_dose_input.setFixedWidth(190)
+        self.order_dose_input.setMinimumHeight(40)
+        self.order_dose_input.setStyleSheet(self.order_input.styleSheet())
+        self.order_rate_input = _line_edit()
+        self.order_rate_input.setPlaceholderText("Скорость (мл/час)")
+        self.order_rate_input.setFixedWidth(145)
+        self.order_rate_input.setMinimumHeight(40)
+        self.order_rate_input.setStyleSheet(self.order_input.styleSheet())
+        self.order_type_combo = QComboBox()
+        self.order_type_combo.setFixedWidth(140)
+        self.order_type_combo.setMinimumHeight(40)
+        self.order_type_combo.addItems(("Болюс", "Газ", "Дозатор", "Капельница"))
+        self.order_type_combo.setStyleSheet(
+            _operblock_combo_box_style()
+            + f"""
+            QComboBox {{
+                border-radius: 8px;
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                padding: 7px 30px 7px 10px;
+            }}
+            """
+        )
+        self.order_type_combo.currentTextChanged.connect(self._update_manual_order_type_fields)
+        self.save_order_button = QPushButton("Добавить")
+        self.save_order_button.setIcon(self._operblock_ui_icon("plus"))
+        self.save_order_button.setIconSize(QSize(16, 16))
+        self.save_order_button.setMinimumHeight(40)
+        self.save_order_button.setMinimumWidth(122)
+        self.save_order_button.setCursor(Qt.PointingHandCursor)
+        self.save_order_button.setStyleSheet(_operblock_primary_action_button_style(radius=8, padding="8px 15px"))
+        self.save_order_button.clicked.connect(self._save_order)
+        input_layout.addWidget(input_title, 0)
+        input_layout.addWidget(self.order_input, 1)
+        input_layout.addWidget(self.order_dose_input, 0)
+        input_layout.addWidget(self.order_rate_input, 0)
+        input_layout.addWidget(self.order_type_combo, 0)
+        input_layout.addWidget(self.save_order_button)
+        input_body.addLayout(input_layout)
+        self._update_manual_order_type_fields()
+        layout.addWidget(input_panel, 0)
+        self._pump_operblock_ui_events()
+
+        active_panel, active_body = self._orders_panel("")
+        self.active_infusions_panel = active_panel
+        active_panel.setObjectName("operblockActiveInfusionsPanel")
+        active_panel.setStyleSheet(
+            f"""
+            QFrame#operblockActiveInfusionsPanel {{
+                background-color: {OPERBLOCK_ORDERS_BG};
+                border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 5px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {OPERBLOCK_ORDERS_TEXT};
+            }}
+            """
+        )
+        active_body.setContentsMargins(14, 12, 14, 14)
+        active_header = QHBoxLayout()
+        active_header.setContentsMargins(0, 0, 0, 2)
+        active_header.setSpacing(8)
+        active_title = QLabel("Активные дозаторы, капельницы и газы")
+        active_title.setStyleSheet(
+            f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+        )
+        self.active_infusions_count_label = self._count_badge("0")
+        active_header.addWidget(active_title, 0)
+        active_header.addWidget(self.active_infusions_count_label, 0)
+        active_header.addStretch(1)
+        active_body.addLayout(active_header)
+
+        self.active_infusions_scroll = QScrollArea()
+        self.active_infusions_scroll.setObjectName("operblockActiveInfusionsScroll")
+        self.active_infusions_scroll.setWidgetResizable(True)
+        self.active_infusions_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.active_infusions_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.active_infusions_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.active_infusions_scroll.setMinimumHeight(OPERBLOCK_ACTIVE_INFUSION_EMPTY_HEIGHT)
+        self.active_infusions_scroll.setMaximumHeight(OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT)
+        self.active_infusions_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.active_infusions_scroll.setStyleSheet(
+            "QScrollArea#operblockActiveInfusionsScroll { background: transparent; border: none; }"
+        )
+        active_scroll_bar = self.active_infusions_scroll.verticalScrollBar()
+        active_scroll_bar.setObjectName("OperBlockActiveInfusionsScrollBar")
+        active_scroll_bar.setFixedWidth(14)
+        active_scroll_bar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockActiveInfusionsScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+        self.active_infusions_content = QWidget()
+        self.active_infusions_content.setMinimumHeight(OPERBLOCK_ACTIVE_INFUSION_EMPTY_HEIGHT)
+        self.active_infusions_content.setStyleSheet("background: transparent;")
+        self.active_infusions_list = QGridLayout(self.active_infusions_content)
+        self.active_infusions_list.setContentsMargins(0, 0, 0, 0)
+        self.active_infusions_list.setHorizontalSpacing(OPERBLOCK_ACTIVE_INFUSION_GRID_SPACING)
+        self.active_infusions_list.setVerticalSpacing(OPERBLOCK_ACTIVE_INFUSION_GRID_SPACING)
+        for column in range(OPERBLOCK_ACTIVE_INFUSION_COLUMNS):
+            self.active_infusions_list.setColumnStretch(column, 1)
+        self.active_infusions_scroll.setWidget(self.active_infusions_content)
+        active_body.addWidget(self.active_infusions_scroll, 0)
+        layout.addWidget(active_panel, 0)
+        self._pump_operblock_ui_events()
+
+        timeline_panel, timeline_body = self._orders_panel("")
+        self.orders_timeline_panel = timeline_panel
+        timeline_panel.setObjectName("operblockOrdersTimelinePanel")
+        timeline_panel.setStyleSheet(
+            f"""
+            QFrame#operblockOrdersTimelinePanel {{
+                background-color: {OPERBLOCK_ORDERS_BG};
+                border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 5px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {OPERBLOCK_ORDERS_TEXT};
+            }}
+            """
+        )
+        timeline_body.setContentsMargins(14, 12, 14, 10)
+        timeline_header = QHBoxLayout()
+        timeline_header.setContentsMargins(0, 0, 0, 2)
+        timeline_header.setSpacing(8)
+        timeline_title = QLabel("Назначения")
+        timeline_title.setStyleSheet(
+            f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+        )
+        self.orders_count_label = self._count_badge("0")
+        self.orders_filter_button = QPushButton("Фильтры")
+        self.orders_filter_button.setIcon(self._operblock_ui_icon("filter"))
+        self.orders_filter_button.setIconSize(QSize(15, 15))
+        self.orders_filter_button.setFixedHeight(32)
+        self.orders_filter_button.setCursor(Qt.PointingHandCursor)
+        self.orders_filter_button.setStyleSheet(self._secondary_order_button_style())
+        self.orders_filter_button.clicked.connect(self._show_orders_filter_menu)
+        self.orders_sort_combo = QComboBox()
+        self.orders_sort_combo.setFixedHeight(32)
+        self.orders_sort_combo.setMinimumWidth(210)
+        for sort_key, title in OPERBLOCK_ORDERS_SORT_OPTIONS:
+            self.orders_sort_combo.addItem(title, sort_key)
+        self.orders_sort_combo.setStyleSheet(_operblock_combo_box_style())
+        self.orders_sort_combo.currentIndexChanged.connect(self._on_orders_sort_changed)
+        timeline_header.addWidget(timeline_title, 0)
+        timeline_header.addWidget(self.orders_count_label, 0)
+        timeline_header.addStretch(1)
+        timeline_header.addWidget(self.orders_filter_button, 0)
+        timeline_header.addWidget(self.orders_sort_combo, 0)
+        timeline_body.addLayout(timeline_header)
+        self.orders_scroll = QScrollArea()
+        self.orders_scroll.setWidgetResizable(True)
+        self.orders_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.orders_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.orders_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.orders_scroll.setStyleSheet(
+            """
+            QScrollArea {{ background: transparent; border: none; }}
+            """
+        )
+        orders_scroll_bar = self.orders_scroll.verticalScrollBar()
+        orders_scroll_bar.setObjectName("OperBlockOrdersScrollBar")
+        orders_scroll_bar.setFixedWidth(14)
+        orders_scroll_bar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockOrdersScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+        orders_content = QWidget()
+        orders_content.setStyleSheet("background: transparent;")
+        self.orders_list = QVBoxLayout()
+        self.orders_list.setContentsMargins(0, 0, 0, 0)
+        self.orders_list.setSpacing(4)
+        orders_content.setLayout(self.orders_list)
+        self.orders_scroll.setWidget(orders_content)
+        timeline_body.addWidget(self.orders_scroll, 1)
+        layout.addWidget(timeline_panel, 1)
+
+        outer_layout.addWidget(content_column, 1)
+        self._pump_operblock_ui_events()
+
+        quick_wrapper = QWidget()
+        quick_wrapper.setStyleSheet("background: transparent;")
+        quick_wrapper_layout = QVBoxLayout(quick_wrapper)
+        quick_wrapper_layout.setContentsMargins(5, 3, 0, 5)
+        quick_wrapper_layout.setSpacing(0)
+
+        quick_panel, quick_body = self._orders_panel("Быстрые назначения")
+        self.quick_orders_panel = quick_panel
+        quick_panel.setObjectName("operblockQuickOrdersPanel")
+        quick_panel.setStyleSheet(
+            f"""
+            QFrame#operblockQuickOrdersPanel {{
+                background-color: {OPERBLOCK_ORDERS_BG};
+                border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 5px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {OPERBLOCK_ORDERS_TEXT};
+            }}
+            """
+        )
+        quick_panel.setFixedWidth(286)
+        quick_body.setSpacing(8)
+
+        self.quick_orders_controls_panel = QFrame()
+        self.quick_orders_controls_panel.setObjectName("operblockQuickOrdersControlsPanel")
+        self.quick_orders_controls_panel.setStyleSheet(
+            f"""
+            QFrame#operblockQuickOrdersControlsPanel {{
+                background-color: {OPERBLOCK_ORDERS_CARD_BG};
+                border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 5px;
+            }}
+            """
+        )
+        quick_controls_layout = QVBoxLayout(self.quick_orders_controls_panel)
+        quick_controls_layout.setContentsMargins(8, 8, 8, 8)
+        quick_controls_layout.setSpacing(8)
+
+        self.preset_search_input = QLineEdit()
+        self.preset_search_input.setPlaceholderText("Найти препарат...")
+        self.preset_search_input.setFixedHeight(32)
+        self.preset_search_input.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background-color: {OPERBLOCK_ORDERS_CARD_BG};
+                color: {OPERBLOCK_ORDERS_TEXT};
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 8px;
+                padding: 0 9px;
+            }}
+            QLineEdit:focus {{ border: 1px solid {OPERBLOCK_ORDERS_ACCENT}; }}
+            """
+        )
+        self.preset_search_input.textChanged.connect(self._on_preset_search_changed)
+        quick_controls_layout.addWidget(self.preset_search_input)
+
+        filter_row = QGridLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setHorizontalSpacing(4)
+        filter_row.setVerticalSpacing(4)
+        filter_row.setColumnStretch(0, 1)
+        filter_row.setColumnStretch(1, 1)
+        self.preset_filter_layout = filter_row
+        if not self._quick_order_filter_buttons:
+            self._quick_order_filter_buttons = self._fallback_quick_order_filter_buttons()
+        self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
+        if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
+            self._preset_kind_filter = self._quick_order_filter_keys[0]
+        self._rebuild_quick_order_filter_buttons_ui()
+        quick_controls_layout.addLayout(filter_row)
+
+        self.preset_settings_button = QPushButton("Настроить препараты")
+        self.preset_settings_button.setFixedHeight(32)
+        self.preset_settings_button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: #F8FAFC;
+                color: {OPERBLOCK_ORDERS_TEXT};
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 7px;
+                padding: 4px 8px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{ background-color: #EEF3FF; }}
+            """
+        )
+        self.preset_settings_button.clicked.connect(self._open_quick_orders_settings)
+        self.preset_settings_button.setVisible(False)
+        quick_controls_layout.addWidget(self.preset_settings_button)
+        quick_body.addWidget(self.quick_orders_controls_panel, 0)
+        self._pump_operblock_ui_events()
+
+        quick_scroll = QScrollArea()
+        quick_scroll.setObjectName("operblockQuickOrdersScroll")
+        quick_scroll.setWidgetResizable(True)
+        quick_scroll.setFrameShape(QScrollArea.NoFrame)
+        quick_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        quick_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        quick_scroll.setStyleSheet("QScrollArea#operblockQuickOrdersScroll { background: transparent; border: none; }")
+        self.quick_orders_scroll = quick_scroll
+        quick_scroll_bar = quick_scroll.verticalScrollBar()
+        quick_scroll_bar.setObjectName("OperBlockQuickOrdersScrollBar")
+        quick_scroll_bar.setFixedWidth(14)
+        quick_scroll_bar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockQuickOrdersScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+        quick_content = _QuickOrderPresetListWidget(self)
+        quick_content.setStyleSheet("background: transparent;")
+        self.quick_orders_list = QVBoxLayout(quick_content)
+        self.quick_orders_list.setContentsMargins(0, 0, 0, 0)
+        self.quick_orders_list.setSpacing(8)
+        quick_scroll.setWidget(quick_content)
+        quick_body.addWidget(quick_scroll, 1)
+        quick_wrapper_layout.addWidget(quick_panel, 1)
+        outer_layout.addWidget(quick_wrapper, 0)
+        self._pump_operblock_ui_events()
+
+        operblock_startup_metrics.record_since("build_orders_tab_ms", metric_started, source="operblock_widget")
+        if getattr(self, "_creating_lazy_protocol_page", False):
+            operblock_startup_metrics.record_since(
+                "orders_tab_lazy_created_ms",
+                metric_started,
+                source="operblock_widget",
+            )
+        return page
+
+    def _operblock_ui_icon(self, name: str) -> QIcon:
+        path = os.path.join(get_icon_dir(), f"operblock_{name}.svg")
+        return QIcon(path) if os.path.exists(path) else QIcon()
+
+    def _add_line_edit_icon(self, line_edit: QLineEdit, icon_name: str) -> None:
+        icon = self._operblock_ui_icon(icon_name)
+        if icon.isNull():
+            return
+        try:
+            position = QLineEdit.ActionPosition.LeadingPosition
+        except AttributeError:
+            position = QLineEdit.LeadingPosition
+        line_edit.addAction(icon, position)
+
+    @staticmethod
+    def _count_badge(text: str) -> QLabel:
+        badge = QLabel(str(text or "0"))
+        badge.setAlignment(Qt.AlignCenter)
+        badge.setMinimumWidth(24)
+        badge.setFixedHeight(22)
+        badge.setStyleSheet(
+            f"font-size: 12px; font-weight: 500; color: #1D4ED8; background-color: #DBEAFE; "
+            f"border: 1px solid {OPERBLOCK_ORDERS_BORDER}; border-radius: 11px; padding: 0 7px;"
+        )
+        return badge
+
+    @staticmethod
+    def _secondary_order_button_style() -> str:
+        return f"""
+            QPushButton {{
+                background-color: #FFFFFF;
+                color: {OPERBLOCK_ORDERS_TEXT};
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 7px;
+                padding: 5px 10px;
+                font-size: 12px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: #F8FAFC;
+                border-color: {OPERBLOCK_ORDERS_BORDER};
+            }}
+            QPushButton:disabled {{
+                color: {OPERBLOCK_ORDERS_MUTED};
+                background-color: #F1F5F9;
+            }}
+        """
+
+    def _show_orders_filter_menu(self):
+        menu = self._actions_menu()
+        current_filter = str(getattr(self, "_orders_filter_kind", "all") or "all")
+        for filter_key, title in OPERBLOCK_ORDERS_FILTERS:
+            action = menu.addAction(title)
+            action.setCheckable(True)
+            action.setChecked(filter_key == current_filter)
+            action.triggered.connect(lambda _checked=False, key=filter_key: self._set_orders_filter(key))
+        menu.addSeparator()
+        hide_deleted_action = menu.addAction("Удалённые скрыть")
+        hide_deleted_action.setCheckable(True)
+        hide_deleted_action.setChecked(bool(getattr(self, "_orders_hide_deleted", True)))
+        hide_deleted_action.triggered.connect(self._toggle_orders_hide_deleted)
+        menu.exec(self.orders_filter_button.mapToGlobal(self.orders_filter_button.rect().bottomLeft()))
+
+    def _set_orders_filter(self, filter_key: str):
+        normalized = str(filter_key or "all").strip()
+        allowed = {key for key, _title in OPERBLOCK_ORDERS_FILTERS}
+        self._orders_filter_kind = normalized if normalized in allowed else "all"
+        self._update_orders_filter_button_text()
+        self._orders_force_top_on_next_apply = True
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
+
+    def _toggle_orders_hide_deleted(self, checked: bool):
+        self._orders_hide_deleted = bool(checked)
+        self._orders_force_top_on_next_apply = True
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
+
+    def _update_orders_filter_button_text(self):
+        filter_key = str(getattr(self, "_orders_filter_kind", "all") or "all")
+        title_by_key = dict(OPERBLOCK_ORDERS_FILTERS)
+        title = title_by_key.get(filter_key, "Все")
+        if filter_key == "all":
+            self.orders_filter_button.setText("Фильтры")
+        else:
+            self.orders_filter_button.setText(f"Фильтры: {title}")
+
+    def _orders_sort_mode(self) -> str:
+        combo = getattr(self, "orders_sort_combo", None)
+        sort_key = str(combo.currentData() or "") if combo is not None else ""
+        allowed = {key for key, _title in OPERBLOCK_ORDERS_SORT_OPTIONS}
+        return sort_key if sort_key in allowed else "time_desc"
+
+    def _on_orders_sort_changed(self, *_args):
+        self._orders_force_top_on_next_apply = True
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
+
+    def _placeholder_frame(self, title: str, rows: list[str]) -> QWidget:
+        widget, body_layout = self._sector(title)
+        body_layout.setContentsMargins(10, 10, 10, 10)
+        for row in rows:
+            body_layout.addWidget(_label(row, size=12, color=TEXT_SECONDARY))
+        body_layout.addStretch(1)
+        return widget
+
+    def _sector(self, title: str) -> tuple[QWidget, QVBoxLayout]:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QLabel(title)
+        header.setFixedHeight(28)
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet(SECTOR_HEADER_STYLE)
+        body = QFrame()
+        body.setStyleSheet(SECTOR_BODY_STYLE)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        layout.addWidget(header)
+        layout.addWidget(body, 1)
+        return wrapper, body_layout
+
+    def _connect_updates(self):
+        if self.data_service and hasattr(self.data_service, "changes_detected"):
+            self.data_service.changes_detected.connect(self._on_changes_detected)
+
+    def start_auto_refresh(self, *, wake_monitor: bool = True):
+        if self._is_closing:
+            return
+        metric_started = operblock_startup_metrics.timer_start()
+        operblock_startup_metrics.record_value(
+            "start_auto_refresh_nested_phase",
+            "wrapper:refresh_board",
+            source="operblock_widget",
+        )
+        try:
+            if self.data_service and hasattr(self.data_service, "set_change_monitor_enabled"):
+                self.data_service.set_change_monitor_enabled(False)
+            self.refresh_board(
+                force=True,
+                refresh_reason="start_auto_refresh",
+                loading_message="Загрузка операционной...",
+            )
+            if self.data_service and wake_monitor:
+                self.data_service.request_immediate_refresh(force_emit=False, source="operblock_start")
+        finally:
+            operblock_startup_metrics.record_since(
+                "start_auto_refresh_ms",
+                metric_started,
+                source="operblock_widget",
+                nested_role="wrapper",
+                child_phase="first_refresh_board_ms",
+            )
+
+    def auto_refresh(self, force: bool = False):
+        if self._is_closing:
+            return
+        action_info = self._start_opblock_action_diagnostics("operblock_user_refresh") if force else None
+        current_widget = self.stack.currentWidget()
+        try:
+            if self.protocol_page is not None and current_widget == self.protocol_page and self._current_operation_case_id:
+                self.refresh_protocol(
+                    force=force,
+                    loading_message="Обновление протокола операции..." if force else None,
+                )
+            elif self.archive_page is not None and current_widget == self.archive_page:
+                self.refresh_operblock_archive(
+                    force=force,
+                    loading_message="Обновление архива оперблока..." if force else None,
+                )
+            else:
+                self.refresh_board(
+                    force=force,
+                    refresh_reason="auto_refresh",
+                    loading_message="Обновление операционной..." if force else None,
+                )
+        finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
+
+    def apply_operblock_icon_settings(self):
+        self._orders_render_signature = ""
+        self._active_infusions_render_signature = ""
+        self._rendered_medication_group_signatures.clear()
+        self._rendered_active_infusion_signatures.clear()
+        self._board_photo_thumbnail_cache.clear()
+        current_widget = self.stack.currentWidget()
+        if self.protocol_page is not None and current_widget == self.protocol_page and self._current_operation_case_id:
+            self.refresh_protocol(force=True)
+            return
+        if getattr(self, "quick_orders_list", None) is not None:
+            try:
+                self._refresh_quick_orders()
+            except Exception:
+                pass
+        if self.archive_page is not None and current_widget == self.archive_page:
+            self.refresh_operblock_archive(force=True)
+        else:
+            self.refresh_board(force=True, refresh_reason="operblock_icon_settings")
+
+    def refresh_board(
+        self,
+        *,
+        force: bool = False,
+        refresh_reason: str = "refresh_board",
+        loading_message: str | None = None,
+    ):
+        if self._is_closing:
+            return
+        worker = getattr(self, "_board_refresh_worker", None)
+        if worker is not None and worker.isRunning():
+            pending = dict(self._board_refresh_pending or {})
+            self._board_refresh_pending = {
+                "force": bool(force) or bool(pending.get("force")),
+                "refresh_reason": str(refresh_reason or pending.get("refresh_reason") or "refresh_board"),
+                "loading_message": loading_message or pending.get("loading_message"),
+            }
+            return
+        loading_key = self._show_operblock_loading(
+            loading_message,
+            key="board-refresh",
+            auto_hide_ms=30000,
+        )
+        enter_started = operblock_startup_metrics.timer_start()
+        self._board_refresh_seq += 1
+        refresh_seq = self._board_refresh_seq
+        self._board_refresh_count_before_ready += 1
+        is_first_refresh = not getattr(self, "_operblock_startup_first_refresh_recorded", False)
+        refresh_fields = {
+            "refresh_seq": refresh_seq,
+            "refresh_reason": str(refresh_reason or "refresh_board"),
+            "force": bool(force),
+            "is_first": bool(is_first_refresh),
+            "is_first_refresh": bool(is_first_refresh),
+        }
+        operblock_startup_metrics.record_value("refresh_seq", refresh_seq, source="operblock_widget", **refresh_fields)
+        operblock_startup_metrics.record_value(
+            "refresh_count_before_ready",
+            self._board_refresh_count_before_ready,
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value(
+            "refresh_reason",
+            refresh_fields["refresh_reason"],
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value("refresh_force", bool(force), source="operblock_widget", **refresh_fields)
+        operblock_startup_metrics.record_value(
+            "refresh_is_first_refresh",
+            bool(is_first_refresh),
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value(
+            "refresh_is_first",
+            bool(is_first_refresh),
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_since("refresh_board_enter_ms", enter_started, source="operblock_widget", **refresh_fields)
+        first_refresh_started = None
+        if not getattr(self, "_operblock_startup_first_refresh_recorded", False):
+            first_refresh_started = operblock_startup_metrics.timer_start()
+            self._operblock_startup_first_refresh_recorded = True
+        snapshot_started = operblock_startup_metrics.timer_start()
+        worker = AsyncCallThread(
+            self.operblock_service.build_operblock_board_snapshot,
+            table_code=self._table_filter_code,
+            parent=self,
+        )
+        self._board_refresh_worker = worker
+        finalized = {"done": False}
+
+        def finalize_refresh():
+            if finalized["done"]:
+                return
+            finalized["done"] = True
+            operblock_startup_metrics.record_since(
+                "first_refresh_board_ms",
+                first_refresh_started,
+                source="operblock_widget",
+                nested_role="child",
+                parent_phase="start_auto_refresh_ms",
+                **refresh_fields,
+            )
+            self._hide_operblock_loading(loading_key)
+            if getattr(self, "_board_refresh_worker", None) is worker:
+                self._board_refresh_worker = None
+            pending = self._board_refresh_pending
+            self._board_refresh_pending = None
+            if pending and not self._is_closing:
+                QTimer.singleShot(0, lambda pending=pending: self.refresh_board(**pending))
+            elif is_first_refresh and not self._is_closing:
+                QTimer.singleShot(300, self._preload_operblock_chart_module)
+
+        def on_snapshot_ready(snapshot):
+            try:
+                operblock_startup_metrics.record_since(
+                    "refresh_board_snapshot_ms",
+                    snapshot_started,
+                    source="operblock_widget",
+                    nested_role="child",
+                    parent_phase="first_refresh_board_ms",
+                    **refresh_fields,
+                )
+                snapshot = self._filter_board_snapshot(snapshot)
+                if not force and snapshot.get("content_hash") == self._board_hash:
+                    return
+                self._board_hash = snapshot.get("content_hash") or ""
+                apply_started = operblock_startup_metrics.timer_start()
+                self._apply_board_snapshot(snapshot, refresh_context=refresh_fields)
+                operblock_startup_metrics.record_since(
+                    "refresh_board_apply_total_ms",
+                    apply_started,
+                    source="operblock_widget",
+                    nested_role="child",
+                    parent_phase="first_refresh_board_ms",
+                    **refresh_fields,
+                )
+            except Exception as exc:
+                logger.error("operblock board refresh apply failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
+            finally:
+                finalize_refresh()
+
+        def on_snapshot_failed(exc):
+            try:
+                operblock_startup_metrics.record_since(
+                    "refresh_board_snapshot_ms",
+                    snapshot_started,
+                    source="operblock_widget",
+                    nested_role="child",
+                    parent_phase="first_refresh_board_ms",
+                    status="error",
+                    **refresh_fields,
+                )
+                logger.error("operblock board refresh failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
+            finally:
+                finalize_refresh()
+
+        worker.succeeded.connect(on_snapshot_ready)
+        worker.failed.connect(on_snapshot_failed)
+        worker.start()
+
+    def refresh_operblock_archive(self, *, force: bool = False, loading_message: str | None = None, page: int | None = None):
+        if self._is_closing:
+            return
+        if page is not None:
+            self._archive_current_page = max(1, int(page or 1))
+        loading_key = self._show_operblock_loading(
+            loading_message,
+            key="archive-refresh",
+            auto_hide_ms=30000,
+        )
+        try:
+            try:
+                search_query = str(
+                    getattr(self, "archive_search_input", None).text()
+                    if hasattr(self, "archive_search_input")
+                    else ""
+                ).strip()
+                if hasattr(self.operblock_service, "list_archived_operation_cases_page"):
+                    payload = self.operblock_service.list_archived_operation_cases_page(
+                        page=self._archive_current_page,
+                        page_size=self._archive_page_size,
+                        table_code=self._table_filter_code,
+                        search_query=search_query,
+                    )
+                    cases = [dict(item or {}) for item in (payload or {}).get("records") or []]
+                    total_count = int((payload or {}).get("total_count") or len(cases))
+                    loaded_page = int((payload or {}).get("page") or self._archive_current_page or 1)
+                else:
+                    all_cases = self._filter_archive_cases_by_table(self.operblock_service.list_archived_operation_cases())
+                    cases = all_cases
+                    total_count = len(all_cases)
+                    loaded_page = 1
+            except Exception as exc:
+                logger.error("operblock archive refresh failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось обновить архив:\n{exc}")
+                return
+            total_pages = max(1, int(ceil(total_count / self._archive_page_size))) if total_count else 1
+            if loaded_page > total_pages:
+                self._archive_current_page = total_pages
+                QTimer.singleShot(0, lambda: self.refresh_operblock_archive(force=True, page=total_pages))
+                return
+            self._archive_current_page = max(1, min(loaded_page, total_pages))
+            self._archive_total_records = max(0, total_count)
+            self._archive_total_pages = total_pages
+            source_hash = _stable_ui_hash(cases)
+            if not force and source_hash == getattr(self, "_archive_cases_hash", ""):
+                self._refresh_operblock_archive_pagination_ui()
+                return
+            self._archive_cases_hash = source_hash
+            self._archive_cases = [dict(item or {}) for item in cases]
+            self._apply_operblock_archive_cases()
+        finally:
+            self._hide_operblock_loading(loading_key)
+
+    def refresh_protocol(self, *, force: bool = False, loading_message: str | None = None):
+        if self._is_closing or not self._current_operation_case_id:
+            return
+        worker = getattr(self, "_protocol_refresh_worker", None)
+        if worker is not None and worker.isRunning():
+            self._refresh_generation += 1
+            pending = dict(self._protocol_refresh_pending or {})
+            self._protocol_refresh_pending = {
+                "force": bool(force) or bool(pending.get("force")),
+                "loading_message": loading_message or pending.get("loading_message"),
+            }
+            return
+        loading_key = self._show_operblock_loading(
+            loading_message,
+            key="protocol-refresh",
+            auto_hide_ms=30000,
+        )
+        generation = self._refresh_generation = self._refresh_generation + 1
+        operation_case_id = int(self._current_operation_case_id)
+        snapshot_started = operblock_startup_metrics.timer_start()
+        worker = AsyncCallThread(
+            self.operblock_service.build_operblock_protocol_snapshot,
+            operation_case_id,
+            parent=self,
+        )
+        self._protocol_refresh_worker = worker
+        finalized = {"done": False}
+
+        def finalize_refresh():
+            if finalized["done"]:
+                return
+            finalized["done"] = True
+            self._hide_operblock_loading(loading_key)
+            if getattr(self, "_protocol_refresh_worker", None) is worker:
+                self._protocol_refresh_worker = None
+            pending = self._protocol_refresh_pending
+            self._protocol_refresh_pending = None
+            if pending and not self._is_closing:
+                QTimer.singleShot(0, lambda pending=pending: self.refresh_protocol(**pending))
+
+        def is_stale_result() -> bool:
+            return (
+                self._is_closing
+                or generation != self._refresh_generation
+                or int(self._current_operation_case_id or 0) != operation_case_id
+            )
+
+        def on_snapshot_ready(snapshot):
+            try:
+                operblock_startup_metrics.record_since(
+                    "refresh_protocol_snapshot_ms",
+                    snapshot_started,
+                    source="operblock_widget",
+                    operation_case_id=operation_case_id,
+                )
+                if is_stale_result():
+                    return
+                if not force and snapshot.get("content_hash") == self._protocol_hash:
+                    return
+                self._protocol_hash = snapshot.get("content_hash") or ""
+                apply_started = operblock_startup_metrics.timer_start()
+                self._apply_protocol_snapshot(snapshot)
+                operblock_startup_metrics.record_since(
+                    "refresh_protocol_apply_ms",
+                    apply_started,
+                    source="operblock_widget",
+                    operation_case_id=operation_case_id,
+                )
+                self._schedule_current_protocol_tab_ready(120)
+            except Exception as exc:
+                logger.error("operblock protocol refresh apply failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Ошибка", f"Не удалось обновить протокол:\n{exc}")
+            finally:
+                finalize_refresh()
+
+        def on_snapshot_failed(exc):
+            try:
+                operblock_startup_metrics.record_since(
+                    "refresh_protocol_snapshot_ms",
+                    snapshot_started,
+                    source="operblock_widget",
+                    operation_case_id=operation_case_id,
+                    status="error",
+                )
+                if is_stale_result():
+                    return
+                if isinstance(exc, OperBlockConflictError):
+                    CustomMessageBox.warning(self, "Оперблок", str(exc))
+                    self._show_board()
+                    return
+                logger.error("operblock protocol refresh failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Ошибка", f"Не удалось обновить протокол:\n{exc}")
+            finally:
+                finalize_refresh()
+
+        worker.succeeded.connect(on_snapshot_ready)
+        worker.failed.connect(on_snapshot_failed)
+        worker.start()
+
+    @staticmethod
+    def _empty_board_table_payload(table: dict) -> dict:
+        return {
+            "code": str(table.get("code") or ""),
+            "display_name": table.get("display_name") or "",
+            "sort_order": table.get("sort_order"),
+            "occupied": False,
+            "patient": None,
+        }
+
+    @staticmethod
+    def _board_table_content_hash(table: dict) -> str:
+        return _stable_ui_hash(
+            {
+                "code": str(table.get("code") or ""),
+                "display_name": table.get("display_name") or "",
+                "sort_order": table.get("sort_order"),
+                "occupied": bool(table.get("occupied")),
+                "patient": table.get("patient") or None,
+            }
+        )
+
+    def _board_card_layout_index(self, widget: QWidget | None) -> int:
+        if widget is None:
+            return -1
+        layout = getattr(self, "cards_layout", None)
+        if layout is None:
+            return -1
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item is not None and item.widget() is widget:
+                return index
+        return -1
+
+    def _remove_board_card_widget(self, widget: QWidget | None) -> bool:
+        if widget is None:
+            return False
+        if getattr(self, "cards_layout", None) is not None:
+            self.cards_layout.removeWidget(widget)
+        widget.setParent(None)
+        return True
+
+    def _apply_board_snapshot(self, snapshot: dict, *, refresh_context: dict | None = None):
+        metric_started = operblock_startup_metrics.timer_start()
+        refresh_fields = dict(refresh_context or {})
+        tables = list(snapshot.get("tables", []) or [])
+        occupied_count = sum(1 for table in tables if table.get("occupied"))
+        empty_count = max(0, len(tables) - occupied_count)
+        apply_fields = {
+            **refresh_fields,
+            "nested_role": "child",
+            "parent_phase": "apply_board_snapshot_ms",
+        }
+        apply_metrics = {
+            "photo_count": 0,
+            "missing_photo_count": 0,
+            "current_card_fields": {},
+            "photo_cache_hit_count": 0,
+            "photo_cache_miss_count": 0,
+        }
+        previous_apply_metrics = self._current_board_apply_metrics
+        self._current_board_apply_metrics = apply_metrics
+        try:
+            operblock_startup_metrics.record_value("board_apply_table_count", len(tables), source="operblock_widget", **apply_fields)
+            operblock_startup_metrics.record_value("board_apply_occupied_count", occupied_count, source="operblock_widget", **apply_fields)
+            operblock_startup_metrics.record_value("board_apply_empty_count", empty_count, source="operblock_widget", **apply_fields)
+            snapshot_codes = {str(table.get("code") or "") for table in tables}
+            clear_started = operblock_startup_metrics.timer_start()
+            remove_started = operblock_startup_metrics.timer_start()
+            removed_count = 0
+            for table_code, widget in list(self._table_cards.items()):
+                if table_code in snapshot_codes:
+                    continue
+                if self._remove_board_card_widget(widget):
+                    removed_count += 1
+                self._table_cards.pop(table_code, None)
+                self._board_card_hashes.pop(table_code, None)
+                self._board_card_states.pop(table_code, None)
+            operblock_startup_metrics.record_since(
+                "board_apply_clear_remove_widgets_ms",
+                remove_started,
+                source="operblock_widget",
+                removed_count=removed_count,
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_duration(
+                "board_apply_clear_delete_later_ms",
+                0.0,
+                source="operblock_widget",
+                reason="delete_later_not_used",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_since("board_apply_clear_total_ms", clear_started, source="operblock_widget", **apply_fields)
+
+            loop_started = operblock_startup_metrics.timer_start()
+            recreated_count = 0
+            reused_count = 0
+            skipped_unchanged_count = 0
+            replaced_count = 0
+            updated_count = 0
+            relayout_count = 0
+            relayout_elapsed_recorded = False
+            for target_index, table in enumerate(tables):
+                table_code = str(table.get("code") or "")
+                table_hash = self._board_table_content_hash(table)
+                card_kind = "occupied" if table.get("occupied") else "empty"
+                previous_card = self._table_cards.get(table_code)
+                previous_hash = self._board_card_hashes.get(table_code, "")
+                previous_state = self._board_card_states.get(table_code) or {}
+                card_fields = {
+                    **refresh_fields,
+                    "table_code": table_code,
+                    "card_kind": card_kind,
+                    "nested_role": "child",
+                    "parent_phase": "board_apply_card_loop_total_ms",
+                }
+                card_inner_fields = {
+                    **refresh_fields,
+                    "table_code": table_code,
+                    "card_kind": card_kind,
+                    "nested_role": "child",
+                    "parent_phase": (
+                        "board_apply_make_occupied_card_ms" if table.get("occupied") else "board_apply_make_empty_card_ms"
+                    ),
+                }
+                if previous_card is not None and previous_hash == table_hash:
+                    reused_count += 1
+                    skipped_unchanged_count += 1
+                    if previous_state.get("has_photo"):
+                        apply_metrics["photo_cache_hit_count"] = int(apply_metrics.get("photo_cache_hit_count") or 0) + 1
+                    current_index = self._board_card_layout_index(previous_card)
+                    if current_index != target_index:
+                        move_started = operblock_startup_metrics.timer_start()
+                        if current_index >= 0:
+                            self.cards_layout.removeWidget(previous_card)
+                        self.cards_layout.insertWidget(target_index, previous_card, 1)
+                        operblock_startup_metrics.record_since(
+                            "board_apply_order_relayout_ms",
+                            move_started,
+                            source="operblock_widget",
+                            **card_fields,
+                        )
+                        relayout_elapsed_recorded = True
+                        relayout_count += 1
+                    continue
+
+                apply_metrics["current_card_fields"] = card_inner_fields
+                if previous_card is not None:
+                    self._remove_board_card_widget(previous_card)
+                    replaced_count += 1
+                    updated_count += 1
+                if table.get("occupied"):
+                    card_started = operblock_startup_metrics.timer_start()
+                    card = self._make_occupied_table_card(table)
+                    operblock_startup_metrics.record_since(
+                        "board_apply_make_occupied_card_ms",
+                        card_started,
+                        source="operblock_widget",
+                        **card_fields,
+                    )
+                else:
+                    card_started = operblock_startup_metrics.timer_start()
+                    card = self._make_empty_table_card(table["code"], table["display_name"])
+                    operblock_startup_metrics.record_since(
+                        "board_apply_make_empty_card_ms",
+                        card_started,
+                        source="operblock_widget",
+                        **card_fields,
+                    )
+                self._table_cards[table_code] = card
+                self._board_card_hashes[table_code] = table_hash
+                self._board_card_states[table_code] = {
+                    "kind": card_kind,
+                    "content_hash": table_hash,
+                    "has_photo": True,
+                }
+                layout_add_started = operblock_startup_metrics.timer_start()
+                self.cards_layout.insertWidget(target_index, card, 1)
+                operblock_startup_metrics.record_since("board_apply_layout_add_ms", layout_add_started, source="operblock_widget", **card_fields)
+                recreated_count += 1
+            apply_metrics["current_card_fields"] = {}
+            if not relayout_elapsed_recorded:
+                operblock_startup_metrics.record_duration(
+                    "board_apply_order_relayout_ms",
+                    0.0,
+                    source="operblock_widget",
+                    **apply_fields,
+                )
+            operblock_startup_metrics.record_since("board_apply_card_loop_total_ms", loop_started, source="operblock_widget", **apply_fields)
+
+            after_loop_started = operblock_startup_metrics.timer_start()
+            operblock_startup_metrics.record_value(
+                "board_apply_card_recreated_count",
+                recreated_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_card_reused_count",
+                reused_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_card_skipped_unchanged_count",
+                skipped_unchanged_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_card_replaced_count",
+                replaced_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_card_updated_count",
+                updated_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_order_relayout_count",
+                relayout_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_photo_count",
+                int(apply_metrics.get("photo_count") or 0),
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_missing_photo_count",
+                int(apply_metrics.get("missing_photo_count") or 0),
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_photo_cache_hit_count",
+                int(apply_metrics.get("photo_cache_hit_count") or 0),
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_photo_cache_miss_count",
+                int(apply_metrics.get("photo_cache_miss_count") or 0),
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_since("board_apply_after_loop_ms", after_loop_started, source="operblock_widget", **apply_fields)
+        finally:
+            self._current_board_apply_metrics = previous_apply_metrics
+            operblock_startup_metrics.record_since(
+                "apply_board_snapshot_ms",
+                metric_started,
+                source="operblock_widget",
+                nested_role="child",
+                parent_phase="first_refresh_board_ms",
+                **refresh_fields,
+            )
+
+    def _show_operblock_archive(self):
+        if self._is_closing or self._write_pending:
+            return
+        action_info = self._start_opblock_action_diagnostics("operblock_open_archive")
+        loading_key = self._show_operblock_loading(
+            "Открытие архива оперблока...",
+            key="open-archive",
+            auto_hide_ms=30000,
+        )
+        try:
+            current_widget = self.stack.currentWidget()
+            if current_widget == self.protocol_page and self._current_operation_case_id:
+                self._archive_return_operation_case_id = int(self._current_operation_case_id)
+            elif current_widget != self.archive_page:
+                self._archive_return_operation_case_id = None
+            first_open = self.archive_page is None
+            first_open_started = operblock_startup_metrics.timer_start() if first_open else None
+            if not self._ensure_archive_page_created():
+                return
+            self._set_protocol_chrome(True)
+            self.stack.setCurrentWidget(self.archive_page)
+            self._current_operation_case_id = None
+            self._current_admission_id = None
+            self._current_operation_start = None
+            self._current_operation_end = None
+            self._current_case_active = False
+            self._current_operation_has_vitals = False
+            self._current_stage_state = {}
+            self._current_anesthesia_active = False
+            self._current_surgery_active = False
+            self._current_anesthesia_assistance_type = ""
+            self._current_operation_name = ""
+            self._current_protocol_display = ""
+            self._update_protocol_title_label()
+            self._update_operblock_staff_legend()
+            self.refresh_operblock_archive(force=True, page=1)
+            if first_open:
+                operblock_startup_metrics.record_since(
+                    "first_open_archive_ms",
+                    first_open_started,
+                    source="operblock_widget",
+                )
+        finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
+            self._hide_operblock_loading(loading_key)
+
+    def _filtered_archive_cases(self) -> list[dict]:
+        query = str(getattr(self, "archive_search_input", None).text() if hasattr(self, "archive_search_input") else "").strip().casefold()
+        cases = list(getattr(self, "_archive_cases", []) or [])
+        if not query:
+            return cases
+        result = []
+        for case in cases:
+            haystack = " ".join(
+                [
+                    str(case.get("full_name") or ""),
+                    str(case.get("history_number") or ""),
+                    str(case.get("diagnosis_code") or ""),
+                    str(case.get("diagnosis_text") or ""),
+                    str(case.get("table_display_name") or ""),
+                ]
+            ).casefold()
+            if query in haystack:
+                result.append(case)
+        return result
+
+    def _apply_operblock_archive_cases(self):
+        table = getattr(self, "archive_table", None)
+        if table is None:
+            return
+        cases = self._filtered_archive_cases()
+        table.setRowCount(0)
+        table.setRowCount(len(cases))
+        for row, case in enumerate(cases):
+            diagnosis_text = str(case.get("diagnosis_text") or "—")
+            diagnosis_code = str(case.get("diagnosis_code") or "").strip()
+            if diagnosis_code:
+                diagnosis_text = f"{diagnosis_code}: {diagnosis_text}"
+            status = str(case.get("status") or "").strip().lower()
+            values = [
+                case.get("table_display_name") or "—",
+                case.get("full_name") or "Неизвестно",
+                case.get("history_number") or "",
+                diagnosis_text,
+                _format_dt(case.get("started_at")),
+                "" if status == "active" else _format_dt(case.get("ended_at")),
+                "В операционной" if status == "active" else "В архиве",
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 0:
+                    item.setData(Qt.UserRole, dict(case))
+                table.setItem(row, column, item)
+        self._update_operblock_archive_buttons()
+        self._refresh_operblock_archive_pagination_ui()
+
+    def _set_operblock_archive_page(self, page: int):
+        page = max(1, min(int(page or 1), int(getattr(self, "_archive_total_pages", 1) or 1)))
+        if page == getattr(self, "_archive_current_page", 1) and getattr(self, "_archive_cases", None):
+            self._apply_operblock_archive_cases()
+            return
+        self.refresh_operblock_archive(force=True, page=page)
+
+    def _jump_operblock_archive_page_from_input(self):
+        raw = str(getattr(self, "archive_page_jump_input", None).text() if hasattr(self, "archive_page_jump_input") else "").strip()
+        if not raw:
+            return
+        if not raw.isdigit():
+            CustomMessageBox.warning(self, "Пагинация", "Введите номер страницы цифрами.")
+            return
+        self._set_operblock_archive_page(int(raw))
+
+    def _refresh_operblock_archive_pagination_ui(self):
+        layout = getattr(self, "archive_page_buttons_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        current_page = max(1, int(getattr(self, "_archive_current_page", 1) or 1))
+        total_pages = max(1, int(getattr(self, "_archive_total_pages", 1) or 1))
+        max_visible = 7
+        start_page = max(1, current_page - 3)
+        end_page = min(total_pages, start_page + max_visible - 1)
+        start_page = max(1, end_page - max_visible + 1)
+
+        for page in range(start_page, end_page + 1):
+            button = QPushButton(str(page))
+            button.setCheckable(True)
+            button.setChecked(page == current_page)
+            button.setMinimumWidth(30)
+            button.setFixedHeight(28)
+            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+            button.clicked.connect(lambda _checked=False, p=page: self._set_operblock_archive_page(p))
+            layout.addWidget(button)
+
+        if hasattr(self, "archive_prev_page_button"):
+            self.archive_prev_page_button.setEnabled(current_page > 1 and not self._write_pending)
+        if hasattr(self, "archive_next_page_button"):
+            self.archive_next_page_button.setEnabled(current_page < total_pages and not self._write_pending)
+        if hasattr(self, "archive_page_info_label"):
+            total_records = int(getattr(self, "_archive_total_records", 0) or 0)
+            self.archive_page_info_label.setText(f"Страница {current_page} из {total_pages} · записей: {total_records}")
+        if hasattr(self, "archive_page_jump_button"):
+            self.archive_page_jump_button.setEnabled(not self._write_pending)
+        if hasattr(self, "archive_page_jump_input"):
+            self.archive_page_jump_input.setEnabled(not self._write_pending)
+
+    def _archive_case_from_row(self, row: int) -> dict | None:
+        table = getattr(self, "archive_table", None)
+        if table is None or row < 0:
+            return None
+        item = table.item(row, 0)
+        if item is None:
+            return None
+        data = item.data(Qt.UserRole)
+        return dict(data or {}) if isinstance(data, dict) else None
+
+    def _selected_archive_case(self) -> dict | None:
+        table = getattr(self, "archive_table", None)
+        if table is None:
+            return None
+        return self._archive_case_from_row(table.currentRow())
+
+    def _update_operblock_archive_buttons(self):
+        selected = self._selected_archive_case()
+        enabled = bool(selected) and not self._write_pending
+        selected_external = enabled and bool((selected or {}).get("is_external_archive"))
+        selected_closed = (
+            enabled
+            and not selected_external
+            and str((selected or {}).get("status") or "").strip().lower() == "closed"
+        )
+        selected_current_case = enabled and not selected_external
+        has_closed_cases = any(
+            str((case or {}).get("status") or "").strip().lower() == "closed"
+            and not bool((case or {}).get("is_external_archive"))
+            for case in (getattr(self, "_archive_cases", None) or [])
+        ) and not self._write_pending
+        if hasattr(self, "archive_open_button"):
+            self.archive_open_button.setEnabled(enabled)
+        if hasattr(self, "archive_restore_button"):
+            self.archive_restore_button.setEnabled(selected_closed)
+        if hasattr(self, "archive_delete_button"):
+            self.archive_delete_button.setEnabled(selected_current_case)
+        if hasattr(self, "archive_delete_all_button"):
+            self.archive_delete_all_button.setEnabled(has_closed_cases)
+        self._refresh_operblock_archive_pagination_ui()
+
+    def _open_selected_archive_case(self):
+        selected = self._selected_archive_case()
+        if selected and selected.get("is_external_archive"):
+            self._open_external_archive_case(selected)
+            return
+        case_id = _safe_int((selected or {}).get("operation_case_id"))
+        if case_id:
+            self._open_protocol(case_id)
+
+    def _close_external_archive_viewer(self):
+        viewer = getattr(self, "_external_archive_viewer", None)
+        if viewer is not None:
+            try:
+                if hasattr(viewer, "shutdown"):
+                    viewer.shutdown()
+            except Exception as exc:
+                logger.warning("Failed to shutdown external operblock archive viewer: %s", exc)
+            try:
+                if getattr(self, "stack", None) is not None and self.stack.indexOf(viewer) >= 0:
+                    self.stack.removeWidget(viewer)
+            except Exception:
+                pass
+            try:
+                viewer.deleteLater()
+            except Exception:
+                pass
+        self._external_archive_viewer = None
+        if self._external_archive_db_manager is not None:
+            try:
+                self._external_archive_db_manager.close()
+            except Exception as exc:
+                logger.warning("Failed to close external operblock archive DB manager: %s", exc)
+        self._external_archive_db_manager = None
+
+    def _return_from_external_archive_viewer(self):
+        loading_key = self._show_operblock_loading(
+            "Возврат в архив оперблока...",
+            key="return-external-archive",
+            auto_hide_ms=30000,
+        )
+        try:
+            if getattr(self, "archive_page", None) is not None:
+                self.stack.setCurrentWidget(self.archive_page)
+            self._close_external_archive_viewer()
+            self.refresh_operblock_archive(force=True)
+        finally:
+            self._hide_operblock_loading(loading_key)
+
+    def _open_external_archive_case(self, selected: dict):
+        source_db_path = str((selected or {}).get("source_db_path") or "").strip()
+        case_id = _safe_int((selected or {}).get("source_operation_case_id") or (selected or {}).get("operation_case_id"))
+        if not source_db_path or not case_id:
+            CustomMessageBox.warning(self, "Архив оперблока", "Не удалось определить архивную БД или запись оперблока.")
+            return
+        loading_key = self._show_operblock_loading(
+            "Открытие архивной операции...",
+            key="open-external-archive",
+            auto_hide_ms=30000,
+        )
+        try:
+            self._close_external_archive_viewer()
+            ro_db_manager = None
+            try:
+                from rem_card.services.archive_readonly_service import create_archive_readonly_service
+
+                ro_remcard_service, ro_db_manager = create_archive_readonly_service(source_db_path)
+                ro_operblock_service = OperBlockService(ro_db_manager)
+                ro_patient_service = getattr(ro_remcard_service, "_patients", self.patient_service)
+                viewer = OperBlockMainWidget(
+                    ro_patient_service,
+                    ro_remcard_service,
+                    ro_operblock_service,
+                    parent=self.stack,
+                    table_code=self._table_filter_code,
+                    view_only=True,
+                )
+            except Exception as exc:
+                if ro_db_manager is not None:
+                    try:
+                        ro_db_manager.close()
+                    except Exception:
+                        pass
+                CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось открыть архивную БД:\n{exc}")
+                return
+            self._external_archive_viewer = viewer
+            self._external_archive_db_manager = ro_db_manager
+            viewer.view_back_requested.connect(self._return_from_external_archive_viewer)
+            self.stack.addWidget(viewer)
+            self.stack.setCurrentWidget(viewer)
+            viewer.open_archive_protocol(case_id)
+        finally:
+            self._hide_operblock_loading(loading_key)
+
+    def _restore_selected_archive_case(self):
+        selected = self._selected_archive_case()
+        case_id = _safe_int((selected or {}).get("operation_case_id"))
+        if not case_id or self._write_pending:
+            return
+        if (selected or {}).get("is_external_archive"):
+            CustomMessageBox.information(self, "Только просмотр", "Запись прошлых периодов доступна только для просмотра.")
+            return
+        reply = CustomMessageBox.question(
+            self,
+            "Возврат из архива",
+            "Вернуть пациента на операционный стол?",
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+        self._write_pending = True
+        self._update_operblock_archive_buttons()
+
+        def operation():
+            return self.operblock_service.restore_archived_operation_case(case_id)
+
+        self._enqueue_write(
+            f"operblock_restore_archive_case:{case_id}",
+            operation,
+            on_success=lambda result: self._on_restore_archive_case_success(result),
+            on_error=lambda exc: self._on_restore_archive_case_error(exc),
+        )
+
+    def _on_restore_archive_case_success(self, result):
+        self._write_pending = False
+        self.refresh_board(force=True)
+        self.refresh_operblock_archive(force=True)
+        case_id = _safe_int((result or {}).get("operation_case_id"))
+        if case_id:
+            self._open_protocol(case_id)
+
+    def _on_restore_archive_case_error(self, exc: Exception):
+        self._write_pending = False
+        CustomMessageBox.warning(self, "Возврат из архива", str(exc))
+        self.refresh_operblock_archive(force=True)
+
+    def _delete_selected_archive_case(self):
+        selected = self._selected_archive_case()
+        case_id = _safe_int((selected or {}).get("operation_case_id"))
+        if not case_id or self._write_pending:
+            return
+        if (selected or {}).get("is_external_archive"):
+            CustomMessageBox.information(self, "Только просмотр", "Запись прошлых периодов доступна только для просмотра.")
+            return
+        patient_name = str((selected or {}).get("full_name") or "выбранного пациента")
+        reply = CustomMessageBox.question(
+            self,
+            "Удаление из архива",
+            f"Действительно удалить анестезиологическую карту пациента {patient_name}?\n"
+            "Если случай ещё открыт, он будет закрыт, а операционный стол освобождён.",
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+        self._write_pending = True
+        self._update_operblock_archive_buttons()
+
+        def operation():
+            return self.operblock_service.delete_archived_operation_case(case_id)
+
+        self._enqueue_write(
+            f"operblock_delete_archive_case:{case_id}",
+            operation,
+            on_success=lambda _result: self._on_delete_archive_case_success(),
+            on_error=lambda exc: self._on_delete_archive_case_error(exc),
+        )
+
+    def _delete_all_archive_cases(self):
+        if self._write_pending:
+            return
+        count = len(getattr(self, "_archive_cases", []) or [])
+        if count <= 0:
+            return
+        archive_scope = f"«{self._table_filter_name}»" if self._table_filter_name else "операционной"
+        reply = CustomMessageBox.question(
+            self,
+            "Удаление архива",
+            f"Действительно удалить пациентов из архива {archive_scope} в текущей БД? "
+            "Записи прошлых циклов после ротации останутся доступными только для просмотра.",
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+        self._write_pending = True
+        self._update_operblock_archive_buttons()
+
+        self._enqueue_write(
+            "operblock_delete_all_archive_cases",
+            lambda: self.operblock_service.delete_all_archived_operation_cases(table_code=self._table_filter_code),
+            on_success=lambda _result: self._on_delete_archive_case_success(),
+            on_error=lambda exc: self._on_delete_archive_case_error(exc),
+        )
+
+    def _on_delete_archive_case_success(self):
+        self._write_pending = False
+        self._archive_cases_hash = ""
+        self.refresh_board(force=True)
+        self.refresh_operblock_archive(force=True)
+
+    def _on_delete_archive_case_error(self, exc: Exception):
+        self._write_pending = False
+        CustomMessageBox.warning(self, "Удаление из архива", str(exc))
+        self.refresh_operblock_archive(force=True)
+
+    def _make_empty_table_action_button(self, table_code: str, display_name: str) -> QPushButton:
+        button = QPushButton("ЗАНЯТЬ СТОЛ")
+        button.setObjectName("OperBlockEmptyStateOccupyButton")
+        button.setFixedHeight(58)
+        button.setMinimumWidth(320)
+        button.setMaximumWidth(480)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setIcon(QIcon(os.path.join(get_icon_dir(), "operblock_plus.svg")))
+        button.setIconSize(QSize(22, 22))
+        button.setStyleSheet(
+            """
+            QPushButton#OperBlockEmptyStateOccupyButton {
+                background-color: #16A34A;
+                color: #FFFFFF;
+                border: 1px solid #15803D;
+                border-radius: 12px;
+                font-size: 17px;
+                font-weight: 800;
+                padding: 0 28px;
+                text-align: center;
+            }
+            QPushButton#OperBlockEmptyStateOccupyButton:hover {
+                background-color: #15803D;
+                border-color: #166534;
+            }
+            QPushButton#OperBlockEmptyStateOccupyButton:pressed {
+                background-color: #166534;
+                border-color: #14532D;
+            }
+            """
+        )
+        button.setEnabled(not self.is_view_only_mode())
+        if not self.is_view_only_mode():
+            button.clicked.connect(lambda _=False, code=table_code, name=display_name: self._open_occupy_dialog(code, name))
+        return button
+
+    def _make_empty_table_queue_button(self, table_code: str, display_name: str) -> QPushButton:
+        button = QPushButton("ОЧЕРЕДЬ")
+        button.setObjectName("OperBlockEmptyStateQueueButton")
+        button.setFixedHeight(58)
+        button.setMinimumWidth(190)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            """
+            QPushButton#OperBlockEmptyStateQueueButton {
+                background-color: #2563EB;
+                color: #FFFFFF;
+                border: 1px solid #1D4ED8;
+                border-radius: 12px;
+                font-size: 17px;
+                font-weight: 800;
+                padding: 0 24px;
+            }
+            QPushButton#OperBlockEmptyStateQueueButton:hover {
+                background-color: #1D4ED8;
+            }
+            QPushButton#OperBlockEmptyStateQueueButton:pressed {
+                background-color: #1E40AF;
+            }
+            """
+        )
+        button.setEnabled(not self.is_view_only_mode())
+        if not self.is_view_only_mode():
+            button.clicked.connect(
+                lambda _=False, code=table_code, name=display_name: self._open_rao_queue_dialog(
+                    code,
+                    name,
+                )
+            )
+        return button
+
+    @staticmethod
+    def _make_empty_table_info_block() -> QFrame:
+        info = QFrame()
+        info.setObjectName("OperBlockEmptyStateInfo")
+        info.setMinimumHeight(58)
+        info.setStyleSheet(
+            """
+            QFrame#OperBlockEmptyStateInfo {
+                background-color: #EFF6FF;
+                border: 1px solid #BBD7FF;
+                border-radius: 10px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        info_layout = QHBoxLayout(info)
+        info_layout.setContentsMargins(18, 12, 18, 12)
+        info_layout.setSpacing(11)
+        info_layout.addStretch(1)
+
+        icon = _OperBlockCircleIcon(
+            "info",
+            background="#DBEAFE",
+            border="#93C5FD",
+            foreground="#1D4ED8",
+            size=26,
+        )
+        icon.setObjectName("OperBlockEmptyStateInfoIcon")
+        info_layout.addWidget(icon, 0, Qt.AlignVCenter)
+
+        text = QLabel("После занятия стола вы сможете добавить пациента и запланировать операцию.")
+        text.setObjectName("OperBlockEmptyStateInfoText")
+        text.setWordWrap(True)
+        text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        text.setStyleSheet("color: #31516F; font-size: 14px; font-weight: 600;")
+        info_layout.addWidget(text, 0, Qt.AlignVCenter)
+        info_layout.addStretch(1)
+        return info
+
+    def _make_empty_table_card(self, table_code: str, display_name: str) -> QFrame:
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
+        frame = self._base_card()
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = self._card_header(display_name)
+        layout.addWidget(header)
+
+        body_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(64, 32, 64, 32)
+        body_layout.setSpacing(16)
+        body_layout.addStretch(1)
+
+        empty_card = QFrame()
+        empty_card.setObjectName("OperBlockEmptyStateCard")
+        empty_card.setMinimumHeight(438)
+        empty_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        empty_card.setStyleSheet(
+            """
+            QFrame#OperBlockEmptyStateCard {
+                background-color: #FFFFFF;
+                border: 1px solid #DDE5EE;
+                border-radius: 14px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        empty_shadow = QGraphicsDropShadowEffect(empty_card)
+        empty_shadow.setBlurRadius(24)
+        empty_shadow.setColor(QColor(31, 45, 61, 20))
+        empty_shadow.setOffset(0, 8)
+        empty_card.setGraphicsEffect(empty_shadow)
+
+        empty_layout = QVBoxLayout(empty_card)
+        empty_layout.setContentsMargins(46, 34, 46, 36)
+        empty_layout.setSpacing(16)
+        empty_layout.addWidget(_OperBlockEmptyRoomIllustration(), 0, Qt.AlignCenter)
+
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(10)
+        status_row.addStretch(1)
+        status_icon = _OperBlockCircleIcon(
+            "check",
+            background="#DCFCE7",
+            border="#86EFAC",
+            foreground="#16A34A",
+            size=24,
+        )
+        status_icon.setObjectName("OperBlockEmptyStateStatusIcon")
+        status_row.addWidget(status_icon, 0, Qt.AlignVCenter)
+        free = QLabel("МЕСТО СВОБОДНО")
+        free.setObjectName("OperBlockEmptyStateStatus")
+        free.setAlignment(Qt.AlignCenter)
+        free.setStyleSheet("color: #16A34A; font-size: 25px; font-weight: 900; background: transparent;")
+        status_row.addWidget(free, 0, Qt.AlignVCenter)
+        status_row.addStretch(1)
+        empty_layout.addLayout(status_row)
+
+        description = QLabel("В операционной нет активной операции.\nВы можете занять стол для нового пациента.")
+        description.setObjectName("OperBlockEmptyStateDescription")
+        description.setAlignment(Qt.AlignCenter)
+        description.setWordWrap(True)
+        description.setStyleSheet("color: #5D7288; font-size: 15px; line-height: 130%;")
+        empty_layout.addWidget(description)
+
+        separator = QFrame()
+        separator.setObjectName("OperBlockEmptyStateSeparator")
+        separator.setFixedHeight(1)
+        separator.setStyleSheet("background-color: #E2E8F0; border: none;")
+        empty_layout.addSpacing(2)
+        empty_layout.addWidget(separator)
+        empty_layout.addSpacing(2)
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(12)
+        action_row.addStretch(1)
+        occupy_button = self._make_empty_table_action_button(table_code, display_name)
+        occupy_button.setMinimumWidth(240)
+        occupy_button.setMaximumWidth(420)
+        action_row.addWidget(occupy_button, 2)
+        action_row.addWidget(self._make_empty_table_queue_button(table_code, display_name), 1)
+        action_row.addStretch(1)
+        empty_layout.addLayout(action_row)
+
+        body_layout.addWidget(empty_card)
+        body_layout.addWidget(self._make_empty_table_info_block())
+        body_layout.addStretch(1)
+        layout.addWidget(body, 1)
+        operblock_startup_metrics.record_since(
+            "board_apply_card_body_ms",
+            body_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
+        return frame
+
+    def _make_occupied_table_card(self, table: dict) -> QFrame:
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
+        patient = table.get("patient") or {}
+        frame = self._base_card()
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._card_header(table.get("display_name") or ""))
+
+        body_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+        body = QWidget()
+        body.setObjectName("OperBlockStartBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(18, 18, 18, 18)
+        body_layout.setSpacing(16)
+        body.setStyleSheet("QWidget#OperBlockStartBody { background: #F7F9FC; }")
+
+        content = QGridLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setHorizontalSpacing(12)
+        content.setVerticalSpacing(12)
+
+        center_top = QWidget()
+        center_top.setStyleSheet("background: transparent; border: none;")
+        center_top_layout = QVBoxLayout(center_top)
+        center_top_layout.setContentsMargins(0, 0, 0, 0)
+        center_top_layout.setSpacing(12)
+        center_top_layout.addWidget(self._board_admission_block(table, patient), 0)
+        center_top_layout.addWidget(self._board_progress_block(patient), 1)
+
+        right_column = QVBoxLayout()
+        right_column.setSpacing(12)
+        right_column.addWidget(self._board_allergies_block(patient), 0)
+        right_column.addWidget(self._board_special_notes_block(patient), 0)
+        right_column.addWidget(self._board_operation_stages_block(patient), 1)
+
+        content.addWidget(self._board_patient_block(patient), 0, 0)
+        content.addWidget(center_top, 0, 1)
+        content.addLayout(right_column, 0, 2, 2, 1)
+        content.addWidget(self._board_vitals_block(patient), 1, 0)
+        content.addWidget(self._board_medications_block(patient), 1, 1)
+        content.setColumnStretch(0, 3)
+        content.setColumnStretch(1, 5)
+        content.setColumnStretch(2, 3)
+        content.setRowStretch(0, 0)
+        content.setRowStretch(1, 1)
+        body_layout.addLayout(content, 1)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        open_btn = QPushButton("ОТКРЫТЬ КАРТОЧКУ")
+        edit_btn = QPushButton("РЕДАКТИРОВАТЬ")
+        edit_icon_path = os.path.join(get_icon_dir(), "edit.png")
+        if os.path.exists(edit_icon_path):
+            edit_btn.setIcon(QIcon(edit_icon_path))
+            edit_btn.setIconSize(QSize(24, 24))
+        print_btn = QPushButton("ПЕЧАТЬ ОТЧЕТА")
+        print_icon_path = os.path.join(get_icon_dir(), "allprint.png")
+        if os.path.exists(print_icon_path):
+            print_btn.setIcon(QIcon(print_icon_path))
+            print_btn.setIconSize(QSize(24, 24))
+        close_btn = QPushButton("ОСВОБОДИТЬ СТОЛ")
+        for button in (open_btn, edit_btn, print_btn, close_btn):
+            button.setFixedHeight(48)
+            button.setCursor(Qt.PointingHandCursor)
+        open_btn.setStyleSheet(self._board_action_button_style("open"))
+        edit_btn.setStyleSheet(self._board_action_button_style("edit"))
+        print_btn.setStyleSheet(self._board_action_button_style("print"))
+        close_btn.setStyleSheet(self._board_action_button_style("danger"))
+        open_btn.clicked.connect(
+            lambda _=False, case_id=patient.get("operation_case_id"): self._open_protocol(int(case_id))
+        )
+        edit_btn.clicked.connect(
+            lambda _=False, case_id=patient.get("operation_case_id"): self._open_edit_patient_dialog(int(case_id))
+        )
+        print_btn.clicked.connect(
+            lambda _=False, case_id=patient.get("operation_case_id"), button=print_btn: self._build_operation_report_pdf(case_id, trigger_button=button)
+        )
+        close_btn.clicked.connect(
+            lambda _=False, case_id=patient.get("operation_case_id"): self._confirm_release_case(int(case_id))
+        )
+        if self.is_view_only_mode():
+            edit_btn.setEnabled(False)
+            close_btn.setEnabled(False)
+        buttons.addWidget(open_btn, 1)
+        buttons.addWidget(edit_btn, 1)
+        buttons.addWidget(print_btn, 1)
+        buttons.addWidget(close_btn, 2)
+        body_layout.addLayout(buttons)
+        layout.addWidget(body, 1)
+        operblock_startup_metrics.record_since(
+            "board_apply_card_body_ms",
+            body_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
+        return frame
+
+    @staticmethod
+    def _board_action_button_style(kind: str) -> str:
+        if kind == "edit":
+            return """
+                QPushButton {
+                    background-color: #FFFFFF;
+                    color: #2563EB;
+                    border: 1px solid #93C5FD;
+                    border-radius: 6px;
+                    font-size: 13px;
+                    font-weight: 800;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { background-color: #DBEAFE; border-color: #2563EB; }
+            """
+        if kind == "print":
+            return """
+                QPushButton {
+                    background-color: #FFFFFF;
+                    color: #1D4ED8;
+                    border: 1px solid #93C5FD;
+                    border-radius: 6px;
+                    font-size: 13px;
+                    font-weight: 800;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { background-color: #DBEAFE; border-color: #2563EB; }
+            """
+        if kind == "danger":
+            return """
+                QPushButton {
+                    background-color: #FFF9F8;
+                    color: #EF4444;
+                    border: 1px solid #EF4444;
+                    border-radius: 6px;
+                    font-size: 13px;
+                    font-weight: 800;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { background-color: #FEE2E2; }
+            """
+        return """
+            QPushButton {
+                background-color: #F8FAFC;
+                color: #1F2D3D;
+                border: 1px solid #B8C2CC;
+                border-radius: 6px;
+                font-size: 13px;
+                font-weight: 800;
+                padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #E2E8F0; border-color: #64748B; }
+        """
+
+    @staticmethod
+    def _board_block(
+        title: str,
+        icon_text: str = "",
+        *,
+        title_color: str = "#1F2D3D",
+        icon_color: str = "#2563EB",
+        icon_kind: str = "",
+        shadow: bool = True,
+        background_color: str = "#FFFFFF",
+        border_color: str = "#E0E6EE",
+    ) -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setObjectName("OperBlockStartBlock")
+        frame.setStyleSheet(
+            f"""
+            QFrame#OperBlockStartBlock {{
+                background-color: {background_color};
+                border: 1px solid {border_color};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        if shadow:
+            effect = QGraphicsDropShadowEffect(frame)
+            effect.setBlurRadius(24)
+            effect.setOffset(0, 5)
+            effect.setColor(QColor(15, 23, 42, 10))
+            frame.setGraphicsEffect(effect)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+        if title:
+            header = QHBoxLayout()
+            header.setContentsMargins(0, 0, 0, 0)
+            header.setSpacing(8)
+            if icon_kind:
+                header_icon = OperBlockMainWidget._board_line_icon(icon_kind, color=icon_color, size=20)
+                header_icon.setObjectName("OperBlockBoardBlockHeaderIcon")
+                header.addWidget(header_icon, 0, Qt.AlignTop)
+            elif icon_text:
+                marker = QLabel(icon_text)
+                marker.setObjectName("OperBlockBoardBlockHeaderIcon")
+                marker.setFixedSize(18, 18)
+                marker.setAlignment(Qt.AlignCenter)
+                marker.setStyleSheet(f"color: {icon_color}; font-size: 12px; font-weight: 900;")
+                header.addWidget(marker, 0, Qt.AlignTop)
+            title_label = QLabel(title)
+            title_label.setWordWrap(True)
+            title_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+            title_label.setStyleSheet(f"color: {title_color}; font-size: 15px; font-weight: 800;")
+            header.addWidget(title_label, 1, Qt.AlignTop)
+            layout.addLayout(header)
+        return frame, layout
+
+    @staticmethod
+    def _disable_context_menu_for_widget_tree(widget: QWidget) -> None:
+        for item in [widget, *widget.findChildren(QWidget)]:
+            item.setContextMenuPolicy(Qt.NoContextMenu)
+
+    @staticmethod
+    def _board_separator() -> QFrame:
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background: #E1E7EF; border: none;")
+        return line
+
+    @staticmethod
+    def _board_line_icon(kind: str, *, color: str = "#71839A", size: int = 22) -> QLabel:
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(color), 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        s = float(size)
+
+        if kind == "pulse":
+            path = QPainterPath()
+            path.moveTo(0.10 * s, 0.55 * s)
+            path.lineTo(0.28 * s, 0.55 * s)
+            path.lineTo(0.38 * s, 0.30 * s)
+            path.lineTo(0.52 * s, 0.72 * s)
+            path.lineTo(0.64 * s, 0.44 * s)
+            path.lineTo(0.74 * s, 0.55 * s)
+            path.lineTo(0.90 * s, 0.55 * s)
+            painter.drawPath(path)
+        elif kind == "bp":
+            path = QPainterPath()
+            path.moveTo(0.50 * s, 0.12 * s)
+            path.lineTo(0.78 * s, 0.24 * s)
+            path.lineTo(0.74 * s, 0.58 * s)
+            path.cubicTo(0.70 * s, 0.78 * s, 0.58 * s, 0.86 * s, 0.50 * s, 0.90 * s)
+            path.cubicTo(0.42 * s, 0.86 * s, 0.30 * s, 0.78 * s, 0.26 * s, 0.58 * s)
+            path.lineTo(0.22 * s, 0.24 * s)
+            path.closeSubpath()
+            painter.drawPath(path)
+            painter.drawLine(int(0.50 * s), int(0.34 * s), int(0.50 * s), int(0.63 * s))
+            painter.drawLine(int(0.36 * s), int(0.48 * s), int(0.64 * s), int(0.48 * s))
+        elif kind == "heart":
+            path = QPainterPath()
+            path.moveTo(0.50 * s, 0.82 * s)
+            path.cubicTo(0.18 * s, 0.58 * s, 0.18 * s, 0.30 * s, 0.36 * s, 0.25 * s)
+            path.cubicTo(0.45 * s, 0.23 * s, 0.50 * s, 0.30 * s, 0.50 * s, 0.36 * s)
+            path.cubicTo(0.50 * s, 0.30 * s, 0.56 * s, 0.23 * s, 0.65 * s, 0.25 * s)
+            path.cubicTo(0.82 * s, 0.30 * s, 0.82 * s, 0.58 * s, 0.50 * s, 0.82 * s)
+            painter.drawPath(path)
+        elif kind == "spo2":
+            path = QPainterPath()
+            path.moveTo(0.50 * s, 0.12 * s)
+            path.cubicTo(0.72 * s, 0.40 * s, 0.82 * s, 0.58 * s, 0.70 * s, 0.76 * s)
+            path.cubicTo(0.60 * s, 0.90 * s, 0.40 * s, 0.90 * s, 0.30 * s, 0.76 * s)
+            path.cubicTo(0.18 * s, 0.58 * s, 0.28 * s, 0.40 * s, 0.50 * s, 0.12 * s)
+            painter.drawPath(path)
+        elif kind == "calendar":
+            painter.drawRoundedRect(int(0.17 * s), int(0.23 * s), int(0.66 * s), int(0.60 * s), 3, 3)
+            painter.drawLine(int(0.17 * s), int(0.40 * s), int(0.83 * s), int(0.40 * s))
+            painter.drawLine(int(0.33 * s), int(0.14 * s), int(0.33 * s), int(0.30 * s))
+            painter.drawLine(int(0.67 * s), int(0.14 * s), int(0.67 * s), int(0.30 * s))
+        elif kind == "clock":
+            painter.drawEllipse(int(0.17 * s), int(0.17 * s), int(0.66 * s), int(0.66 * s))
+            painter.drawLine(int(0.50 * s), int(0.50 * s), int(0.50 * s), int(0.30 * s))
+            painter.drawLine(int(0.50 * s), int(0.50 * s), int(0.64 * s), int(0.58 * s))
+        elif kind == "room":
+            painter.drawRoundedRect(int(0.22 * s), int(0.18 * s), int(0.56 * s), int(0.66 * s), 4, 4)
+            painter.drawLine(int(0.34 * s), int(0.34 * s), int(0.66 * s), int(0.34 * s))
+            painter.drawLine(int(0.34 * s), int(0.52 * s), int(0.58 * s), int(0.52 * s))
+        elif kind == "team":
+            painter.drawEllipse(int(0.20 * s), int(0.22 * s), int(0.24 * s), int(0.24 * s))
+            painter.drawEllipse(int(0.56 * s), int(0.22 * s), int(0.24 * s), int(0.24 * s))
+            painter.drawArc(int(0.12 * s), int(0.54 * s), int(0.40 * s), int(0.28 * s), 0, 180 * 16)
+            painter.drawArc(int(0.48 * s), int(0.54 * s), int(0.40 * s), int(0.28 * s), 0, 180 * 16)
+
+        painter.end()
+        label = QLabel()
+        label.setFixedSize(size, size)
+        label.setAlignment(Qt.AlignCenter)
+        label.setPixmap(pixmap)
+        label.setStyleSheet("background: transparent; border: none;")
+        return label
+
+    @staticmethod
+    def _board_muted_label(text: str, *, size: int = 13) -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet(f"font-size: {size}px; color: #64748B; font-weight: 500;")
+        return label
+
+    @staticmethod
+    def _board_value_label(text: str, *, size: int = 14, weight: int = 700, color: str = "#1F2D3D") -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setStyleSheet(f"font-size: {size}px; color: {color}; font-weight: {weight};")
+        return label
+
+    @staticmethod
+    def _board_allergy_status_icon(*, has_allergies: bool) -> QLabel:
+        size = 22
+        color = "#EF4444" if has_allergies else "#16A34A"
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(color), 1.9, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QRectF(2.5, 2.5, 17.0, 17.0))
+        pen.setWidthF(2.1)
+        painter.setPen(pen)
+        if has_allergies:
+            painter.drawLine(QPointF(7.2, 7.2), QPointF(14.8, 14.8))
+            painter.drawLine(QPointF(14.8, 7.2), QPointF(7.2, 14.8))
+        else:
+            painter.drawLine(QPointF(6.2, 11.2), QPointF(9.4, 14.4))
+            painter.drawLine(QPointF(9.4, 14.4), QPointF(15.8, 7.8))
+        painter.end()
+        icon = QLabel()
+        icon.setFixedSize(22, 22)
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setPixmap(pixmap)
+        icon.setStyleSheet("background: transparent; border: none;")
+        return icon
+
+    @staticmethod
+    def _board_scroll_area(
+        *,
+        object_name: str,
+        scrollbar_object_name: str,
+        maximum_height: int,
+        single_step: int = 36,
+        page_step: int = 144,
+    ) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName(object_name)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setMaximumHeight(maximum_height)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea#{object_name} {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#{object_name} > QWidget > QWidget {{
+                background: transparent;
+            }}
+            """
+        )
+        scrollbar = scroll.verticalScrollBar()
+        scrollbar.setObjectName(scrollbar_object_name)
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(single_step)
+        scrollbar.setPageStep(page_step)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                scrollbar_object_name,
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+        return scroll
+
+    @staticmethod
+    def _scroll_board_area_to_bottom_when_ready(scroll: QScrollArea) -> None:
+        scroll_ref = weakref.ref(scroll)
+        scrollbar = scroll.verticalScrollBar()
+        connection = {"active": True}
+
+        def scroll_to_bottom(*_args) -> None:
+            if not connection.get("active"):
+                return
+            scroll_widget = scroll_ref()
+            if scroll_widget is None:
+                connection["active"] = False
+                return
+            try:
+                maximum = int(scrollbar.maximum())
+                minimum = int(scrollbar.minimum())
+                if maximum <= minimum:
+                    return
+                scrollbar.setValue(maximum)
+                connection["active"] = False
+                try:
+                    scrollbar.rangeChanged.disconnect(scroll_to_bottom)
+                except (RuntimeError, TypeError):
+                    pass
+            except RuntimeError:
+                connection["active"] = False
+
+        try:
+            scrollbar.rangeChanged.connect(scroll_to_bottom)
+        except RuntimeError:
+            return
+        QTimer.singleShot(0, scroll_to_bottom)
+
+    @staticmethod
+    def _board_format_weight(value) -> str:
+        if value in (None, ""):
+            return "—"
+        text = str(value).strip()
+        if isinstance(value, float):
+            text = text.rstrip("0").rstrip(".")
+        return f"{text} кг"
+
+    @staticmethod
+    def _board_format_bmi(height_cm, weight_kg) -> str:
+        if height_cm in (None, "") or weight_kg in (None, ""):
+            return "—"
+        try:
+            height = Decimal(str(height_cm).replace(",", "."))
+            weight = Decimal(str(weight_kg).replace(",", "."))
+        except (InvalidOperation, ValueError):
+            return "—"
+        if height <= 0 or weight <= 0:
+            return "—"
+        height_m = height / Decimal("100")
+        try:
+            bmi = weight / (height_m * height_m)
+        except (InvalidOperation, ZeroDivisionError):
+            return "—"
+        return str(bmi.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)).replace(".", ",")
+
+    @staticmethod
+    def _board_elapsed_text(started_at) -> str:
+        start = _minute_floor_dt(_parse_datetime_value(started_at))
+        if start is None:
+            return "—"
+        delta = max(timedelta(0), datetime.now().replace(second=0, microsecond=0) - start)
+        total_minutes = int(delta.total_seconds() // 60)
+        hours, minutes = divmod(total_minutes, 60)
+        if hours <= 0:
+            return f"{minutes} мин"
+        return f"{hours} ч {minutes:02d} мин"
+
+    @staticmethod
+    def _board_diagnosis_text(patient: dict) -> str:
+        diagnosis = str(patient.get("diagnosis_text") or "—").strip()
+        code = str(patient.get("diagnosis_code") or "").strip()
+        return f"{code}: {diagnosis}" if code else diagnosis
+
+    @staticmethod
+    def _board_ru_plural(value: int, forms: tuple[str, str, str]) -> str:
+        number = abs(int(value)) % 100
+        if 11 <= number <= 14:
+            return forms[2]
+        last_digit = number % 10
+        if last_digit == 1:
+            return forms[0]
+        if 2 <= last_digit <= 4:
+            return forms[1]
+        return forms[2]
+
+    @classmethod
+    def _board_elapsed_short_text(cls, started_at) -> str:
+        start = _minute_floor_dt(_parse_datetime_value(started_at))
+        if start is None:
+            return ""
+        delta = max(timedelta(0), datetime.now().replace(second=0, microsecond=0) - start)
+        total_minutes = int(delta.total_seconds() // 60)
+        hours, minutes = divmod(total_minutes, 60)
+        if hours <= 0:
+            return f"{minutes} мин"
+        if minutes <= 0:
+            return f"{hours} {cls._board_ru_plural(hours, ('час', 'часа', 'часов'))}"
+        return f"{hours} ч {minutes:02d} мин"
+
+    @classmethod
+    def _board_current_time_text(cls, started_at) -> str:
+        current = datetime.now().replace(second=0, microsecond=0).strftime("%d.%m.%Y %H:%M")
+        elapsed = cls._board_elapsed_short_text(started_at)
+        return f"{current} - {elapsed}" if elapsed else current
+
+    @staticmethod
+    def _board_operating_room_text(value) -> str:
+        text = normalize_operblock_team_text(value)
+        if not text:
+            return "—"
+        text = re.sub(r"\bоперационн(?:ая|ой|ую|ые|ых|ое|ого|ому|ым|ом)?\b", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" -—:").strip()
+        return text or "—"
+
+    @staticmethod
+    def _board_surgeon_group_label(position: str) -> str:
+        normalized = normalize_operblock_team_text(position).casefold()
+        if "гинеколог" in normalized or "акушер" in normalized:
+            return "Гинекологи"
+        if "лор" in normalized or "оториноларинголог" in normalized:
+            return "Лор"
+        if "травматолог" in normalized or "ортопед" in normalized:
+            return "Травматологи"
+        return "Хирурги"
+
+    def _board_team_text(self, patient: dict) -> str:
+        lines: list[str] = []
+        anesthesiologist = normalize_operblock_team_text(patient.get("anesthesiologist"))
+        if anesthesiologist:
+            lines.append(f"Анестезиологи: {anesthesiologist}")
+
+        position_by_name: dict[str, str] = {}
+        try:
+            team_items = load_operblock_team()
+        except Exception as exc:
+            logger.warning("operblock board team load failed: %s", exc, exc_info=True)
+            team_items = []
+        for item in team_items:
+            name = normalize_operblock_team_text((item or {}).get("name"))
+            position = normalize_operblock_team_text((item or {}).get("position"))
+            if name and position:
+                position_by_name.setdefault(name.casefold(), position)
+
+        groups: dict[str, list[str]] = {}
+        group_order: list[str] = []
+        seen_surgeons: set[str] = set()
+        for value in patient.get("surgeons") or []:
+            surgeon = normalize_operblock_team_text(value)
+            surgeon_key = surgeon.casefold()
+            if not surgeon or surgeon_key in seen_surgeons:
+                continue
+            seen_surgeons.add(surgeon_key)
+            label = self._board_surgeon_group_label(position_by_name.get(surgeon_key, ""))
+            if label not in groups:
+                groups[label] = []
+                group_order.append(label)
+            groups[label].append(surgeon)
+
+        for label in group_order:
+            lines.append(f"{label}: {', '.join(groups[label])}")
+        return "\n".join(lines) if lines else "—"
+
+    def _board_patient_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("")
+        layout.setSpacing(11)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(14)
+        photo = QLabel()
+        photo.setFixedSize(232, 268)
+        photo.setAlignment(Qt.AlignCenter)
+        photo.setStyleSheet("border-radius: 4px;")
+        self._set_patient_photo(photo, patient.get("gender"))
+        top.addWidget(photo, 0, Qt.AlignTop)
+
+        main = QVBoxLayout()
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(9)
+        status = QLabel("В ОПЕРАЦИОННОЙ")
+        status.setAlignment(Qt.AlignCenter)
+        status.setFixedHeight(24)
+        status.setStyleSheet(
+            "color: #FFFFFF; background-color: #EF4444; border-radius: 5px; "
+            "font-size: 12px; font-weight: 800; padding: 3px 8px;"
+        )
+        main.addWidget(status, 0, Qt.AlignLeft)
+        main.addWidget(self._board_value_label(f"ИБ № {patient.get('history_number') or '—'}", size=15, color="#0F5CC9"))
+        name = self._board_value_label(patient.get("full_name") or "Неизвестно", size=21, weight=800)
+        name.setMaximumHeight(82)
+        main.addWidget(name)
+        main.addStretch(1)
+        top.addLayout(main, 1)
+        layout.addLayout(top)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(8)
+        blood_parts = [
+            str(value).strip()
+            for value in (patient.get("blood_group"), patient.get("blood_rh"))
+            if str(value or "").strip()
+        ]
+        rows = [
+            ("Возраст:", patient.get("age") or "—"),
+            ("Пол:", patient.get("gender") or "—"),
+            ("Вес:", self._board_format_weight(patient.get("weight_kg"))),
+            ("Рост:", f"{patient.get('height_cm')} см" if patient.get("height_cm") not in (None, "") else "—"),
+            ("ИМТ:", self._board_format_bmi(patient.get("height_cm"), patient.get("weight_kg"))),
+            ("Группа крови:", " ".join(blood_parts) if blood_parts else "—"),
+        ]
+        for row, (label_text, value_text) in enumerate(rows):
+            grid.addWidget(self._board_muted_label(label_text, size=13), row, 0)
+            grid.addWidget(self._board_value_label(str(value_text), size=13, weight=550), row, 1)
+        layout.addLayout(grid)
+
+        layout.addStretch(1)
+        self._disable_context_menu_for_widget_tree(block)
+        return block
+
+    def _board_vitals_block(self, patient: dict) -> QFrame:
+        latest = patient.get("latest") or {}
+        ad = str(latest.get("ad") or "").strip("/")
+        pulse = latest.get("pulse")
+        spo2 = latest.get("spo2")
+        has_data = bool(ad) or pulse not in (None, "") or spo2 not in (None, "")
+        source = str(latest.get("source") or "")
+        title = "Текущие показатели" if source == "current" else "Исходные показатели"
+        block, layout = self._board_block(title, icon_kind="pulse", icon_color="#71839A")
+        values = [
+            ("bp", "АД", f"{ad} мм рт. ст." if ad else "-/- мм рт. ст."),
+            ("heart", "ЧСС", f"{pulse} уд/мин" if pulse not in (None, "") else "- уд/мин"),
+            ("spo2", "SpO₂", f"{spo2} %" if spo2 not in (None, "") else "- %"),
+        ]
+        for index, (icon_kind, name, value) in enumerate(values):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(10)
+            row.addWidget(self._board_line_icon(icon_kind, color="#71839A", size=22), 0)
+            row.addWidget(self._board_value_label(name, size=13, weight=550), 0)
+            value_label = self._board_value_label(value, size=16, weight=800, color="#1F2D3D")
+            value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(value_label, 1)
+            layout.addLayout(row)
+            if index < len(values) - 1:
+                layout.addWidget(self._board_separator())
+
+        if not has_data:
+            layout.addSpacing(10)
+            notice = QFrame()
+            notice.setObjectName("OperBlockVitalsNotice")
+            notice.setStyleSheet(
+                """
+                QFrame#OperBlockVitalsNotice {
+                    background-color: #EFF6FF;
+                    border: 1px solid #93C5FD;
+                    border-radius: 6px;
+                }
+                QLabel {
+                    background: transparent;
+                    border: none;
+                }
+                """
+            )
+            notice_layout = QHBoxLayout(notice)
+            notice_layout.setContentsMargins(14, 10, 14, 10)
+            notice_layout.setSpacing(10)
+            icon = QLabel("i")
+            icon.setFixedSize(18, 18)
+            icon.setAlignment(Qt.AlignCenter)
+            icon.setStyleSheet(
+                "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
+                "font-size: 12px; font-weight: 800;"
+            )
+            text = QLabel("Показатели будут отображаться после начала мониторинга")
+            text.setWordWrap(True)
+            text.setStyleSheet("color: #2563EB; font-size: 13px; font-weight: 700;")
+            notice_layout.addWidget(icon, 0, Qt.AlignTop)
+            notice_layout.addWidget(text, 1)
+            layout.addWidget(notice)
+        self._disable_context_menu_for_widget_tree(block)
+        return block
+
+    @staticmethod
+    def _board_department_profile_text(value) -> str:
+        return normalize_profile_department(value, clear_legacy_operblock=True) or "—"
+
+    def _board_admission_block(self, table: dict, patient: dict) -> QFrame:
+        block, layout = self._board_block("Диагноз при поступлении", shadow=False)
+        diagnosis = self._board_value_label(self._board_diagnosis_text(patient), size=15, weight=700)
+        diagnosis.setMaximumHeight(76)
+        layout.addWidget(diagnosis)
+        layout.addWidget(self._board_separator())
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(26)
+        grid.setVerticalSpacing(18)
+        team = self._board_team_text(patient)
+        current_time_text = self._board_current_time_text(patient.get("started_at"))
+        values = [
+            ("calendar", "Поступление", _format_dt(patient.get("started_at"))),
+            ("clock", "Текущее время в операционной", current_time_text),
+            ("room", "Отделение", self._board_department_profile_text(patient.get("department_profile"))),
+            ("team", "Бригада", team),
+        ]
+        for index, (icon_kind, name, value) in enumerate(values):
+            row = index // 2
+            col = index % 2
+            item = QWidget()
+            item.setStyleSheet("background: transparent; border: none;")
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(0, 0, 0, 0)
+            item_layout.setSpacing(10)
+            text_layout = QVBoxLayout()
+            text_layout.setContentsMargins(0, 0, 0, 0)
+            text_layout.setSpacing(6)
+            text_layout.addWidget(self._board_value_label(name, size=13, weight=800))
+            text_layout.addWidget(self._board_value_label(str(value or "—"), size=14, weight=500))
+            item_layout.addWidget(self._board_line_icon(icon_kind, color="#2563EB", size=24), 0, Qt.AlignTop)
+            item_layout.addLayout(text_layout, 1)
+            grid.addWidget(item, row, col)
+        layout.addLayout(grid)
+        self._disable_context_menu_for_widget_tree(block)
+        return block
+
+    @staticmethod
+    def _board_progress_state(operation_events: list[dict]) -> tuple[int, float, str]:
+        kinds = [str((event or {}).get("kind") or "") for event in operation_events]
+        if "surgery_end" in kinds:
+            return 3, 1.0, "surgery_end"
+        if "surgery_start" in kinds:
+            return 2, 5.0 / 6.0, "surgery_start"
+        if "anesthesia_start" in kinds:
+            return 1, 0.5, "anesthesia_start"
+        return 0, 0.14, "preparation"
+
+    @staticmethod
+    def _board_stage_label(kind: str, fallback: str = "") -> str:
+        clean_fallback = re.sub(r"\s+", " ", str(fallback or "").strip())
+        labels = {
+            "anesthesia_start": "Начало анестезии",
+            "anesthesia_end": "Завершение анестезии",
+            "surgery_start": "Начало операции",
+            "surgery_end": "Завершение операции",
+            "custom": clean_fallback or "Этап операции",
+        }
+        default = labels.get(kind, clean_fallback or "Этап операции")
+        if kind == "anesthesia_end" and clean_fallback and clean_fallback not in {"Конец пособия", default}:
+            return clean_fallback
+        return default
+
+    @staticmethod
+    def _board_stage_history(patient: dict) -> list[dict]:
+        events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
+        history = [
+            {
+                "event_time": event.get("event_time"),
+                "label": OperBlockMainWidget._board_stage_label(str(event.get("kind") or ""), str(event.get("label") or "")),
+                "kind": str(event.get("kind") or ""),
+            }
+            for event in events
+        ]
+        history.sort(key=lambda item: _parse_datetime_value(item.get("event_time")) or datetime.min)
+        return history
+
+    @staticmethod
+    def _board_empty_notice(text: str, *, object_name: str) -> QFrame:
+        notice = QFrame()
+        notice.setObjectName(object_name)
+        notice.setMinimumHeight(66)
+        notice.setStyleSheet(
+            f"""
+            QFrame#{object_name} {{
+                background-color: #EFF6FF;
+                border: 1px solid #8FBEFF;
+                border-radius: 6px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        notice_layout = QHBoxLayout(notice)
+        notice_layout.setContentsMargins(16, 0, 16, 0)
+        notice_layout.setSpacing(10)
+        icon = QLabel("i")
+        icon.setFixedSize(18, 18)
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet(
+            "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
+            "font-size: 12px; font-weight: 800;"
+        )
+        notice_text = QLabel(text)
+        notice_text.setStyleSheet("color: #2563EB; font-size: 13px; font-weight: 800;")
+        notice_layout.addWidget(icon, 0)
+        notice_layout.addWidget(notice_text, 1)
+        return notice
+
+    @staticmethod
+    def _board_operation_stages_empty_notice() -> QFrame:
+        return OperBlockMainWidget._board_empty_notice(
+            "Операция еще не начата",
+            object_name="OperBlockStagesEmptyNotice",
+        )
+
+    def _board_progress_block(self, patient: dict) -> QFrame:
+        operation_name = normalize_operblock_team_text(patient.get("operation_name"))
+        title = f"Ход операции: {operation_name}" if operation_name else "Ход операции"
+        block, layout = self._board_block(title)
+        events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
+        active_index, fill_fraction, _active_kind = self._board_progress_state(events)
+        stages = ["Подготовка", "Анестезия", "Операция", "Завершение"]
+
+        stepper_area = QWidget()
+        stepper_area.setObjectName("OperBlockBoardProgressStepperArea")
+        stepper_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        stepper_area.setStyleSheet("background: transparent; border: none;")
+        stepper_layout = QVBoxLayout(stepper_area)
+        stepper_layout.setContentsMargins(0, 0, 0, 0)
+        stepper_layout.setSpacing(0)
+        stepper_layout.addStretch(1)
+        stepper_layout.addWidget(_OperBlockBoardProgressStepper(stages, active_index, fill_fraction), 0)
+        stepper_layout.addStretch(1)
+        layout.addWidget(stepper_area, 1)
+        return block
+
+    def _board_operation_stages_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Этапы операции")
+        layout.setAlignment(Qt.AlignTop)
+        stages_panel = QFrame()
+        stages_panel.setObjectName("OperBlockBoardStagesPanel")
+        stages_panel.setStyleSheet(
+            """
+            QFrame#OperBlockBoardStagesPanel {
+                background-color: #F8FBFF;
+                border: 1px solid #CFE3FF;
+                border-radius: 8px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        stages_layout = QVBoxLayout(stages_panel)
+        stages_layout.setContentsMargins(12, 10, 12, 10)
+        stages_layout.setSpacing(8)
+        history = self._board_stage_history(patient)
+        if not history:
+            stages_layout.addWidget(self._board_operation_stages_empty_notice())
+            layout.addWidget(stages_panel, 0, Qt.AlignTop)
+            return block
+        for item in history:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            dot = QLabel("•")
+            dot.setFixedWidth(12)
+            dot.setAlignment(Qt.AlignCenter)
+            dot.setStyleSheet("font-size: 18px; color: #1F2D3D; font-weight: 900;")
+            time_label = QLabel(_format_order_time(item.get("event_time")))
+            time_label.setFixedWidth(44)
+            time_label.setStyleSheet("font-size: 12px; color: #64748B; font-weight: 700;")
+            text_label = self._board_value_label(
+                str(item.get("label") or "Этап операции"),
+                size=13,
+                weight=700,
+                color="#1F2D3D",
+            )
+            row.addWidget(dot, 0)
+            row.addWidget(time_label, 0)
+            row.addWidget(text_label, 1)
+            stages_layout.addLayout(row)
+        layout.addWidget(stages_panel, 0, Qt.AlignTop)
+        return block
+
+    def _board_medications_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Назначения и препараты")
+        layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignTop)
+        items = [dict(item or {}) for item in (patient.get("medication_history") or [])]
+        if not items:
+            layout.addWidget(
+                self._board_empty_notice(
+                    "Нет введённых препаратов",
+                    object_name="OperBlockMedicationsEmptyNotice",
+                ),
+                0,
+                Qt.AlignTop,
+            )
+            return block
+        scroll = self._board_scroll_area(
+            object_name="OperBlockBoardMedicationsScroll",
+            scrollbar_object_name="OperBlockBoardMedicationsScrollBar",
+            maximum_height=OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT,
+            single_step=34,
+            page_step=136,
+        )
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        for item in items:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            time_label = QLabel(_format_order_time(item.get("time")))
+            time_label.setFixedWidth(44)
+            time_label.setStyleSheet("font-size: 12px; color: #64748B; font-weight: 800;")
+            text_label = self._board_value_label(str(item.get("label") or "Препарат"), size=13, weight=700)
+            pill = QLabel(str(item.get("kind_label") or "Болюс"))
+            pill.setAlignment(Qt.AlignCenter)
+            pill.setStyleSheet("background: #EEF2FF; color: #2563EB; border: 1px solid #C7D2FE; border-radius: 5px; padding: 2px 6px; font-size: 11px; font-weight: 800;")
+            row.addWidget(time_label, 0)
+            row.addWidget(text_label, 1)
+            row.addWidget(pill, 0)
+            content_layout.addLayout(row)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 0, Qt.AlignTop)
+        self._scroll_board_area_to_bottom_when_ready(scroll)
+        return block
+
+    def _board_allergies_block(self, patient: dict) -> QFrame:
+        allergies = normalize_operblock_team_text(patient.get("allergies"))
+        block, layout = self._board_block("Аллергии", title_color="#EF4444")
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        if allergies:
+            label = self._board_value_label(allergies, size=14, weight=800, color="#EF4444")
+            row.addWidget(label, 1)
+            row.addWidget(self._board_allergy_status_icon(has_allergies=True), 0, Qt.AlignRight | Qt.AlignTop)
+        else:
+            text = self._board_value_label("Не известны", size=14, weight=500)
+            row.addWidget(text, 1)
+            row.addWidget(self._board_allergy_status_icon(has_allergies=False), 0, Qt.AlignRight | Qt.AlignTop)
+        layout.addLayout(row)
+        self._disable_context_menu_for_widget_tree(block)
+        return block
+
+    def _board_special_notes_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Особые отметки")
+        layout.addWidget(self._board_muted_label("—", size=15))
+        return block
+
+    def _card_header(self, display_name: str) -> QLabel:
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
+        metric_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+        label = QLabel(display_name)
+        label.setFixedHeight(54)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet(
+            """
+            QLabel {
+                background-color: #F5F7FA;
+                color: #1F2D3D;
+                font-size: 22px;
+                font-weight: 800;
+                border-bottom: 1px solid #DDE3EA;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+            }
+            """
+        )
+        operblock_startup_metrics.record_since(
+            "board_apply_card_header_ms",
+            metric_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
+        return label
+
+    def _base_card(self) -> QFrame:
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
+        metric_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+        frame = QFrame()
+        frame.setObjectName("operblockTableCard")
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        stylesheet_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+        frame.setStyleSheet(PATIENT_CARD_STYLE)
+        operblock_startup_metrics.record_since(
+            "board_apply_card_stylesheet_ms",
+            stylesheet_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
+        shadow_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+        shadow = QGraphicsDropShadowEffect(frame)
+        shadow.setBlurRadius(18)
+        shadow.setColor(QColor(0, 0, 0, 22))
+        shadow.setOffset(3, 4)
+        frame.setGraphicsEffect(shadow)
+        operblock_startup_metrics.record_since(
+            "board_apply_card_shadow_effect_ms",
+            shadow_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
+        operblock_startup_metrics.record_since(
+            "board_apply_card_widget_create_ms",
+            metric_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
+        return frame
+
+    def _open_rao_queue_dialog(self, table_code: str, table_name: str):
+        if self._is_closing or self._write_pending or self.is_view_only_mode():
+            return
+        dialog = OperBlockQueueDialog(self.operblock_service.list_waiting_rao_handoffs, self)
+        dialog.refresh_rows()
+        if dialog.exec() != QDialog.Accepted or dialog.selected_handoff_id is None:
+            return
+        try:
+            initial_data = self.operblock_service.get_rao_handoff_form_data(
+                dialog.selected_handoff_id,
+                table_code,
+            )
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Очередь", str(exc))
+            return
+        self._open_occupy_dialog(table_code, table_name, initial_data=initial_data)
+
+    def _open_occupy_dialog(
+        self,
+        table_code: str,
+        table_name: str,
+        *,
+        initial_data: dict[str, Any] | None = None,
+    ):
+        if self._is_closing or self._write_pending:
+            return
+        if self.is_view_only_mode():
+            return
+        dialog = OccupyTableDialog(
+            table_code,
+            table_name,
+            self,
+            initial_data=dict(initial_data or {}),
+        )
+        dialog_ref = weakref.ref(dialog)
+
+        def save():
+            form = dialog_ref()
+            if form is None:
+                return
+            try:
+                payload = form.get_data()
+            except Exception as exc:
+                CustomMessageBox.warning(form, "Ошибка", str(exc))
+                return
+            form.set_saving(True)
+            self._write_pending = True
+
+            def operation():
+                return self.operblock_service.create_operation_case(payload)
+
+            self._enqueue_write(
+                f"operblock_create_operation_case:{table_code}",
+                operation,
+                on_success=lambda result: self._on_occupy_success(dialog_ref, result),
+                on_error=lambda exc: self._on_occupy_error(dialog_ref, exc),
+            )
+
+        dialog.save_button.clicked.connect(save)
+        dialog.exec()
+
+    def _open_edit_patient_dialog(self, operation_case_id: int):
+        if self._is_closing or self._write_pending:
+            return
+        if self.is_view_only_mode():
+            return
+        try:
+            initial_data = self.operblock_service.get_operation_case_form_data(int(operation_case_id))
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Редактировать пациента", str(exc))
+            self.refresh_board(force=True)
+            return
+        table_code = str((initial_data or {}).get("table_code") or "")
+        table_name = str((initial_data or {}).get("table_name") or "") or _operblock_table_display_name(table_code)
+        dialog = OccupyTableDialog(
+            table_code,
+            table_name,
+            self,
+            mode="edit",
+            initial_data=dict(initial_data or {}),
+            operation_case_id=int(operation_case_id),
+        )
+        dialog_ref = weakref.ref(dialog)
+
+        def save():
+            form = dialog_ref()
+            if form is None:
+                return
+            try:
+                payload = form.get_data()
+            except Exception as exc:
+                CustomMessageBox.warning(form, "Ошибка", str(exc))
+                return
+            form.set_saving(True)
+            self._write_pending = True
+
+            def operation():
+                return self.operblock_service.update_operation_case_form_data(int(operation_case_id), payload)
+
+            self._enqueue_write(
+                f"operblock_update_operation_case:{int(operation_case_id)}",
+                operation,
+                on_success=lambda result: self._on_patient_edit_success(dialog_ref, result),
+                on_error=lambda exc: self._on_patient_edit_error(dialog_ref, exc),
+            )
+
+        dialog.save_button.clicked.connect(save)
+        dialog.exec()
+
+    def _on_occupy_success(self, dialog_ref, result):
+        self._write_pending = False
+        dialog = dialog_ref()
+        if dialog is not None:
+            dialog.set_saving(False)
+            dialog.accept()
+        self.refresh_board(force=True)
+
+    def _on_occupy_error(self, dialog_ref, exc: Exception):
+        self._write_pending = False
+        dialog = dialog_ref()
+        if dialog is not None:
+            dialog.set_saving(False)
+        CustomMessageBox.warning(self, "Ошибка сохранения", str(exc))
+        self.refresh_board(force=True)
+
+    def _on_patient_edit_success(self, dialog_ref, result):
+        self._write_pending = False
+        dialog = dialog_ref()
+        if dialog is not None:
+            dialog.set_saving(False)
+            dialog.accept()
+        self.refresh_board(force=True)
+        case_id = int((result or {}).get("operation_case_id") or 0)
+        if self._current_operation_case_id and int(self._current_operation_case_id) == case_id:
+            self.refresh_protocol(force=True)
+
+    def _on_patient_edit_error(self, dialog_ref, exc: Exception):
+        self._write_pending = False
+        dialog = dialog_ref()
+        if dialog is not None:
+            dialog.set_saving(False)
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Ошибка сохранения"
+        CustomMessageBox.warning(self, title, str(exc))
+        self.refresh_board(force=True)
+        if self._current_operation_case_id:
+            self.refresh_protocol(force=True)
+
+    def _open_protocol(self, operation_case_id: int):
+        if self._is_closing:
+            return
+        action_info = self._start_opblock_action_diagnostics(f"operblock_open_protocol:{int(operation_case_id)}")
+        loading_key = self._show_operblock_loading(
+            "Открытие протокола операции...",
+            key="open-protocol",
+            auto_hide_ms=30000,
+        )
+        try:
+            first_open = self.protocol_page is None
+            first_open_started = operblock_startup_metrics.timer_start() if first_open else None
+            if not self._ensure_protocol_page_created():
+                return
+            self._current_operation_case_id = int(operation_case_id)
+            self._current_operation_start = None
+            self._current_operation_end = None
+            self._current_case_active = False
+            self._current_operation_has_vitals = False
+            self._current_stage_state = {}
+            self._current_anesthesia_start = None
+            self._current_anesthesia_end = None
+            self._current_surgery_start = None
+            self._current_surgery_end = None
+            self._current_anesthesia_active = False
+            self._current_surgery_active = False
+            self._current_anesthesia_assistance_type = ""
+            self._current_operation_name = ""
+            self._current_protocol_display = ""
+            self._update_protocol_title_label()
+            self._update_operblock_staff_legend()
+            self._current_protocol_date = datetime.now()
+            self._vitals_context_key = None
+            self._current_orders_rows = []
+            self._current_timeline_snapshot = None
+            self._current_chart_vitals = []
+            self._pending_orders_snapshot = {"orders": []}
+            if getattr(self, "vitals_chart", None) and hasattr(self.vitals_chart, "set_timeline_snapshot"):
+                self.vitals_chart.set_timeline_snapshot(None, None, force=True)
+            if getattr(self, "_orders_tab_built", False):
+                self._apply_active_infusions()
+                self._apply_orders({"orders": []})
+            self._protocol_hash = ""
+            self.operblock_vitals_service.set_operation_context(
+                operation_case_id=self._current_operation_case_id,
+                admission_id=None,
+                started_at=None,
+                ended_at=None,
+            )
+            self._set_protocol_chrome(True)
+            self.stack.setCurrentWidget(self.protocol_page)
+            self._preload_operblock_chart_module()
+            self._schedule_current_protocol_tab_ready(150)
+            self.refresh_protocol(force=True, loading_message="Загрузка протокола операции...")
+            if first_open:
+                operblock_startup_metrics.record_since(
+                    "first_open_protocol_ms",
+                    first_open_started,
+                    source="operblock_widget",
+                )
+        finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
+            self._hide_operblock_loading(loading_key)
+
+    def _apply_protocol_snapshot(self, snapshot: dict):
+        header = snapshot.get("header") or {}
+        self._current_admission_id = int(header.get("admission_id") or 0)
+        table_name = str(header.get("table_display_name") or "").strip()
+        self.protocol_info_header_label.setText(f"Информация - {table_name}" if table_name else "Информация")
+        started_at = header.get("started_at")
+        ended_at = header.get("ended_at")
+        self.protocol_started_label.setText(_format_protocol_started_at(started_at))
+        self._current_operation_start = _minute_floor_dt(_parse_datetime_value(started_at)) or _minute_floor_dt(datetime.now())
+        self._current_operation_end = _parse_datetime_value(ended_at)
+        self._current_protocol_date = self._current_operation_start
+        self.protocol_patient_label.setText(header.get("full_name") or "Неизвестно")
+        self.protocol_history_label.setText(f"№ {header.get('history_number') or '—'}")
+        self.protocol_age_label.setText(str(header.get("age") or "—"))
+        diagnosis_text = header.get("diagnosis_text") or "—"
+        diagnosis_code = header.get("diagnosis_code")
+        diagnosis_line = f"{diagnosis_code}: {diagnosis_text}" if diagnosis_code else diagnosis_text
+        self.protocol_diagnosis_label.set_full_text(f"Диагноз: {diagnosis_line}")
+        self._current_protocol_display = str(header.get("protocol_display") or "").strip()
+        self._update_protocol_status_label(started_at, active=header.get("status") == "active")
+        self._current_case_active = header.get("status") == "active"
+        self._current_operation_has_vitals = bool((snapshot.get("vitals") or {}).get("vitals"))
+        self._apply_stage_state(header.get("stage_state") or {})
+        latest = header.get("latest") or {}
+        self._update_latest_badges(latest)
+        self.operblock_vitals_service.set_operation_context(
+            operation_case_id=self._current_operation_case_id,
+            admission_id=self._current_admission_id,
+            started_at=self._current_operation_start,
+            ended_at=self._current_operation_end,
+        )
+        orders_snapshot = snapshot.get("orders") or {}
+        self._current_orders_rows = [dict(row or {}) for row in orders_snapshot.get("orders") or []]
+        self._current_timeline_snapshot = dict(snapshot.get("timeline") or {})
+        self._current_chart_vitals = list(snapshot.get("chart_vitals") or [])
+        self._pending_orders_snapshot = dict(orders_snapshot or {})
+        if getattr(self, "_orders_tab_built", False):
+            self._apply_active_infusions()
+        self._set_vitals_context(self._current_admission_id)
+        if getattr(self, "_vitals_tab_built", False):
+            self._update_vitals_chart()
+        if getattr(self, "_orders_tab_built", False):
+            self._apply_orders(orders_snapshot)
+        self._apply_protocol_controls_state()
+
+    def _update_protocol_status_label(self, started_at, *, active: bool):
+        text, color = _format_main_remcard_status_text(started_at, active=active)
+        self.protocol_status_label.setText(text)
+        self.protocol_status_label.setStyleSheet(
+            f"background-color: {color}; color: white; font-weight: bold; border-radius: 4px; padding: 2px;"
+        )
+
+    def _update_latest_badges(self, latest: dict):
+        ad = str(latest.get("ad") or "-/-")
+        pulse = latest.get("pulse")
+        spo2 = latest.get("spo2")
+        self.badge_ad.set_value(ad)
+        self.badge_pulse.set_value(str(pulse if pulse is not None else "-"))
+        self.badge_spo2.set_value(f"{int(spo2)}%" if spo2 is not None else "-%")
+
+    def _apply_stage_state(self, stage_state: dict):
+        self._current_stage_state = dict(stage_state or {})
+        self._current_anesthesia_active = bool(self._current_stage_state.get("anesthesia_active"))
+        self._current_surgery_active = bool(self._current_stage_state.get("surgery_active"))
+        self._current_anesthesia_start = _minute_floor_dt(
+            _parse_datetime_value(self._current_stage_state.get("current_anesthesia_start"))
+            or _parse_datetime_value(self._current_stage_state.get("last_anesthesia_start"))
+        )
+        self._current_anesthesia_end = _minute_floor_dt(_parse_datetime_value(self._current_stage_state.get("last_anesthesia_end")))
+        self._current_surgery_start = _minute_floor_dt(
+            _parse_datetime_value(self._current_stage_state.get("current_surgery_start"))
+            or _parse_datetime_value(self._current_stage_state.get("last_surgery_start"))
+        )
+        self._current_surgery_end = _minute_floor_dt(_parse_datetime_value(self._current_stage_state.get("last_surgery_end")))
+        self._current_anesthesia_assistance_type = normalize_operblock_anesthesia_type_label(
+            self._current_stage_state.get("current_anesthesia_assistance_type")
+            or self._current_stage_state.get("last_anesthesia_assistance_type")
+            or self._current_stage_state.get("first_anesthesia_assistance_type")
+            or self._current_stage_state.get("planned_anesthesia_assistance_type")
+        )
+        self._current_operation_name = normalize_operblock_team_text(
+            self._current_stage_state.get("current_operation_name")
+            or self._current_stage_state.get("last_operation_name")
+            or self._current_stage_state.get("first_operation_name")
+        )
+        self._update_protocol_title_label()
+        self._update_operblock_staff_legend()
+        self._apply_protocol_controls_state()
+
+    def _apply_protocol_controls_state(self):
+        case_active = bool(getattr(self, "_current_case_active", False))
+        aid_active = bool(getattr(self, "_current_anesthesia_active", False))
+        surgery_active = bool(getattr(self, "_current_surgery_active", False))
+        stages_available = self._operation_stages_available()
+        view_only = self.is_view_only_mode()
+        write_enabled = case_active and not self._write_pending and not view_only
+        if hasattr(self, "start_anesthesia_button"):
+            has_initial_vitals = bool(getattr(self, "_current_operation_has_vitals", False))
+            start_prep_pending = bool(getattr(self, "_start_anesthesia_prep_pending", False))
+            self.start_anesthesia_button.setEnabled(
+                write_enabled and not aid_active and has_initial_vitals and not start_prep_pending
+            )
+            if write_enabled and not aid_active and not has_initial_vitals:
+                self.start_anesthesia_button.setToolTip(
+                    "Введите исходные витальные показатели, чтобы начать пособие."
+                )
+            else:
+                self.start_anesthesia_button.setToolTip("")
+            self.end_anesthesia_button.setEnabled(write_enabled and aid_active)
+            self.start_surgery_button.setEnabled(write_enabled and aid_active and not surgery_active)
+            self.operation_stages_button.setEnabled(write_enabled and stages_available)
+            self.close_case_button.setEnabled(write_enabled and aid_active and surgery_active)
+            self.release_table_button.setEnabled(write_enabled and not aid_active)
+            if hasattr(self, "report_button"):
+                self.report_button.setEnabled(bool(self._current_operation_case_id))
+        if getattr(self, "vitals_input", None) is not None:
+            try:
+                self.vitals_input.set_forced_read_only(view_only or not case_active)
+            except Exception:
+                pass
+            if hasattr(self.vitals_input, "save_btn"):
+                self.vitals_input.save_btn.setEnabled(write_enabled)
+            if hasattr(self.vitals_input, "undo_btn"):
+                self.vitals_input.undo_btn.setEnabled(write_enabled)
+
+        orders_tab_available = case_active and aid_active
+        orders_controls_enabled = write_enabled and aid_active
+        if hasattr(self, "orders_tab_button"):
+            orders_visible = bool(getattr(self, "_protocol_tab_visible", {}).get("orders", True))
+            self.orders_tab_button.setEnabled(orders_visible and orders_tab_available)
+            if (
+                self.content_stack is not None
+                and (not orders_visible or not orders_tab_available)
+                and self.content_stack.currentIndex() == 1
+            ):
+                self._set_protocol_tab_by_id("vitals")
+            self._ensure_visible_protocol_tab()
+        self._set_orders_entry_controls_enabled(orders_controls_enabled)
+        if view_only and orders_tab_available:
+            self._set_quick_order_buttons_enabled(True)
+
+    def _set_orders_entry_controls_enabled(self, enabled: bool):
+        for widget_name in ("order_input", "order_dose_input", "order_type_combo", "save_order_button"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(bool(enabled))
+        self._set_quick_order_buttons_enabled(enabled)
+        self._set_order_action_buttons_enabled(enabled)
+        self._set_infusion_action_buttons_enabled(enabled)
+
+    def _set_vitals_context(self, admission_id: int):
+        if not admission_id or not getattr(self, "vitals_input", None):
+            return
+        context_key = (
+            int(admission_id),
+            int(self._current_operation_case_id or 0),
+            self._current_protocol_date.isoformat(timespec="minutes"),
+        )
+        if self._vitals_context_key == context_key:
+            return
+        self._vitals_context_key = context_key
+        self.vitals_input.set_context(int(admission_id), self._current_protocol_date)
+
+    def _update_vitals_chart(self):
+        chart = getattr(self, "vitals_chart", None)
+        if not self._current_admission_id or not self._current_operation_case_id or chart is None:
+            return
+        try:
+            start_dt = self._current_operation_start or self._current_protocol_date
+            vitals = list(getattr(self, "_current_chart_vitals", []) or [])
+            anesthesia_started_at = self._first_anesthesia_start_for_chart()
+            timeline_transform = type(chart).build_operation_timeline_transform(anesthesia_started_at, vitals)
+            display_start_dt = timeline_transform.display_origin_at or start_dt
+            visible_hours = self._calculate_operblock_chart_hours(
+                display_start_dt,
+                vitals,
+                self._current_operation_end,
+                timeline_transform=timeline_transform,
+                timeline_snapshot=getattr(self, "_current_timeline_snapshot", None),
+            )
+            chart.admission_id = self._current_admission_id
+            if hasattr(chart, "set_operation_timeline_model"):
+                chart.set_operation_timeline_model(timeline_transform)
+            chart.set_visible_hours(visible_hours)
+            chart.update_data(vitals, display_start_dt, active_intervals=None)
+            if hasattr(chart, "set_timeline_snapshot"):
+                chart.set_timeline_snapshot(
+                    getattr(self, "_current_timeline_snapshot", None),
+                    display_start_dt,
+                    force=True,
+                )
+            elif hasattr(chart, "set_operation_orders"):
+                chart.set_operation_orders(getattr(self, "_current_orders_rows", []), display_start_dt, force=True)
+            if getattr(self, "vitals_legend_sector", None):
+                self.vitals_legend_sector.update_legend(OPERBLOCK_VITAL_SETTINGS)
+        except Exception as exc:
+            logger.error("operblock vitals chart refresh failed: %s", exc, exc_info=True)
+
+    def _first_anesthesia_start_for_chart(self) -> datetime | None:
+        state = getattr(self, "_current_stage_state", {}) or {}
+        candidates = [
+            state.get("first_anesthesia_start"),
+            state.get("current_anesthesia_start"),
+            state.get("last_anesthesia_start"),
+        ]
+        for value in candidates:
+            parsed = _minute_floor_dt(_parse_datetime_value(value))
+            if parsed is not None:
+                return parsed
+        return None
+
+    @staticmethod
+    def _timeline_extent_datetimes(timeline_snapshot: dict | None) -> list[datetime]:
+        snapshot = timeline_snapshot or {}
+        result: list[datetime] = []
+
+        def add(value) -> None:
+            parsed = _minute_floor_dt(_parse_datetime_value(value))
+            if isinstance(parsed, datetime):
+                result.append(parsed)
+
+        for event in snapshot.get("operation_events") or []:
+            add((event or {}).get("event_time"))
+        for event in snapshot.get("bolus_events") or []:
+            add((event or {}).get("event_time"))
+
+        now_dt = datetime.now().replace(second=0, microsecond=0)
+        for interval in snapshot.get("infusion_intervals") or []:
+            interval = interval or {}
+            add(interval.get("start_time"))
+            add(interval.get("end_time"))
+            for history in interval.get("rate_history") or []:
+                add((history or {}).get("event_time"))
+            if str(interval.get("status") or "") == "active":
+                add(now_dt)
+        return result
+
+    @staticmethod
+    def _calculate_operblock_chart_hours(
+        start_dt: datetime | None,
+        vitals,
+        ended_at: datetime | None = None,
+        *,
+        timeline_transform: object | None = None,
+        timeline_snapshot: dict | None = None,
+    ) -> int:
+        if start_dt is None:
+            return OPERBLOCK_INITIAL_CHART_HOURS
+        if timeline_transform and timeline_transform.display_origin_at:
+            elapsed_hours = 0.0
+            for vital in vitals or []:
+                timestamp = getattr(vital, "timestamp", None)
+                x = timeline_transform.display_hours_for_vital(timestamp, fallback_start=start_dt)
+                if x is not None:
+                    elapsed_hours = max(elapsed_hours, float(x))
+            if ended_at:
+                x = timeline_transform.display_hours_for(ended_at, fallback_start=start_dt)
+                if x is not None:
+                    elapsed_hours = max(elapsed_hours, float(x))
+            for event_dt in OperBlockMainWidget._timeline_extent_datetimes(timeline_snapshot):
+                x = timeline_transform.display_hours_for(event_dt, fallback_start=start_dt)
+                if x is not None:
+                    elapsed_hours = max(elapsed_hours, float(x))
+        else:
+            max_dt = ended_at if ended_at and ended_at > start_dt else start_dt
+            for vital in vitals or []:
+                timestamp = getattr(vital, "timestamp", None)
+                if isinstance(timestamp, datetime) and timestamp > max_dt:
+                    max_dt = timestamp
+            for event_dt in OperBlockMainWidget._timeline_extent_datetimes(timeline_snapshot):
+                if event_dt > max_dt:
+                    max_dt = event_dt
+            elapsed_hours = max(0.0, (max_dt - start_dt).total_seconds() / 3600.0)
+        visible_hours = OPERBLOCK_INITIAL_CHART_HOURS
+        threshold_hours = OPERBLOCK_CHART_EXPAND_THRESHOLD_MINUTES / 60.0
+        while elapsed_hours >= visible_hours - threshold_hours and visible_hours < OPERBLOCK_MAX_CHART_HOURS:
+            visible_hours += 1
+        return visible_hours
+
+    def _on_standard_vitals_changed(self, change=None):
+        started = time.perf_counter()
+        payload = dict(change or {}) if isinstance(change, dict) else {}
+        action = str(payload.get("action") or "")
+        chart_vitals = list(getattr(self, "_current_chart_vitals", []) or [])
+        if action == "upsert":
+            vital = payload.get("vital")
+            vital_id = getattr(vital, "id", None)
+            vital_timestamp = getattr(vital, "timestamp", None)
+            replaced = False
+            for index, current in enumerate(chart_vitals):
+                current_id = getattr(current, "id", None)
+                current_timestamp = getattr(current, "timestamp", None)
+                if (
+                    vital_id is not None
+                    and current_id is not None
+                    and int(current_id) == int(vital_id)
+                ) or (
+                    isinstance(vital_timestamp, datetime)
+                    and isinstance(current_timestamp, datetime)
+                    and _minute_floor_dt(current_timestamp) == _minute_floor_dt(vital_timestamp)
+                ):
+                    chart_vitals[index] = vital
+                    replaced = True
+                    break
+            if vital is not None and not replaced:
+                chart_vitals.append(vital)
+            chart_vitals.sort(
+                key=lambda item: (
+                    getattr(item, "timestamp", datetime.min),
+                    int(getattr(item, "id", 0) or 0),
+                )
+            )
+        elif action == "delete":
+            vital_id = payload.get("vital_id")
+            if vital_id is not None:
+                chart_vitals = [
+                    vital
+                    for vital in chart_vitals
+                    if int(getattr(vital, "id", 0) or 0) != int(vital_id)
+                ]
+
+        if action in {"upsert", "delete"}:
+            self._current_chart_vitals = chart_vitals
+            self._current_operation_has_vitals = bool(
+                payload.get("has_vitals", bool(chart_vitals))
+            )
+        self._apply_protocol_controls_state()
+        if action in {"upsert", "delete"} and getattr(self, "_vitals_tab_built", False):
+            QTimer.singleShot(0, self._update_vitals_chart)
+        self.refresh_protocol(force=True)
+        self.refresh_board(force=True)
+        record_metric(
+            "operblock_vitals_local_apply_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            operation_case_id=int(self._current_operation_case_id or 0),
+            action=action or "unknown",
+            ui_sync_reads=0,
+        )
+
+    def _load_quick_orders_data(self):
+        metric_started = operblock_startup_metrics.timer_start()
+        try:
+            try:
+                self._quick_order_templates = load_operblock_quick_orders()
+                self._medication_presets = load_operblock_medication_presets(include_disabled=True)
+                self._quick_order_filter_buttons = self._load_quick_order_filter_buttons()
+                self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
+                if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
+                    self._preset_kind_filter = self._quick_order_filter_keys[0]
+            except Exception as exc:
+                logger.error("operblock medication presets load failed: %s", exc, exc_info=True)
+                self._quick_order_templates = []
+                self._medication_presets = []
+                self._quick_order_filter_buttons = self._fallback_quick_order_filter_buttons()
+                self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
+                if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
+                    self._preset_kind_filter = self._quick_order_filter_keys[0]
+            self._rebuild_quick_order_search_index()
+            self._quick_orders_data_loaded = True
+            self._rebuild_quick_order_filter_buttons_ui()
+        finally:
+            elapsed_ms = (time.perf_counter() - metric_started) * 1000.0 if metric_started else 0.0
+            operblock_startup_metrics.record_duration(
+                "quick_orders_load_ms",
+                elapsed_ms,
+                source="operblock_widget",
+            )
+            if getattr(self, "_creating_lazy_protocol_page", False):
+                operblock_startup_metrics.record_duration(
+                    "quick_orders_lazy_load_ms",
+                    elapsed_ms,
+                    source="operblock_widget",
+                )
+
+    @staticmethod
+    def _fallback_quick_order_filter_buttons() -> list[dict]:
+        return [
+            {"key": key, "label": label, "built_in": True, "sort_order": (index + 1) * 10}
+            for index, (key, label) in enumerate(OPERBLOCK_TEMPLATE_FILTERS)
+        ]
+
+    @staticmethod
+    def _quick_order_filter_keys_from_buttons(buttons: list[dict]) -> list[str]:
+        return [
+            str((button or {}).get("key") or "").strip()
+            for button in buttons or []
+            if str((button or {}).get("key") or "").strip()
+        ]
+
+    def _rebuild_quick_order_filter_buttons_ui(self) -> None:
+        layout = getattr(self, "preset_filter_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.preset_filter_group = QButtonGroup(self)
+        self.preset_filter_group.setExclusive(True)
+        self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
+        if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
+            self._preset_kind_filter = self._quick_order_filter_keys[0]
+        grid_row = 0
+        grid_column = 0
+        for index, button_info in enumerate(self._quick_order_filter_buttons):
+            filter_key = str((button_info or {}).get("key") or "").strip()
+            label = str((button_info or {}).get("label") or filter_key).strip()
+            if not filter_key or not label:
+                continue
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setChecked(filter_key == self._preset_kind_filter)
+            button.setFixedHeight(28)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.setToolTip(label)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: #F8FAFC;
+                    color: {OPERBLOCK_ORDERS_MUTED};
+                    border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                    border-radius: 6px;
+                    padding: 4px 6px;
+                    font-size: 11px;
+                    font-weight: 500;
+                }}
+                QPushButton:checked {{
+                    background-color: #EEF3FF;
+                    color: {OPERBLOCK_ORDERS_ACCENT};
+                    border-color: {OPERBLOCK_ORDERS_BORDER};
+                }}
+                """
+            )
+            self.preset_filter_group.addButton(button, index)
+            if filter_key == "favorite":
+                layout.addWidget(button, grid_row, 0, 1, 2)
+                grid_row += 1
+                grid_column = 0
+            else:
+                layout.addWidget(button, grid_row, grid_column)
+                grid_column += 1
+                if grid_column > 1:
+                    grid_column = 0
+                    grid_row += 1
+        self.preset_filter_group.idClicked.connect(self._on_preset_filter_changed)
+
+    def _load_quick_order_filter_buttons(self) -> list[dict]:
+        try:
+            buttons = load_operblock_quick_order_buttons()
+        except Exception:
+            logger.exception("Не удалось загрузить кнопки быстрых назначений")
+            buttons = []
+        if not buttons:
+            buttons = self._fallback_quick_order_filter_buttons()
+        return [dict(button or {}) for button in buttons]
+
+    @staticmethod
+    def _quick_order_drug_group_label_map() -> dict[str, str]:
+        try:
+            groups = load_operblock_drug_groups()
+        except Exception:
+            logger.exception("Не удалось загрузить группы препаратов для поиска быстрых назначений")
+            groups = []
+        result: dict[str, str] = {}
+        for group in groups or []:
+            code = str((group or {}).get("code") or "").strip()
+            label = str((group or {}).get("label") or code).strip()
+            display = label or code
+            for key in (code, label):
+                clean_key = str(key or "").strip().casefold()
+                if clean_key:
+                    result[clean_key] = display
+        return result
+
+    def _drug_group_label_for_preset(self, preset: dict) -> str:
+        group_code = str((preset or {}).get("drug_group") or "").strip()
+        if not group_code:
+            return ""
+        label_by_key = getattr(self, "_quick_order_drug_group_label_by_key", {}) or {}
+        return label_by_key.get(group_code.casefold(), group_code)
+
+    def _quick_order_preset_search_haystack(self, preset: dict, label_by_extra_key: dict[str, str]) -> str:
+        extra_type_labels = [
+            label_by_extra_key.get(key, key)
+            for key in normalize_operblock_extra_quick_type_keys(
+                preset.get("extra_quick_types"),
+                buttons=getattr(self, "_quick_order_filter_buttons", []) or [],
+                include_unknown=True,
+            )
+        ]
+        return " ".join(
+            [
+                str(preset.get("label") or ""),
+                str(preset.get("display_name") or ""),
+                str(preset.get("latin") or ""),
+                str(preset.get("group") or ""),
+                self._drug_group_label_for_preset(preset),
+                " ".join(extra_type_labels),
+                " ".join(str(alias) for alias in preset.get("aliases") or []),
+            ]
+        ).casefold()
+
+    def _rebuild_quick_order_search_index(self) -> None:
+        self._quick_order_drug_group_label_by_key = self._quick_order_drug_group_label_map()
+        label_by_extra_key = operblock_quick_order_button_label_map(
+            getattr(self, "_quick_order_filter_buttons", []) or []
+        )
+        self._quick_order_search_haystack_by_preset_id = {
+            self._quick_order_preset_id(preset): self._quick_order_preset_search_haystack(preset, label_by_extra_key)
+            for preset in getattr(self, "_medication_presets", []) or []
+        }
+
+    def _refresh_quick_orders(self, *, force_reload: bool = False):
+        if force_reload or not getattr(self, "_quick_orders_data_loaded", False):
+            self._load_quick_orders_data()
+        self._render_quick_orders()
+
+    def _on_preset_search_changed(self, text: str):
+        self._preset_search_text = str(text or "").strip().casefold()
+        self._render_quick_orders()
+
+    def _on_preset_filter_changed(self, button_id: int):
+        try:
+            next_filter = self._quick_order_filter_keys[int(button_id)]
+        except Exception:
+            next_filter = "bolus"
+        if str(next_filter or "bolus") == str(getattr(self, "_preset_kind_filter", "bolus") or "bolus"):
+            return
+        self._preset_kind_filter = next_filter
+        self._render_quick_orders()
+
+    def _render_quick_orders(self):
+        layout = getattr(self, "quick_orders_list", None)
+        if layout is None:
+            return
+        if getattr(self, "_quick_order_drag_source_id", None):
+            self._cancel_quick_order_drag()
+        self._quick_order_drag_source_id = None
+        self._quick_order_drag_placeholder = None
+        self._quick_order_drag_order = []
+        self._quick_order_drag_committed = False
+        presets = self._filtered_medication_presets()
+        old_widgets = dict(getattr(self, "_quick_order_card_widgets", {}) or {})
+        old_signatures = dict(getattr(self, "_quick_order_card_signatures", {}) or {})
+        next_widgets: dict[str, QWidget] = {}
+        next_signatures: dict[str, str] = {}
+        next_ids: list[str] = []
+        replaced_widgets: list[QWidget] = []
+        add_icon = os.path.join(get_icon_dir(), "add_nazn.png")
+        for preset in presets:
+            preset_id = self._quick_order_preset_id(preset)
+            signature = self._quick_order_preset_render_signature(preset)
+            row = old_widgets.get(preset_id)
+            if row is None or old_signatures.get(preset_id) != signature:
+                if row is not None:
+                    replaced_widgets.append(row)
+                row = self._make_medication_preset_row(preset, add_icon)
+            next_widgets[preset_id] = row
+            next_signatures[preset_id] = signature
+            next_ids.append(preset_id)
+
+        render_widget = getattr(self, "quick_orders_scroll", None) or layout.parentWidget()
+        if render_widget is not None:
+            render_widget.setUpdatesEnabled(False)
+        try:
+            deleted_widget_ids = self._clear_quick_orders_layout_for_render(layout, next_widgets.values())
+            for widget in replaced_widgets:
+                if id(widget) not in deleted_widget_ids:
+                    widget.deleteLater()
+            for preset_id, widget in old_widgets.items():
+                if preset_id not in next_widgets and id(widget) not in deleted_widget_ids:
+                    widget.deleteLater()
+            self._quick_order_card_widgets = next_widgets
+            self._quick_order_card_signatures = next_signatures
+            self._quick_order_visible_preset_ids = next_ids
+            self._quick_order_buttons = []
+
+            if not presets:
+                layout.addWidget(_label("Быстрые назначения не настроены", size=12, color=OPERBLOCK_ORDERS_MUTED))
+                layout.addStretch(1)
+                return
+
+            for preset_id in next_ids:
+                row = next_widgets.get(preset_id)
+                if row is None:
+                    continue
+                layout.addWidget(row)
+                row.show()
+            layout.addStretch(1)
+            self._quick_order_buttons = self._visible_quick_order_buttons()
+            self._set_quick_order_buttons_enabled(bool(not self._write_pending) and self._orders_tab_enabled())
+        finally:
+            if render_widget is not None:
+                render_widget.setUpdatesEnabled(True)
+                render_widget.update()
+
+    @staticmethod
+    def _quick_order_preset_render_signature(preset: dict) -> str:
+        return _stable_ui_hash(preset or {})
+
+    def _clear_quick_orders_layout_for_render(self, layout, keep_widgets) -> set[int]:
+        keep_ids = {id(widget) for widget in keep_widgets if widget is not None}
+        deleted_ids: set[int] = set()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                if id(widget) not in keep_ids:
+                    widget.deleteLater()
+                    deleted_ids.add(id(widget))
+                continue
+            if child_layout is not None:
+                self._clear_layout(child_layout)
+        return deleted_ids
+
+    def _visible_quick_order_buttons(self) -> list[QPushButton]:
+        buttons: list[QPushButton] = []
+        widgets = getattr(self, "_quick_order_card_widgets", {}) or {}
+        for preset_id in getattr(self, "_quick_order_visible_preset_ids", []) or []:
+            widget = widgets.get(preset_id)
+            if widget is None:
+                continue
+            buttons.extend(widget.findChildren(QPushButton))
+        return buttons
+
+    def _filtered_medication_presets(self) -> list[dict]:
+        query = str(getattr(self, "_preset_search_text", "") or "").casefold()
+        filter_kind = str(getattr(self, "_preset_kind_filter", "bolus") or "bolus")
+        apply_active_filter = not bool(query)
+        extra_filter_keys = {
+            str((button or {}).get("key") or "").strip()
+            for button in getattr(self, "_quick_order_filter_buttons", []) or []
+            if str((button or {}).get("key") or "").strip() and not bool((button or {}).get("built_in"))
+        }
+        result: list[dict] = []
+        for preset in getattr(self, "_medication_presets", []) or []:
+            if not preset.get("enabled"):
+                continue
+            if apply_active_filter:
+                kind = normalize_operblock_medication_preset_kind(preset.get("kind"))
+                if filter_kind in extra_filter_keys:
+                    extra_types = normalize_operblock_extra_quick_type_keys(
+                        preset.get("extra_quick_types"),
+                        buttons=getattr(self, "_quick_order_filter_buttons", []) or [],
+                        include_unknown=False,
+                    )
+                    if filter_kind not in extra_types:
+                        continue
+                elif filter_kind == "favorite":
+                    if not any(bool(preset.get(key)) for key in ("favorite", "is_favorite", "pinned")):
+                        continue
+                elif filter_kind == "timed_infusion":
+                    if kind not in {"timed_infusion", "solvent"}:
+                        continue
+                elif kind != filter_kind:
+                    continue
+            if query:
+                preset_id = self._quick_order_preset_id(preset)
+                haystack_by_id = getattr(self, "_quick_order_search_haystack_by_preset_id", None)
+                if not isinstance(haystack_by_id, dict):
+                    haystack_by_id = {}
+                    self._quick_order_search_haystack_by_preset_id = haystack_by_id
+                haystack = haystack_by_id.get(preset_id)
+                if haystack is None:
+                    label_by_extra_key = operblock_quick_order_button_label_map(
+                        getattr(self, "_quick_order_filter_buttons", []) or []
+                    )
+                    haystack = self._quick_order_preset_search_haystack(preset, label_by_extra_key)
+                    haystack_by_id[preset_id] = haystack
+                if query not in haystack:
+                    continue
+            result.append(dict(preset))
+        result.sort(key=self._quick_order_preset_sort_key)
+        if self.is_view_only_mode():
+            result = self._apply_view_only_quick_order(result)
+        return result
+
+    @staticmethod
+    def _quick_order_preset_id(preset: dict) -> str:
+        preset_id = str((preset or {}).get("preset_id") or "").strip()
+        if preset_id:
+            return preset_id
+        label = str((preset or {}).get("label") or (preset or {}).get("display_name") or "").strip()
+        kind = normalize_operblock_medication_preset_kind((preset or {}).get("kind"))
+        return f"manual:{kind}:{label.casefold()}"
+
+    @staticmethod
+    def _quick_order_preset_sort_key(preset: dict) -> tuple:
+        sort_order = _safe_int((preset or {}).get("sort_order"))
+        return (
+            sort_order if sort_order is not None else 99_999,
+            str((preset or {}).get("display_name") or (preset or {}).get("label") or "").casefold(),
+            OperBlockMainWidget._quick_order_preset_id(preset),
+        )
+
+    def _quick_order_layout_index(self, widget: QWidget | None) -> int:
+        layout = getattr(self, "quick_orders_list", None)
+        if layout is None or widget is None:
+            return -1
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item is not None and item.widget() is widget:
+                return index
+        return -1
+
+    def _make_quick_order_drag_placeholder(self, source_widget: QWidget) -> QFrame:
+        placeholder = QFrame()
+        placeholder.setObjectName("QuickOrderDragPlaceholder")
+        height = max(46, int(source_widget.height() or source_widget.sizeHint().height() or 46))
+        placeholder.setMinimumHeight(height)
+        placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        placeholder.setStyleSheet(
+            f"""
+            QFrame#QuickOrderDragPlaceholder {{
+                background-color: #EAF3FF;
+                border: 2px dashed {OPERBLOCK_ORDERS_ACCENT};
+                border-radius: 7px;
+            }}
+            """
+        )
+        return placeholder
+
+    def _begin_quick_order_drag(self, source_preset_id: str) -> bool:
+        source_id = str(source_preset_id or "").strip()
+        layout = getattr(self, "quick_orders_list", None)
+        source_widget = (getattr(self, "_quick_order_card_widgets", {}) or {}).get(source_id)
+        if not source_id or layout is None or source_widget is None:
+            return False
+        self._cancel_quick_order_drag()
+        source_index = self._quick_order_layout_index(source_widget)
+        if source_index < 0:
+            return False
+        placeholder = self._make_quick_order_drag_placeholder(source_widget)
+        self._quick_order_drag_source_id = source_id
+        self._quick_order_drag_placeholder = placeholder
+        self._quick_order_drag_order = list(getattr(self, "_quick_order_visible_preset_ids", []) or [])
+        self._quick_order_drag_committed = False
+        source_widget.hide()
+        layout.insertWidget(source_index, placeholder)
+        return True
+
+    def _cancel_quick_order_drag(self) -> None:
+        if not getattr(self, "_quick_order_drag_source_id", None):
+            return
+        self._restore_quick_order_drag_layout()
+        self._quick_order_drag_source_id = None
+        self._quick_order_drag_placeholder = None
+        self._quick_order_drag_order = []
+        self._quick_order_drag_committed = False
+
+    def _restore_quick_order_drag_layout(self) -> None:
+        layout = getattr(self, "quick_orders_list", None)
+        if layout is None:
+            return
+        placeholder = getattr(self, "_quick_order_drag_placeholder", None)
+        if placeholder is not None:
+            layout.removeWidget(placeholder)
+            placeholder.setParent(None)
+            placeholder.deleteLater()
+        widgets = getattr(self, "_quick_order_card_widgets", {}) or {}
+        for widget in widgets.values():
+            layout.removeWidget(widget)
+        for index, preset_id in enumerate(getattr(self, "_quick_order_visible_preset_ids", []) or []):
+            widget = widgets.get(preset_id)
+            if widget is None:
+                continue
+            widget.show()
+            layout.insertWidget(index, widget)
+
+    def _finish_quick_order_drag_layout(self, order: list[str]) -> None:
+        layout = getattr(self, "quick_orders_list", None)
+        if layout is None:
+            return
+        placeholder = getattr(self, "_quick_order_drag_placeholder", None)
+        if placeholder is not None:
+            layout.removeWidget(placeholder)
+            placeholder.setParent(None)
+            placeholder.deleteLater()
+        widgets = getattr(self, "_quick_order_card_widgets", {}) or {}
+        for widget in widgets.values():
+            layout.removeWidget(widget)
+        final_order = [preset_id for preset_id in order if preset_id in widgets]
+        for preset_id in getattr(self, "_quick_order_visible_preset_ids", []) or []:
+            if preset_id not in final_order and preset_id in widgets:
+                final_order.append(preset_id)
+        for index, preset_id in enumerate(final_order):
+            widget = widgets.get(preset_id)
+            if widget is None:
+                continue
+            widget.show()
+            layout.insertWidget(index, widget)
+        self._quick_order_visible_preset_ids = final_order
+        self._quick_order_drag_source_id = None
+        self._quick_order_drag_placeholder = None
+        self._quick_order_drag_order = []
+
+    def _apply_quick_order_drag_order(self, order: list[str]) -> bool:
+        source_id = str(getattr(self, "_quick_order_drag_source_id", "") or "")
+        placeholder = getattr(self, "_quick_order_drag_placeholder", None)
+        layout = getattr(self, "quick_orders_list", None)
+        if not source_id or placeholder is None or layout is None:
+            return False
+        normalized_order = [str(item) for item in order if str(item or "").strip()]
+        if source_id not in normalized_order:
+            return False
+        if normalized_order == list(getattr(self, "_quick_order_drag_order", []) or []):
+            return True
+        widgets = getattr(self, "_quick_order_card_widgets", {}) or {}
+        for widget in widgets.values():
+            layout.removeWidget(widget)
+        layout.removeWidget(placeholder)
+        for index, preset_id in enumerate(normalized_order):
+            widget = placeholder if preset_id == source_id else widgets.get(preset_id)
+            if widget is None:
+                continue
+            if widget is not placeholder:
+                widget.show()
+            layout.insertWidget(index, widget)
+        source_widget = widgets.get(source_id)
+        if source_widget is not None:
+            source_widget.hide()
+        self._quick_order_drag_order = normalized_order
+        return True
+
+    def _preview_quick_order_drag(self, source_preset_id: str, target_preset_id: str, *, after: bool = False) -> bool:
+        source_id = str(source_preset_id or "").strip()
+        target_id = str(target_preset_id or "").strip()
+        if not source_id or not target_id or source_id == target_id:
+            return False
+        current = [item for item in (getattr(self, "_quick_order_drag_order", None) or getattr(self, "_quick_order_visible_preset_ids", []) or []) if item != source_id]
+        if target_id not in current:
+            return False
+        insert_index = current.index(target_id) + (1 if after else 0)
+        next_order = list(current)
+        next_order.insert(insert_index, source_id)
+        return self._apply_quick_order_drag_order(next_order)
+
+    def _preview_quick_order_drag_at_y(self, source_preset_id: str, y: float) -> bool:
+        source_id = str(source_preset_id or "").strip()
+        if not source_id:
+            return False
+        order_without_source = [
+            item
+            for item in (getattr(self, "_quick_order_drag_order", None) or getattr(self, "_quick_order_visible_preset_ids", []) or [])
+            if item != source_id
+        ]
+        widgets = getattr(self, "_quick_order_card_widgets", {}) or {}
+        insert_index = len(order_without_source)
+        for index, preset_id in enumerate(order_without_source):
+            widget = widgets.get(preset_id)
+            if widget is None or not widget.isVisible():
+                continue
+            if float(y) < float(widget.y() + widget.height() / 2):
+                insert_index = index
+                break
+        next_order = list(order_without_source)
+        next_order.insert(insert_index, source_id)
+        return self._apply_quick_order_drag_order(next_order)
+
+    def _save_quick_order_preset_order(self, visible_order: list[str]) -> list[dict]:
+        visible_ids = [str(item) for item in visible_order if str(item or "").strip()]
+        visible_set = set(visible_ids)
+        presets = [dict(preset or {}) for preset in getattr(self, "_medication_presets", []) or []]
+        global_ids = [self._quick_order_preset_id(preset) for preset in sorted(presets, key=self._quick_order_preset_sort_key)]
+        ordered_ids: list[str] = []
+        visible_iter = iter(visible_ids)
+        for preset_id in global_ids:
+            if preset_id in visible_set:
+                try:
+                    ordered_ids.append(next(visible_iter))
+                except StopIteration:
+                    continue
+            else:
+                ordered_ids.append(preset_id)
+        for preset_id in visible_ids:
+            if preset_id not in ordered_ids:
+                ordered_ids.append(preset_id)
+        sort_order_by_id = {preset_id: (index + 1) * 10 for index, preset_id in enumerate(ordered_ids)}
+        for preset in presets:
+            preset_id = self._quick_order_preset_id(preset)
+            if preset_id in sort_order_by_id:
+                preset["sort_order"] = sort_order_by_id[preset_id]
+        return save_operblock_medication_presets(presets)
+
+    def _view_only_quick_order_settings_key(self) -> str:
+        filter_kind = str(getattr(self, "_preset_kind_filter", "all") or "all").strip() or "all"
+        return f"operblock/view_only_quick_order/{filter_kind}"
+
+    def _load_view_only_quick_order_ids(self) -> list[str]:
+        raw = QSettings("MyHospital", "RemCard").value(self._view_only_quick_order_settings_key(), "[]")
+        try:
+            data = json.loads(str(raw or "[]"))
+        except Exception:
+            return []
+        return [str(item) for item in data if str(item or "").strip()]
+
+    def _save_view_only_quick_order_ids(self, order: list[str]) -> None:
+        ids = [str(item) for item in order if str(item or "").strip()]
+        QSettings("MyHospital", "RemCard").setValue(
+            self._view_only_quick_order_settings_key(),
+            json.dumps(ids, ensure_ascii=False),
+        )
+
+    def _apply_view_only_quick_order(self, presets: list[dict]) -> list[dict]:
+        if not presets:
+            return []
+        order = self._load_view_only_quick_order_ids()
+        if not order:
+            return presets
+        by_id = {self._quick_order_preset_id(preset): dict(preset or {}) for preset in presets}
+        ordered: list[dict] = []
+        used: set[str] = set()
+        for preset_id in order:
+            preset = by_id.get(preset_id)
+            if preset is None:
+                continue
+            ordered.append(preset)
+            used.add(preset_id)
+        for preset in presets:
+            preset_id = self._quick_order_preset_id(preset)
+            if preset_id not in used:
+                ordered.append(dict(preset or {}))
+        return ordered
+
+    def _commit_quick_order_drag(self) -> bool:
+        source_id = str(getattr(self, "_quick_order_drag_source_id", "") or "")
+        order = list(getattr(self, "_quick_order_drag_order", []) or [])
+        if not source_id or source_id not in order:
+            return False
+        if order == list(getattr(self, "_quick_order_visible_preset_ids", []) or []):
+            self._cancel_quick_order_drag()
+            self._quick_order_drag_committed = True
+            return True
+        scroll_state = self._capture_quick_orders_scroll_state()
+        if self.is_view_only_mode():
+            try:
+                self._save_view_only_quick_order_ids(order)
+            except Exception as exc:
+                logger.warning("operblock view-only quick order reorder cache failed: %s", exc, exc_info=True)
+                self._cancel_quick_order_drag()
+                self._refresh_quick_orders(force_reload=True)
+                return False
+            self._quick_order_drag_committed = True
+            self._finish_quick_order_drag_layout(order)
+            self._restore_quick_orders_scroll_state_later(scroll_state)
+            return True
+        try:
+            self._medication_presets = self._save_quick_order_preset_order(order)
+            self._rebuild_quick_order_search_index()
+        except Exception as exc:
+            logger.error("operblock quick order reorder failed: %s", exc, exc_info=True)
+            CustomMessageBox.warning(self, "Быстрые назначения", f"Не удалось сохранить порядок:\n{exc}")
+            self._cancel_quick_order_drag()
+            self._refresh_quick_orders(force_reload=True)
+            return False
+        self._quick_order_drag_committed = True
+        self._finish_quick_order_drag_layout(order)
+        self._restore_quick_orders_scroll_state_later(scroll_state)
+        return True
+
+    def _make_medication_preset_row(self, preset: dict, add_icon: str = "") -> QWidget:
+        display_name = operblock_medication_preset_display_name(preset)
+        label = str(preset.get("label") or display_name).strip()
+        kind = normalize_operblock_medication_preset_kind(preset.get("kind"))
+        doses = [str(dose or "").strip() for dose in preset.get("doses") or [] if str(dose or "").strip()]
+        rates = _normalize_infusion_rate_options(preset.get("rates")) if kind == "continuous_infusion" else []
+        concentration_text = str(preset.get("concentration") or "").strip()
+        title_text, concentration_text = _quick_order_title_and_concentration(display_name or label, concentration_text)
+        solvent_text = _quick_order_solvent_text(preset)
+        title_line = f"{title_text} + {solvent_text}" if solvent_text else title_text
+        card_color = _operblock_preset_card_color(preset)
+        card_bg = card_color or OPERBLOCK_ORDERS_CARD_BG
+        card_text = _contrast_text_color(card_color, default=OPERBLOCK_ORDERS_TEXT)
+        card_muted = card_text if card_color else OPERBLOCK_ORDERS_MUTED
+        button_bg = "#FFFFFF" if card_color else "#F8FAFC"
+        button_hover_bg = "#F1F5F9" if card_color else "#EEF3FF"
+
+        frame = _QuickOrderPresetCard(self._quick_order_preset_id(preset), self)
+        frame.setObjectName("medicationPresetRow")
+        frame.setStyleSheet(
+            f"""
+            QFrame#medicationPresetRow {{
+                background-color: {card_bg};
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 6px;
+            }}
+            QPushButton {{
+                background-color: {button_bg};
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 4px;
+                color: {OPERBLOCK_ORDERS_TEXT};
+                padding: 4px 6px;
+                font-size: 11px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {button_hover_bg};
+                color: {OPERBLOCK_ORDERS_ACCENT};
+                border-color: {OPERBLOCK_ORDERS_BORDER};
+            }}
+            QPushButton:disabled {{
+                color: {OPERBLOCK_ORDERS_MUTED};
+                background-color: #F1F5F9;
+            }}
+            """
+        )
+        row_layout = QVBoxLayout(frame)
+        row_layout.setContentsMargins(8, 8, 8, 8)
+        row_layout.setSpacing(6)
+
+        name_label = ElidedTooltipLabel(title_line)
+        name_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 500; color: {card_text}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        row_layout.addWidget(name_label)
+        if concentration_text:
+            detail_label = ElidedTooltipLabel(concentration_text)
+            detail_label.setStyleSheet(
+                f"font-size: 11px; color: {card_muted}; background: transparent; border: none;"
+                f"{TOOLTIP_WHITE_STYLE}"
+            )
+            row_layout.addWidget(detail_label)
+
+        def add_button(grid: QGridLayout, text: str, row: int, column: int, callback) -> None:
+            button = QPushButton(text)
+            button.setFixedHeight(28)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(callback)
+            self._quick_order_buttons.append(button)
+            grid.addWidget(button, row, column)
+
+        if kind == "bolus":
+            if doses:
+                visible_doses = doses[:4]
+                dose_columns = 2 if len(visible_doses) > 1 else 1
+                dose_grid = QGridLayout()
+                dose_grid.setContentsMargins(0, 0, 0, 0)
+                dose_grid.setHorizontalSpacing(6)
+                dose_grid.setVerticalSpacing(6)
+                for column in range(dose_columns):
+                    dose_grid.setColumnStretch(column, 1)
+                for index, dose in enumerate(visible_doses):
+                    add_button(
+                        dose_grid,
+                        _quick_order_dose_display_text(dose, concentration_text),
+                        index // dose_columns,
+                        index % dose_columns,
+                        lambda _=False, current=preset, value=dose: self._add_preset_bolus(current, value),
+                    )
+                row_layout.addLayout(dose_grid)
+            else:
+                row_layout.addWidget(_label("Дозировки не указаны", size=12, color=card_muted))
+        elif kind == "gas":
+            is_oxygen_gas = _payload_or_text_is_oxygen(preset, display_name, label, title_line)
+            if doses:
+                visible_doses = doses[:4]
+                dose_columns = 2 if len(visible_doses) > 1 else 1
+                dose_grid = QGridLayout()
+                dose_grid.setContentsMargins(0, 0, 0, 0)
+                dose_grid.setHorizontalSpacing(6)
+                dose_grid.setVerticalSpacing(6)
+                for column in range(dose_columns):
+                    dose_grid.setColumnStretch(column, 1)
+                for index, dose in enumerate(visible_doses):
+                    dose_button_text = (
+                        _normalize_oxygen_flow_text(dose) or str(dose or "").strip()
+                        if is_oxygen_gas
+                        else _normalize_gas_dose_text(dose)
+                    )
+                    add_button(
+                        dose_grid,
+                        dose_button_text,
+                        index // dose_columns,
+                        index % dose_columns,
+                        lambda _=False, current=preset, value=dose: self._add_preset_gas(current, value),
+                    )
+                row_layout.addLayout(dose_grid)
+            else:
+                empty_text = "Потоки не указаны" if is_oxygen_gas else "Дозы MAC не указаны"
+                row_layout.addWidget(_label(empty_text, size=12, color=card_muted))
+        elif kind == "continuous_infusion":
+            if rates:
+                visible_rates = rates[:4]
+                rate_columns = 2 if len(visible_rates) > 1 else 1
+                rate_grid = QGridLayout()
+                rate_grid.setContentsMargins(0, 0, 0, 0)
+                rate_grid.setHorizontalSpacing(6)
+                rate_grid.setVerticalSpacing(6)
+                for column in range(rate_columns):
+                    rate_grid.setColumnStretch(column, 1)
+                for index, rate in enumerate(visible_rates):
+                    add_button(
+                        rate_grid,
+                        f"Старт {_compact_infusion_rate_display_text(rate)}",
+                        index // rate_columns,
+                        index % rate_columns,
+                        lambda _=False, current=preset, value=rate: self._start_preset_infusion(current, value),
+                    )
+                row_layout.addLayout(rate_grid)
+            else:
+                row_layout.addWidget(_label("Скорости не указаны", size=12, color=card_muted))
+        elif kind in {"timed_infusion", "solvent"}:
+            dose_options = _timed_infusion_dose_options(preset)
+            if dose_options:
+                visible_doses = dose_options[:4]
+                dose_columns = 2 if len(visible_doses) > 1 else 1
+                dose_grid = QGridLayout()
+                dose_grid.setContentsMargins(0, 0, 0, 0)
+                dose_grid.setHorizontalSpacing(6)
+                dose_grid.setVerticalSpacing(6)
+                for column in range(dose_columns):
+                    dose_grid.setColumnStretch(column, 1)
+                for index, dose in enumerate(visible_doses):
+                    add_button(
+                        dose_grid,
+                        _quick_order_dose_display_text(dose, concentration_text),
+                        index // dose_columns,
+                        index % dose_columns,
+                        lambda _=False, current=preset, value=dose: self._start_timed_infusion_preset(current, value),
+                    )
+                row_layout.addLayout(dose_grid)
+            else:
+                row_layout.addWidget(_label("Объем не указан", size=12, color=card_muted))
+        else:
+            row_layout.addWidget(_label("Доступно в справочнике", size=12, color=card_muted))
+        frame.bind_drag_sources()
+        return frame
+
+    def _make_quick_order_row(self, template: dict, add_icon: str) -> QWidget:
+        drug_name = str(template.get("drug_name") or "").strip()
+        group_number = normalize_operblock_quick_order_group(template.get("group"))
+        kind = normalize_operblock_quick_order_kind(template.get("kind"))
+        doses = [str(dose or "").strip() for dose in template.get("doses") or [] if str(dose or "").strip()]
+        rates = _normalize_infusion_rate_options(template.get("rates")) if kind == "infusion" else []
+        concentration_text = str(template.get("concentration") or template.get("concentration_text") or "").strip()
+        title_text, concentration_text = _quick_order_title_and_concentration(drug_name, concentration_text)
+        solvent_text = _quick_order_solvent_text(template)
+        title_line = f"{title_text} + {solvent_text}" if solvent_text else title_text
+
+        frame = QFrame()
+        frame.setObjectName("quickOrderRow")
+        frame.setStyleSheet(
+            f"""
+            QFrame#quickOrderRow {{
+                background-color: {BG_LIGHT};
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: {CUSTOM_DIALOG_RADIUS};
+            }}
+            QPushButton {{
+                background-color: #ffffff;
+                border: 1px solid {BORDER_COLOR};
+                border-radius: 4px;
+                color: {TEXT_PRIMARY};
+                padding: 2px 3px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: #eef3f6;
+            }}
+            QPushButton:disabled {{
+                color: {TEXT_MUTED};
+                background-color: {BG_MAIN};
+            }}
+            """
+        )
+        row_layout = QVBoxLayout(frame)
+        row_layout.setContentsMargins(5, 5, 5, 5)
+        row_layout.setSpacing(5)
+
+        drug_header = QHBoxLayout()
+        drug_header.setContentsMargins(0, 0, 0, 0)
+        drug_header.setSpacing(5)
+        drug_label = ElidedTooltipLabel(title_line)
+        drug_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 500; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        group_label = QLabel(f"{group_number}")
+        group_label.setAlignment(Qt.AlignCenter)
+        group_label.setFixedSize(22, 20)
+        group_label.setStyleSheet(
+            f"font-size: 11px; font-weight: 500; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px;"
+        )
+        kind_label = QLabel({"infusion": "ИНФ", "gas": "ГАЗ"}.get(kind, "БОЛ"))
+        kind_label.setAlignment(Qt.AlignCenter)
+        kind_label.setFixedSize(32, 20)
+        kind_label.setStyleSheet(
+            f"font-size: 10px; font-weight: 500; color: {TEXT_SECONDARY}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px;"
+        )
+        drug_header.addWidget(drug_label, 1)
+        drug_header.addWidget(kind_label, 0)
+        drug_header.addWidget(group_label, 0)
+        row_layout.addLayout(drug_header)
+        if concentration_text:
+            detail_label = ElidedTooltipLabel(concentration_text)
+            detail_label.setStyleSheet(
+                f"font-size: 11px; color: {TEXT_SECONDARY}; background: transparent; border: none;"
+                f"{TOOLTIP_WHITE_STYLE}"
+            )
+            row_layout.addWidget(detail_label)
+
+        if kind == "infusion":
+            if rates:
+                visible_rates = rates[:4]
+                rate_columns = 2 if len(visible_rates) > 1 else 1
+                rate_grid = QGridLayout()
+                rate_grid.setContentsMargins(0, 0, 0, 0)
+                rate_grid.setHorizontalSpacing(6)
+                rate_grid.setVerticalSpacing(4)
+                for column in range(rate_columns):
+                    rate_grid.setColumnStretch(column, 1)
+                for index, rate in enumerate(visible_rates):
+                    rate_layout = QHBoxLayout()
+                    rate_layout.setContentsMargins(0, 0, 0, 0)
+                    rate_layout.setSpacing(4)
+
+                    start_button = QPushButton("Старт")
+                    start_button.setFixedHeight(24)
+                    start_button.setCursor(Qt.PointingHandCursor)
+                    start_button.setToolTip(f"Старт дозатора {drug_name}: {rate}")
+                    start_button.clicked.connect(
+                        lambda _=False, drug=drug_name, value=rate, concentration=concentration_text: self._start_quick_infusion(
+                            drug,
+                            value,
+                            concentration_text=concentration,
+                        )
+                    )
+                    self._quick_order_buttons.append(start_button)
+
+                    rate_label = ElidedTooltipLabel(_compact_infusion_rate_display_text(rate))
+                    rate_label.setMinimumWidth(0)
+                    rate_label.setToolTip(rate)
+                    rate_label.setStyleSheet(
+                        f"font-size: 12px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+                        f"{TOOLTIP_WHITE_STYLE}"
+                    )
+                    rate_layout.addWidget(start_button, 0)
+                    rate_layout.addWidget(rate_label, 1)
+                    rate_grid.addLayout(rate_layout, index // rate_columns, index % rate_columns)
+                row_layout.addLayout(rate_grid)
+            else:
+                row_layout.addWidget(_label("Скорости не указаны", size=12, color=TEXT_SECONDARY))
+        elif doses:
+            is_oxygen_quick_gas = kind == "gas" and _payload_or_text_is_oxygen(None, drug_name, title_line)
+            for dose in doses[:4]:
+                dose_layout = QHBoxLayout()
+                dose_layout.setContentsMargins(0, 0, 0, 0)
+                dose_layout.setSpacing(5)
+
+                add_button = QPushButton()
+                add_button.setFixedSize(24, 24)
+                add_button.setCursor(Qt.PointingHandCursor)
+                add_button.setToolTip(f"Добавить {build_operblock_quick_order_text(drug_name, dose)}")
+                if os.path.exists(add_icon):
+                    add_button.setIcon(QIcon(add_icon))
+                    add_button.setIconSize(QSize(18, 18))
+                add_button.clicked.connect(
+                    lambda _=False, drug=drug_name, value=dose, order_kind=kind: self._add_quick_order(
+                        drug,
+                        value,
+                        kind=order_kind,
+                    )
+                )
+                self._quick_order_buttons.append(add_button)
+
+                dose_label_text = (
+                    _normalize_oxygen_flow_text(dose) or str(dose or "").strip()
+                    if is_oxygen_quick_gas
+                    else _quick_order_dose_display_text(dose, concentration_text)
+                )
+                dose_label = QLabel(dose_label_text)
+                dose_label.setStyleSheet(
+                    f"font-size: 12px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+                )
+                dose_layout.addWidget(add_button, 0)
+                dose_layout.addWidget(dose_label, 1)
+                row_layout.addLayout(dose_layout)
+        else:
+            empty_text = "Потоки не указаны" if kind == "gas" and _payload_or_text_is_oxygen(None, drug_name, title_line) else "Дозировки не указаны"
+            row_layout.addWidget(_label(empty_text, size=12, color=TEXT_SECONDARY))
+        return frame
+
+    def _set_quick_order_buttons_enabled(self, enabled: bool):
+        for button in list(getattr(self, "_quick_order_buttons", [])):
+            try:
+                button.setEnabled(bool(enabled))
+            except RuntimeError:
+                continue
+
+    def _capture_quick_orders_scroll_state(self) -> dict:
+        scroll = getattr(self, "quick_orders_scroll", None)
+        if scroll is None:
+            return {"value": 0, "maximum": 0}
+        bar = scroll.verticalScrollBar()
+        return {"value": int(bar.value()), "maximum": int(bar.maximum())}
+
+    def _restore_quick_orders_scroll_state(self, state: dict | None):
+        if not state:
+            return
+        scroll = getattr(self, "quick_orders_scroll", None)
+        if scroll is None:
+            return
+        bar = scroll.verticalScrollBar()
+        old_value = int(state.get("value") or 0)
+        bar.setValue(max(0, min(old_value, int(bar.maximum()))))
+
+    def _restore_quick_orders_scroll_state_later(self, state: dict | None):
+        if not state:
+            return
+        snapshot = dict(state)
+        self._restore_quick_orders_scroll_state(snapshot)
+        QTimer.singleShot(0, lambda: self._restore_quick_orders_scroll_state(snapshot))
+
+    def _remember_quick_orders_scroll_state(self) -> dict:
+        state = self._capture_quick_orders_scroll_state()
+        self._pending_quick_orders_scroll_state = dict(state)
+        return state
+
+    def _open_unified_settings(self):
+        if self._is_closing:
+            return
+        if self.is_view_only_mode():
+            return
+        action_info = self._start_opblock_action_diagnostics("operblock_open_settings")
+        loading_key = self._show_operblock_loading(
+            "Открытие настроек...",
+            key="open-settings",
+            auto_hide_ms=20000,
+        )
+        try:
+            self._remember_settings_return_page()
+            if not self._ensure_settings_page_created():
+                return
+            page = self.settings_page
+            if page is None:
+                return
+            if hasattr(page, "set_print_context"):
+                page.set_print_context(self.remcard_service, self._current_admission_id, datetime.now())
+            if hasattr(page, "show_menu"):
+                page.show_menu()
+            self._set_protocol_chrome(True)
+            self.stack.setCurrentWidget(page)
+        finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
+            self._hide_operblock_loading(loading_key)
+
+    def _remember_settings_return_page(self):
+        current_widget = self.stack.currentWidget()
+        if current_widget == self.settings_page:
+            return
+        self._settings_return_page = "board"
+        self._settings_return_operation_case_id = None
+        if current_widget == self.protocol_page and self._current_operation_case_id:
+            self._settings_return_page = "protocol"
+            self._settings_return_operation_case_id = int(self._current_operation_case_id)
+        elif current_widget == self.archive_page:
+            self._settings_return_page = "archive"
+            return_case_id = int(getattr(self, "_archive_return_operation_case_id", 0) or 0)
+            self._settings_return_operation_case_id = return_case_id or None
+
+    def _on_settings_back_clicked(self):
+        action_info = self._start_opblock_action_diagnostics("operblock_settings_back")
+        page = self.settings_page
+        try:
+            if page is not None and hasattr(page, "go_back") and page.go_back():
+                return
+            self._return_from_settings()
+        finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
+
+    def _return_from_settings(self):
+        return_page = str(getattr(self, "_settings_return_page", "") or "board")
+        return_case_id = int(getattr(self, "_settings_return_operation_case_id", 0) or 0)
+        self._settings_return_page = "board"
+        self._settings_return_operation_case_id = None
+        if return_page == "protocol" and return_case_id:
+            if self.protocol_page is not None and self._current_operation_case_id == return_case_id:
+                self._set_protocol_chrome(True)
+                self.stack.setCurrentWidget(self.protocol_page)
+                self.refresh_protocol(
+                    force=True,
+                    loading_message="Возврат к протоколу операции...",
+                )
+                return
+            self._open_protocol(return_case_id)
+            return
+        if return_page == "archive" and self.archive_page is not None:
+            self._archive_return_operation_case_id = return_case_id or None
+            self._set_protocol_chrome(True)
+            self.stack.setCurrentWidget(self.archive_page)
+            self.refresh_operblock_archive(
+                force=True,
+                loading_message="Возврат в архив оперблока...",
+            )
+            return
+        self._show_board(loading_message="Возврат к операционной...")
+
+    def _open_operblock_settings(self):
+        if self._is_closing:
+            return
+        if self.is_view_only_mode():
+            return
+        dialog = OperBlockSettingsDialog(self)
+        dialog.medications_button.clicked.connect(lambda: self._open_quick_orders_settings(dialog))
+        dialog.anesthesia_types_button.clicked.connect(lambda: self._open_anesthesia_types_settings(dialog))
+        dialog.team_button.clicked.connect(lambda: self._open_operblock_team_settings(dialog))
+        dialog.exec()
+
+    def _open_anesthesia_types_settings(self, dialog_parent: QWidget | None = None):
+        if self.is_view_only_mode():
+            return
+        loading_key = self._show_operblock_loading(
+            "Загрузка видов пособия...",
+            key="anesthesia-types-settings",
+            auto_hide_ms=20000,
+        )
+        try:
+            try:
+                items = load_operblock_anesthesia_types()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Виды пособия", f"Не удалось загрузить виды пособия: {exc}")
+                return
+        finally:
+            self._hide_operblock_loading(loading_key, delay_ms=0)
+        parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
+        dialog = OperBlockAnesthesiaTypesDialog(items, parent)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            save_operblock_anesthesia_types(dialog.items())
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Виды пособия", f"Не удалось сохранить виды пособия: {exc}")
+            return
+        invalidate_start_anesthesia_options_cache()
+
+    def _open_operblock_team_settings(self, dialog_parent: QWidget | None = None):
+        if self._is_closing:
+            return
+        if self.is_view_only_mode():
+            return
+        loading_key = self._show_operblock_loading(
+            "Загрузка опер. бригады...",
+            key="team-settings",
+            auto_hide_ms=20000,
+        )
+        try:
+            try:
+                items = load_operblock_team()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось загрузить опер. бригаду: {exc}")
+                return
+        finally:
+            self._hide_operblock_loading(loading_key, delay_ms=0)
+        parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
+        dialog = OperBlockTeamDialog(items, parent)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            save_operblock_team(dialog.items())
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось сохранить опер. бригаду: {exc}")
+            return
+        invalidate_start_anesthesia_options_cache()
+
+    def _open_quick_orders_settings(self, dialog_parent: QWidget | None = None):
+        if self._is_closing or self._write_pending:
+            return
+        if self.is_view_only_mode():
+            return
+        loading_key = self._show_operblock_loading(
+            "Загрузка настроек препаратов...",
+            key="quick-orders-settings",
+            auto_hide_ms=20000,
+        )
+        try:
+            self._load_quick_orders_data()
+        finally:
+            self._hide_operblock_loading(loading_key, delay_ms=0)
+        parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
+        dialog = OperBlockMedicationPresetsDialog(
+            self._medication_presets,
+            parent,
+            save_handler=self._save_medication_presets_from_dialog,
+        )
+        dialog.exec()
+
+    def _save_medication_presets_from_dialog(self, templates: list[dict]) -> list[dict]:
+        result = save_operblock_medication_presets(templates)
+        self._on_quick_orders_saved(result)
+        return list(result or [])
+
+    def _on_quick_orders_saved(self, result):
+        self._write_pending = False
+        self.sector_8_panel.btn_settings.setEnabled(True)
+        self._medication_presets = list(result or [])
+        try:
+            self._quick_order_templates = load_operblock_quick_orders()
+        except Exception:
+            self._quick_order_templates = []
+        self._quick_orders_data_loaded = True
+        self._rebuild_quick_order_search_index()
+        self._render_quick_orders()
+        if self._current_operation_case_id:
+            self._orders_force_top_on_next_apply = True
+            self.refresh_protocol(force=True)
+
+    def _on_quick_orders_save_error(self, exc: Exception):
+        self._write_pending = False
+        self.sector_8_panel.btn_settings.setEnabled(True)
+        CustomMessageBox.warning(self, "Ошибка сохранения", str(exc))
+        self._refresh_quick_orders(force_reload=True)
+
+    def _apply_orders(self, snapshot: dict, *, update_chart_markers: bool = True):
+        scroll_state = self._capture_orders_scroll_state()
+        force_top = bool(getattr(self, "_orders_force_top_on_next_apply", False))
+        self._orders_force_top_on_next_apply = False
+        rows = [dict(row or {}) for row in (snapshot.get("orders") or [])]
+        source_groups = self._build_medication_order_groups(rows)
+        source_signature = self._orders_groups_source_signature(source_groups)
+        groups = self._filtered_medication_order_groups(source_groups)
+        render_signature = self._orders_groups_render_signature(groups)
+        previous_signature = getattr(self, "_orders_render_signature", "")
+        if render_signature == previous_signature:
+            self._current_orders_rows = rows
+            if hasattr(self, "orders_count_label"):
+                self.orders_count_label.setText(str(len(groups)))
+            if force_top:
+                QTimer.singleShot(0, lambda: self._restore_orders_scroll_state({"value": 0, "maximum": 0, "at_bottom": False}))
+            return
+        source_changed = source_signature != getattr(self, "_orders_source_signature", "")
+        scroll = getattr(self, "orders_scroll", None)
+        try:
+            self._current_orders_rows = rows
+            if source_changed and update_chart_markers:
+                self._update_vitals_chart_order_markers()
+            if hasattr(self, "orders_count_label"):
+                self.orders_count_label.setText(str(len(groups)))
+            if not groups:
+                self._render_empty_orders_list()
+                self._orders_render_signature = render_signature
+                self._orders_source_signature = source_signature
+                return
+
+            self._render_medication_groups_diff(groups)
+            self._orders_render_signature = render_signature
+            self._orders_source_signature = source_signature
+        finally:
+            if scroll is not None:
+                self.orders_list.activate()
+                content = scroll.widget()
+                if content is not None:
+                    content.adjustSize()
+                if force_top:
+                    scroll_state = {"value": 0, "maximum": 0, "at_bottom": False}
+                QTimer.singleShot(0, lambda state=scroll_state: self._restore_orders_scroll_state(state))
+
+    def _update_vitals_chart_order_markers(self):
+        chart = getattr(self, "vitals_chart", None)
+        if not chart:
+            return
+        start_dt = getattr(chart, "start_time", None)
+        if not isinstance(start_dt, datetime):
+            transform = getattr(chart, "_timeline_transform", None)
+            start_dt = getattr(transform, "display_origin_at", None)
+        if not isinstance(start_dt, datetime):
+            start_dt = self._current_operation_start or self._current_protocol_date
+        if hasattr(chart, "set_timeline_snapshot"):
+            chart.set_timeline_snapshot(getattr(self, "_current_timeline_snapshot", None), start_dt, force=True)
+        elif hasattr(chart, "set_operation_orders"):
+            chart.set_operation_orders(getattr(self, "_current_orders_rows", []), start_dt, force=True)
+
+    def _remove_orders_spacers(self):
+        layout = getattr(self, "orders_list", None)
+        if layout is None:
+            return
+        for index in reversed(range(layout.count())):
+            item = layout.itemAt(index)
+            if item is not None and item.spacerItem() is not None:
+                layout.takeAt(index)
+
+    def _render_empty_orders_list(self):
+        layout = getattr(self, "orders_list", None)
+        if layout is None:
+            return
+        self._clear_layout(layout)
+        self._rendered_medication_group_widgets = {}
+        self._rendered_medication_group_signatures = {}
+        self._rendered_medication_group_order = []
+        self._rendered_order_detail_labels = {}
+        self._rendered_medication_group_total_labels = {}
+        self._orders_empty_widget = _label("Введений пока нет", size=13, color=OPERBLOCK_ORDERS_MUTED)
+        layout.addWidget(self._orders_empty_widget)
+        layout.addStretch(1)
+        self._order_action_buttons = []
+
+    def _render_medication_groups_diff(self, groups: list[dict]):
+        layout = getattr(self, "orders_list", None)
+        if layout is None:
+            return
+        if getattr(self, "_orders_empty_widget", None) is not None:
+            self._clear_layout(layout)
+            self._orders_empty_widget = None
+            self._rendered_medication_group_widgets = {}
+            self._rendered_medication_group_signatures = {}
+        self._remove_orders_spacers()
+
+        old_widgets = dict(getattr(self, "_rendered_medication_group_widgets", {}) or {})
+        old_signatures = dict(getattr(self, "_rendered_medication_group_signatures", {}) or {})
+        old_order = list(getattr(self, "_rendered_medication_group_order", []) or list(old_widgets.keys()))
+        new_order = [str(group.get("key") or "") for group in groups]
+        new_keys = {str(group.get("key") or "") for group in groups}
+        for key, widget in old_widgets.items():
+            if key in new_keys:
+                continue
+            layout.removeWidget(widget)
+            widget.deleteLater()
+
+        new_widgets: dict[str, QWidget] = {}
+        new_signatures: dict[str, str] = {}
+        changed_or_new_keys = {
+            str(group.get("key") or "")
+            for group in groups
+            if old_widgets.get(str(group.get("key") or "")) is None
+            or old_signatures.get(str(group.get("key") or "")) != self._medication_group_render_signature(group)
+        }
+        retained_old_order = [key for key in old_order if key in new_keys and key not in changed_or_new_keys]
+        retained_new_order = [key for key in new_order if key not in changed_or_new_keys]
+        can_patch_in_place = retained_old_order == retained_new_order
+        if old_order == new_order or can_patch_in_place:
+            for index, group in enumerate(groups):
+                key = str(group.get("key") or "")
+                signature = self._medication_group_render_signature(group)
+                widget = old_widgets.get(key)
+                if key in changed_or_new_keys:
+                    if widget is not None:
+                        layout.removeWidget(widget)
+                        widget.deleteLater()
+                    widget = self._make_medication_group_card(group)
+                    layout.insertWidget(index, widget)
+                new_widgets[key] = widget
+                new_signatures[key] = signature
+        else:
+            for index, group in enumerate(groups):
+                key = str(group.get("key") or "")
+                signature = self._medication_group_render_signature(group)
+                widget = old_widgets.get(key)
+                if widget is None or old_signatures.get(key) != signature:
+                    if widget is not None:
+                        layout.removeWidget(widget)
+                        widget.deleteLater()
+                    widget = self._make_medication_group_card(group)
+                else:
+                    layout.removeWidget(widget)
+                layout.insertWidget(index, widget)
+                new_widgets[key] = widget
+                new_signatures[key] = signature
+
+        self._rendered_medication_group_widgets = new_widgets
+        self._rendered_medication_group_signatures = new_signatures
+        self._rendered_medication_group_order = new_order
+        layout.addStretch(1)
+        content = self.orders_scroll.widget() if getattr(self, "orders_scroll", None) else None
+        self._order_action_buttons = list(content.findChildren(QPushButton)) if content is not None else []
+        self._refresh_rendered_order_widget_index()
+
+    def _refresh_rendered_order_widget_index(self):
+        self._rendered_order_detail_labels = {}
+        self._rendered_medication_group_total_labels = {}
+        content = self.orders_scroll.widget() if getattr(self, "orders_scroll", None) else None
+        if content is None:
+            return
+        for label in content.findChildren(ElidedTooltipLabel):
+            try:
+                order_id = _safe_int(label.property("operblock_order_id"))
+                if order_id:
+                    self._rendered_order_detail_labels[int(order_id)] = label
+                group_key = str(label.property("operblock_group_total_key") or "").strip()
+                if group_key:
+                    self._rendered_medication_group_total_labels[group_key] = label
+            except RuntimeError:
+                continue
+
+    def _orders_groups_render_signature(self, groups: list[dict]) -> str:
+        return _stable_ui_hash(
+            {
+                "order": [str(group.get("key") or "") for group in groups],
+                "groups": {str(group.get("key") or ""): self._medication_group_render_signature(group) for group in groups},
+            }
+        )
+
+    def _sync_orders_render_signatures_from_current_rows(self) -> None:
+        rows = [dict(row or {}) for row in getattr(self, "_current_orders_rows", []) or []]
+        source_groups = self._build_medication_order_groups(rows)
+        groups = self._filtered_medication_order_groups(source_groups)
+        self._orders_render_signature = self._orders_groups_render_signature(groups)
+        self._orders_source_signature = self._orders_groups_source_signature(source_groups)
+        rendered_signatures = dict(getattr(self, "_rendered_medication_group_signatures", {}) or {})
+        rendered_widgets = dict(getattr(self, "_rendered_medication_group_widgets", {}) or {})
+        for group in groups:
+            key = str(group.get("key") or "")
+            if key in rendered_widgets:
+                rendered_signatures[key] = self._medication_group_render_signature(group)
+                total_label = (getattr(self, "_rendered_medication_group_total_labels", {}) or {}).get(key)
+                if total_label is not None:
+                    try:
+                        total_label.set_full_text(str(group.get("total_text") or "Итого: нет дозы"))
+                    except RuntimeError:
+                        pass
+        self._rendered_medication_group_signatures = rendered_signatures
+        if getattr(self, "orders_count_label", None) is not None:
+            self.orders_count_label.setText(str(len(groups)))
+
+    def _patch_rendered_order_detail_text(self, order_id: int) -> None:
+        row = self._current_order_row_by_id(int(order_id))
+        if not row:
+            return
+        _raw_drug_name, dose = _split_order_drug_and_dose(str(row.get("text") or ""))
+        detail = _order_dose_text_with_route(dose, row, short=False) or str(row.get("text") or "").strip()
+        label = (getattr(self, "_rendered_order_detail_labels", {}) or {}).get(int(order_id))
+        if label is None:
+            return
+        try:
+            label.set_full_text(detail)
+        except RuntimeError:
+            self._refresh_rendered_order_widget_index()
+
+    @staticmethod
+    def _orders_groups_source_signature(groups: list[dict]) -> str:
+        return _stable_ui_hash(
+            {
+                "order": [str(group.get("key") or "") for group in groups],
+                "groups": {str(group.get("key") or ""): str(group.get("source_signature") or "") for group in groups},
+            }
+        )
+
+    def _filtered_medication_order_groups(self, groups: list[dict]) -> list[dict]:
+        filter_kind = str(getattr(self, "_orders_filter_kind", "all") or "all")
+        hide_deleted = bool(getattr(self, "_orders_hide_deleted", True))
+        sort_mode = self._orders_sort_mode()
+        result: list[dict] = []
+        for group in groups or []:
+            entries = [
+                dict(entry or {})
+                for entry in (group.get("entries") or [])
+                if self._medication_entry_matches_orders_filter(entry or {}, filter_kind, hide_deleted)
+                and (sort_mode != "active_only" or self._medication_entry_is_active(entry or {}))
+            ]
+            if not entries:
+                continue
+            entries = self._sorted_medication_entries(entries, sort_mode)
+            filtered_group = dict(group)
+            filtered_group["entries"] = entries
+            order_rows = [dict(entry.get("row") or {}) for entry in entries if entry.get("kind") == "order"]
+            infusion_rows = [dict(entry.get("interval") or {}) for entry in entries if entry.get("kind") == "infusion"]
+            filtered_group["order_rows"] = order_rows
+            filtered_group["infusion_rows"] = infusion_rows
+            filtered_group["has_bolus_order"] = any(str(row.get("order_kind") or "") == "bolus" for row in order_rows)
+            filtered_group["has_gas_order"] = any(str(row.get("order_kind") or "") == "gas" for row in order_rows)
+            filtered_group["has_gas_infusion"] = any(_is_gas_infusion(interval) for interval in infusion_rows)
+            filtered_group["has_rate_infusion"] = any(_infusion_has_rate(interval) for interval in infusion_rows)
+            filtered_group["has_volume_infusion"] = any(_is_volume_only_infusion(interval) for interval in infusion_rows)
+            time_values = [
+                _minute_floor_dt(_parse_datetime_value(entry.get("time"))) or datetime.min
+                for entry in entries
+            ]
+            filtered_group["latest_dt"] = max(time_values) if time_values else datetime.min
+            filtered_group["first_dt"] = min(time_values) if time_values else datetime.min
+            sort_ids = [_safe_int(entry.get("sort_id")) or 0 for entry in entries]
+            sort_ids = [value for value in sort_ids if value > 0]
+            filtered_group["first_id"] = min(sort_ids) if sort_ids else None
+            filtered_group["total_text"] = self._medication_group_total_text(filtered_group)
+            filtered_group["source_signature"] = self._medication_group_source_signature(filtered_group)
+            result.append(filtered_group)
+        self._sort_medication_order_groups(result, sort_mode)
+        return result
+
+    @staticmethod
+    def _medication_entry_sort_key(entry: dict) -> tuple:
+        return (
+            _minute_floor_dt(_parse_datetime_value(entry.get("time"))) or datetime.min,
+            int(entry.get("sort_id") or 0),
+            str(entry.get("detail") or "").casefold(),
+        )
+
+    def _sorted_medication_entries(self, entries: list[dict], sort_mode: str) -> list[dict]:
+        return sorted(entries, key=self._medication_entry_sort_key, reverse=sort_mode != "time_asc")
+
+    @staticmethod
+    def _medication_group_time_sort_key(group: dict) -> tuple:
+        latest_dt = group.get("latest_dt")
+        if not isinstance(latest_dt, datetime):
+            latest_dt = datetime.min
+        return (
+            latest_dt,
+            int(group.get("first_id") or 0),
+            str(group.get("drug_name") or "").casefold(),
+        )
+
+    def _sort_medication_order_groups(self, groups: list[dict], sort_mode: str) -> None:
+        if sort_mode == "time_asc":
+            groups.sort(key=self._medication_group_time_sort_key)
+            return
+        if sort_mode == "drug":
+            groups.sort(key=lambda group: str(group.get("drug_name") or "").casefold())
+            return
+        groups.sort(key=self._medication_group_time_sort_key, reverse=True)
+
+    @staticmethod
+    def _medication_entry_is_active(entry: dict) -> bool:
+        row = entry.get("row") if isinstance(entry.get("row"), dict) else {}
+        interval = entry.get("interval") if isinstance(entry.get("interval"), dict) else {}
+        status = str((interval or row or {}).get("status") or "")
+        return status == "active"
+
+    @staticmethod
+    def _medication_entry_matches_orders_filter(entry: dict, filter_kind: str, hide_deleted: bool) -> bool:
+        kind = str(entry.get("kind") or "")
+        row = entry.get("row") if isinstance(entry.get("row"), dict) else {}
+        interval = entry.get("interval") if isinstance(entry.get("interval"), dict) else {}
+        status = str((row or interval or {}).get("status") or "")
+        if hide_deleted and status in {"deleted", "cancelled"}:
+            return False
+        if filter_kind == "all":
+            return True
+        if filter_kind == "bolus":
+            return kind == "order" and str(entry.get("order_kind") or "bolus") != "gas"
+        if filter_kind == "gas":
+            return (kind == "order" and str(entry.get("order_kind") or "") == "gas") or (
+                kind == "infusion" and _is_gas_infusion(interval)
+            )
+        if filter_kind == "continuous_infusion":
+            return kind == "infusion" and _infusion_has_rate(interval)
+        if filter_kind == "timed_infusion":
+            return kind == "infusion" and not _infusion_has_rate(interval) and not _is_gas_infusion(interval)
+        if filter_kind == "active":
+            return kind == "infusion" and status == "active"
+        return True
+
+    @staticmethod
+    def _timeline_event_numeric_id(value) -> int:
+        match = re.search(r"(\d+)$", str(value or ""))
+        return int(match.group(1)) if match else 0
+
+    def _timeline_order_events(self, rows) -> list[dict]:
+        events: list[dict] = []
+        for raw_row in rows or []:
+            row = dict(raw_row or {})
+            order_dt = _minute_floor_dt(_parse_datetime_value(row.get("datetime")))
+            if order_dt is None:
+                continue
+            raw_drug_name, dose = _split_order_drug_and_dose(str(row.get("text") or ""))
+            drug_name = self._order_display_drug_name(row, raw_drug_name)
+            row["drug_name"] = drug_name
+            row["raw_drug_name"] = raw_drug_name
+            row["dose_text"] = dose
+            row["route"] = _order_route_code(row)
+            order_kind = self._order_preset_kind(row)
+            row["order_kind"] = order_kind
+            events.append(
+                {
+                    "kind": "order",
+                    "order_kind": order_kind,
+                    "time": order_dt,
+                    "drug": drug_name,
+                    "detail": _order_dose_text_with_route(dose, row, short=False)
+                    or str(row.get("text") or "").strip(),
+                    "badge": "Газ" if order_kind == "gas" else "Болюс",
+                    "row": row,
+                    "sort_id": _safe_int(row.get("id")) or 0,
+                }
+            )
+        return events
+
+    def _timeline_infusion_change_events(
+        self,
+        interval: dict,
+        *,
+        start_dt: datetime,
+        drug_name: str,
+        is_oxygen: bool,
+    ) -> list[dict]:
+        events: list[dict] = []
+        if _is_gas_infusion(interval):
+            for index, change in enumerate(_gas_dose_events(interval)):
+                change_dt = _minute_floor_dt(_parse_datetime_value((change or {}).get("event_time")))
+                if change_dt is None or (index == 0 and change_dt == start_dt):
+                    continue
+                change_dose = str((change or {}).get("dose_text") or "").strip()
+                events.append(
+                    {
+                        "kind": "infusion",
+                        "role": "change",
+                        "time": change_dt,
+                        "drug": drug_name,
+                        "detail": (
+                            f"поток {change_dose}"
+                            if is_oxygen and change_dose
+                            else f"доза {change_dose}"
+                            if change_dose
+                            else "изменение потока"
+                            if is_oxygen
+                            else "изменение дозы"
+                        ),
+                        "badge": "Изм. поток" if is_oxygen else "Изм. доза",
+                        "interval": interval,
+                        "sort_id": self._timeline_event_numeric_id((change or {}).get("event_id")),
+                    }
+                )
+            return events
+
+        for index, change in enumerate(list(interval.get("rate_history") or [])):
+            change_dt = _minute_floor_dt(_parse_datetime_value((change or {}).get("event_time")))
+            if change_dt is None or (index == 0 and change_dt == start_dt):
+                continue
+            change_rate = _format_infusion_rate((change or {}).get("rate_value"), (change or {}).get("rate_unit"))
+            events.append(
+                {
+                    "kind": "infusion",
+                    "role": "change",
+                    "time": change_dt,
+                    "drug": drug_name,
+                    "detail": f"скорость {change_rate}" if change_rate else "изменение скорости",
+                    "badge": "Изм. скорость",
+                    "interval": interval,
+                    "sort_id": self._timeline_event_numeric_id((change or {}).get("event_id")),
+                }
+            )
+        return events
+
+    def _timeline_events_for_infusion(self, raw_interval) -> list[dict]:
+        interval = dict(raw_interval or {})
+        status = str(interval.get("status") or "")
+        if status not in {"active", "stopped"}:
+            return []
+        start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+        if start_dt is None:
+            return []
+
+        is_gas = _is_gas_infusion(interval)
+        drug_name = _infusion_display_drug_name(interval, "Дозатор")
+        rate = (
+            ""
+            if is_gas
+            else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
+        )
+        declared_volume = _format_infusion_declared_volume(interval)
+        gas_dose = _gas_dose_text(interval) if is_gas else ""
+        is_oxygen = _is_oxygen_infusion(interval)
+        is_rate_infusion = _infusion_has_rate(interval)
+        badge = "Кислород" if is_oxygen else "Газ" if gas_dose else "Дозатор" if is_rate_infusion else "Капельница"
+        detail = (
+            f"старт {rate}"
+            if rate
+            else f"старт поток {gas_dose}"
+            if is_oxygen and gas_dose
+            else f"старт {gas_dose}"
+            if gas_dose
+            else declared_volume or "старт"
+        )
+        start_event_id, _revision = self._infusion_identity(interval)
+        events = [
+            {
+                "kind": "infusion",
+                "role": "start",
+                "time": start_dt,
+                "drug": drug_name,
+                "detail": detail,
+                "badge": badge,
+                "interval": interval,
+                "sort_id": start_event_id or 0,
+            }
+        ]
+        events.extend(
+            self._timeline_infusion_change_events(
+                interval,
+                start_dt=start_dt,
+                drug_name=drug_name,
+                is_oxygen=is_oxygen,
+            )
+        )
+        end_dt = _minute_floor_dt(_parse_datetime_value(interval.get("end_time")))
+        if end_dt is not None and status == "stopped":
+            events.append(
+                {
+                    "kind": "infusion",
+                    "role": "stop",
+                    "time": end_dt,
+                    "drug": drug_name,
+                    "detail": "стоп",
+                    "badge": "Стоп",
+                    "interval": interval,
+                    "sort_id": start_event_id or 0,
+                }
+            )
+        return events
+
+    def _build_timeline_events(self, rows) -> list[dict]:
+        events = self._timeline_order_events(rows)
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        for interval in snapshot.get("infusion_intervals") or []:
+            events.extend(self._timeline_events_for_infusion(interval))
+        events.sort(
+            key=lambda item: (
+                _minute_floor_dt(_parse_datetime_value(item.get("time"))) or datetime.min,
+                int(item.get("sort_id") or 0),
+                str(item.get("badge") or ""),
+            ),
+            reverse=True,
+        )
+        return events
+
+    def _build_medication_order_groups(self, rows) -> list[dict]:
+        groups: dict[str, dict] = {}
+
+        def ensure_group(drug_name: str) -> dict:
+            clean_name = str(drug_name or "").strip() or "Без названия"
+            key = clean_name.casefold()
+            return groups.setdefault(
+                key,
+                {
+                    "key": key,
+                    "drug_name": clean_name,
+                    "entries": [],
+                    "order_rows": [],
+                    "infusion_rows": [],
+                    "latest_dt": datetime.min,
+                    "first_id": None,
+                    "has_bolus_order": False,
+                    "has_gas_order": False,
+                    "has_gas_infusion": False,
+                    "has_rate_infusion": False,
+                    "has_volume_infusion": False,
+                },
+            )
+
+        for raw_row in rows or []:
+            row = dict(raw_row or {})
+            row_dt = _minute_floor_dt(_parse_datetime_value(row.get("datetime")))
+            if row_dt is None:
+                continue
+            raw_drug_name, dose = _split_order_drug_and_dose(str(row.get("text") or ""))
+            drug_name = self._order_display_drug_name(row, raw_drug_name)
+            row["drug_name"] = drug_name
+            row["raw_drug_name"] = raw_drug_name
+            row["dose_text"] = dose
+            row["route"] = _order_route_code(row)
+            order_kind = self._order_preset_kind(row)
+            row["order_kind"] = order_kind
+            group = ensure_group(drug_name)
+            group["order_rows"].append(row)
+            group["has_bolus_order"] = bool(group["has_bolus_order"] or order_kind == "bolus")
+            group["has_gas_order"] = bool(group["has_gas_order"] or order_kind == "gas")
+            row_id = _safe_int(row.get("id")) or 0
+            group["entries"].append(
+                {
+                    "kind": "order",
+                    "order_kind": order_kind,
+                    "time": row_dt,
+                    "detail": _order_dose_text_with_route(dose, row, short=False)
+                    or str(row.get("text") or "").strip(),
+                    "row": row,
+                    "sort_id": row_id,
+                }
+            )
+            if row_dt > group["latest_dt"]:
+                group["latest_dt"] = row_dt
+            if row_id and (group["first_id"] is None or row_id < group["first_id"]):
+                group["first_id"] = row_id
+
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        for raw_interval in snapshot.get("infusion_intervals") or []:
+            interval = dict(raw_interval or {})
+            status = str(interval.get("status") or "")
+            if status not in {"active", "stopped"}:
+                continue
+            start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+            end_dt = _minute_floor_dt(_parse_datetime_value(interval.get("end_time")))
+            row_dt = end_dt or start_dt
+            if row_dt is None:
+                continue
+            drug_name = _infusion_display_drug_name(interval, "Дозатор")
+            group = ensure_group(drug_name)
+            group["infusion_rows"].append(interval)
+            group["has_gas_infusion"] = bool(group["has_gas_infusion"] or _is_gas_infusion(interval))
+            group["has_rate_infusion"] = bool(group["has_rate_infusion"] or _infusion_has_rate(interval))
+            group["has_volume_infusion"] = bool(group["has_volume_infusion"] or _is_volume_only_infusion(interval))
+            start_event_id, _revision = self._infusion_identity(interval)
+            group["entries"].append(
+                {
+                    "kind": "infusion",
+                    "time": row_dt,
+                    "detail": self._infusion_history_entry_text(interval),
+                    "interval": interval,
+                    "sort_id": start_event_id or 0,
+                }
+            )
+            if row_dt > group["latest_dt"]:
+                group["latest_dt"] = row_dt
+            if start_event_id and (group["first_id"] is None or start_event_id < group["first_id"]):
+                group["first_id"] = start_event_id
+
+        result = list(groups.values())
+        for group in result:
+            group["entries"].sort(
+                key=lambda item: (
+                    _minute_floor_dt(_parse_datetime_value(item.get("time"))) or datetime.min,
+                    int(item.get("sort_id") or 0),
+                ),
+                reverse=True,
+            )
+            group["total_text"] = self._medication_group_total_text(group)
+            group["source_signature"] = self._medication_group_source_signature(group)
+        result.sort(
+            key=lambda group: (
+                group.get("latest_dt") if isinstance(group.get("latest_dt"), datetime) else datetime.min,
+                int(group.get("first_id") or 0),
+                str(group.get("drug_name") or "").casefold(),
+            ),
+            reverse=True,
+        )
+        return result
+
+    def _medication_group_source_signature(self, group: dict) -> str:
+        order_rows = []
+        for row in group.get("order_rows") or []:
+            order_rows.append(
+                {
+                    "id": row.get("id"),
+                    "datetime": row.get("datetime"),
+                    "text": row.get("text"),
+                    "drug_key": row.get("drug_key"),
+                    "drug_display_name": row.get("drug_display_name"),
+                    "order_kind": row.get("order_kind"),
+                    "concentration": self._order_row_concentration_text(row),
+                    "comment": row.get("comment"),
+                    "route": _order_route_code(row),
+                    "status": row.get("status"),
+                    "revision": row.get("revision"),
+                    "updated_at": row.get("updated_at"),
+                }
+            )
+        infusion_rows = []
+        for interval in group.get("infusion_rows") or []:
+            infusion_rows.append(
+                {
+                    "interval_id": interval.get("interval_id"),
+                    "drug_label": interval.get("drug_label"),
+                    "display_label": interval.get("display_label"),
+                    "start_time": interval.get("start_time"),
+                    "end_time": interval.get("end_time"),
+                    "status": interval.get("status"),
+                    "volume_ml": interval.get("volume_ml"),
+                    "current_rate_value": interval.get("current_rate_value"),
+                    "current_rate_unit": interval.get("current_rate_unit"),
+                    "rate_history": interval.get("rate_history") or [],
+                    "event_ids": interval.get("event_ids") or [],
+                    "payload": interval.get("payload") or {},
+                }
+            )
+        return _stable_ui_hash(
+            {
+                "key": group.get("key"),
+                "drug_name": group.get("drug_name"),
+                "orders": order_rows,
+                "infusions": infusion_rows,
+            }
+        )
+
+    def _medication_group_render_signature(self, group: dict) -> str:
+        key = str(group.get("key") or "").casefold()
+        return _stable_ui_hash(
+            {
+                "source": str(group.get("source_signature") or ""),
+                "collapsed": key in getattr(self, "_collapsed_order_group_keys", set()),
+            }
+        )
+
+    def _medication_group_total_text(self, group: dict) -> str:
+        parts: list[str] = []
+        order_rows = list(group.get("order_rows") or [])
+        infusion_rows = list(group.get("infusion_rows") or [])
+        order_total = (
+            _summarize_order_total(order_rows, concentration_for_row=self._order_row_concentration_text)
+            if order_rows
+            else ""
+        )
+        if order_total.startswith("Итого: "):
+            parts.append(order_total.removeprefix("Итого: "))
+        elif order_total:
+            parts.append(order_total)
+
+        total_volume = Decimal("0")
+        has_volume = False
+        total_oxygen_liters = Decimal("0")
+        has_oxygen_liters = False
+        active_count = 0
+        for interval in infusion_rows:
+            if str((interval or {}).get("status") or "") == "active":
+                active_count += 1
+            if _is_oxygen_infusion(interval or {}):
+                oxygen_liters = _oxygen_consumed_liters(interval or {})
+                if oxygen_liters is not None:
+                    total_oxygen_liters += oxygen_liters
+                    has_oxygen_liters = True
+                continue
+            volume_text = _format_infusion_executed_volume(interval) if _infusion_has_rate(interval) else ""
+            volume = _counted_infusion_volume_ml(interval or {})
+            if volume is None and volume_text:
+                volume = _decimal_from_ru_number(volume_text.replace("мл", ""))
+            if (
+                volume is None
+                and _is_volume_only_infusion(interval or {})
+                and str((interval or {}).get("status") or "") != "active"
+            ):
+                volume = _infusion_declared_volume_ml(interval or {})
+            if volume is None:
+                continue
+            total_volume += volume
+            has_volume = True
+        if has_volume:
+            parts.append(_format_infusion_volume_ml(total_volume))
+        if has_oxygen_liters:
+            parts.append(_format_oxygen_liters(total_oxygen_liters))
+        elif active_count:
+            parts.append(f"активно: {active_count}")
+
+        return f"Итого: {', '.join(parts)}" if parts else "Итого: нет дозы"
+
+    def _medication_visual(self, group: dict) -> dict:
+        name = str(group.get("drug_name") or "").casefold()
+        if _text_is_oxygen(name):
+            return {
+                "color": "#E0F2FE",
+                "icon": "drop_white",
+                "icon_file": OXYGEN_ICON_FILE,
+                "icon_fallback_file": OXYGEN_ICON_FILE,
+                "icon_size": 30,
+                "time_bg": "#E0F2FE",
+                "time_fg": "#0369A1",
+            }
+        if (
+            group.get("has_gas_order")
+            or group.get("has_gas_infusion")
+            or "газ" in name
+            or "sevo" in name
+            or "сево" in name
+            or "desfl" in name
+            or "десфл" in name
+            or "isofl" in name
+            or "изофл" in name
+            or "oxygen" in name
+            or "кислород" in name
+        ):
+            return {
+                "color": "#E0F2FE",
+                "icon": "drop_white",
+                "icon_file": type_icon_key("gas"),
+                "icon_size": 30,
+                "time_bg": "#E0F2FE",
+                "time_fg": "#0369A1",
+            }
+        if group.get("has_rate_infusion") or "noradren" in name or "норадрен" in name:
+            return {
+                "color": "#FFF7ED",
+                "icon": "infusion_white",
+                "icon_file": type_icon_key("continuous_infusion"),
+                "icon_size": 30,
+                "time_bg": "#DBEAFE",
+                "time_fg": "#1D4ED8",
+            }
+        if group.get("has_volume_infusion") or "nacl" in name or "натрия" in name or "раств" in name:
+            return {
+                "color": "#EAF3FF",
+                "icon": "drop_white",
+                "icon_file": type_icon_key("timed_infusion"),
+                "icon_size": 30,
+                "time_bg": "#CCFBF1",
+                "time_fg": "#0F766E",
+            }
+        if group.get("has_bolus_order"):
+            return {
+                "color": "#EAFBF5",
+                "icon": "syringe_white",
+                "icon_file": type_icon_key("bolus"),
+                "icon_size": 30,
+                "time_bg": "#DCFCE7",
+                "time_fg": "#15803D",
+            }
+        return {
+            "color": "#EAFBF5",
+            "icon": "syringe_white",
+            "icon_file": type_icon_key("bolus"),
+            "icon_size": 30,
+            "time_bg": "#DCFCE7",
+            "time_fg": "#15803D",
+        }
+
+    def _group_icon_frame(self, visual: dict) -> QFrame:
+        frame = QFrame()
+        frame.setFixedSize(44, 44)
+        frame.setStyleSheet(
+            f"background-color: {visual.get('color') or '#2563EB'}; border: none; border-radius: 10px;"
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        icon = QLabel()
+        icon.setAlignment(Qt.AlignCenter)
+        icon_size = int(visual.get("icon_size") or 22)
+        icon_file = visual.get("icon_file")
+        pixmap = (
+            request_operblock_icon_pixmap(
+                icon,
+                icon_file,
+                fallback_file=str(visual.get("icon_fallback_file") or ""),
+                target_size=(icon_size, icon_size),
+            )
+            if icon_file
+            else QPixmap()
+        )
+        if pixmap.isNull():
+            pixmap = self._operblock_ui_icon(str(visual.get("icon") or "syringe_white")).pixmap(icon_size, icon_size)
+        if not pixmap.isNull():
+            icon.setPixmap(pixmap)
+        layout.addWidget(icon, 1)
+        return frame
+
+    @staticmethod
+    def _active_infusion_icon_file(interval: dict) -> str:
+        if _is_oxygen_infusion(interval or {}):
+            return OXYGEN_ICON_FILE
+        if _is_gas_infusion(interval or {}):
+            return type_icon_key("gas")
+        return type_icon_key("continuous_infusion") if _infusion_has_rate(interval or {}) else type_icon_key("timed_infusion")
+
+    @staticmethod
+    def _active_infusion_title_text(interval: dict) -> str:
+        fallback = "Газ" if _is_gas_infusion(interval or {}) else "Дозатор"
+        base = _infusion_display_drug_name(interval or {}, fallback)
+        if not base:
+            base = fallback
+        if _is_gas_infusion(interval or {}):
+            return base
+        return base
+
+    def _make_medication_group_card(self, group: dict) -> QWidget:
+        visual = self._medication_visual(group)
+        key = str(group.get("key") or group.get("drug_name") or "").casefold()
+        collapsed = key in self._collapsed_order_group_keys
+        frame = QFrame()
+        frame.setObjectName("operblockMedicationGroupCard")
+        frame.setStyleSheet(
+            f"""
+            QFrame#operblockMedicationGroupCard {{
+                background-color: #FFFFFF;
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 12px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        outer = QHBoxLayout(frame)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(12)
+        outer.addWidget(self._group_icon_frame(visual), 0, Qt.AlignTop)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(9)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(8)
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(3)
+        name_label = ElidedTooltipLabel(str(group.get("drug_name") or "Без названия"))
+        name_label.setStyleSheet(
+            f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        total_label = ElidedTooltipLabel(str(group.get("total_text") or "Итого: нет дозы"))
+        total_label.setProperty("operblock_group_total_key", key)
+        total_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        title_col.addWidget(name_label)
+        title_col.addWidget(total_label)
+        latest_dt = group.get("latest_dt")
+        latest_label = QLabel(latest_dt.strftime("%H:%M") if isinstance(latest_dt, datetime) else "")
+        latest_label.setStyleSheet(f"font-size: 13px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED};")
+        latest_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        toggle_button = QPushButton("⌄" if collapsed else "⌃")
+        toggle_button.setFixedSize(28, 28)
+        toggle_button.setCursor(Qt.PointingHandCursor)
+        toggle_button.setStyleSheet(self._small_icon_button_style())
+        toggle_button.clicked.connect(lambda _=False, group_key=key: self._toggle_medication_group(group_key))
+        header.addLayout(title_col, 1)
+        header.addWidget(latest_label, 0)
+        header.addWidget(toggle_button, 0)
+        body.addLayout(header)
+
+        if not collapsed:
+            for entry in group.get("entries") or []:
+                body.addWidget(self._make_medication_entry_row(entry, visual))
+        outer.addLayout(body, 1)
+        return frame
+
+    def _make_medication_entry_row(self, entry: dict, visual: dict) -> QWidget:
+        row = QFrame()
+        row.setObjectName("operblockMedicationEntryRow")
+        row.setStyleSheet(
+            f"""
+            QFrame#operblockMedicationEntryRow {{
+                background-color: #F8FAFC;
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(8)
+        time_label = QLabel(_format_order_time(entry.get("time")))
+        time_label.setFixedWidth(54)
+        time_label.setAlignment(Qt.AlignCenter)
+        time_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 500; color: {visual.get('time_fg')}; "
+            f"background-color: {visual.get('time_bg')}; border: none; border-radius: 6px; padding: 4px 6px;"
+        )
+        detail_text = str(entry.get("detail") or "")
+        detail_label = ElidedTooltipLabel(detail_text)
+        entry_row = entry.get("row") if isinstance(entry.get("row"), dict) else {}
+        entry_order_id = _safe_int((entry_row or {}).get("id"))
+        if entry_order_id:
+            detail_label.setProperty("operblock_order_id", int(entry_order_id))
+        detail_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 400; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        layout.addWidget(time_label, 0)
+        layout.addWidget(detail_label, 1)
+
+        if entry.get("kind") == "order":
+            row_data = dict(entry.get("row") or {})
+            edit_button = self._visible_order_action_button("Изменить", "pencil")
+            delete_button = self._visible_order_action_button("Удалить", "trash", danger=True)
+            edit_button.clicked.connect(lambda _=False, payload=row_data: self._edit_order_with_time(dict(payload)))
+            delete_button.clicked.connect(lambda _=False, payload=row_data: self._delete_order(dict(payload)))
+            layout.addWidget(edit_button, 0)
+            layout.addWidget(delete_button, 0)
+        else:
+            interval = dict(entry.get("interval") or {})
+            edit_button = self._visible_infusion_action_button("Изменить", "pencil")
+            edit_button.clicked.connect(lambda _=False, payload=interval: self._edit_infusion_from_group_row(dict(payload)))
+            layout.addWidget(edit_button, 0)
+            if str(interval.get("status") or "") == "active":
+                stop_button = self._visible_infusion_action_button("Стоп", "stop", danger=True)
+                stop_button.clicked.connect(lambda _=False, payload=interval: self._stop_infusion(dict(payload)))
+                layout.addWidget(stop_button, 0)
+            delete_button = self._visible_infusion_action_button("Удалить", "trash", danger=True)
+            delete_button.clicked.connect(lambda _=False, payload=interval: self._delete_infusion(dict(payload)))
+            layout.addWidget(delete_button, 0)
+        return row
+
+    def _toggle_medication_group(self, group_key: str):
+        key = str(group_key or "").casefold()
+        if key in self._collapsed_order_group_keys:
+            self._collapsed_order_group_keys.discard(key)
+        else:
+            self._collapsed_order_group_keys.add(key)
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
+
+    def _edit_infusion_from_group_row(self, interval: dict):
+        if self.is_view_only_mode():
+            return
+        if _is_gas_infusion(interval):
+            self._change_gas_dose(interval, include_time=True)
+            return
+        if _infusion_has_rate(interval):
+            if str(interval.get("status") or "") == "active":
+                self._change_infusion_rate(interval, include_time=True)
+            else:
+                self._edit_infusion_start_time(interval)
+            return
+        self._change_infusion_volume(interval, include_time=True)
+
+    def _small_icon_button_style(self) -> str:
+        return f"""
+            QPushButton {{
+                background-color: #FFFFFF;
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 6px;
+                color: {OPERBLOCK_ORDERS_MUTED};
+                font-size: 14px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: #F1F5F9;
+                color: {OPERBLOCK_ORDERS_TEXT};
+            }}
+        """
+
+    def _visible_action_button(self, text: str, icon_name: str, *, danger: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.setIcon(self._operblock_ui_icon(icon_name))
+        button.setIconSize(QSize(14, 14))
+        button.setFixedHeight(30)
+        button.setMinimumWidth(82 if text != "Удалить" else 92)
+        button.setCursor(Qt.PointingHandCursor)
+        border = "#FECACA" if danger else OPERBLOCK_ORDERS_BORDER
+        color = "#DC2626" if danger else OPERBLOCK_ORDERS_TEXT
+        hover = "#FFF5F5" if danger else "#F1F5F9"
+        button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: #FFFFFF;
+                border: 1px solid {border};
+                border-radius: 7px;
+                color: {color};
+                padding: 5px 9px;
+                font-size: 12px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: {hover};
+            }}
+            QPushButton:disabled {{
+                color: {OPERBLOCK_ORDERS_MUTED};
+                background-color: #F1F5F9;
+                border-color: {OPERBLOCK_ORDERS_BORDER};
+            }}
+            """
+        )
+        return button
+
+    def _visible_order_action_button(self, text: str, icon_name: str, *, danger: bool = False) -> QPushButton:
+        button = self._visible_action_button(text, icon_name, danger=danger)
+        self._order_action_buttons.append(button)
+        return button
+
+    def _visible_infusion_action_button(self, text: str, icon_name: str, *, danger: bool = False) -> QPushButton:
+        button = self._visible_action_button(text, icon_name, danger=danger)
+        self._order_action_buttons.append(button)
+        return button
+
+    @staticmethod
+    def _event_badge_style(badge: str) -> str:
+        bg, color = OPERBLOCK_EVENT_COLORS.get(str(badge or ""), ("#F2F6F8", "#506070"))
+        return (
+            f"font-size: 11px; font-weight: 500; color: {color}; background-color: {bg}; "
+            "border: none; border-radius: 4px; padding: 3px 8px;"
+        )
+
+    def _make_timeline_event_row(self, event: dict) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("timelineEventRow")
+        frame.setStyleSheet(
+            f"""
+            QFrame#timelineEventRow {{
+                background-color: {OPERBLOCK_ORDERS_CARD_BG};
+                border: none;
+                border-bottom: 1px solid {OPERBLOCK_ORDERS_BORDER};
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                color: {OPERBLOCK_ORDERS_MUTED};
+                font-size: 16px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: #F1F5F9;
+                border-color: {OPERBLOCK_ORDERS_BORDER};
+                color: {OPERBLOCK_ORDERS_TEXT};
+            }}
+            """
+        )
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(0, 7, 0, 7)
+        layout.setSpacing(10)
+
+        time_label = QLabel(_format_order_time(event.get("time")))
+        time_label.setFixedWidth(52)
+        time_label.setAlignment(Qt.AlignCenter)
+        time_label.setStyleSheet(f"font-size: 13px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT};")
+
+        drug_label = ElidedTooltipLabel(str(event.get("drug") or "Без названия"))
+        drug_label.setMinimumWidth(150)
+        drug_label.setStyleSheet(
+            f"font-size: 13px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+
+        detail_label = ElidedTooltipLabel(str(event.get("detail") or ""))
+        detail_label.setMinimumWidth(80)
+        detail_label.setStyleSheet(
+            f"font-size: 13px; color: {OPERBLOCK_ORDERS_MUTED}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+
+        badge_label = QLabel(str(event.get("badge") or "Событие"))
+        badge_label.setAlignment(Qt.AlignCenter)
+        badge_label.setStyleSheet(self._event_badge_style(str(event.get("badge") or "")))
+
+        menu_button = QPushButton("⋯")
+        menu_button.setFixedSize(30, 28)
+        menu_button.setCursor(Qt.PointingHandCursor)
+        if event.get("kind") == "order":
+            self._order_action_buttons.append(menu_button)
+            menu_button.clicked.connect(
+                lambda _=False, button=menu_button, row=dict(event.get("row") or {}): self._show_order_actions_menu(button, row)
+            )
+        else:
+            self._infusion_action_buttons.append(menu_button)
+            menu_button.clicked.connect(
+                lambda _=False, button=menu_button, interval=dict(event.get("interval") or {}): self._show_infusion_actions_menu(
+                    button,
+                    interval,
+                )
+            )
+
+        layout.addWidget(time_label, 0)
+        layout.addWidget(drug_label, 2)
+        layout.addWidget(detail_label, 2)
+        layout.addWidget(badge_label, 0)
+        layout.addWidget(menu_button, 0)
+        return frame
+
+    def _actions_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            f"""
+            QMenu {{
+                background-color: {OPERBLOCK_ORDERS_CARD_BG};
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 4px;
+                color: {OPERBLOCK_ORDERS_TEXT};
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 28px 6px 10px;
+                border-radius: 3px;
+            }}
+            QMenu::item:selected {{
+                background-color: #EEF3FF;
+                color: {OPERBLOCK_ORDERS_ACCENT};
+            }}
+            """
+        )
+        return menu
+
+    def _show_order_actions_menu(self, button: QPushButton, row: dict):
+        if self.is_view_only_mode():
+            return
+        menu = self._actions_menu()
+        menu.addAction("Изменить", lambda payload=dict(row): self._edit_order_with_time(payload))
+        menu.addSeparator()
+        menu.addAction("Удалить", lambda payload=dict(row): self._delete_order(payload))
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _show_infusion_actions_menu(self, button: QPushButton, interval: dict):
+        if self.is_view_only_mode():
+            return
+        menu = self._actions_menu()
+        status = str(interval.get("status") or "")
+        menu.addAction("Изменить", lambda payload=dict(interval): self._edit_infusion_from_group_row(payload))
+        if status == "active":
+            menu.addAction("Стоп", lambda payload=dict(interval): self._stop_infusion(payload))
+        menu.addSeparator()
+        menu.addAction("Удалить", lambda payload=dict(interval): self._delete_infusion(payload))
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+
+    def _apply_active_infusions(self, *, force_elapsed: bool = False):
+        layout = getattr(self, "active_infusions_list", None)
+        if layout is None:
+            return
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        infusions = [
+            dict(interval or {})
+            for interval in snapshot.get("infusion_intervals") or []
+            if str((interval or {}).get("status") or "") == "active"
+        ]
+        infusions.sort(key=lambda item: _parse_datetime_value(item.get("start_time")) or datetime.max)
+        render_signature = self._active_infusions_render_signature_for(infusions)
+        if render_signature == getattr(self, "_active_infusions_render_signature", "") and not force_elapsed:
+            if hasattr(self, "active_infusions_count_label"):
+                self.active_infusions_count_label.setText(str(len(infusions)))
+            self._sync_active_infusions_scroll_height(len(infusions))
+            return
+        if hasattr(self, "active_infusions_count_label"):
+            self.active_infusions_count_label.setText(str(len(infusions)))
+        self._sync_active_infusions_scroll_height(len(infusions))
+        if not infusions:
+            self._clear_layout(layout)
+            self._infusion_action_buttons = []
+            self._rendered_active_infusion_widgets = {}
+            self._rendered_active_infusion_signatures = {}
+            self._rendered_active_infusion_order = []
+            self._active_infusions_empty_widget = _label("Активных дозаторов, капельниц и газов нет", size=13, color=OPERBLOCK_ORDERS_MUTED)
+            self._active_infusions_empty_widget.setMinimumHeight(OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT)
+            self._active_infusions_empty_widget.setAlignment(Qt.AlignCenter)
+            layout.addWidget(self._active_infusions_empty_widget, 0, 0, 1, OPERBLOCK_ACTIVE_INFUSION_COLUMNS)
+            self._active_infusions_render_signature = render_signature
+            return
+        if getattr(self, "_active_infusions_empty_widget", None) is not None:
+            self._clear_layout(layout)
+            self._active_infusions_empty_widget = None
+            self._rendered_active_infusion_widgets = {}
+            self._rendered_active_infusion_signatures = {}
+            self._rendered_active_infusion_order = []
+
+        old_widgets = dict(getattr(self, "_rendered_active_infusion_widgets", {}) or {})
+        old_signatures = dict(getattr(self, "_rendered_active_infusion_signatures", {}) or {})
+        old_order = list(getattr(self, "_rendered_active_infusion_order", []) or list(old_widgets.keys()))
+        new_order = [self._active_infusion_key(interval) for interval in infusions]
+        new_keys = {self._active_infusion_key(interval) for interval in infusions}
+        for key, widget in old_widgets.items():
+            if key in new_keys:
+                continue
+            layout.removeWidget(widget)
+            widget.deleteLater()
+
+        new_widgets: dict[str, QWidget] = {}
+        new_signatures: dict[str, str] = {}
+        if old_order == new_order:
+            for index, interval in enumerate(infusions):
+                key = self._active_infusion_key(interval)
+                signature = self._active_infusion_card_signature(interval)
+                widget = old_widgets.get(key)
+                if widget is None or old_signatures.get(key) != signature:
+                    if widget is not None:
+                        layout.removeWidget(widget)
+                        widget.deleteLater()
+                    widget = self._make_active_infusion_card(interval)
+                    layout.addWidget(
+                        widget,
+                        index // OPERBLOCK_ACTIVE_INFUSION_COLUMNS,
+                        index % OPERBLOCK_ACTIVE_INFUSION_COLUMNS,
+                    )
+                new_widgets[key] = widget
+                new_signatures[key] = signature
+        else:
+            for index, interval in enumerate(infusions):
+                key = self._active_infusion_key(interval)
+                signature = self._active_infusion_card_signature(interval)
+                widget = old_widgets.get(key)
+                if widget is None or old_signatures.get(key) != signature:
+                    if widget is not None:
+                        layout.removeWidget(widget)
+                        widget.deleteLater()
+                    widget = self._make_active_infusion_card(interval)
+                else:
+                    layout.removeWidget(widget)
+                layout.addWidget(
+                    widget,
+                    index // OPERBLOCK_ACTIVE_INFUSION_COLUMNS,
+                    index % OPERBLOCK_ACTIVE_INFUSION_COLUMNS,
+                )
+                new_widgets[key] = widget
+                new_signatures[key] = signature
+        self._rendered_active_infusion_widgets = new_widgets
+        self._rendered_active_infusion_signatures = new_signatures
+        self._rendered_active_infusion_order = new_order
+        self._active_infusions_render_signature = render_signature
+
+    def _sync_active_infusions_scroll_height(self, infusion_count: int) -> None:
+        scroll = getattr(self, "active_infusions_scroll", None)
+        content = getattr(self, "active_infusions_content", None)
+        if scroll is None or content is None:
+            return
+        count = max(0, int(infusion_count or 0))
+        if count <= 0:
+            content_height = OPERBLOCK_ACTIVE_INFUSION_EMPTY_HEIGHT
+        else:
+            row_count = max(1, (count + OPERBLOCK_ACTIVE_INFUSION_COLUMNS - 1) // OPERBLOCK_ACTIVE_INFUSION_COLUMNS)
+            content_height = (
+                row_count * OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT
+                + max(0, row_count - 1) * OPERBLOCK_ACTIVE_INFUSION_GRID_SPACING
+            )
+        viewport_height = (
+            OPERBLOCK_ACTIVE_INFUSION_EMPTY_HEIGHT
+            if count <= 0
+            else OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT
+        )
+        content.setMinimumHeight(content_height)
+        scroll.setMinimumHeight(viewport_height)
+        scroll.setMaximumHeight(viewport_height)
+
+    def _active_infusions_render_signature_for(self, infusions: list[dict]) -> str:
+        return _stable_ui_hash(
+            {
+                "columns": OPERBLOCK_ACTIVE_INFUSION_COLUMNS,
+                "minute": datetime.now().replace(second=0, microsecond=0).isoformat(timespec="minutes"),
+                "order": [self._active_infusion_key(interval) for interval in infusions],
+                "items": {
+                    self._active_infusion_key(interval): self._active_infusion_source_signature(interval)
+                    for interval in infusions
+                },
+            }
+        )
+
+    def _active_infusion_card_signature(self, interval: dict) -> str:
+        return _stable_ui_hash(
+            {
+                "minute": datetime.now().replace(second=0, microsecond=0).isoformat(timespec="minutes"),
+                "source": self._active_infusion_source_signature(interval),
+            }
+        )
+
+    def _active_infusion_key(self, interval: dict) -> str:
+        start_event_id, _revision = self._infusion_identity(interval)
+        return str(interval.get("interval_id") or start_event_id or f"{interval.get('drug_label')}:{interval.get('start_time')}")
+
+    @staticmethod
+    def _active_infusion_source_signature(interval: dict) -> str:
+        return _stable_ui_hash(
+            {
+                "interval_id": interval.get("interval_id"),
+                "drug_label": interval.get("drug_label"),
+                "display_label": interval.get("display_label"),
+                "start_time": interval.get("start_time"),
+                "end_time": interval.get("end_time"),
+                "status": interval.get("status"),
+                "volume_ml": interval.get("volume_ml"),
+                "current_rate_value": interval.get("current_rate_value"),
+                "current_rate_unit": interval.get("current_rate_unit"),
+                "rate_history": interval.get("rate_history") or [],
+                "payload": interval.get("payload") or {},
+            }
+        )
+
+    def _make_active_infusion_card(self, interval: dict) -> QWidget:
+        frame = QFrame()
+        frame.setObjectName("operblockActiveInfusion")
+        frame.setMinimumHeight(OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT)
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        frame.setStyleSheet(
+            f"""
+            QFrame#operblockActiveInfusion {{
+                background-color: #FFFFFF;
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 12px;
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton {{
+                background-color: #ffffff;
+                border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                border-radius: 7px;
+                color: {OPERBLOCK_ORDERS_TEXT};
+                padding: 5px 10px;
+                font-size: 12px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: #F8FAFC;
+            }}
+            QPushButton:disabled {{
+                color: {OPERBLOCK_ORDERS_MUTED};
+                background-color: #F1F5F9;
+            }}
+            """
+        )
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
+        icon_box = QFrame()
+        icon_box.setFixedSize(44, 44)
+        icon_box.setStyleSheet("background-color: #EAF3FF; border: none; border-radius: 10px;")
+        icon_layout = QVBoxLayout(icon_box)
+        icon_layout.setContentsMargins(0, 0, 0, 0)
+        icon = QLabel()
+        icon.setAlignment(Qt.AlignCenter)
+        pixmap = request_operblock_icon_pixmap(
+            icon,
+            self._active_infusion_icon_file(interval),
+            fallback_file=OXYGEN_ICON_FILE if _is_oxygen_infusion(interval) else "",
+            target_size=(30, 30),
+        )
+        if pixmap.isNull():
+            pixmap = self._operblock_ui_icon("infusion_blue").pixmap(24, 24)
+        if not pixmap.isNull():
+            icon.setPixmap(pixmap)
+        icon_layout.addWidget(icon, 1)
+        layout.addWidget(icon_box, 0, Qt.AlignTop)
+
+        has_rate = _infusion_has_rate(interval)
+        is_active = str(interval.get("status") or "") == "active" and not interval.get("end_time")
+        name = ElidedTooltipLabel(self._active_infusion_title_text(interval))
+        name.setStyleSheet(
+            f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        is_oxygen = _is_oxygen_infusion(interval)
+        rate = "" if _is_gas_infusion(interval) else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
+        gas_dose = _gas_dose_text(interval) if _is_gas_infusion(interval) else ""
+        duration = _format_infusion_duration(interval.get("start_time"))
+        detail_parts = [f"с {_format_order_time(interval.get('start_time'))}"]
+        if duration:
+            detail_parts.append(duration)
+        if rate:
+            detail_parts.append(rate)
+        if gas_dose:
+            detail_parts.append(f"{'поток' if is_oxygen else 'доза'} {gas_dose}")
+        declared_volume = _format_infusion_declared_volume(interval)
+        if not rate and not gas_dose and declared_volume:
+            detail_parts.append(f"объем {declared_volume}")
+        if rate:
+            executed_volume = _format_infusion_executed_volume(interval)
+            if executed_volume:
+                detail_parts.append(f"введено: {executed_volume}")
+        elif declared_volume and not is_active:
+            detail_parts.append(f"введено: {declared_volume}")
+        detail = ElidedTooltipLabel(" · ".join(detail_parts))
+        detail.setStyleSheet(f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED};")
+
+        progress = QProgressBar()
+        progress.setRange(0, 100)
+        progress.setValue(self._active_infusion_progress_percent(interval))
+        progress.setTextVisible(False)
+        progress.setFixedHeight(6)
+        progress.setStyleSheet(
+            f"""
+            QProgressBar {{
+                background-color: #E2E8F0;
+                border: none;
+                border-radius: 3px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {OPERBLOCK_ORDERS_ACCENT};
+                border-radius: 3px;
+            }}
+            """
+        )
+        volume_label = ElidedTooltipLabel(self._active_infusion_volume_text(interval))
+        volume_label.setStyleSheet(f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_TEXT};")
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(6)
+        text_col.addWidget(name)
+        text_col.addWidget(detail)
+        text_col.addWidget(progress)
+        text_col.addWidget(volume_label)
+        layout.addLayout(text_col, 1)
+
+        buttons_col = QVBoxLayout()
+        buttons_col.setContentsMargins(0, 0, 0, 0)
+        buttons_col.setSpacing(8)
+        change_button = QPushButton("Изм.")
+        change_button.setIcon(self._operblock_ui_icon("pencil"))
+        change_button.setIconSize(QSize(14, 14))
+        stop_button = QPushButton(OPERBLOCK_INFUSION_STOP_BUTTON_TEXT)
+        stop_button.setIcon(self._operblock_ui_icon("stop"))
+        stop_button.setIconSize(QSize(14, 14))
+        stop_button.setStyleSheet(
+            f"""
+            QPushButton {{
+                background-color: #FFFFFF;
+                border: 1px solid #FECACA;
+                border-radius: 7px;
+                color: #DC2626;
+                padding: 5px 10px;
+                font-size: 12px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{ background-color: #FFF5F5; }}
+            QPushButton:disabled {{
+                color: {OPERBLOCK_ORDERS_MUTED};
+                background-color: #F1F5F9;
+                border-color: {OPERBLOCK_ORDERS_BORDER};
+            }}
+            """
+        )
+        buttons = (change_button, stop_button)
+        for button in buttons:
+            button.setFixedHeight(30)
+            button.setMinimumWidth(78)
+            button.setCursor(Qt.PointingHandCursor)
+            self._infusion_action_buttons.append(button)
+        if _is_gas_infusion(interval):
+            change_button.clicked.connect(lambda _=False, payload=dict(interval): self._change_gas_dose(payload, include_time=True))
+        elif has_rate:
+            change_button.clicked.connect(lambda _=False, payload=dict(interval): self._change_infusion_rate(payload))
+        else:
+            change_button.clicked.connect(
+                lambda _=False, payload=dict(interval): self._change_infusion_volume(payload, include_time=True)
+            )
+        stop_button.clicked.connect(lambda _=False, payload=dict(interval): self._stop_infusion(payload))
+        buttons_col.addWidget(change_button, 0)
+        buttons_col.addWidget(stop_button, 0)
+        buttons_col.addStretch(1)
+        layout.addLayout(buttons_col, 0)
+        return frame
+
+    @staticmethod
+    def _active_infusion_progress_percent(interval: dict) -> int:
+        if _is_gas_infusion(interval or {}):
+            return 40 if str((interval or {}).get("status") or "") == "active" and not (interval or {}).get("end_time") else 100
+        declared = _infusion_declared_volume_ml(interval or {})
+        executed = _infusion_volume_ml(interval or {})
+        if declared is not None and declared > 0 and executed is not None:
+            try:
+                return max(0, min(100, int((executed / declared * Decimal("100")).to_integral_value(rounding=ROUND_HALF_UP))))
+            except Exception:
+                return 0
+        if declared is not None and not _infusion_has_rate(interval or {}):
+            if str((interval or {}).get("status") or "") == "active" and not (interval or {}).get("end_time"):
+                return 0
+            return 100
+        return 40
+
+    @staticmethod
+    def _active_infusion_volume_text(interval: dict) -> str:
+        if _is_gas_infusion(interval or {}):
+            if _is_oxygen_infusion(interval or {}):
+                consumed_text = _format_oxygen_consumed_liters(interval or {})
+                if consumed_text:
+                    return f"Всего расход: {consumed_text}"
+                return "Всего расход: --"
+            dose_text = _gas_dose_text(interval or {})
+            if dose_text:
+                return f"Доза газа: {dose_text}"
+            return "Доза газа: --"
+        if _infusion_has_rate(interval or {}):
+            executed = _format_infusion_executed_volume(interval or {})
+            declared = _format_infusion_declared_volume(interval or {})
+            if executed and declared:
+                progress = OperBlockMainWidget._active_infusion_progress_percent(interval or {})
+                return f"Введено: {executed} ({progress}%)"
+            if executed:
+                return f"Введено: {executed}"
+        declared = _format_infusion_declared_volume(interval or {})
+        if declared:
+            if str((interval or {}).get("status") or "") == "active" and not (interval or {}).get("end_time"):
+                return f"Будет введено: {declared}"
+            return f"Введено: {declared} (100%)"
+        return "Будет введено: --"
+
+    def _set_infusion_action_buttons_enabled(self, enabled: bool):
+        for button in list(getattr(self, "_infusion_action_buttons", [])):
+            try:
+                button.setEnabled(bool(enabled))
+            except RuntimeError:
+                continue
+
+    def _set_protocol_write_controls_enabled(self, enabled: bool):
+        orders_enabled = bool(enabled) and self._orders_tab_enabled()
+        if not hasattr(self, "save_order_button"):
+            return
+        self.save_order_button.setEnabled(orders_enabled)
+        if hasattr(self, "order_input"):
+            self.order_input.setEnabled(orders_enabled)
+        if hasattr(self, "order_dose_input"):
+            self.order_dose_input.setEnabled(orders_enabled)
+        if hasattr(self, "order_rate_input"):
+            self.order_rate_input.setEnabled(orders_enabled)
+        if hasattr(self, "order_type_combo"):
+            self.order_type_combo.setEnabled(orders_enabled)
+        if enabled:
+            self.save_order_button.setText(OPERBLOCK_ADD_ORDER_BUTTON_TEXT)
+        self._set_quick_order_buttons_enabled(orders_enabled)
+        self._set_order_action_buttons_enabled(orders_enabled)
+        self._set_infusion_action_buttons_enabled(orders_enabled)
+        self._apply_protocol_controls_state()
+
+    def _manual_order_kind(self) -> str:
+        text = str(self.order_type_combo.currentText() if hasattr(self, "order_type_combo") else "").strip().casefold()
+        if "газ" in text:
+            return "gas"
+        if "дозатор" in text:
+            return "continuous_infusion"
+        if "капель" in text:
+            return "timed_infusion"
+        return "bolus"
+
+    def _update_manual_order_type_fields(self, *_args) -> None:
+        kind = self._manual_order_kind()
+        rate_visible = kind == "continuous_infusion"
+        if hasattr(self, "order_rate_input"):
+            self.order_rate_input.setVisible(rate_visible)
+            self.order_rate_input.setEnabled(bool(not self._write_pending) and self._orders_tab_enabled())
+        if hasattr(self, "order_dose_input"):
+            if kind == "continuous_infusion":
+                self.order_dose_input.setPlaceholderText("Доза (мг)")
+            elif kind == "timed_infusion":
+                self.order_dose_input.setPlaceholderText("Объем/доза (мл, мг)")
+            elif kind == "gas":
+                self.order_dose_input.setPlaceholderText("MAC или поток л/мин")
+            else:
+                self.order_dose_input.setPlaceholderText("Доза (мг, мл, %)")
+
+    def _ensure_infusion_write_context_or_warn(self) -> bool:
+        if not self._current_admission_id or not self._current_operation_case_id:
+            return False
+        if not self._current_case_active:
+            CustomMessageBox.warning(self, "Случай закрыт", "Случай в операционной закрыт. Откройте его из архива или верните на стол.")
+            self.refresh_protocol(force=True)
+            return False
+        if not self._current_anesthesia_active:
+            CustomMessageBox.warning(self, "Пособие не начато", "Сначала нажмите «Начать пособие». До начала пособия назначения недоступны.")
+            self.refresh_protocol(force=True)
+            return False
+        return True
+
+    def _current_operation_event_time_text(self) -> str:
+        now_dt = datetime.now().replace(second=0, microsecond=0)
+        start_dt = _minute_floor_dt(self._current_anesthesia_start or self._current_operation_start)
+        if start_dt and now_dt < start_dt:
+            now_dt = start_dt
+        return now_dt.isoformat(timespec="seconds")
+
+    def _current_operation_event_datetime(self) -> datetime:
+        return (
+            _minute_floor_dt(_parse_datetime_value(self._current_operation_event_time_text()))
+            or datetime.now().replace(second=0, microsecond=0)
+        )
+
+    @staticmethod
+    def _local_iso_minute_text(value) -> str:
+        event_dt = _minute_floor_dt(_parse_datetime_value(value))
+        if event_dt is None:
+            event_dt = datetime.now().replace(second=0, microsecond=0)
+        return event_dt.isoformat(timespec="seconds")
+
+    def _resolve_operation_event_time_text(self, time_text: str) -> str | None:
+        clean_time = str(time_text or "").strip()
+        if not clean_time:
+            return None
+        try:
+            base_date = self._current_protocol_date or self._current_operation_start or datetime.now()
+            event_dt = self.operblock_vitals_service.resolve_datetime(clean_time, base_date)
+        except Exception:
+            return None
+        event_dt = _minute_floor_dt(event_dt)
+        return event_dt.isoformat(timespec="seconds") if event_dt is not None else None
+
+    @staticmethod
+    def _infusion_identity(interval: dict) -> tuple[int | None, int | None]:
+        payload = interval.get("payload") if isinstance(interval.get("payload"), dict) else {}
+        start_event_id = _safe_int((payload or {}).get("start_event_id"))
+        if start_event_id is None:
+            interval_id = str(interval.get("interval_id") or "")
+            if interval_id.startswith("infusion:"):
+                start_event_id = _safe_int(interval_id.split(":", 1)[1])
+        expected_revision = _safe_int((payload or {}).get("start_revision"))
+        return start_event_id, expected_revision
+
+    @staticmethod
+    def _infusion_preset_payload(interval: dict) -> dict | None:
+        payload = interval.get("payload") if isinstance(interval.get("payload"), dict) else {}
+        result = {
+            key: payload.get(key)
+            for key in (
+                "preset_id",
+                "source_drug_id",
+                "label",
+                "display_name",
+                "latin",
+                "kind",
+                "concentration",
+                "solvent_id",
+                "solvent_label",
+                "solvent_volume_ml",
+                "volume_ml",
+                "dose_text",
+                "display_dose_text",
+                "gas_subtype",
+                "is_oxygen",
+                "oxygen_flow_lpm",
+                "oxygen_flow_unit",
+                "calculated_volume_ml",
+                "declared_total_volume_ml",
+                "duration_min",
+                "card_color",
+            )
+            if payload.get(key) not in (None, "", [])
+        }
+        return result or None
+
+    @staticmethod
+    def _latest_infusion_event_datetime(interval: dict) -> datetime | None:
+        latest_dt = _minute_floor_dt(_parse_datetime_value((interval or {}).get("start_time")))
+        for history_key in ("rate_history", "dose_history"):
+            for item in list((interval or {}).get(history_key) or []):
+                event_dt = _minute_floor_dt(_parse_datetime_value((item or {}).get("event_time")))
+                if event_dt is not None and (latest_dt is None or event_dt > latest_dt):
+                    latest_dt = event_dt
+        return latest_dt
+
+    def _active_gas_interval(self, *, oxygen: bool | None = None) -> dict | None:
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        intervals = [
+            dict(interval or {})
+            for interval in snapshot.get("infusion_intervals") or []
+            if str((interval or {}).get("status") or "") == "active" and _is_gas_infusion(interval or {})
+        ]
+        if oxygen is not None:
+            intervals = [interval for interval in intervals if _is_oxygen_infusion(interval) == bool(oxygen)]
+        if not intervals:
+            return None
+        intervals.sort(key=lambda item: _parse_datetime_value(item.get("start_time")) or datetime.max)
+        return intervals[0]
+
+    def _update_gas_dose_direct(
+        self,
+        interval: dict,
+        dose_text: str,
+        *,
+        event_time: str | None = None,
+        start_event_time: str | None = None,
+        source_key: str = "operblock_update_gas_dose",
+        on_saved=None,
+    ) -> None:
+        if self._write_pending or not self._ensure_infusion_write_context_or_warn():
+            return
+        start_event_id, expected_revision = self._infusion_identity(interval)
+        if start_event_id is None or expected_revision is None:
+            CustomMessageBox.warning(self, "Газ", "Не удалось проверить актуальность газа. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        is_oxygen = _is_oxygen_infusion(interval)
+        clean_dose = _normalize_oxygen_flow_text(dose_text) if is_oxygen else _normalize_gas_dose_text(dose_text)
+        if not clean_dose:
+            if is_oxygen:
+                CustomMessageBox.warning(self, "Кислород", "Укажите поток кислорода, например: 10 л/мин.")
+            else:
+                CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
+            return
+        change_event_time = event_time or self._current_operation_event_time_text()
+        if not self._validate_infusion_event_datetime_or_warn(change_event_time):
+            return
+        if start_event_time is not None and not self._validate_infusion_event_datetime_or_warn(start_event_time):
+            return
+        current_dose = _gas_dose_text(interval)
+        has_rate_artifacts = bool(
+            interval.get("current_rate_value")
+            or interval.get("current_rate_unit")
+            or list(interval.get("rate_history") or [])
+        )
+        if clean_dose == current_dose and event_time is None and start_event_time is None and not has_rate_artifacts:
+            return
+        payload = self._infusion_preset_payload(interval) or {}
+        payload = _oxygen_payload_fields(payload, clean_dose) if is_oxygen else payload
+        payload["kind"] = "gas"
+        payload["dose_text"] = clean_dose
+        payload["display_dose_text"] = clean_dose
+        quick_scroll_state = self._remember_quick_orders_scroll_state()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+        write_description = f"{source_key}:{start_event_id}"
+        if on_saved is None:
+            self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+
+        def operation():
+            return self.operblock_service.change_gas_dose(
+                start_event_id,
+                expected_revision=expected_revision,
+                dose_text=clean_dose,
+                event_time=change_event_time,
+                start_event_time=start_event_time,
+                payload=payload,
+            )
+
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=(
+                (lambda _result: on_saved())
+                if on_saved is not None
+                else (
+                    lambda result, sid=start_event_id, dose=clean_dose, change_dt=change_event_time, start_dt=start_event_time, oxygen=is_oxygen: self._on_gas_dose_saved_locally(
+                        result,
+                        sid,
+                        dose_text=dose,
+                        change_event_time=change_dt,
+                        start_event_time=start_dt,
+                        is_oxygen=oxygen,
+                    )
+                )
+            ),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _start_quick_infusion(
+        self,
+        drug_name: str,
+        rate_text: str,
+        *,
+        concentration_text: str = "",
+        preset_payload: dict | None = None,
+    ):
+        if self.is_view_only_mode():
+            return
+        if self._write_pending or not self._ensure_infusion_write_context_or_warn():
+            return
+        rate_value, rate_unit = _split_infusion_rate_text(rate_text)
+        if not rate_value or not rate_unit:
+            CustomMessageBox.warning(self, "Дозатор", "Укажите скорость в мл/час, например: 1 мл/час.")
+            return
+        event_time = self._current_operation_event_time_text()
+        if not self._validate_infusion_event_datetime_or_warn(event_time):
+            return
+        quick_scroll_state = self._remember_quick_orders_scroll_state()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+
+        def operation():
+            return self.operblock_service.start_infusion(
+                self._current_admission_id,
+                self._current_operation_case_id,
+                drug_name,
+                rate_value,
+                rate_unit,
+                event_time,
+                concentration_text=concentration_text,
+                payload=preset_payload,
+                return_event=True,
+            )
+
+        write_description = f"operblock_start_infusion:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result: self._on_infusion_mutation_saved(result),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _start_preset_infusion(self, preset: dict, rate_text: str):
+        drug_name = operblock_medication_preset_display_name(preset)
+        if not drug_name:
+            CustomMessageBox.warning(self, "Дозатор", "Укажите препарат для дозатора.")
+            return
+        self._start_quick_infusion(
+            drug_name,
+            rate_text,
+            concentration_text=str(preset.get("concentration") or "").strip(),
+            preset_payload=build_operblock_preset_payload(preset),
+        )
+
+    def _edit_infusion_start_time(self, interval: dict):
+        if self._write_pending or not self._ensure_infusion_write_context_or_warn():
+            return
+        start_event_id, expected_revision = self._infusion_identity(interval)
+        if start_event_id is None or expected_revision is None:
+            CustomMessageBox.warning(self, "Дозатор", "Не удалось проверить актуальность дозатора. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        old_start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+        if old_start_dt is None:
+            CustomMessageBox.warning(self, "Дозатор", "Не удалось определить время начала дозатора. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        drug_name = _infusion_display_drug_name(interval, "Дозатор")
+        dialog = TimeEditDialog(f"Время начала: {drug_name}", old_start_dt, self, field_label="Время начала")
+        if dialog.exec() != QDialog.Accepted:
+            return
+        event_time = dialog.datetime_text()
+        if not self._validate_infusion_event_datetime_or_warn(event_time):
+            return
+        new_start_dt = _minute_floor_dt(_parse_datetime_value(event_time))
+        if new_start_dt == old_start_dt:
+            return
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+
+        def operation():
+            return self.operblock_service.update_infusion_start_time(
+                start_event_id,
+                expected_revision=expected_revision,
+                event_time=event_time,
+            )
+
+        write_description = f"operblock_update_infusion_start:{start_event_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda _result, sid=start_event_id, dt=event_time: self._on_infusion_start_time_saved_locally(sid, dt),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _change_gas_dose(self, interval: dict, *, include_time: bool = False):
+        if self.is_view_only_mode():
+            return
+        if self._write_pending or not self._ensure_infusion_write_context_or_warn():
+            return
+        start_event_id, expected_revision = self._infusion_identity(interval)
+        if start_event_id is None or expected_revision is None:
+            CustomMessageBox.warning(self, "Газ", "Не удалось проверить актуальность газа. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        is_oxygen = _is_oxygen_infusion(interval)
+        current_dose = _gas_dose_text(interval)
+        old_start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+        if include_time and old_start_dt is None:
+            CustomMessageBox.warning(self, "Газ", "Не удалось определить время начала газа. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        drug_name = _infusion_display_drug_name(interval, "Газ")
+        dialog = GasDoseDialog(
+            drug_name,
+            current_dose,
+            self,
+            start_datetime=old_start_dt,
+            min_datetime=self._current_anesthesia_start or self._current_operation_start,
+            max_datetime=self._current_anesthesia_end,
+            show_time=include_time,
+            action_text="Сохранить",
+            payload=interval.get("payload") if isinstance(interval.get("payload"), dict) else None,
+            is_oxygen=is_oxygen,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        dose_text = _normalize_oxygen_flow_text(dialog.volume_text()) if is_oxygen else _normalize_gas_dose_text(dialog.volume_text())
+        if not dose_text:
+            if is_oxygen:
+                CustomMessageBox.warning(self, "Кислород", "Укажите поток кислорода, например: 10 л/мин.")
+            else:
+                CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
+            return
+        start_event_time = None
+        new_start_dt = old_start_dt
+        if include_time:
+            start_event_time = self._resolve_operation_event_time_text(dialog.start_time_text())
+            if not self._validate_infusion_event_datetime_or_warn(start_event_time):
+                return
+            new_start_dt = _minute_floor_dt(_parse_datetime_value(start_event_time))
+        has_rate_artifacts = bool(
+            interval.get("current_rate_value")
+            or interval.get("current_rate_unit")
+            or list(interval.get("rate_history") or [])
+        )
+        dose_changed = dose_text != current_dose or has_rate_artifacts
+        start_changed = bool(include_time and new_start_dt != old_start_dt)
+        if not dose_changed and not start_changed:
+            return
+        if not dose_changed and start_changed:
+            self._write_pending = True
+            self._set_protocol_write_controls_enabled(False)
+
+            def operation():
+                return self.operblock_service.update_infusion_start_time(
+                    start_event_id,
+                    expected_revision=expected_revision,
+                    event_time=start_event_time,
+                )
+
+            write_description = f"operblock_update_gas_start:{start_event_id}"
+            self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+            self._enqueue_write(
+                write_description,
+                operation,
+                on_success=lambda _result, sid=start_event_id, dt=start_event_time: self._on_infusion_start_time_saved_locally(sid, dt),
+                on_error=lambda exc: self._on_infusion_mutation_error(exc),
+            )
+            return
+        self._update_gas_dose_direct(
+            interval,
+            dose_text,
+            start_event_time=start_event_time if start_changed else None,
+            source_key="operblock_update_gas_dose",
+        )
+
+    def _change_infusion_rate(self, interval: dict, *, include_time: bool = False):
+        if self.is_view_only_mode():
+            return
+        if self._write_pending or not self._ensure_infusion_write_context_or_warn():
+            return
+        start_event_id, expected_revision = self._infusion_identity(interval)
+        if start_event_id is None or expected_revision is None:
+            CustomMessageBox.warning(self, "Дозатор", "Не удалось проверить актуальность дозатора. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        current_rate = _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
+        old_start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+        if include_time and old_start_dt is None:
+            CustomMessageBox.warning(self, "Дозатор", "Не удалось определить время начала дозатора. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        dialog_title = "Изменить дозатор" if include_time else f"{OPERBLOCK_INFUSION_CHANGE_BUTTON_TEXT} скорость"
+        dialog = InfusionRateDialog(
+            dialog_title,
+            current_rate,
+            self,
+            drug_name=_infusion_display_drug_name(interval, "Дозатор"),
+            start_datetime=old_start_dt if include_time else None,
+            min_datetime=self._current_anesthesia_start or self._current_operation_start,
+            max_datetime=self._current_anesthesia_end,
+            action_text="Сохранить",
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        rate_value, rate_unit = _split_infusion_rate_text(dialog.rate_text())
+        if not rate_value or not rate_unit:
+            CustomMessageBox.warning(self, "Дозатор", "Укажите скорость в мл/час, например: 1 мл/час.")
+            return
+        normalized_rate = _format_infusion_rate(rate_value, rate_unit)
+        rate_changed = normalized_rate != current_rate
+        start_event_time = None
+        new_start_dt = old_start_dt
+        if include_time:
+            start_event_time = self._resolve_operation_event_time_text(dialog.start_time_text())
+            if not self._validate_infusion_event_datetime_or_warn(start_event_time):
+                return
+            new_start_dt = _minute_floor_dt(_parse_datetime_value(start_event_time))
+        start_changed = bool(include_time and new_start_dt != old_start_dt)
+        if not rate_changed and not start_changed:
+            return
+        change_event_time = self._current_operation_event_time_text()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+
+        def operation():
+            if not rate_changed:
+                return self.operblock_service.update_infusion_start_time(
+                    start_event_id,
+                    expected_revision=expected_revision,
+                    event_time=start_event_time,
+                )
+            return self.operblock_service.change_infusion_rate(
+                start_event_id,
+                expected_revision=expected_revision,
+                new_rate_value=rate_value,
+                new_rate_unit=rate_unit,
+                event_time=change_event_time,
+                start_event_time=start_event_time if start_changed else None,
+                payload=self._infusion_preset_payload(interval),
+            )
+
+        write_description = f"operblock_change_infusion:{start_event_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=(
+                (lambda _result, sid=start_event_id, dt=start_event_time: self._on_infusion_start_time_saved_locally(sid, dt))
+                if not rate_changed
+                else (
+                    lambda result, sid=start_event_id, rv=rate_value, ru=rate_unit, change_dt=change_event_time, start_dt=start_event_time if start_changed else None: self._on_infusion_rate_saved_locally(
+                        result,
+                        sid,
+                        rate_value=rv,
+                        rate_unit=ru,
+                        change_event_time=change_dt,
+                        start_event_time=start_dt,
+                    )
+                )
+            ),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _change_infusion_volume(self, interval: dict, *, include_time: bool = False):
+        if self.is_view_only_mode():
+            return
+        if self._write_pending or not self._ensure_infusion_write_context_or_warn():
+            return
+        start_event_id, expected_revision = self._infusion_identity(interval)
+        if start_event_id is None or expected_revision is None:
+            CustomMessageBox.warning(self, "Капельница", "Не удалось проверить актуальность капельницы. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        current_volume = _format_infusion_declared_volume(interval).replace(" мл", "")
+        old_start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+        if include_time and old_start_dt is None:
+            CustomMessageBox.warning(self, "Капельница", "Не удалось определить время начала капельницы. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        drug_name = _infusion_display_drug_name(interval, "Капельница")
+        dialog = InfusionVolumeDialog(
+            f"{'Изменить капельницу' if include_time else 'Правка объема'}: {drug_name}",
+            current_volume,
+            self,
+            drug_name=_infusion_display_drug_name(interval, "Капельница"),
+            start_datetime=old_start_dt,
+            min_datetime=self._current_anesthesia_start or self._current_operation_start,
+            max_datetime=self._current_anesthesia_end,
+            show_time=include_time,
+            action_text="Сохранить",
+            field_label="Объем: мл",
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        volume = _normalize_volume_ml_text(dialog.volume_text())
+        if not volume:
+            CustomMessageBox.warning(self, "Капельница", "Укажите объем в мл, например: 200 мл.")
+            return
+        event_time = None
+        new_start_dt = old_start_dt
+        if include_time:
+            event_time = self._resolve_operation_event_time_text(dialog.start_time_text())
+            if not self._validate_infusion_event_datetime_or_warn(event_time):
+                return
+            new_start_dt = _minute_floor_dt(_parse_datetime_value(event_time))
+        if volume == current_volume and (not include_time or new_start_dt == old_start_dt):
+            return
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+
+        def operation():
+            return self.operblock_service.update_infusion_volume(
+                start_event_id,
+                expected_revision=expected_revision,
+                volume_ml=volume,
+                event_time=event_time,
+                payload=self._infusion_preset_payload(interval),
+            )
+
+        write_description = f"operblock_update_infusion_volume:{start_event_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda _result, sid=start_event_id, vol=volume, dt=event_time: self._on_infusion_volume_saved_locally(
+                sid,
+                volume_ml=vol,
+                event_time=dt,
+            ),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _stop_infusion(self, interval: dict):
+        if self.is_view_only_mode():
+            return
+        if self._write_pending or not self._ensure_infusion_write_context_or_warn():
+            return
+        start_event_id, expected_revision = self._infusion_identity(interval)
+        if start_event_id is None or expected_revision is None:
+            CustomMessageBox.warning(self, "Дозатор", "Не удалось проверить актуальность дозатора. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        drug_name = _infusion_display_drug_name(interval, "назначение")
+        start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
+        if start_dt is None:
+            CustomMessageBox.warning(self, "Время остановки", "Не удалось определить время начала назначения. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        if _is_gas_infusion(interval):
+            infusion_kind = "gas"
+        elif _is_volume_only_infusion(interval):
+            infusion_kind = "volume"
+        else:
+            infusion_kind = "rate"
+        dialog = InfusionStopDialog(
+            drug_name,
+            self,
+            start_datetime=self._current_operation_event_datetime(),
+            min_datetime=self._latest_infusion_event_datetime(interval) or start_dt,
+            max_datetime=self._current_anesthesia_end if not self._current_anesthesia_active else None,
+            infusion_kind=infusion_kind,
+            payload=interval.get("payload") if isinstance(interval.get("payload"), dict) else None,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        event_time = dialog.datetime_text()
+        if not self._validate_infusion_stop_datetime_or_warn(event_time, interval):
+            return
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+
+        def operation():
+            return self.operblock_service.stop_infusion(
+                start_event_id,
+                expected_revision=expected_revision,
+                event_time=event_time,
+                payload=self._infusion_preset_payload(interval),
+            )
+
+        self._enqueue_write(
+            f"operblock_stop_infusion:{start_event_id}",
+            operation,
+            on_success=lambda _result: self._on_infusion_mutation_saved(),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _delete_infusion(self, interval: dict):
+        if self.is_view_only_mode():
+            return
+        if self._write_pending or not self._ensure_infusion_write_context_or_warn():
+            return
+        start_event_id, expected_revision = self._infusion_identity(interval)
+        if start_event_id is None or expected_revision is None:
+            CustomMessageBox.warning(self, "Дозатор", "Не удалось проверить актуальность дозатора. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        drug_name = _infusion_display_drug_name(interval, "назначение")
+        is_active = str(interval.get("status") or "") == "active"
+        title = "Удалить активное назначение" if is_active else "Удаление назначения"
+        message = (
+            f"Удалить активное назначение из истории и графика?\n{drug_name}"
+            if is_active
+            else f"Удалить назначение из истории и графика?\n{drug_name}"
+        )
+        reply = CustomMessageBox.question(
+            self,
+            title,
+            message,
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+
+        def operation():
+            return self.operblock_service.delete_infusion(
+                start_event_id,
+                expected_revision=expected_revision,
+            )
+
+        self._enqueue_write(
+            f"operblock_delete_infusion:{start_event_id}",
+            operation,
+            on_success=lambda _result: self._on_infusion_mutation_saved(),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _on_infusion_mutation_saved(self, result=None):
+        quick_scroll_state = getattr(self, "_pending_quick_orders_scroll_state", None)
+        self._pending_quick_orders_scroll_state = None
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        if not self._apply_started_infusion_locally(dict(result or {}) if isinstance(result, dict) else {}):
+            self.refresh_protocol(force=True)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+
+    def _on_infusion_mutation_error(self, exc: Exception):
+        quick_scroll_state = getattr(self, "_pending_quick_orders_scroll_state", None)
+        self._pending_quick_orders_scroll_state = None
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Ошибка назначения"
+        CustomMessageBox.warning(self, title, str(exc))
+        self.refresh_protocol(force=True)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+
+    def _clear_order_columns(self):
+        columns = getattr(self, "orders_columns", [])
+        for column in columns:
+            self._clear_layout(column)
+
+    def _stretch_order_columns(self):
+        for column in getattr(self, "orders_columns", []):
+            column.addStretch(1)
+
+    def _capture_orders_scroll_state(self) -> dict:
+        scroll = getattr(self, "orders_scroll", None)
+        if scroll is None:
+            return {"value": 0, "maximum": 0, "at_bottom": False}
+        bar = scroll.verticalScrollBar()
+        maximum = int(bar.maximum())
+        value = int(bar.value())
+        return {
+            "value": value,
+            "maximum": maximum,
+            "at_bottom": maximum > 0 and value >= maximum - 2,
+        }
+
+    def _restore_orders_scroll_state(self, state: dict):
+        scroll = getattr(self, "orders_scroll", None)
+        if scroll is None:
+            return
+        bar = scroll.verticalScrollBar()
+        if state.get("at_bottom"):
+            bar.setValue(bar.maximum())
+            return
+        value = int(state.get("value") or 0)
+        bar.setValue(max(0, min(value, bar.maximum())))
+
+    def _orders_column_entry_sort_key(self, entry: tuple[str, dict]) -> tuple:
+        kind, group = entry
+        if kind == "infusion":
+            return self._infusion_history_group_time_sort_key(group)
+        return self._order_group_time_sort_key(group)
+
+    def _build_infusion_history_groups(self) -> list[dict]:
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        groups: dict[str, dict] = {}
+        for raw_interval in snapshot.get("infusion_intervals") or []:
+            interval = dict(raw_interval or {})
+            status = str(interval.get("status") or "")
+            if status not in {"active", "stopped"}:
+                continue
+            drug_name = _infusion_display_drug_name(interval, "Дозатор")
+            drug_name = drug_name or "Дозатор"
+            key = drug_name.casefold()
+            group = groups.setdefault(
+                key,
+                {
+                    "drug_name": drug_name,
+                    "column": OPERBLOCK_INFUSION_HISTORY_COLUMN,
+                    "rows": [],
+                    "latest_dt": datetime.min,
+                    "first_dt": datetime.max,
+                    "first_id": None,
+                },
+            )
+            group["rows"].append(interval)
+            start_dt = _parse_datetime_value(interval.get("start_time"))
+            end_dt = _parse_datetime_value(interval.get("end_time"))
+            row_dt = end_dt or start_dt or datetime.min
+            if row_dt > group["latest_dt"]:
+                group["latest_dt"] = row_dt
+            if start_dt is not None and start_dt < group["first_dt"]:
+                group["first_dt"] = start_dt
+            start_event_id, _revision = self._infusion_identity(interval)
+            if start_event_id and (group["first_id"] is None or start_event_id < group["first_id"]):
+                group["first_id"] = start_event_id
+        result = list(groups.values())
+        for group in result:
+            group["rows"].sort(
+                key=lambda item: (
+                    _parse_datetime_value(item.get("end_time"))
+                    or _parse_datetime_value(item.get("start_time"))
+                    or datetime.min,
+                    self._infusion_identity(item)[0] or 0,
+                ),
+                reverse=True,
+            )
+        return result
+
+    @staticmethod
+    def _infusion_history_group_time_sort_key(group: dict) -> tuple:
+        latest_dt = group.get("latest_dt")
+        if not isinstance(latest_dt, datetime):
+            latest_dt = datetime.min
+        first_id = group.get("first_id")
+        if first_id is None:
+            first_id = 0
+        return (latest_dt, first_id, str(group.get("drug_name") or "").casefold())
+
+    def _preset_display_name_for_id(self, preset_id: str | None) -> str:
+        key = str(preset_id or "").strip()
+        if not key:
+            return ""
+        for preset in getattr(self, "_medication_presets", []) or []:
+            if str((preset or {}).get("preset_id") or "").strip() == key:
+                return operblock_medication_preset_display_name(preset or {})
+        return ""
+
+    def _preset_for_order_row(self, row: dict) -> dict | None:
+        preset_id = str((row or {}).get("drug_key") or "").strip()
+        if not preset_id:
+            return None
+        presets = list(getattr(self, "_medication_presets", []) or [])
+        if not presets:
+            try:
+                presets = load_operblock_medication_presets(include_disabled=True)
+                self._medication_presets = presets
+            except Exception as exc:
+                logger.error("operblock medication presets load for order total failed: %s", exc, exc_info=True)
+                presets = []
+        for preset in presets:
+            if str((preset or {}).get("preset_id") or "").strip() == preset_id:
+                return dict(preset or {})
+        return None
+
+    def _route_options_for_group(self, group_code: str, *, current_code: str = "") -> list[dict[str, str]]:
+        try:
+            routes = operblock_routes_for_drug_group(group_code)
+        except Exception as exc:
+            logger.error("operblock routes load for bolus edit failed: %s", exc, exc_info=True)
+            routes = []
+        if not routes:
+            routes = [{"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": operblock_route_label(OPERBLOCK_ORDER_ROUTE_DEFAULT, short=True)}]
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for route in routes:
+            code = _normalize_order_route_code((route or {}).get("code"))
+            if not code or code in seen:
+                continue
+            raw_label = str((route or {}).get("label") or "").strip()
+            label_routes = [{"code": code, "label": raw_label}] if raw_label else None
+            label = str(operblock_route_label(code, short=True, routes=label_routes) or raw_label or code).strip()
+            result.append({"code": code, "label": label})
+            seen.add(code)
+        current_code = _normalize_order_route_code(current_code)
+        if current_code and current_code not in seen:
+            result.append({"code": current_code, "label": operblock_route_label(current_code, short=True)})
+        return result or [{"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": operblock_route_label(OPERBLOCK_ORDER_ROUTE_DEFAULT, short=True)}]
+
+    def _route_options_for_order_row(self, row: dict) -> list[dict[str, str]]:
+        preset = self._preset_for_order_row(row)
+        group_code = str((preset or {}).get("drug_group") or "").strip() if preset else ""
+        return self._route_options_for_group(group_code, current_code=_order_route_code(row))
+
+    def _default_route_for_preset(self, preset: dict) -> str:
+        group_code = str((preset or {}).get("drug_group") or "").strip()
+        try:
+            route_code = operblock_default_route_for_drug_group(group_code)
+        except Exception as exc:
+            logger.error("operblock default route load for preset failed: %s", exc, exc_info=True)
+            route_code = OPERBLOCK_ORDER_ROUTE_DEFAULT
+        return _normalize_order_route_code(route_code)
+
+    def _quick_order_template_concentration_for_row(self, row: dict) -> str:
+        drug_name = str((row or {}).get("drug_name") or (row or {}).get("raw_drug_name") or "").strip()
+        if not drug_name:
+            return ""
+        templates = list(getattr(self, "_quick_order_templates", []) or [])
+        if not templates:
+            try:
+                templates = load_operblock_quick_orders()
+                self._quick_order_templates = templates
+            except Exception as exc:
+                logger.error("operblock quick order templates load for order total failed: %s", exc, exc_info=True)
+                templates = []
+        folded_name = drug_name.casefold()
+        for template in templates:
+            raw_name = str((template or {}).get("drug_name") or "").strip()
+            concentration = str((template or {}).get("concentration") or (template or {}).get("concentration_text") or "").strip()
+            title, concentration = _quick_order_title_and_concentration(raw_name, concentration)
+            if concentration and {raw_name.casefold(), title.casefold()}.intersection({folded_name}):
+                return concentration
+        return ""
+
+    def _order_row_concentration_text(self, row: dict) -> str:
+        for key in ("concentration", "concentration_text"):
+            value = str((row or {}).get(key) or "").strip()
+            if value:
+                return value
+        preset = self._preset_for_order_row(row)
+        if preset:
+            value = str((preset or {}).get("concentration") or (preset or {}).get("concentration_text") or "").strip()
+            if value:
+                return value
+        return self._quick_order_template_concentration_for_row(row)
+
+    def _order_display_drug_name(self, row: dict, fallback: str) -> str:
+        display_name = str(row.get("drug_display_name") or "").strip()
+        if display_name:
+            return display_name
+        display_name = self._preset_display_name_for_id(row.get("drug_key"))
+        return display_name or fallback
+
+    def _order_preset_kind(self, row: dict) -> str:
+        drug_key = str((row or {}).get("drug_key") or "").strip()
+        folded_key = drug_key.casefold()
+        if folded_key.startswith(("manual:gas:", "quick:gas:", "gas:")):
+            return "gas"
+        if drug_key:
+            for preset in getattr(self, "_medication_presets", []) or []:
+                if str((preset or {}).get("preset_id") or "").strip() == drug_key:
+                    kind = normalize_operblock_medication_preset_kind((preset or {}).get("kind"))
+                    return "gas" if kind == "gas" else "bolus"
+        return "bolus"
+
+    def _build_order_groups(self, rows: list[dict]) -> list[dict]:
+        groups: dict[str, dict] = {}
+        for raw_row in rows:
+            row = dict(raw_row or {})
+            raw_drug_name, dose = _split_order_drug_and_dose(str(row.get("text") or ""))
+            drug_name = self._order_display_drug_name(row, raw_drug_name)
+            row["drug_name"] = drug_name
+            row["raw_drug_name"] = raw_drug_name
+            row["dose_text"] = dose
+            row["route"] = _order_route_code(row)
+            key = str(row.get("drug_key") or drug_name).casefold()
+            group = groups.setdefault(
+                key,
+                {
+                    "drug_name": drug_name,
+                    "column": self._order_column_for_row(row, raw_drug_name),
+                    "rows": [],
+                    "latest_dt": datetime.min,
+                    "first_dt": datetime.max,
+                    "first_id": None,
+                },
+            )
+            group["rows"].append(row)
+            row_dt = _order_sort_dt(row)
+            if row_dt > group["latest_dt"]:
+                group["latest_dt"] = row_dt
+            if row_dt != datetime.min and row_dt < group["first_dt"]:
+                group["first_dt"] = row_dt
+            row_id = _safe_int(row.get("id"))
+            if row_id and (group["first_id"] is None or row_id < group["first_id"]):
+                group["first_id"] = row_id
+        result = list(groups.values())
+        for group in result:
+            group["rows"].sort(key=lambda item: (_order_sort_dt(item), _safe_int(item.get("id")) or 0), reverse=True)
+        return result
+
+    def _order_column_for_row(self, row: dict, drug_name: str) -> int:
+        drug_key = str(row.get("drug_key") or "").strip()
+        if drug_key:
+            for preset in getattr(self, "_medication_presets", []) or []:
+                if str(preset.get("preset_id") or "").strip() != drug_key:
+                    continue
+                kind = normalize_operblock_medication_preset_kind(preset.get("kind"))
+                if kind == "timed_infusion":
+                    return OPERBLOCK_INFUSION_HISTORY_COLUMN
+                break
+        return self._order_column_for_drug(drug_name)
+
+    def _order_column_for_drug(self, drug_name: str) -> int:
+        key = str(drug_name or "").casefold()
+        for template in getattr(self, "_quick_order_templates", []) or []:
+            if str(template.get("drug_name") or "").casefold() == key:
+                return normalize_operblock_quick_order_group(template.get("group"))
+        return 1
+
+    @staticmethod
+    def _order_group_time_sort_key(group: dict) -> tuple:
+        latest_dt = group.get("latest_dt")
+        if not isinstance(latest_dt, datetime):
+            latest_dt = datetime.min
+        first_id = group.get("first_id")
+        if first_id is None:
+            first_id = 0
+        return (latest_dt, first_id, str(group.get("drug_name") or "").casefold())
+
+    def _make_order_group_card(self, group: dict) -> QWidget:
+        rows = list(group.get("rows") or [])
+        frame = QFrame()
+        frame.setObjectName("operblockOrderGroup")
+        frame.setStyleSheet(
+            f"""
+            QFrame#operblockOrderGroup {{
+                background-color: {BG_LIGHT};
+                border: 1px solid {BORDER_COLOR};
+                border-radius: {CUSTOM_DIALOG_RADIUS};
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton {{
+                background-color: #ffffff;
+                border: 1px solid {BORDER_COLOR};
+                border-radius: 4px;
+                color: {TEXT_PRIMARY};
+                padding: 2px 6px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: #eef3f6;
+            }}
+            QPushButton:disabled {{
+                color: {TEXT_MUTED};
+                background-color: {BG_MAIN};
+            }}
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(5)
+
+        header = QVBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(3)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+        name_label = ElidedTooltipLabel(str(group.get("drug_name") or "Без названия"))
+        name_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        latest_label = QLabel(f"{_format_order_time(rows[-1].get('datetime'))}" if rows else "")
+        latest_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        latest_label.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
+        title_row.addWidget(name_label, 1)
+        title_row.addWidget(latest_label, 0)
+        total_label = ElidedTooltipLabel(
+            _summarize_order_total(rows, concentration_for_row=self._order_row_concentration_text)
+        )
+        total_label.setMinimumWidth(120)
+        total_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 700; color: {TEXT_PRIMARY}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px 7px;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        header.addLayout(title_row)
+        header.addWidget(total_label)
+        layout.addLayout(header)
+
+        current_day = None
+        for row in rows:
+            day = _format_order_day(row.get("datetime"))
+            if day != current_day:
+                current_day = day
+                day_label = QLabel(day)
+                day_label.setStyleSheet(
+                    f"font-size: 11px; font-weight: 700; color: {TEXT_SECONDARY}; "
+                    f"background-color: {BG_MAIN}; border-radius: 3px; padding: 1px 6px;"
+                )
+                layout.addWidget(day_label, 0, Qt.AlignLeft)
+            layout.addLayout(self._make_order_entry_row(row))
+        return frame
+
+    def _make_infusion_history_group_card(self, group: dict) -> QWidget:
+        rows = list(group.get("rows") or [])
+        frame = QFrame()
+        frame.setObjectName("operblockInfusionHistoryGroup")
+        frame.setStyleSheet(
+            f"""
+            QFrame#operblockInfusionHistoryGroup {{
+                background-color: {BG_LIGHT};
+                border: 1px solid {BORDER_COLOR};
+                border-radius: {CUSTOM_DIALOG_RADIUS};
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton {{
+                background-color: #ffffff;
+                border: 1px solid {BORDER_COLOR};
+                border-radius: 4px;
+                color: {TEXT_PRIMARY};
+                padding: 2px 6px;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: #eef3f6;
+            }}
+            QPushButton:disabled {{
+                color: {TEXT_MUTED};
+                background-color: {BG_MAIN};
+            }}
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(5)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+        name_label = ElidedTooltipLabel(str(group.get("drug_name") or "Дозатор"))
+        name_label.setStyleSheet(
+            f"font-size: 14px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        latest_dt = group.get("latest_dt")
+        latest_label = QLabel(latest_dt.strftime("%H:%M") if isinstance(latest_dt, datetime) else "")
+        latest_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        latest_label.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
+        title_row.addWidget(name_label, 1)
+        title_row.addWidget(latest_label, 0)
+        layout.addLayout(title_row)
+
+        total_label = QLabel(self._summarize_infusion_history(rows))
+        total_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 700; color: {TEXT_PRIMARY}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px 7px;"
+        )
+        layout.addWidget(total_label)
+
+        current_day = None
+        for interval in rows:
+            day = _format_order_day(interval.get("start_time"))
+            if day != current_day:
+                current_day = day
+                day_label = QLabel(day)
+                day_label.setStyleSheet(
+                    f"font-size: 11px; font-weight: 700; color: {TEXT_SECONDARY}; "
+                    f"background-color: {BG_MAIN}; border-radius: 3px; padding: 1px 6px;"
+                )
+                layout.addWidget(day_label, 0, Qt.AlignLeft)
+            layout.addLayout(self._make_infusion_history_entry_row(interval))
+        return frame
+
+    @staticmethod
+    def _summarize_infusion_history(rows: list[dict]) -> str:
+        active_count = sum(1 for row in rows if str((row or {}).get("status") or "") == "active")
+        stopped_count = len(rows) - active_count
+        total_volume = Decimal("0")
+        has_volume = False
+        total_oxygen_liters = Decimal("0")
+        has_oxygen_liters = False
+        for row in rows:
+            if _is_oxygen_infusion(row or {}):
+                oxygen_liters = _oxygen_consumed_liters(row or {})
+                if oxygen_liters is not None:
+                    total_oxygen_liters += oxygen_liters
+                    has_oxygen_liters = True
+                continue
+            volume = _counted_infusion_volume_ml(row or {})
+            if volume is None:
+                continue
+            total_volume += volume
+            has_volume = True
+        if active_count and stopped_count:
+            status_text = f"активно: {active_count} · Остановлено: {stopped_count}"
+        elif active_count:
+            status_text = f"активно: {active_count}"
+        else:
+            status_text = f"Остановлено: {stopped_count}"
+        totals: list[str] = []
+        if has_volume:
+            totals.append(_format_infusion_volume_ml(total_volume))
+        if has_oxygen_liters:
+            totals.append(_format_oxygen_liters(total_oxygen_liters))
+        if totals:
+            return f"{status_text} · итого: {', '.join(totals)}"
+        return status_text
+
+    def _make_infusion_history_entry_row(self, interval: dict) -> QHBoxLayout:
+        entry = QHBoxLayout()
+        entry.setContentsMargins(0, 0, 0, 0)
+        entry.setSpacing(6)
+        time_label = QLabel(_format_order_time(interval.get("start_time")))
+        time_label.setFixedWidth(48)
+        time_label.setAlignment(Qt.AlignCenter)
+        time_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px;"
+        )
+        detail_label = ElidedTooltipLabel(self._infusion_history_entry_text(interval))
+        detail_label.setStyleSheet(
+            f"font-size: 13px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        entry.addWidget(time_label, 0)
+        entry.addWidget(detail_label, 1)
+        edit_button = self._infusion_history_action_button("Изменить")
+        edit_button.clicked.connect(lambda _=False, payload=dict(interval): self._edit_infusion_from_group_row(payload))
+        entry.addWidget(edit_button, 0)
+        if str(interval.get("status") or "") == "active":
+            stop_button = self._infusion_history_action_button(OPERBLOCK_INFUSION_STOP_BUTTON_TEXT)
+            stop_button.clicked.connect(lambda _=False, payload=dict(interval): self._stop_infusion(payload))
+            entry.addWidget(stop_button, 0)
+        delete_button = self._infusion_history_action_button("Удалить", danger=True)
+        delete_button.clicked.connect(lambda _=False, payload=dict(interval): self._delete_infusion(payload))
+        entry.addWidget(delete_button, 0)
+        return entry
+
+    @staticmethod
+    def _infusion_history_entry_text(interval: dict) -> str:
+        status = str(interval.get("status") or "")
+        end_time = interval.get("end_time")
+        is_oxygen = _is_oxygen_infusion(interval)
+        rate = "" if _is_gas_infusion(interval) else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
+        gas_dose = _gas_dose_text(interval) if _is_gas_infusion(interval) else ""
+        if status == "active":
+            parts = ["активно", f"с {_format_order_time(interval.get('start_time'))}"]
+        else:
+            parts = ["Стоп"]
+            if end_time:
+                parts.append(f"до {_format_order_time(end_time)}")
+        duration = _format_infusion_interval_duration(interval.get("start_time"), end_time)
+        if duration:
+            parts.append(duration)
+        if gas_dose:
+            parts.append(f"{'поток' if is_oxygen else 'доза'}: {gas_dose}")
+            if is_oxygen:
+                consumed_text = _format_oxygen_consumed_liters(interval)
+                if consumed_text:
+                    parts.append(f"расход: {consumed_text}")
+        elif rate:
+            parts.append(rate)
+        if not gas_dose and rate:
+            executed_volume = _format_infusion_executed_volume(interval)
+            if executed_volume:
+                label = "введено" if status == "active" else "итог"
+                parts.append(f"{label}: {executed_volume}")
+        elif not gas_dose:
+            declared_volume = _format_infusion_declared_volume(interval)
+            if declared_volume:
+                label = "объем" if status == "active" else "итог"
+                parts.append(f"{label}: {declared_volume}")
+        return " · ".join(parts)
+
+    def _make_order_entry_row(self, row: dict) -> QHBoxLayout:
+        entry = QHBoxLayout()
+        entry.setContentsMargins(0, 0, 0, 0)
+        entry.setSpacing(6)
+        time_label = QLabel(_format_order_time(row.get("datetime")))
+        time_label.setFixedWidth(48)
+        time_label.setAlignment(Qt.AlignCenter)
+        time_label.setStyleSheet(
+            f"font-size: 12px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px;"
+        )
+        dose_text = _order_dose_text_with_route(str(row.get("dose_text") or row.get("text") or ""), row, short=False)
+        dose_label = ElidedTooltipLabel(dose_text)
+        dose_label.setStyleSheet(
+            f"font-size: 13px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}"
+        )
+        edit_button = self._order_action_button("Изменить")
+        delete_button = self._order_action_button("Удалить", danger=True)
+        edit_button.clicked.connect(lambda _=False, payload=dict(row): self._edit_order_with_time(payload))
+        delete_button.clicked.connect(lambda _=False, payload=dict(row): self._delete_order(payload))
+        entry.addWidget(time_label, 0)
+        entry.addWidget(dose_label, 1)
+        entry.addWidget(edit_button, 0)
+        entry.addWidget(delete_button, 0)
+        return entry
+
+    def _order_action_button(self, text: str, *, danger: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.setFixedHeight(24)
+        button.setCursor(Qt.PointingHandCursor)
+        if danger:
+            button.setStyleSheet(DANGER_BUTTON_STYLE + "QPushButton { padding: 2px 7px; font-size: 11px; }")
+        self._order_action_buttons.append(button)
+        return button
+
+    def _infusion_history_action_button(self, text: str, *, danger: bool = False) -> QPushButton:
+        button = QPushButton(text)
+        button.setFixedHeight(24)
+        button.setCursor(Qt.PointingHandCursor)
+        if danger:
+            button.setStyleSheet(DANGER_BUTTON_STYLE + "QPushButton { padding: 2px 7px; font-size: 11px; }")
+        self._infusion_action_buttons.append(button)
+        return button
+
+    def _set_order_action_buttons_enabled(self, enabled: bool):
+        for button in list(getattr(self, "_order_action_buttons", [])):
+            try:
+                button.setEnabled(bool(enabled))
+            except RuntimeError:
+                continue
+
+    @staticmethod
+    def _manual_single_order_payload(kind: str, drug_text: str) -> dict[str, str | bool]:
+        clean_kind = normalize_operblock_medication_preset_kind(kind)
+        clean_label = re.sub(r"\s+", " ", str(drug_text or "").strip())
+        slug = re.sub(r"[^0-9A-Za-zА-Яа-яЁё]+", "_", clean_label.casefold()).strip("_") or "order"
+        return {
+            "preset_id": f"manual:{clean_kind}:{slug}",
+            "kind": clean_kind,
+            "label": clean_label,
+            "display_name": clean_label,
+            "manual_order": True,
+        }
+
+    def _save_order(self):
+        if self.is_view_only_mode():
+            return
+        if not self._current_admission_id or self._write_pending:
+            return
+        if not self._orders_tab_enabled():
+            CustomMessageBox.warning(self, "Пособие не начато", "Назначения доступны только во время анестезиологического пособия.")
+            self.refresh_protocol(force=True)
+            return
+        drug_text = self.order_input.text().strip()
+        dose_text = self.order_dose_input.text().strip() if hasattr(self, "order_dose_input") else ""
+        rate_text = self.order_rate_input.text().strip() if hasattr(self, "order_rate_input") else ""
+        kind = self._manual_order_kind()
+        if kind == "continuous_infusion":
+            self._start_manual_continuous_infusion(drug_text, dose_text, rate_text)
+            return
+        if kind == "timed_infusion":
+            self._start_manual_timed_infusion(drug_text, dose_text)
+            return
+        if kind == "gas":
+            self._start_manual_gas(drug_text, dose_text)
+            return
+
+        text = drug_text
+        if text and dose_text and dose_text.casefold() not in text.casefold():
+            text = f"{text} {dose_text}".strip()
+        if not text:
+            CustomMessageBox.warning(self, "Ошибка", "Текст назначения не заполнен.")
+            return
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self.save_order_button.setText("Сохранение...")
+        preset_payload = self._manual_single_order_payload(kind, drug_text) if kind == "gas" else None
+
+        def operation():
+            return self.operblock_service.add_order(
+                self._current_admission_id,
+                text,
+                preset_payload=preset_payload,
+                return_row=True,
+            )
+
+        write_description = f"operblock_add_{kind}_order:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"orders"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result: self._on_order_saved(result),
+            on_error=lambda exc: self._on_protocol_write_error(exc, self.save_order_button, OPERBLOCK_ADD_ORDER_BUTTON_TEXT),
+        )
+
+    def _on_order_saved(self, result=None):
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        self._clear_manual_order_inputs()
+        if not self._apply_added_order_locally(dict(result or {}) if isinstance(result, dict) else {}):
+            self.refresh_protocol(force=True)
+
+    def _clear_manual_order_inputs(self):
+        if hasattr(self, "order_input"):
+            self.order_input.clear()
+        if hasattr(self, "order_dose_input"):
+            self.order_dose_input.clear()
+        if hasattr(self, "order_rate_input"):
+            self.order_rate_input.clear()
+
+    def _on_manual_infusion_saved(self, result=None):
+        self._clear_manual_order_inputs()
+        self._on_infusion_mutation_saved(result)
+
+    def _manual_infusion_payload(self, kind: str, dose_text: str, volume: str = "") -> dict[str, str | bool]:
+        payload: dict[str, str | bool] = {"kind": kind, "manual_order": True}
+        clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
+        if clean_dose:
+            payload["dose_text"] = clean_dose
+            payload["display_dose_text"] = clean_dose
+        if volume:
+            payload["volume_ml"] = volume
+            payload["declared_total_volume_ml"] = volume
+        return payload
+
+    def _start_manual_continuous_infusion(self, drug_text: str, dose_text: str, rate_text: str):
+        if self.is_view_only_mode():
+            return
+        drug_name = re.sub(r"\s+", " ", str(drug_text or "").strip())
+        clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
+        if not drug_name:
+            CustomMessageBox.warning(self, "Дозатор", "Укажите препарат для дозатора.")
+            return
+        rate_value, rate_unit = _split_infusion_rate_text(rate_text)
+        if not rate_value or not rate_unit:
+            CustomMessageBox.warning(self, "Дозатор", "Укажите скорость в мл/час, например: 1 мл/час.")
+            return
+        if clean_dose:
+            drug_name = build_operblock_quick_order_text(drug_name, clean_dose)
+        event_time = self._current_operation_event_time_text()
+        if not self._validate_infusion_event_datetime_or_warn(event_time):
+            return
+        quick_scroll_state = self._remember_quick_orders_scroll_state()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+        payload = self._manual_infusion_payload("continuous_infusion", clean_dose)
+
+        def operation():
+            return self.operblock_service.start_infusion(
+                self._current_admission_id,
+                self._current_operation_case_id,
+                drug_name,
+                rate_value,
+                rate_unit,
+                event_time,
+                payload=payload,
+                return_event=True,
+            )
+
+        write_description = f"operblock_manual_dozator:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result: self._on_manual_infusion_saved(result),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _start_manual_timed_infusion(self, drug_text: str, dose_text: str):
+        if self.is_view_only_mode():
+            return
+        drug_name = re.sub(r"\s+", " ", str(drug_text or "").strip())
+        clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
+        if not drug_name:
+            CustomMessageBox.warning(self, "Капельница", "Укажите препарат для капельницы.")
+            return
+        if not clean_dose:
+            CustomMessageBox.warning(self, "Капельница", "Укажите объем или дозу капельницы.")
+            return
+        volume = _normalize_volume_ml_text(clean_dose)
+        event_time = self._current_operation_event_time_text()
+        if not self._validate_infusion_event_datetime_or_warn(event_time):
+            return
+        quick_scroll_state = self._remember_quick_orders_scroll_state()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+        payload = self._manual_infusion_payload("timed_infusion", clean_dose, volume)
+        infusion_drug_name = build_operblock_quick_order_text(drug_name, clean_dose) if clean_dose and not volume else drug_name
+
+        def operation():
+            return self.operblock_service.start_infusion(
+                self._current_admission_id,
+                self._current_operation_case_id,
+                infusion_drug_name,
+                None,
+                "",
+                event_time,
+                volume_ml=volume,
+                payload=payload,
+                return_event=True,
+            )
+
+        write_description = f"operblock_manual_timed_infusion:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result: self._on_manual_infusion_saved(result),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _start_gas_infusion(
+        self,
+        drug_text: str,
+        dose_text: str,
+        *,
+        payload: dict | None = None,
+        source_key: str = "operblock_gas",
+        on_saved=None,
+    ):
+        if self.is_view_only_mode():
+            return
+        if not self._current_admission_id or self._write_pending:
+            return
+        if not self._ensure_infusion_write_context_or_warn():
+            return
+        drug_name = re.sub(r"\s+", " ", str(drug_text or "").strip())
+        if not drug_name:
+            CustomMessageBox.warning(self, "Газ", "Укажите газ.")
+            return
+        effective_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        is_oxygen = _payload_or_text_is_oxygen(effective_payload, drug_name)
+        clean_dose = _normalize_oxygen_flow_text(dose_text) if is_oxygen else _normalize_gas_dose_text(dose_text)
+        if not clean_dose:
+            if is_oxygen:
+                CustomMessageBox.warning(self, "Кислород", "Укажите поток кислорода, например: 10 л/мин.")
+            else:
+                CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
+            return
+        success_callback = on_saved or self._on_infusion_mutation_saved
+        if is_oxygen:
+            effective_payload = _oxygen_payload_fields(effective_payload, clean_dose)
+        effective_payload["kind"] = "gas"
+        effective_payload["dose_text"] = clean_dose
+        effective_payload["display_dose_text"] = clean_dose
+        effective_payload.setdefault("label", drug_name)
+        effective_payload.setdefault("display_name", drug_name)
+        active_gas = self._active_gas_interval(oxygen=is_oxygen)
+        if active_gas is not None:
+            if not _gas_identity_matches(active_gas, drug_name, effective_payload):
+                active_name = _infusion_display_drug_name(active_gas, "Газ")
+                requested_name = _gas_display_name_for_payload(drug_name, effective_payload)
+                CustomMessageBox.warning(
+                    self,
+                    "Газ уже идет",
+                    (
+                        f"Сейчас активен газ: {active_name}.\n"
+                        "Одновременное использование двух разных газов запрещено. "
+                        f"Сначала остановите активный газ, затем назначьте {requested_name}."
+                    ),
+                )
+                return
+            self._update_gas_dose_direct(
+                active_gas,
+                clean_dose,
+                source_key=f"{source_key}_active",
+                on_saved=success_callback if on_saved is not None else None,
+            )
+            return
+        event_time = self._current_operation_event_time_text()
+        if not self._validate_infusion_event_datetime_or_warn(event_time):
+            return
+        quick_scroll_state = self._remember_quick_orders_scroll_state()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+
+        def operation():
+            return self.operblock_service.start_infusion(
+                self._current_admission_id,
+                self._current_operation_case_id,
+                drug_name,
+                None,
+                "",
+                event_time,
+                payload=effective_payload,
+                return_event=True,
+            )
+
+        write_description = f"{source_key}:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result: success_callback(result),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _start_manual_gas(self, drug_text: str, dose_text: str):
+        self._start_gas_infusion(
+            drug_text,
+            dose_text,
+            payload={"manual_order": True},
+            source_key="operblock_manual_gas",
+            on_saved=self._on_manual_infusion_saved,
+        )
+
+    def _on_protocol_write_error(self, exc: Exception, button: QPushButton, label: str):
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        button.setText(label)
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Ошибка сохранения"
+        CustomMessageBox.warning(self, title, str(exc))
+        self.refresh_protocol(force=True)
+
+    def _validate_order_datetime_or_warn(self, value: str) -> bool:
+        order_dt = _minute_floor_dt(_parse_datetime_value(value))
+        if order_dt is None:
+            CustomMessageBox.warning(self, "Время назначения", "Укажите корректное время введения препарата.")
+            return False
+        start_dt = _minute_floor_dt(self._current_anesthesia_start)
+        if start_dt and order_dt < start_dt:
+            CustomMessageBox.warning(
+                self,
+                "Время назначения",
+                f"Назначение не может быть раньше начала пособия: {start_dt.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        end_dt = _minute_floor_dt(self._current_anesthesia_end) if not self._current_anesthesia_active else None
+        if end_dt and order_dt > end_dt:
+            CustomMessageBox.warning(
+                self,
+                "Время назначения",
+                f"Назначение не может быть позже окончания пособия: {end_dt.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        return True
+
+    def _validate_infusion_event_datetime_or_warn(self, value: str | None) -> bool:
+        event_dt = _minute_floor_dt(_parse_datetime_value(value))
+        if event_dt is None:
+            CustomMessageBox.warning(self, "Время назначения", "Укажите корректное время начала назначения.")
+            return False
+        start_dt = _minute_floor_dt(self._current_anesthesia_start)
+        if start_dt and event_dt < start_dt:
+            CustomMessageBox.warning(
+                self,
+                "Время назначения",
+                f"Старт назначения не может быть раньше начала пособия: {start_dt.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        end_dt = _minute_floor_dt(self._current_anesthesia_end) if not self._current_anesthesia_active else None
+        if end_dt and event_dt > end_dt:
+            CustomMessageBox.warning(
+                self,
+                "Время назначения",
+                f"Старт назначения не может быть позже окончания пособия: {end_dt.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        return True
+
+    def _validate_infusion_stop_datetime_or_warn(self, value: str | None, interval: dict) -> bool:
+        event_dt = _minute_floor_dt(_parse_datetime_value(value))
+        if event_dt is None:
+            CustomMessageBox.warning(self, "Время остановки", "Укажите корректное время окончания назначения.")
+            return False
+        start_dt = _minute_floor_dt(_parse_datetime_value((interval or {}).get("start_time")))
+        if start_dt and event_dt < start_dt:
+            CustomMessageBox.warning(
+                self,
+                "Время остановки",
+                f"Остановка назначения не может быть раньше старта: {start_dt.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        latest_dt = self._latest_infusion_event_datetime(interval or {})
+        if latest_dt and event_dt < latest_dt:
+            CustomMessageBox.warning(
+                self,
+                "Время остановки",
+                f"Остановка назначения не может быть раньше последнего изменения: {latest_dt.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        anesthesia_start_dt = _minute_floor_dt(self._current_anesthesia_start)
+        if anesthesia_start_dt and event_dt < anesthesia_start_dt:
+            CustomMessageBox.warning(
+                self,
+                "Время остановки",
+                f"Остановка назначения не может быть раньше начала пособия: {anesthesia_start_dt.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        anesthesia_end_dt = _minute_floor_dt(self._current_anesthesia_end) if not self._current_anesthesia_active else None
+        if anesthesia_end_dt and event_dt > anesthesia_end_dt:
+            CustomMessageBox.warning(
+                self,
+                "Время остановки",
+                f"Остановка назначения не может быть позже окончания пособия: {anesthesia_end_dt.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _route_only_write_description(admission_id: int, order_id: int) -> str:
+        return f"operblock_update_order_route:{int(admission_id)}:{int(order_id)}"
+
+    def _remember_route_only_write(self, admission_id: int, order_id: int) -> None:
+        self._route_only_write_suppressions[(int(admission_id), int(order_id))] = time.monotonic()
+
+    def _current_order_row_by_id(self, order_id: int) -> dict | None:
+        target_id = int(order_id)
+        for row in list(getattr(self, "_current_orders_rows", []) or []):
+            if _safe_int((row or {}).get("id")) == target_id:
+                return dict(row or {})
+        return None
+
+    def _fresh_order_row(self, row: dict) -> dict:
+        order_id = _safe_int((row or {}).get("id"))
+        if not order_id:
+            return dict(row or {})
+        return self._current_order_row_by_id(order_id) or dict(row or {})
+
+    def _patch_timeline_snapshot_order_route(self, order_id: int, route_code: str) -> bool:
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        events = list(snapshot.get("bolus_events") or [])
+        if not events:
+            return False
+        route_value = _stored_order_route_value(route_code)
+        changed = False
+        patched_events: list[dict] = []
+        for event in events:
+            data = dict(event or {})
+            event_order_id = _safe_int(data.get("source_id"))
+            if str(data.get("source") or "") == "legacy_order" and event_order_id == int(order_id):
+                payload = dict(data.get("payload") or {})
+                data["route"] = route_value
+                if route_value:
+                    payload["route"] = route_value
+                else:
+                    payload.pop("route", None)
+                data["payload"] = payload
+                data["revision"] = int(data.get("revision") or 0) + 1
+                changed = True
+            patched_events.append(data)
+        if not changed:
+            return False
+        snapshot["bolus_events"] = patched_events
+        hash_payload = dict(snapshot)
+        hash_payload.pop("generated_at", None)
+        snapshot["content_hash"] = _stable_ui_hash(hash_payload)
+        self._current_timeline_snapshot = snapshot
+        return True
+
+    @staticmethod
+    def _refresh_timeline_snapshot_hash(snapshot: dict) -> dict:
+        updated = dict(snapshot or {})
+        hash_payload = dict(updated)
+        hash_payload.pop("generated_at", None)
+        hash_payload.pop("content_hash", None)
+        updated["content_hash"] = _stable_ui_hash(hash_payload)
+        return updated
+
+    def _patch_timeline_snapshot_order(
+        self,
+        order_id: int,
+        *,
+        text: str | None = None,
+        order_datetime: str | None = None,
+        route_code: str | None = None,
+    ) -> bool:
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        events = list(snapshot.get("bolus_events") or [])
+        if not events:
+            return False
+        changed = False
+        patched_events: list[dict] = []
+        drug_name, dose_text = _split_order_drug_and_dose(text or "") if text is not None else ("", "")
+        event_time = self._local_iso_minute_text(order_datetime) if order_datetime is not None else None
+        route_value = _stored_order_route_value(route_code) if route_code is not None else None
+        for event in events:
+            data = dict(event or {})
+            event_order_id = _safe_int(data.get("source_id"))
+            if str(data.get("source") or "") == "legacy_order" and event_order_id == int(order_id):
+                payload = dict(data.get("payload") or {})
+                if text is not None:
+                    data["drug_label"] = drug_name
+                    data["dose_text"] = dose_text
+                    payload["text"] = text
+                    payload["drug_label"] = drug_name
+                    payload["dose_text"] = dose_text
+                if event_time is not None:
+                    data["event_time"] = event_time
+                if route_code is not None:
+                    data["route"] = route_value
+                    if route_value:
+                        payload["route"] = route_value
+                    else:
+                        payload.pop("route", None)
+                data["payload"] = payload
+                data["revision"] = int(data.get("revision") or 0) + 1
+                changed = True
+            patched_events.append(data)
+        if not changed:
+            return False
+        snapshot["bolus_events"] = patched_events
+        self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    @staticmethod
+    def _timeline_snapshot_source_versions_with(
+        snapshot: dict,
+        source_key: str,
+        source_id: int | None,
+        revision: int | None,
+    ) -> dict:
+        versions = dict((snapshot or {}).get("source_versions") or {})
+        current = dict(versions.get(source_key) or {})
+        ids = [
+            int(value)
+            for value in list(current.get("ids") or [])
+            if _safe_int(value) is not None
+        ]
+        if source_id is not None and int(source_id) not in ids:
+            ids.append(int(source_id))
+        current["ids"] = ids
+        current["count"] = len(ids)
+        if revision is not None:
+            current["max_revision"] = max(int(current.get("max_revision") or 0), int(revision or 0))
+        versions[source_key] = current
+        return versions
+
+    def _timeline_table_code_for_local_event(self) -> str | None:
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        for section in ("operation_events", "bolus_events"):
+            for event in list(snapshot.get(section) or []):
+                table_code = str((event or {}).get("table_code") or "").strip()
+                if table_code:
+                    return table_code
+        for interval in list(snapshot.get("infusion_intervals") or []):
+            table_code = str((interval or {}).get("table_code") or "").strip()
+            if table_code:
+                return table_code
+        return None
+
+    def _patch_timeline_snapshot_added_order(self, order_row: dict) -> bool:
+        order_id = _safe_int((order_row or {}).get("id"))
+        if not order_id or not self._current_admission_id:
+            return False
+        event = legacy_order_row_to_medication_event(
+            dict(order_row or {}),
+            admission_id=int(self._current_admission_id),
+            operation_case_id=int(self._current_operation_case_id or 0) or None,
+            table_code=self._timeline_table_code_for_local_event(),
+        )
+        if event is None:
+            return False
+        event_data = event.to_dict()
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        if not snapshot:
+            snapshot = {
+                "admission_id": int(self._current_admission_id),
+                "operation_case_id": int(self._current_operation_case_id or 0) or None,
+            }
+        events = [
+            dict(item or {})
+            for item in list(snapshot.get("bolus_events") or [])
+            if not (str((item or {}).get("source") or "") == "legacy_order" and _safe_int((item or {}).get("source_id")) == int(order_id))
+        ]
+        events.append(event_data)
+        events.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("event_time")) or datetime.min,
+                _safe_int((item or {}).get("source_id")) or 0,
+            )
+        )
+        snapshot["bolus_events"] = events
+        snapshot["source_versions"] = self._timeline_snapshot_source_versions_with(
+            snapshot,
+            "legacy_orders",
+            int(order_id),
+            int((order_row or {}).get("revision") or 0),
+        )
+        self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    def _apply_added_order_locally(self, order_row: dict) -> bool:
+        row = dict(order_row or {})
+        order_id = _safe_int(row.get("id"))
+        order_dt = _minute_floor_dt(_parse_datetime_value(row.get("datetime")))
+        if not order_id or order_dt is None:
+            return False
+        row["route"] = _order_route_code(row)
+        rows = [
+            dict(existing or {})
+            for existing in list(getattr(self, "_current_orders_rows", []) or [])
+            if _safe_int((existing or {}).get("id")) != int(order_id)
+        ]
+        rows.append(row)
+        rows.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("datetime")) or datetime.min,
+                _safe_int((item or {}).get("id")) or 0,
+            ),
+            reverse=True,
+        )
+        rows = rows[:100]
+        if not self._patch_timeline_snapshot_added_order(row):
+            return False
+        self._current_orders_rows = rows
+        self._apply_orders({"orders": rows})
+        return True
+
+    def _patch_timeline_snapshot_started_infusion(self, event_row: dict) -> bool:
+        event = timeline_event_row_to_medication_event(dict(event_row or {}))
+        if event is None or event.event_type != "infusion_start":
+            return False
+        intervals = build_infusion_intervals_from_timeline_events([event])
+        if not intervals:
+            return False
+        interval = intervals[0].to_dict()
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        if not snapshot:
+            snapshot = {
+                "admission_id": int(self._current_admission_id or event.admission_id or 0),
+                "operation_case_id": int(self._current_operation_case_id or event.operation_case_id or 0) or None,
+            }
+        interval_id = str(interval.get("interval_id") or "")
+        current_intervals = [
+            dict(item or {})
+            for item in list(snapshot.get("infusion_intervals") or [])
+            if str((item or {}).get("interval_id") or "") != interval_id
+        ]
+        current_intervals.append(interval)
+        current_intervals.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("start_time")) or datetime.min,
+                str((item or {}).get("interval_id") or ""),
+            )
+        )
+        snapshot["infusion_intervals"] = current_intervals
+        snapshot["source_versions"] = self._timeline_snapshot_source_versions_with(
+            snapshot,
+            "timeline_events",
+            int(event.source_id),
+            int(event.revision or 0),
+        )
+        self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    def _apply_started_infusion_locally(self, event_row: dict) -> bool:
+        if not self._patch_timeline_snapshot_started_infusion(event_row):
+            return False
+        self._apply_active_infusions()
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])})
+        return True
+
+    def _apply_order_route_change_locally(self, order_id: int, route_code: str) -> bool:
+        normalized_route = _normalize_order_route_code(route_code)
+        rows = []
+        found = False
+        for row in list(getattr(self, "_current_orders_rows", []) or []):
+            updated = dict(row or {})
+            if _safe_int(updated.get("id")) == int(order_id):
+                updated["route"] = normalized_route
+                updated["comment"] = _order_comment_with_route(str(updated.get("comment") or ""), normalized_route)
+                updated["revision"] = int(updated.get("revision") or 0) + 1
+                updated["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                found = True
+            rows.append(updated)
+        if not found:
+            return False
+        self._patch_timeline_snapshot_order_route(order_id, normalized_route)
+        self._current_orders_rows = rows
+        self._patch_rendered_order_detail_text(order_id)
+        self._sync_orders_render_signatures_from_current_rows()
+        self._update_vitals_chart_order_markers()
+        return True
+
+    def _apply_order_edit_locally(
+        self,
+        order_id: int,
+        text: str,
+        *,
+        order_datetime: str | None = None,
+        route_code: str | None = None,
+    ) -> bool:
+        clean_text = re.sub(r"\s+", " ", str(text or "").strip())
+        if not clean_text:
+            return False
+        rows = []
+        found = False
+        normalized_route = _normalize_order_route_code(route_code) if route_code is not None else None
+        for row in list(getattr(self, "_current_orders_rows", []) or []):
+            updated = dict(row or {})
+            if _safe_int(updated.get("id")) == int(order_id):
+                updated["text"] = clean_text
+                if order_datetime is not None:
+                    updated["datetime"] = self._local_iso_minute_text(order_datetime)
+                if normalized_route is not None:
+                    updated["route"] = normalized_route
+                    updated["comment"] = _order_comment_with_route(str(updated.get("comment") or ""), normalized_route)
+                updated["revision"] = int(updated.get("revision") or 0) + 1
+                updated["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                raw_drug_name, dose_text = _split_order_drug_and_dose(clean_text)
+                updated["drug_name"] = self._order_display_drug_name(updated, raw_drug_name)
+                updated["raw_drug_name"] = raw_drug_name
+                updated["dose_text"] = dose_text
+                found = True
+            rows.append(updated)
+        if not found:
+            return False
+        self._patch_timeline_snapshot_order(
+            order_id,
+            text=clean_text,
+            order_datetime=order_datetime,
+            route_code=normalized_route,
+        )
+        self._current_orders_rows = rows
+        self._apply_orders({"orders": rows})
+        self._update_vitals_chart_order_markers()
+        return True
+
+    def _on_order_route_saved(self, order_id: int, route_code: str):
+        self._write_pending = False
+        if not self._apply_order_route_change_locally(order_id, route_code):
+            self._set_protocol_write_controls_enabled(True)
+            self.refresh_protocol(force=True)
+
+    def _on_order_edit_saved(
+        self,
+        order_id: int,
+        text: str,
+        *,
+        order_datetime: str | None = None,
+        route_code: str | None = None,
+    ):
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        if not self._apply_order_edit_locally(order_id, text, order_datetime=order_datetime, route_code=route_code):
+            self.refresh_protocol(force=True)
+
+    @staticmethod
+    def _timeline_event_key(event_id: int | None) -> str:
+        return f"timeline_event:{int(event_id)}" if event_id else ""
+
+    def _patch_current_infusion_interval(self, start_event_id: int, updater) -> bool:
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        intervals = list(snapshot.get("infusion_intervals") or [])
+        if not intervals:
+            return False
+        patched_intervals: list[dict] = []
+        changed = False
+        for interval in intervals:
+            data = dict(interval or {})
+            interval_start_id, _revision = self._infusion_identity(data)
+            if interval_start_id == int(start_event_id):
+                data = updater(data) or data
+                changed = True
+            patched_intervals.append(data)
+        if not changed:
+            return False
+        snapshot["infusion_intervals"] = patched_intervals
+        self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    @staticmethod
+    def _bump_infusion_interval_start_revision(interval: dict) -> dict:
+        payload = dict((interval or {}).get("payload") or {})
+        payload["start_revision"] = int(payload.get("start_revision") or 0) + 1
+        interval["payload"] = payload
+        return interval
+
+    def _set_infusion_interval_start_time(self, interval: dict, start_event_id: int, event_time: str | None) -> dict:
+        if event_time is None:
+            return interval
+        event_time_text = self._local_iso_minute_text(event_time)
+        interval["start_time"] = event_time_text
+        start_key = self._timeline_event_key(start_event_id)
+        for history_key in ("rate_history", "dose_history"):
+            history = []
+            for index, item in enumerate(list(interval.get(history_key) or [])):
+                updated_item = dict(item or {})
+                if index == 0 or (start_key and str(updated_item.get("event_id") or "") == start_key):
+                    updated_item["event_time"] = event_time_text
+                    updated_item["revision"] = int(updated_item.get("revision") or 0) + 1
+                history.append(updated_item)
+            if history:
+                interval[history_key] = history
+        return interval
+
+    def _apply_infusion_interval_locally(self, start_event_id: int, updater) -> bool:
+        if not self._patch_current_infusion_interval(start_event_id, updater):
+            return False
+        self._apply_active_infusions()
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])})
+        self._update_vitals_chart_order_markers()
+        return True
+
+    def _complete_local_infusion_mutation(self, applied: bool) -> None:
+        quick_scroll_state = getattr(self, "_pending_quick_orders_scroll_state", None)
+        self._pending_quick_orders_scroll_state = None
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        if not applied:
+            self.refresh_protocol(force=True)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+
+    def _on_infusion_start_time_saved_locally(self, start_event_id: int, event_time: str | None) -> None:
+        def updater(interval: dict) -> dict:
+            interval = self._set_infusion_interval_start_time(interval, start_event_id, event_time)
+            return self._bump_infusion_interval_start_revision(interval)
+
+        self._complete_local_infusion_mutation(self._apply_infusion_interval_locally(start_event_id, updater))
+
+    def _on_infusion_rate_saved_locally(
+        self,
+        result,
+        start_event_id: int,
+        *,
+        rate_value: str,
+        rate_unit: str,
+        change_event_time: str,
+        start_event_time: str | None,
+    ) -> None:
+        change_event_id = _safe_int(result)
+        change_event_key = self._timeline_event_key(change_event_id) or f"local_rate:{int(start_event_id)}:{change_event_time}"
+
+        def updater(interval: dict) -> dict:
+            interval = self._set_infusion_interval_start_time(interval, start_event_id, start_event_time)
+            interval["current_rate_value"] = str(rate_value or "").strip()
+            interval["current_rate_unit"] = str(rate_unit or "").strip()
+            history = [dict(item or {}) for item in list(interval.get("rate_history") or [])]
+            history = [item for item in history if str(item.get("event_id") or "") != change_event_key]
+            history.append(
+                {
+                    "event_id": change_event_key,
+                    "event_time": self._local_iso_minute_text(change_event_time),
+                    "rate_value": str(rate_value or "").strip(),
+                    "rate_unit": str(rate_unit or "").strip(),
+                    "revision": 1,
+                }
+            )
+            history.sort(key=lambda item: (_parse_datetime_value(item.get("event_time")) or datetime.min, str(item.get("event_id") or "")))
+            interval["rate_history"] = history
+            event_ids = [str(item) for item in list(interval.get("event_ids") or []) if item]
+            if change_event_key not in event_ids:
+                event_ids.append(change_event_key)
+            interval["event_ids"] = event_ids
+            return self._bump_infusion_interval_start_revision(interval)
+
+        self._complete_local_infusion_mutation(self._apply_infusion_interval_locally(start_event_id, updater))
+
+    def _on_gas_dose_saved_locally(
+        self,
+        result,
+        start_event_id: int,
+        *,
+        dose_text: str,
+        change_event_time: str,
+        start_event_time: str | None,
+        is_oxygen: bool = False,
+    ) -> None:
+        change_event_id = _safe_int(result)
+        change_event_key = self._timeline_event_key(change_event_id) or f"local_gas:{int(start_event_id)}:{change_event_time}"
+        clean_dose = _normalize_oxygen_flow_text(dose_text) if is_oxygen else _normalize_gas_dose_text(dose_text)
+
+        def updater(interval: dict) -> dict:
+            interval = self._set_infusion_interval_start_time(interval, start_event_id, start_event_time)
+            interval["current_rate_value"] = None
+            interval["current_rate_unit"] = None
+            interval["rate_history"] = []
+            payload = dict(interval.get("payload") or {})
+            if is_oxygen:
+                payload = _oxygen_payload_fields(payload, clean_dose)
+            payload["kind"] = "gas"
+            payload["dose_text"] = clean_dose
+            payload["display_dose_text"] = clean_dose
+            interval["payload"] = payload
+            history = [dict(item or {}) for item in list(interval.get("dose_history") or [])]
+            history = [item for item in history if str(item.get("event_id") or "") != change_event_key]
+            history.append(
+                {
+                    "event_id": change_event_key,
+                    "event_time": self._local_iso_minute_text(change_event_time),
+                    "dose_text": clean_dose,
+                    "revision": 1,
+                }
+            )
+            history.sort(key=lambda item: (_parse_datetime_value(item.get("event_time")) or datetime.min, str(item.get("event_id") or "")))
+            interval["dose_history"] = history
+            event_ids = [str(item) for item in list(interval.get("event_ids") or []) if item]
+            if change_event_key not in event_ids:
+                event_ids.append(change_event_key)
+            interval["event_ids"] = event_ids
+            return self._bump_infusion_interval_start_revision(interval)
+
+        self._complete_local_infusion_mutation(self._apply_infusion_interval_locally(start_event_id, updater))
+
+    def _on_infusion_volume_saved_locally(
+        self,
+        start_event_id: int,
+        *,
+        volume_ml: str,
+        event_time: str | None,
+    ) -> None:
+        clean_volume = _normalize_volume_ml_text(volume_ml)
+
+        def updater(interval: dict) -> dict:
+            interval = self._set_infusion_interval_start_time(interval, start_event_id, event_time)
+            interval["volume_ml"] = clean_volume
+            drug_label = _infusion_display_drug_name(interval, "Капельница")
+            interval["display_label"] = f"{drug_label} {clean_volume} мл".strip()
+            payload = dict(interval.get("payload") or {})
+            payload["volume_ml"] = clean_volume
+            payload["declared_total_volume_ml"] = clean_volume
+            interval["payload"] = payload
+            return self._bump_infusion_interval_start_revision(interval)
+
+        self._complete_local_infusion_mutation(self._apply_infusion_interval_locally(start_event_id, updater))
+
+    @staticmethod
+    def _bolus_order_dialog_parts(row: dict) -> tuple[str, str]:
+        clean_text = re.sub(r"\s+", " ", str((row or {}).get("text") or "").strip())
+        drug_name = re.sub(
+            r"\s+",
+            " ",
+            str((row or {}).get("drug_name") or (row or {}).get("drug_label") or "").strip(),
+        )
+        dose_text = _normalize_bolus_dose_text(str((row or {}).get("dose_text") or "").strip())
+        if drug_name and dose_text:
+            return drug_name, dose_text
+        if drug_name and clean_text.casefold().startswith(drug_name.casefold()):
+            tail = clean_text[len(drug_name) :].strip(" -:;·")
+            if tail and not dose_text:
+                dose_text = _normalize_bolus_dose_text(tail)
+            return drug_name, dose_text
+        parsed_drug, parsed_dose = _split_order_drug_and_dose(clean_text)
+        if parsed_dose:
+            if not dose_text:
+                dose_text = _normalize_bolus_dose_text(parsed_dose)
+            if not drug_name:
+                drug_name = parsed_drug
+        elif not dose_text:
+            trailing_number = re.search(r"(?P<dose>\d+(?:[.,]\d+)?)$", clean_text)
+            if trailing_number:
+                prefix = clean_text[: trailing_number.start()].strip()
+                if prefix:
+                    dose_text = _normalize_bolus_dose_text(trailing_number.group("dose"))
+                    if not drug_name:
+                        drug_name = prefix
+        if not drug_name:
+            drug_name = clean_text
+        return drug_name or "Препарат", dose_text
+
+
+    def _edit_order_with_time(self, row: dict):
+        if self.is_view_only_mode():
+            return
+        if not self._current_admission_id or self._write_pending:
+            return
+        order_id = _safe_int(row.get("id"))
+        if not order_id:
+            return
+        row = self._fresh_order_row(row)
+        old_datetime = _minute_floor_dt(_parse_datetime_value(row.get("datetime")))
+        if old_datetime is None:
+            CustomMessageBox.warning(self, "Время назначения", "Не удалось определить время назначения. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        old_text = str(row.get("text") or "").strip()
+        if not old_text:
+            CustomMessageBox.warning(self, "Ошибка", "Текст назначения не заполнен.")
+            return
+        old_route = _order_route_code(row)
+        drug_name, dose_text = self._bolus_order_dialog_parts(row)
+        route_options = self._route_options_for_order_row(row)
+        dialog = BolusEditDialog(
+            drug_name,
+            dose_text,
+            self,
+            base_datetime=old_datetime,
+            min_datetime=self._current_anesthesia_start or self._current_operation_start,
+            max_datetime=self._current_anesthesia_end,
+            route_code=old_route,
+            route_options=route_options,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        text = dialog.text()
+        if not text:
+            CustomMessageBox.warning(self, "Ошибка", "Текст назначения не заполнен.")
+            return
+        order_datetime = dialog.datetime_text()
+        if not self._validate_order_datetime_or_warn(order_datetime):
+            self.refresh_protocol(force=True)
+            return
+        new_datetime = _minute_floor_dt(_parse_datetime_value(order_datetime))
+        route_code = dialog.route_code()
+        if text == old_text and new_datetime == old_datetime and route_code == old_route:
+            return
+        route_only = text == old_text and new_datetime == old_datetime and route_code != old_route
+        expected_revision = None if route_only else int(row.get("revision") or 0)
+        self._write_pending = True
+        if not route_only:
+            self._set_protocol_write_controls_enabled(False)
+        if route_only:
+            self._remember_route_only_write(self._current_admission_id, order_id)
+
+        def operation():
+            return self.operblock_service.update_order_text(
+                self._current_admission_id,
+                order_id,
+                text,
+                None if route_only else order_datetime,
+                expected_revision=expected_revision,
+                route=route_code,
+            )
+
+        write_description = (
+            self._route_only_write_description(self._current_admission_id, order_id)
+            if route_only
+            else f"operblock_update_order:{self._current_admission_id}:{order_id}"
+        )
+        if not route_only:
+            self._remember_local_write_refresh_suppression(write_description, {"orders"})
+        on_success = (
+            (lambda _result, oid=order_id, route=route_code: self._on_order_route_saved(oid, route))
+            if route_only
+            else (
+                lambda _result, oid=order_id, new_text=text, dt=order_datetime, route=route_code: self._on_order_edit_saved(
+                    oid,
+                    new_text,
+                    order_datetime=dt,
+                    route_code=route,
+                )
+            )
+        )
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=on_success,
+            on_error=lambda exc: self._on_order_mutation_error(exc),
+        )
+
+    def _edit_order(self, row: dict):
+        if not self._current_admission_id or self._write_pending:
+            return
+        order_id = _safe_int(row.get("id"))
+        if not order_id:
+            return
+        row = self._fresh_order_row(row)
+        old_route = _order_route_code(row)
+        old_text = str(row.get("text") or "").strip()
+        drug_name, dose_text = self._bolus_order_dialog_parts(row)
+        route_options = self._route_options_for_order_row(row)
+        dialog = BolusEditDialog(
+            drug_name,
+            dose_text,
+            self,
+            route_code=old_route,
+            route_options=route_options,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        text = dialog.text()
+        if not text:
+            CustomMessageBox.warning(self, "Ошибка", "Текст назначения не заполнен.")
+            return
+        route_code = dialog.route_code()
+        if text == old_text and route_code == old_route:
+            return
+        route_only = text == old_text and route_code != old_route
+        expected_revision = None if route_only else int(row.get("revision") or 0)
+        self._write_pending = True
+        if not route_only:
+            self._set_protocol_write_controls_enabled(False)
+        if route_only:
+            self._remember_route_only_write(self._current_admission_id, order_id)
+
+        def operation():
+            return self.operblock_service.update_order_text(
+                self._current_admission_id,
+                order_id,
+                text,
+                None,
+                expected_revision=expected_revision,
+                route=route_code,
+            )
+
+        write_description = (
+            self._route_only_write_description(self._current_admission_id, order_id)
+            if route_only
+            else f"operblock_update_order:{self._current_admission_id}:{order_id}"
+        )
+        if not route_only:
+            self._remember_local_write_refresh_suppression(write_description, {"orders"})
+        on_success = (
+            (lambda _result, oid=order_id, route=route_code: self._on_order_route_saved(oid, route))
+            if route_only
+            else (
+                lambda _result, oid=order_id, new_text=text, route=route_code: self._on_order_edit_saved(
+                    oid,
+                    new_text,
+                    route_code=route,
+                )
+            )
+        )
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=on_success,
+            on_error=lambda exc: self._on_order_mutation_error(exc),
+        )
+
+    def _edit_order_time(self, row: dict):
+        if not self._current_admission_id or self._write_pending:
+            return
+        order_id = _safe_int(row.get("id"))
+        if not order_id:
+            return
+        old_datetime = _minute_floor_dt(_parse_datetime_value(row.get("datetime")))
+        if old_datetime is None:
+            CustomMessageBox.warning(self, "Время назначения", "Не удалось определить время назначения. Обновите протокол.")
+            self.refresh_protocol(force=True)
+            return
+        text = str(row.get("text") or "").strip()
+        if not text:
+            CustomMessageBox.warning(self, "Ошибка", "Текст назначения не заполнен.")
+            return
+        dialog = TimeEditDialog("Время назначения", old_datetime, self, field_label="Время введения")
+        if dialog.exec() != QDialog.Accepted:
+            return
+        order_datetime = dialog.datetime_text()
+        if not self._validate_order_datetime_or_warn(order_datetime):
+            self.refresh_protocol(force=True)
+            return
+        new_datetime = _minute_floor_dt(_parse_datetime_value(order_datetime))
+        if new_datetime == old_datetime:
+            return
+        expected_revision = int(row.get("revision") or 0)
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+
+        def operation():
+            return self.operblock_service.update_order_text(
+                self._current_admission_id,
+                order_id,
+                text,
+                order_datetime,
+                expected_revision=expected_revision,
+            )
+
+        write_description = f"operblock_update_order_time:{self._current_admission_id}:{order_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"orders"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda _result, oid=order_id, new_text=text, dt=order_datetime: self._on_order_edit_saved(
+                oid,
+                new_text,
+                order_datetime=dt,
+            ),
+            on_error=lambda exc: self._on_order_mutation_error(exc),
+        )
+
+    def _delete_order(self, row: dict):
+        if self.is_view_only_mode():
+            return
+        if not self._current_admission_id or self._write_pending:
+            return
+        order_id = _safe_int(row.get("id"))
+        if not order_id:
+            return
+        text = (
+            _build_order_text_for_display(str(row.get("drug_name") or ""), str(row.get("dose_text") or ""))
+            if row.get("drug_name")
+            else str(row.get("text") or "").strip()
+        )
+        reply = CustomMessageBox.question(
+            self,
+            "Удаление назначения",
+            f"Удалить назначение?\n{text}",
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+        expected_revision = int(row.get("revision") or 0)
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+
+        def operation():
+            return self.operblock_service.delete_order(
+                self._current_admission_id,
+                order_id,
+                expected_revision=expected_revision,
+            )
+
+        self._enqueue_write(
+            f"operblock_delete_order:{self._current_admission_id}:{order_id}",
+            operation,
+            on_success=lambda _result: self._on_order_mutation_saved(),
+            on_error=lambda exc: self._on_order_mutation_error(exc),
+        )
+
+    def _on_order_mutation_saved(self):
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        self._orders_force_top_on_next_apply = True
+        self.refresh_protocol(force=True)
+
+    def _on_order_mutation_error(self, exc: Exception):
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Ошибка назначения"
+        CustomMessageBox.warning(self, title, str(exc))
+        self.refresh_protocol(force=True)
+
+    def _add_quick_order(self, drug_name: str, dose: str, *, kind: str = "bolus"):
+        if self.is_view_only_mode():
+            return
+        if not self._current_admission_id or self._write_pending:
+            return
+        if not self._orders_tab_enabled():
+            CustomMessageBox.warning(self, "Пособие не начато", "Назначения доступны только во время анестезиологического пособия.")
+            self.refresh_protocol(force=True)
+            return
+        normalized_kind = "gas" if normalize_operblock_quick_order_kind(kind) == "gas" else "bolus"
+        if normalized_kind == "gas":
+            self._start_gas_infusion(
+                drug_name,
+                dose,
+                payload={"manual_order": False, "quick_order": True},
+                source_key="operblock_quick_gas_order",
+            )
+            return
+        text = build_operblock_quick_order_text(drug_name, dose)
+        if not text:
+            return
+        quick_scroll_state = self._remember_quick_orders_scroll_state()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+
+        def operation():
+            return self.operblock_service.add_order(
+                self._current_admission_id,
+                text,
+                return_row=True,
+            )
+
+        write_description = f"operblock_quick_{normalized_kind}_order:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"orders"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result: self._on_quick_order_saved(result),
+            on_error=lambda exc: self._on_quick_order_error(exc),
+        )
+
+    def _add_preset_bolus(self, preset: dict, dose: str):
+        if self.is_view_only_mode():
+            return
+        if not self._current_admission_id or self._write_pending:
+            return
+        if not self._orders_tab_enabled():
+            CustomMessageBox.warning(self, "Пособие не начато", "Назначения доступны только во время анестезиологического пособия.")
+            self.refresh_protocol(force=True)
+            return
+        text = build_operblock_preset_bolus_text(preset, dose)
+        if not text:
+            return
+        quick_scroll_state = self._remember_quick_orders_scroll_state()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+        preset_payload = build_operblock_preset_payload(preset)
+        route_code = self._default_route_for_preset(preset)
+
+        def operation():
+            return self.operblock_service.add_order(
+                self._current_admission_id,
+                text,
+                preset_payload=preset_payload,
+                route=route_code,
+                return_row=True,
+            )
+
+        write_description = f"operblock_preset_bolus:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"orders"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result: self._on_quick_order_saved(result),
+            on_error=lambda exc: self._on_quick_order_error(exc),
+        )
+
+    def _add_preset_gas(self, preset: dict, dose: str):
+        if self.is_view_only_mode():
+            return
+        if not self._current_admission_id or self._write_pending:
+            return
+        if not self._orders_tab_enabled():
+            CustomMessageBox.warning(self, "Пособие не начато", "Назначения доступны только во время анестезиологического пособия.")
+            self.refresh_protocol(force=True)
+            return
+        drug_name = operblock_medication_preset_display_name(preset)
+        preset_payload = build_operblock_preset_payload(preset)
+        self._start_gas_infusion(
+            drug_name,
+            dose,
+            payload=preset_payload,
+            source_key="operblock_preset_gas",
+        )
+
+    def _start_timed_infusion_preset(self, preset: dict, dose_text: str = ""):
+        if self.is_view_only_mode():
+            return
+        if not self._current_admission_id or self._write_pending:
+            return
+        drug_name = operblock_medication_preset_display_name(preset)
+        if not drug_name:
+            CustomMessageBox.warning(self, "Капельница", "Укажите препарат для капельницы.")
+            return
+        if not self._ensure_infusion_write_context_or_warn():
+            return
+        selected_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
+        if not selected_dose:
+            dose_options = _timed_infusion_dose_options(preset)
+            selected_dose = dose_options[0] if dose_options else ""
+        concentration_text = str(preset.get("concentration") or "").strip()
+        dose_volume = _quick_order_dose_volume_ml(selected_dose, concentration_text)
+        solvent_volume = _source_solvent_volume_ml(preset)
+        total_volume = _timed_infusion_total_volume_ml(preset, selected_dose, concentration_text)
+        volume = _volume_text_without_unit(total_volume)
+        if not volume:
+            if _quick_order_mass_dose_component(selected_dose):
+                CustomMessageBox.warning(
+                    self,
+                    "Капельница",
+                    "Для дозировки в мг/г укажите концентрацию препарата или объем капельницы в настройках быстрого назначения.",
+                )
+            else:
+                CustomMessageBox.warning(self, "Капельница", "Укажите объем капельницы в настройках быстрого назначения.")
+            return
+        event_time = self._current_operation_event_time_text()
+        if not self._validate_infusion_event_datetime_or_warn(event_time):
+            return
+        quick_scroll_state = self._remember_quick_orders_scroll_state()
+        self._write_pending = True
+        self._set_protocol_write_controls_enabled(False)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+        preset_payload = build_operblock_preset_payload(preset)
+        preset_payload["volume_ml"] = volume
+        preset_payload["declared_total_volume_ml"] = volume
+        if selected_dose:
+            preset_payload["dose_text"] = selected_dose
+            preset_payload["display_dose_text"] = _quick_order_dose_display_text(selected_dose, concentration_text)
+            if dose_volume is not None:
+                preset_payload["calculated_volume_ml"] = _volume_text_without_unit(dose_volume)
+        if solvent_volume is not None:
+            preset_payload["solvent_volume_ml"] = _volume_text_without_unit(solvent_volume)
+
+        def operation():
+            return self.operblock_service.start_infusion(
+                self._current_admission_id,
+                self._current_operation_case_id,
+                drug_name,
+                None,
+                "",
+                event_time,
+                concentration_text=concentration_text,
+                volume_ml=volume,
+                payload=preset_payload,
+                return_event=True,
+            )
+
+        write_description = f"operblock_timed_infusion:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result: self._on_infusion_mutation_saved(result),
+            on_error=lambda exc: self._on_infusion_mutation_error(exc),
+        )
+
+    def _add_timed_infusion_preset(self, preset: dict):
+        self._start_timed_infusion_preset(preset, "")
+
+    def _on_quick_order_saved(self, result=None):
+        quick_scroll_state = getattr(self, "_pending_quick_orders_scroll_state", None)
+        self._pending_quick_orders_scroll_state = None
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        if not self._apply_added_order_locally(dict(result or {}) if isinstance(result, dict) else {}):
+            self.refresh_protocol(force=True)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+
+    def _on_quick_order_error(self, exc: Exception):
+        quick_scroll_state = getattr(self, "_pending_quick_orders_scroll_state", None)
+        self._pending_quick_orders_scroll_state = None
+        self._write_pending = False
+        self._set_protocol_write_controls_enabled(True)
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Ошибка сохранения"
+        CustomMessageBox.warning(self, title, str(exc))
+        self.refresh_protocol(force=True)
+        self._restore_quick_orders_scroll_state_later(quick_scroll_state)
+
+    def _run_stage_action(self, action_name: str, operation, success_message: str = ""):
+        if self._write_pending:
+            return
+        self._write_pending = True
+        self._apply_protocol_controls_state()
+        self._enqueue_write(
+            action_name,
+            operation,
+            on_success=lambda _result: self._on_stage_action_success(success_message),
+            on_error=lambda exc: self._on_stage_action_error(exc),
+        )
+
+    def _on_stage_action_success(self, message: str = ""):
+        self._write_pending = False
+        if message:
+            CustomMessageBox.information(self, "Оперблок", message)
+        self.refresh_protocol(force=True)
+        self.refresh_board(force=True)
+
+    def _on_stage_action_error(self, exc: Exception):
+        self._write_pending = False
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Оперблок"
+        CustomMessageBox.warning(self, title, str(exc))
+        if self._current_operation_case_id:
+            self.refresh_protocol(force=True)
+        self.refresh_board(force=True)
+
+    def _operation_case_defaults(self, operation_case_id: int) -> dict:
+        try:
+            return dict(self.operblock_service.get_operation_case_form_data(int(operation_case_id)) or {})
+        except Exception as exc:
+            logger.error("operblock operation case defaults load failed: %s", exc, exc_info=True)
+            return {}
+
+    def _default_anesthesia_start_datetime(
+        self,
+        operation_case_id: int | None = None,
+        *,
+        latest_vital_at: datetime | None = None,
+    ) -> datetime:
+        fallback = (
+            _minute_floor_dt(self._current_operation_start)
+            or _minute_floor_dt(self._current_protocol_date)
+            or datetime.now().replace(second=0, microsecond=0)
+        )
+        latest_vital_dt = _minute_floor_dt(latest_vital_at)
+        if latest_vital_dt is None and operation_case_id:
+            try:
+                vitals = self.operblock_service.list_operation_vitals(int(operation_case_id))
+            except Exception as exc:
+                logger.error("operblock anesthesia default time vitals load failed: %s", exc, exc_info=True)
+                vitals = []
+            for vital in vitals or []:
+                timestamp = _minute_floor_dt(getattr(vital, "timestamp", None))
+                if timestamp is not None and (latest_vital_dt is None or timestamp > latest_vital_dt):
+                    latest_vital_dt = timestamp
+        if latest_vital_dt is not None:
+            return latest_vital_dt + timedelta(minutes=5)
+        return fallback
+
+    def _prepare_start_anesthesia_dialog_data(
+        self,
+        operation_case_id: int,
+        fallback_start_datetime: datetime,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        status = "error"
+        try:
+            context = dict(
+                self.operblock_service.get_start_anesthesia_context(int(operation_case_id))
+                or {}
+            )
+            options = load_start_anesthesia_options()
+            latest_vital_at = _minute_floor_dt(context.get("latest_vital_at"))
+            initial_start_datetime = (
+                latest_vital_at + timedelta(minutes=5)
+                if latest_vital_at is not None
+                else _minute_floor_dt(fallback_start_datetime)
+            )
+            status = "ok"
+            return {
+                **context,
+                **options,
+                "initial_start_datetime": initial_start_datetime,
+            }
+        finally:
+            record_metric(
+                "operblock_start_anesthesia_prepare_worker_ms",
+                round((time.perf_counter() - started) * 1000.0, 3),
+                operation_case_id=int(operation_case_id),
+                status=status,
+            )
+
+    def _show_start_anesthesia_dialog(self, case_id: int, payload: dict[str, Any]) -> None:
+        has_initial_vitals = bool(payload.get("has_initial_vitals"))
+        self._current_operation_has_vitals = has_initial_vitals
+        self._apply_protocol_controls_state()
+        if not has_initial_vitals:
+            CustomMessageBox.warning(
+                self,
+                "Начать пособие",
+                "Перед началом пособия введите исходные витальные показатели.",
+            )
+            return
+
+        defaults = dict(payload.get("defaults") or {})
+        dialog = StartAnesthesiaDialog(
+            list(payload.get("anesthesia_types") or []),
+            list(payload.get("anesthesiologists") or []),
+            list(payload.get("anesthetists") or []),
+            self,
+            initial_assistance_type=str(defaults.get("anesthesia_assistance_type") or ""),
+            initial_anesthesiologist=str(defaults.get("anesthesiologist") or ""),
+            initial_anesthetist=str(defaults.get("anesthetist") or ""),
+            initial_start_datetime=_minute_floor_dt(payload.get("initial_start_datetime"))
+            or self._default_anesthesia_start_datetime(),
+            min_start_datetime=self._current_operation_start,
+            max_start_datetime=self._current_operation_end,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        assistance_type = dialog.selected_assistance_type()
+        anesthesiologist = dialog.selected_anesthesiologist()
+        anesthetist = dialog.selected_anesthetist()
+        event_time = dialog.start_datetime_text()
+        self._run_stage_action(
+            f"operblock_start_anesthesia:{case_id}",
+            lambda: self.operblock_service.start_anesthesia(
+                case_id,
+                assistance_type,
+                anesthesiologist=anesthesiologist,
+                anesthetist=anesthetist,
+                event_time=event_time,
+            ),
+            "Анестезиологическое пособие начато.",
+        )
+
+    def _default_surgery_start_datetime(self) -> datetime:
+        base_dt = (
+            _minute_floor_dt(self._current_anesthesia_start)
+            or _minute_floor_dt(self._current_operation_start)
+            or _minute_floor_dt(self._current_protocol_date)
+            or datetime.now().replace(second=0, microsecond=0)
+        )
+        default_dt = base_dt + timedelta(minutes=5)
+        latest_stage_dt = self._latest_stage_before_surgery_datetime()
+        return max(default_dt, latest_stage_dt) if latest_stage_dt is not None else default_dt
+
+    def _latest_stage_before_surgery_datetime(self) -> datetime | None:
+        stage_times = [
+            _minute_floor_dt(_parse_datetime_value(row.get("event_time")))
+            for row in self._operation_stage_dialog_rows()
+            if str(row.get("kind") or "") in {"anesthesia_start", "custom"}
+        ]
+        return max((value for value in stage_times if value is not None), default=None)
+
+    @staticmethod
+    def _clamp_stage_datetime(
+        value: datetime | None,
+        *,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+    ) -> datetime:
+        result = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        min_dt = _minute_floor_dt(min_datetime)
+        max_dt = _minute_floor_dt(max_datetime)
+        if min_dt is not None and max_dt is not None and max_dt < min_dt:
+            max_dt = None
+        if min_dt is not None and result < min_dt:
+            result = min_dt
+        if max_dt is not None and result > max_dt:
+            result = max_dt
+        return result
+
+    def _default_surgery_end_datetime(self) -> datetime:
+        min_dt = _minute_floor_dt(self._current_surgery_start) or _minute_floor_dt(self._current_anesthesia_start)
+        return self._clamp_stage_datetime(datetime.now(), min_datetime=min_dt, max_datetime=self._current_anesthesia_end)
+
+    def _default_anesthesia_end_datetime(self) -> datetime:
+        lower_bounds = [
+            _minute_floor_dt(self._current_operation_start),
+            _minute_floor_dt(self._current_anesthesia_start),
+            _minute_floor_dt(self._current_surgery_end),
+        ]
+        min_dt = max((dt for dt in lower_bounds if dt is not None), default=None)
+        return self._clamp_stage_datetime(datetime.now(), min_datetime=min_dt, max_datetime=self._current_operation_end)
+
+    def _start_anesthesia(self):
+        if self.is_view_only_mode():
+            return
+        if not self._current_operation_case_id:
+            return
+        active_worker = getattr(self, "_start_anesthesia_prep_worker", None)
+        if active_worker is not None and active_worker.isRunning():
+            return
+
+        case_id = int(self._current_operation_case_id)
+        fallback_start_datetime = self._default_anesthesia_start_datetime()
+        generation = int(getattr(self, "_start_anesthesia_prep_generation", 0)) + 1
+        self._start_anesthesia_prep_generation = generation
+        self._start_anesthesia_prep_pending = True
+        self._apply_protocol_controls_state()
+        loading_key = self._show_operblock_loading(
+            "Подготовка начала пособия...",
+            key="start-anesthesia",
+            auto_hide_ms=30000,
+        )
+        total_started = time.perf_counter()
+        worker = AsyncCallThread(
+            self._prepare_start_anesthesia_dialog_data,
+            case_id,
+            fallback_start_datetime,
+            parent=self,
+        )
+        self._start_anesthesia_prep_worker = worker
+        finalized = {"done": False}
+
+        def is_stale_result() -> bool:
+            return (
+                bool(getattr(self, "_is_closing", False))
+                or generation != int(getattr(self, "_start_anesthesia_prep_generation", 0))
+                or case_id != int(getattr(self, "_current_operation_case_id", 0) or 0)
+            )
+
+        def finalize_preparation(status: str) -> None:
+            if finalized["done"]:
+                return
+            finalized["done"] = True
+            self._hide_operblock_loading(loading_key, delay_ms=0)
+            if getattr(self, "_start_anesthesia_prep_worker", None) is worker:
+                self._start_anesthesia_prep_worker = None
+            if generation == int(getattr(self, "_start_anesthesia_prep_generation", 0)):
+                self._start_anesthesia_prep_pending = False
+                self._apply_protocol_controls_state()
+            record_metric(
+                "operblock_start_anesthesia_prepare_total_ms",
+                round((time.perf_counter() - total_started) * 1000.0, 3),
+                operation_case_id=case_id,
+                status=status,
+                ui_sync_reads=0,
+            )
+
+        def on_preparation_ready(payload):
+            stale = is_stale_result()
+            finalize_preparation("stale" if stale else "ok")
+            if stale:
+                return
+            self._show_start_anesthesia_dialog(case_id, dict(payload or {}))
+
+        def on_preparation_failed(exc):
+            stale = is_stale_result()
+            finalize_preparation("stale" if stale else "error")
+            if stale:
+                return
+            logger.error("operblock start anesthesia preparation failed: %s", exc, exc_info=True)
+            CustomMessageBox.warning(
+                self,
+                "Начать пособие",
+                f"Не удалось подготовить начало пособия: {exc}",
+            )
+
+        worker.succeeded.connect(on_preparation_ready)
+        worker.failed.connect(on_preparation_failed)
+        worker.start()
+
+    def _end_anesthesia(self):
+        if self.is_view_only_mode():
+            return
+        if not self._current_operation_case_id:
+            return
+        case_id = int(self._current_operation_case_id)
+        defaults = self._operation_case_defaults(case_id)
+        initial_department = normalize_operblock_transfer_department(defaults.get("department_profile") or "")
+        departments = list(OPERBLOCK_TRANSFER_DEPARTMENT_OPTIONS)
+        if initial_department and initial_department.casefold() not in {item.casefold() for item in departments}:
+            departments.insert(1, initial_department)
+        dialog = EndAnesthesiaTransferDialog(
+            departments,
+            self,
+            initial_department=initial_department,
+            initial_end_datetime=self._default_anesthesia_end_datetime(),
+            min_end_datetime=max(
+                (
+                    dt
+                    for dt in (
+                        _minute_floor_dt(self._current_operation_start),
+                        _minute_floor_dt(self._current_anesthesia_start),
+                        _minute_floor_dt(self._current_surgery_end),
+                    )
+                    if dt is not None
+                ),
+                default=None,
+            ),
+            max_end_datetime=self._current_operation_end,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        transfer_department = dialog.selected_department()
+        event_time = dialog.end_datetime_text()
+        handoff_id = None
+        if normalize_operblock_transfer_department(transfer_department).casefold() == "рао":
+            try:
+                candidates = self.operblock_service.find_late_binding_candidates(
+                    case_id,
+                    target_department=transfer_department,
+                )
+            except Exception as exc:
+                logger.error(
+                    "operblock late handoff lookup failed case_id=%s: %s",
+                    case_id,
+                    exc,
+                    exc_info=True,
+                )
+                candidates = []
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                patient = dict(candidate.get("patient_snapshot") or {})
+                reply = CustomMessageBox.question(
+                    self,
+                    "Связать с картой РАО",
+                    "В очереди РАО найден пациент с теми же номером истории, ФИО "
+                    "и датой рождения:\n\n"
+                    f"{patient.get('full_name') or 'ФИО не указано'}\n"
+                    f"История: {patient.get('history_number') or 'не указана'}\n\n"
+                    "Связать операционный случай с исходной картой и вернуть пациента "
+                    "на зарезервированную койку?",
+                    CustomMessageBox.Yes | CustomMessageBox.No,
+                    CustomMessageBox.Yes,
+                )
+                if reply == CustomMessageBox.Yes:
+                    handoff_id = int(candidate["id"])
+        self._run_stage_action(
+            f"operblock_end_anesthesia:{case_id}",
+            lambda: self.operblock_service.end_anesthesia_with_transfer(
+                case_id,
+                transfer_department,
+                event_time=event_time,
+                handoff_id=handoff_id,
+            ),
+            "Анестезиологическое пособие завершено.",
+        )
+
+    def _start_surgery(self):
+        if self.is_view_only_mode():
+            return
+        if not self._current_operation_case_id:
+            return
+        case_id = int(self._current_operation_case_id)
+        try:
+            surgeons = load_operblock_surgeons()
+            operating_nurses = load_operblock_operating_nurses()
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Начать операцию", f"Не удалось загрузить сотрудников для операции: {exc}")
+            return
+        defaults = self._operation_case_defaults(case_id)
+        initial_start_dt = self._default_surgery_start_datetime()
+        min_start_dt = max(
+            (
+                value
+                for value in (
+                    _minute_floor_dt(self._current_anesthesia_start),
+                    _minute_floor_dt(self._current_operation_start),
+                    self._latest_stage_before_surgery_datetime(),
+                )
+                if value is not None
+            ),
+            default=None,
+        )
+        dialog = StartSurgeryDialog(
+            surgeons,
+            operating_nurses,
+            self,
+            initial_operation_name=str(defaults.get("operation_name") or ""),
+            initial_surgeons=list(defaults.get("surgeons") or []),
+            initial_operating_nurse=str(defaults.get("operating_nurse") or ""),
+            initial_start_datetime=initial_start_dt,
+            min_start_datetime=min_start_dt,
+            max_start_datetime=self._current_anesthesia_end,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        operation_name = dialog.operation_name()
+        surgeons = dialog.selected_surgeons()
+        operating_nurse = dialog.selected_operating_nurse()
+        event_time = dialog.start_datetime_text()
+        self._run_stage_action(
+            f"operblock_start_surgery:{case_id}",
+            lambda: self.operblock_service.start_surgery(
+                case_id,
+                operation_name=operation_name,
+                surgeons=surgeons,
+                operating_nurse=operating_nurse,
+                event_time=event_time,
+            ),
+        )
+
+    def _end_surgery(self):
+        if self.is_view_only_mode():
+            return
+        if not self._current_operation_case_id:
+            return
+        case_id = int(self._current_operation_case_id)
+        dialog = EndSurgeryDialog(
+            self,
+            initial_end_datetime=self._default_surgery_end_datetime(),
+            min_end_datetime=self._current_surgery_start or self._current_anesthesia_start or self._current_operation_start,
+            max_end_datetime=self._current_anesthesia_end,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        event_time = dialog.end_datetime_text()
+        self._run_stage_action(
+            f"operblock_end_surgery:{case_id}",
+            lambda: self.operblock_service.end_surgery(case_id, event_time=event_time),
+        )
+
+    def _operation_stage_dialog_rows(self) -> list[dict]:
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        rows: list[dict] = []
+        for event in snapshot.get("operation_events") or []:
+            data = dict(event or {})
+            payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+            kind = str((payload or {}).get("stage_kind") or (payload or {}).get("operation_stage") or "").strip()
+            if kind not in {"anesthesia_start", "surgery_start", "custom"}:
+                continue
+            label = str(
+                (payload or {}).get("label")
+                or data.get("display_label")
+                or data.get("raw_text")
+                or ""
+            ).strip()
+            rows.append(
+                {
+                    "kind": kind,
+                    "label": label,
+                    "event_id": _safe_int(data.get("source_id")),
+                    "source_id": _safe_int(data.get("source_id")),
+                    "event_time": data.get("event_time"),
+                    "revision": int(data.get("revision") or 0),
+                    "payload": payload,
+                    "display_label": data.get("display_label"),
+                    "raw_text": data.get("raw_text"),
+                }
+            )
+
+        existing_auto = {str(row.get("kind") or "") for row in rows}
+        for event in (getattr(self, "_current_stage_state", {}) or {}).get("events") or []:
+            kind = str((event or {}).get("kind") or "").strip()
+            if kind not in {"anesthesia_start", "surgery_start"} or kind in existing_auto:
+                continue
+            rows.append(
+                {
+                    "kind": kind,
+                    "label": str((event or {}).get("label") or ""),
+                    "event_id": _safe_int((event or {}).get("id")),
+                    "source_id": _safe_int((event or {}).get("id")),
+                    "event_time": (event or {}).get("event_time"),
+                    "revision": int((event or {}).get("revision") or 0),
+                    "payload": {"stage_kind": kind, "label": str((event or {}).get("label") or "")},
+                }
+            )
+        return rows
+
+    def _operation_stages_available(self) -> bool:
+        state = dict(getattr(self, "_current_stage_state", {}) or {})
+        return bool(state.get("anesthesia_active"))
+
+    def _open_operation_stages_dialog(self):
+        if self.is_view_only_mode():
+            return
+        if self._write_pending:
+            return
+        if not self._current_operation_case_id:
+            return
+        if not self._operation_stages_available():
+            CustomMessageBox.warning(
+                self,
+                "Этапы",
+                "Этапы доступны после начала и до завершения пособия.",
+            )
+            return
+        dialog = OperationStagesDialog(self._operation_stage_dialog_rows(), self)
+        dialog_ref = weakref.ref(dialog)
+        dialog.saveRequested.connect(lambda payload, ref=dialog_ref: self._save_operation_stage_from_dialog(ref, payload))
+        dialog.timeEditRequested.connect(lambda payload, ref=dialog_ref: self._edit_operation_stage_time_from_dialog(ref, payload))
+        dialog.exec()
+
+    def _validate_operation_stage_datetime_or_warn(self, value: str | None) -> bool:
+        event_dt = _minute_floor_dt(_parse_datetime_value(value))
+        if event_dt is None:
+            CustomMessageBox.warning(self, "Время этапа", "Укажите корректное время этапа.")
+            return False
+        anesthesia_start = _minute_floor_dt(self._current_anesthesia_start)
+        if anesthesia_start is None:
+            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить начало пособия. Обновите протокол.")
+            return False
+        if event_dt < anesthesia_start:
+            CustomMessageBox.warning(
+                self,
+                "Время этапа",
+                f"Этап не может быть раньше начала пособия: {anesthesia_start.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        anesthesia_end = _minute_floor_dt(self._current_anesthesia_end) if not self._current_anesthesia_active else None
+        if anesthesia_end is not None and event_dt > anesthesia_end:
+            CustomMessageBox.warning(
+                self,
+                "Время этапа",
+                f"Этап операции не может быть позже окончания пособия: {anesthesia_end.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        return True
+
+    def _edit_operation_stage_time_from_dialog(self, dialog_ref, payload: dict):
+        dialog = dialog_ref()
+        row_key = str((payload or {}).get("row_key") or "")
+        if dialog is None or self._write_pending:
+            if dialog is not None:
+                dialog.apply_save_error(row_key)
+            return
+        event_id = _safe_int((payload or {}).get("event_id"))
+        is_new = bool((payload or {}).get("is_new"))
+        old_event_dt = _minute_floor_dt(_parse_datetime_value((payload or {}).get("event_time")))
+        label = re.sub(r"\s+", " ", str((payload or {}).get("label") or "").strip())
+        if old_event_dt is None:
+            dialog.apply_save_error(row_key)
+            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить этап. Обновите протокол.")
+            return
+        if not is_new and (not event_id or not label):
+            dialog.apply_save_error(row_key)
+            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить этап. Обновите протокол.")
+            return
+        time_dialog = OperationStageTimeEditDialog(
+            old_event_dt,
+            self,
+            stage_label=label or "Новый этап",
+            field_label="Время этапа",
+            min_datetime=self._current_anesthesia_start,
+            max_datetime=self._current_anesthesia_end if not self._current_anesthesia_active else None,
+        )
+        if time_dialog.exec() != QDialog.Accepted:
+            return
+        event_time = time_dialog.datetime_text()
+        new_event_dt = _minute_floor_dt(_parse_datetime_value(event_time))
+        if new_event_dt == old_event_dt:
+            return
+        if not self._validate_operation_stage_datetime_or_warn(event_time):
+            return
+        if is_new:
+            dialog.apply_pending_stage_time(row_key, event_time)
+            return
+        self._save_operation_stage_from_dialog(
+            dialog_ref,
+            {
+                "row_key": row_key,
+                "event_id": event_id,
+                "expected_revision": int((payload or {}).get("expected_revision") or 0),
+                "label": label,
+                "event_time": event_time,
+                "is_new": False,
+            },
+        )
+
+    def _save_operation_stage_from_dialog(self, dialog_ref, payload: dict):
+        dialog = dialog_ref()
+        row_key = str((payload or {}).get("row_key") or "")
+        if dialog is None:
+            return
+        if self._write_pending:
+            dialog.apply_save_error(row_key)
+            return
+        if not self._current_operation_case_id:
+            dialog.apply_save_error(row_key)
+            return
+        label = re.sub(r"\s+", " ", str((payload or {}).get("label") or "").strip())
+        if not label:
+            dialog.apply_save_error(row_key)
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
+            return
+        case_id = int(self._current_operation_case_id)
+        is_new = bool((payload or {}).get("is_new"))
+        event_id = _safe_int((payload or {}).get("event_id"))
+        expected_revision = int((payload or {}).get("expected_revision") or 0)
+        event_time = str((payload or {}).get("event_time") or "").strip() or None
+        if not is_new and not event_id:
+            dialog.apply_save_error(row_key)
+            CustomMessageBox.warning(self, "Этапы", "Не удалось определить этап. Обновите протокол.")
+            return
+        if event_time is not None and not self._validate_operation_stage_datetime_or_warn(event_time):
+            dialog.apply_save_error(row_key)
+            return
+
+        write_description = (
+            f"operblock_add_operation_stage:{case_id}"
+            if is_new
+            else f"operblock_update_operation_stage:{int(event_id)}"
+        )
+        self._write_pending = True
+        self._apply_protocol_controls_state()
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+
+        def operation():
+            if is_new:
+                return self.operblock_service.add_operation_stage(case_id, label, event_time=event_time)
+            return self.operblock_service.update_operation_stage(
+                int(event_id),
+                label,
+                expected_revision=expected_revision,
+                event_time=event_time,
+            )
+
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result, ref=dialog_ref, key=row_key: self._on_operation_stage_saved(ref, key, result),
+            on_error=lambda exc, ref=dialog_ref, key=row_key: self._on_operation_stage_save_error(ref, key, exc),
+        )
+
+    @staticmethod
+    def _normalized_operation_stage_event(stage: dict) -> dict:
+        data = dict(stage or {})
+        source_id = _safe_int(data.get("source_id") or data.get("event_id"))
+        if source_id:
+            data["id"] = f"timeline_event:{int(source_id)}"
+            data["source"] = "timeline_event"
+            data["source_id"] = int(source_id)
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        payload = dict(payload or {})
+        payload["stage_kind"] = str(payload.get("stage_kind") or "custom").strip() or "custom"
+        label = re.sub(
+            r"\s+",
+            " ",
+            str(payload.get("label") or data.get("display_label") or data.get("raw_text") or "").strip(),
+        )
+        if label:
+            payload["label"] = label
+            data["drug_label"] = label
+            data["display_label"] = label
+            data["raw_text"] = label
+        data["payload"] = payload
+        data["event_type"] = "clinical_event"
+        data["status"] = str(data.get("status") or "active")
+        data["revision"] = int(data.get("revision") or 0)
+        return data
+
+    def _patch_operation_stage_event_locally(self, stage: dict) -> bool:
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        if not snapshot:
+            return False
+        stage_event = self._normalized_operation_stage_event(stage)
+        source_id = _safe_int(stage_event.get("source_id"))
+        if not source_id:
+            return False
+        events = []
+        replaced = False
+        for event in list(snapshot.get("operation_events") or []):
+            data = dict(event or {})
+            if _safe_int(data.get("source_id")) == int(source_id):
+                if not replaced:
+                    events.append(stage_event)
+                    replaced = True
+                continue
+            events.append(data)
+        if not replaced:
+            events.append(stage_event)
+        events.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("event_time")) or datetime.min,
+                _safe_int((item or {}).get("source_id")) or 0,
+            )
+        )
+        snapshot["operation_events"] = events
+        self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    def _update_single_operation_stage_marker(self, stage: dict) -> bool:
+        chart = getattr(self, "vitals_chart", None)
+        if chart is None or not hasattr(chart, "patch_operation_stage_marker"):
+            return False
+        start_dt = getattr(chart, "start_time", None)
+        if not isinstance(start_dt, datetime):
+            transform = getattr(chart, "_timeline_transform", None)
+            start_dt = getattr(transform, "display_origin_at", None)
+        if not isinstance(start_dt, datetime):
+            start_dt = self._current_operation_start or self._current_protocol_date
+        return bool(
+            chart.patch_operation_stage_marker(
+                self._normalized_operation_stage_event(stage),
+                snapshot=getattr(self, "_current_timeline_snapshot", None),
+                start_time=start_dt,
+            )
+        )
+
+    def _on_operation_stage_saved(self, dialog_ref, row_key: str, result):
+        self._write_pending = False
+        self._apply_protocol_controls_state()
+        stage = self._normalized_operation_stage_event(dict(result or {}))
+        patched = self._patch_operation_stage_event_locally(stage)
+        dialog = dialog_ref()
+        if patched:
+            if dialog is not None:
+                dialog.apply_saved_stage(row_key, stage)
+            if not self._update_single_operation_stage_marker(stage):
+                self._update_vitals_chart_order_markers()
+            return
+        if dialog is not None:
+            dialog.apply_save_error(row_key)
+        self.refresh_protocol(force=True)
+
+    def _on_operation_stage_save_error(self, dialog_ref, row_key: str, exc: Exception):
+        self._write_pending = False
+        self._apply_protocol_controls_state()
+        dialog = dialog_ref()
+        if dialog is not None:
+            dialog.apply_save_error(row_key)
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Этапы"
+        CustomMessageBox.warning(self, title, str(exc))
+        if isinstance(exc, (DataConflictError, OperBlockConflictError)) and self._current_operation_case_id:
+            self.refresh_protocol(force=True)
+
+    def _undo_last_action(self):
+        if not self._current_operation_case_id or self._write_pending:
+            return
+        case_id = int(self._current_operation_case_id)
+
+        def operation():
+            return self.operblock_service.undo_last_action(case_id)
+
+        self._write_pending = True
+        self._apply_protocol_controls_state()
+        self._enqueue_write(
+            f"operblock_undo_last:{case_id}",
+            operation,
+            on_success=lambda result: self._on_undo_last_success(result),
+            on_error=lambda exc: self._on_stage_action_error(exc),
+        )
+
+    def _on_undo_last_success(self, result):
+        self._write_pending = False
+        message = str((result or {}).get("message") or "Последнее действие отменено.")
+        CustomMessageBox.information(self, "Отмена действия", message)
+        self.refresh_protocol(force=True)
+        self.refresh_board(force=True)
+
+    def _confirm_release_current_case(self):
+        if self._current_operation_case_id:
+            self._confirm_release_case(self._current_operation_case_id)
+
+    def _confirm_release_case(self, operation_case_id: int):
+        if self.is_view_only_mode():
+            return
+        if self._write_pending:
+            return
+        reply = CustomMessageBox.question(
+            self,
+            "Освободить стол",
+            "Действительно освободить операционный стол?\n"
+            "Пациент будет перенесён в архив операционных пациентов.",
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+        handoff_id = None
+        try:
+            candidates = self.operblock_service.find_late_binding_candidates(
+                int(operation_case_id)
+            )
+        except Exception as exc:
+            logger.error(
+                "operblock release late handoff lookup failed case_id=%s: %s",
+                operation_case_id,
+                exc,
+                exc_info=True,
+            )
+            candidates = []
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            patient = dict(candidate.get("patient_snapshot") or {})
+            reply = CustomMessageBox.question(
+                self,
+                "Связать с картой РАО",
+                "Перед освобождением стола найдена исходная карта РАО с теми же "
+                "номером истории, ФИО и датой рождения:\n\n"
+                f"{patient.get('full_name') or 'ФИО не указано'}\n"
+                f"История: {patient.get('history_number') or 'не указана'}\n\n"
+                "Связать случай и вернуть пациента на зарезервированную койку?",
+                CustomMessageBox.Yes | CustomMessageBox.No,
+                CustomMessageBox.Yes,
+            )
+            if reply == CustomMessageBox.Yes:
+                handoff_id = int(candidate["id"])
+        self._enqueue_release_case(
+            int(operation_case_id),
+            handoff_id=handoff_id,
+        )
+
+    def _enqueue_release_case(
+        self,
+        operation_case_id: int,
+        *,
+        handoff_id: int | None,
+        preserve_source_movement: bool = False,
+    ) -> None:
+        self._write_pending = True
+
+        def operation():
+            return self.operblock_service.release_operation_table(
+                operation_case_id,
+                handoff_id=handoff_id,
+                preserve_source_movement=preserve_source_movement,
+            )
+
+        self._enqueue_write(
+            (
+                f"operblock_release_operation_table:{operation_case_id}:preserve_source"
+                if preserve_source_movement
+                else f"operblock_release_operation_table:{operation_case_id}"
+            ),
+            operation,
+            on_success=lambda _result: self._on_release_case_success(operation_case_id),
+            on_error=lambda exc: self._on_release_case_error(
+                operation_case_id,
+                handoff_id,
+                preserve_source_movement,
+                exc,
+            ),
+        )
+
+    def _on_release_case_success(self, operation_case_id: int):
+        self._write_pending = False
+        self.refresh_board(force=True)
+        if self._current_operation_case_id == int(operation_case_id):
+            self._show_board()
+        parent = self.window()
+        migrate = getattr(parent, "_maybe_migrate_operblock_offline_after_release", None)
+        if callable(migrate):
+            migrate()
+
+    def _on_release_case_error(
+        self,
+        operation_case_id: int,
+        handoff_id: int | None,
+        preserve_source_movement: bool,
+        exc: Exception,
+    ):
+        self._write_pending = False
+        if isinstance(exc, OperBlockSourceMovementChangedError) and not preserve_source_movement:
+            CustomMessageBox.warning(self, "Освободить стол", str(exc))
+            self._enqueue_release_case(
+                int(operation_case_id),
+                handoff_id=handoff_id,
+                preserve_source_movement=True,
+            )
+            return
+        CustomMessageBox.warning(self, "Освободить стол", str(exc))
+        self.refresh_board(force=True)
+        if self._current_operation_case_id:
+            self.refresh_protocol(force=True)
+
+    def _diagnostic_role(self) -> str:
+        code = str(self._table_filter_code or "").strip()
+        return f"operblock_{code}" if code else "operblock"
+
+    def _diagnostic_current_screen(self) -> str:
+        stack = getattr(self, "stack", None)
+        current = stack.currentWidget() if stack is not None else None
+        if current == getattr(self, "protocol_page", None):
+            return "protocol"
+        if current == getattr(self, "archive_page", None):
+            return "archive"
+        if current == getattr(self, "settings_page", None):
+            return "settings"
+        return "board"
+
+    def _diagnostic_table_code(self) -> str:
+        if self._table_filter_code:
+            return str(self._table_filter_code)
+        for source in (
+            getattr(self, "_current_timeline_snapshot", None),
+            getattr(self, "_current_stage_state", None),
+        ):
+            if isinstance(source, dict):
+                table_code = str(source.get("table_code") or "").strip()
+                if table_code:
+                    return table_code
+        return ""
+
+    def _record_user_idle_diagnostics(self, action: str) -> dict[str, Any]:
+        now = time.monotonic()
+        previous = float(getattr(self, "_opblock_idle_last_activity_monotonic", now) or now)
+        idle_ms = max(0.0, (now - previous) * 1000.0)
+        threshold_ms = OPERBLOCK_IDLE_DIAGNOSTIC_THRESHOLD_SEC * 1000.0
+        returned_from_idle = False
+        if idle_ms >= threshold_ms and not bool(getattr(self, "_opblock_idle_period_reported", False)):
+            common = {
+                "role": self._diagnostic_role(),
+                "current_screen": self._diagnostic_current_screen(),
+                "current_admission_id": self._current_admission_id,
+                "current_operation_case_id": self._current_operation_case_id,
+                "idle_ms": round(idle_ms, 3),
+                "timestamp_ms": int(time.time() * 1000.0),
+            }
+            record_metric("user_idle_detected", 1, **common)
+            record_metric(
+                "user_return_from_idle",
+                1,
+                role=common["role"],
+                idle_ms=common["idle_ms"],
+                first_action=str(action or ""),
+                current_screen=common["current_screen"],
+                admission_id=self._current_admission_id,
+                operation_case_id=self._current_operation_case_id,
+                timestamp_ms=common["timestamp_ms"],
+            )
+            self._opblock_idle_period_reported = True
+            returned_from_idle = True
+        elif idle_ms < threshold_ms:
+            self._opblock_idle_period_reported = False
+        self._opblock_idle_last_activity_monotonic = now
+        return {"idle_ms": idle_ms, "returned_from_idle": returned_from_idle}
+
+    def _finish_foreground_resume_lease_later(self, lease_id: str, result: str = "expired") -> None:
+        finished = finish_foreground_resume_lease(lease_id, result=result)
+        active = dict(getattr(self, "_active_foreground_resume_lease", None) or {})
+        if active.get("lease_id") == lease_id:
+            self._active_foreground_resume_lease = None
+        if finished:
+            last = dict(getattr(self, "_last_opblock_action", None) or {})
+            if last.get("foreground_lease_id") == lease_id:
+                last["foreground_lease_finished"] = True
+                self._last_opblock_action = last
+
+    def _maybe_start_foreground_resume_lease(self, action: str, idle_info: dict[str, Any]) -> dict[str, Any] | None:
+        if not bool((idle_info or {}).get("returned_from_idle")):
+            return None
+        idle_ms = float((idle_info or {}).get("idle_ms") or 0.0)
+        lease = start_foreground_resume_lease(
+            role=self._diagnostic_role(),
+            idle_ms=idle_ms,
+            first_action=str(action or ""),
+            current_screen=self._diagnostic_current_screen(),
+            admission_id=self._current_admission_id,
+            operation_case_id=self._current_operation_case_id,
+            table_code=self._diagnostic_table_code(),
+        )
+        if not lease:
+            return None
+        self._active_foreground_resume_lease = dict(lease)
+        mark_foreground_activity(
+            "opblock_resume",
+            admission_id=self._current_admission_id,
+            source="click",
+            ttl_sec=max(1.0, float(lease.get("remaining_ms") or 0.0) / 1000.0),
+            request_id=str(lease.get("lease_id") or ""),
+            operation_case_id=self._current_operation_case_id,
+        )
+        remaining_ms = int(max(1000.0, float(lease.get("remaining_ms") or 0.0)))
+        QTimer.singleShot(
+            remaining_ms,
+            lambda lease_id=str(lease.get("lease_id") or ""): self._finish_foreground_resume_lease_later(lease_id),
+        )
+        return dict(lease)
+
+    def _start_opblock_action_diagnostics(self, description: str) -> dict[str, Any]:
+        request_id = uuid.uuid4().hex
+        action = str(description or "")
+        idle_info = self._record_user_idle_diagnostics(action)
+        idle_ms = float((idle_info or {}).get("idle_ms") or 0.0)
+        lease = self._maybe_start_foreground_resume_lease(action, idle_info)
+        started = time.monotonic()
+        payload = {
+            "action": action,
+            "source": "foreground_resume" if lease else action,
+            "priority": "user_visible" if lease else "",
+            "foreground_lease_id": str((lease or {}).get("lease_id") or ""),
+            "operation_case_id": self._current_operation_case_id,
+            "admission_id": self._current_admission_id,
+            "table_code": self._diagnostic_table_code(),
+            "request_id": request_id,
+            "idle_before_action_ms": round(idle_ms, 3),
+            "timestamp_ms": int(time.time() * 1000.0),
+            "started_monotonic": started,
+            "pending_since_monotonic": started if self._write_pending else None,
+            "screen": self._diagnostic_current_screen(),
+            "first_action_after_idle": bool(lease),
+        }
+        self._active_opblock_action = dict(payload)
+        self._last_opblock_action = dict(payload)
+        record_metric("opblock_action_started", 1, **{k: v for k, v in payload.items() if not k.endswith("_monotonic")})
+        if self._write_pending:
+            record_metric(
+                "ui_pending_state_observed",
+                1,
+                active_opblock_action=action,
+                request_id=request_id,
+                pending_since_ms=0,
+                widget_alive=True,
+                case_still_current=True,
+                source="opblock_action_started",
+            )
+        return payload
+
+    @staticmethod
+    def _diagnostic_result_for_error(exc: Exception) -> str:
+        if isinstance(exc, OpBlockInteractiveWriteBusyTimeout):
+            return "busy_timeout"
+        text = str(exc or "").lower()
+        if "timeout" in text or "timed out" in text:
+            return "timeout"
+        if "busy" in text or "locked" in text or "занят" in text:
+            return "busy"
+        return "error"
+
+    @staticmethod
+    def _is_interactive_busy_timeout(exc: Exception) -> bool:
+        if isinstance(exc, OpBlockInteractiveWriteBusyTimeout):
+            return True
+        text = f"{type(exc).__name__} {exc}".lower()
+        return "interactive" in text and "busy" in text and "timeout" in text
+
+    def _finish_opblock_action_diagnostics(self, action_info: dict[str, Any] | None, result: str, exc: Exception | None = None):
+        if not action_info:
+            return
+        duration_ms = round((time.monotonic() - float(action_info.get("started_monotonic") or time.monotonic())) * 1000.0, 3)
+        payload = {
+            "action": str(action_info.get("action") or ""),
+            "request_id": str(action_info.get("request_id") or ""),
+            "result": result,
+            "duration_ms": duration_ms,
+            "error_class": type(exc).__name__ if exc is not None else "",
+            "error_message_sanitized": _sanitize_diagnostic_message(exc) if exc is not None else "",
+        }
+        record_metric("opblock_action_finished", duration_ms, **payload)
+        if (
+            self._active_opblock_action
+            and self._active_opblock_action.get("request_id") == action_info.get("request_id")
+        ):
+            self._active_opblock_action = None
+        self._last_opblock_action = {**dict(action_info), **payload, "finished_monotonic": time.monotonic()}
+
+    def diagnostic_snapshot(self) -> dict[str, Any]:
+        active = dict(getattr(self, "_active_opblock_action", None) or {})
+        last = dict(getattr(self, "_last_opblock_action", None) or {})
+        lease = dict(getattr(self, "_active_foreground_resume_lease", None) or {})
+        pending_since = active.get("pending_since_monotonic")
+        pending_since_ms = None
+        if isinstance(pending_since, (int, float)):
+            pending_since_ms = round(max(0.0, (time.monotonic() - float(pending_since)) * 1000.0), 3)
+        lease_age_ms = None
+        if lease:
+            lease_age_ms = max(0.0, float(lease.get("age_ms") or 0.0))
+            started = active.get("started_monotonic") if active.get("foreground_lease_id") == lease.get("lease_id") else None
+            if isinstance(started, (int, float)):
+                lease_age_ms = round(max(lease_age_ms, (time.monotonic() - float(started)) * 1000.0), 3)
+        return {
+            "active_opblock_action": str(active.get("action") or ""),
+            "active_opblock_request_id": str(active.get("request_id") or ""),
+            "last_user_action": str(last.get("action") or ""),
+            "first_action_after_idle": str(lease.get("first_action") or last.get("action") or ""),
+            "idle_before_action_ms": active.get("idle_before_action_ms") or last.get("idle_before_action_ms"),
+            "current_operation_case_id": self._current_operation_case_id,
+            "current_admission_id": self._current_admission_id,
+            "current_table_code": self._diagnostic_table_code(),
+            "active_foreground_resume_lease": str(lease.get("lease_id") or ""),
+            "foreground_lease_age_ms": lease_age_ms,
+            "foreground_lease_reason": str(lease.get("reason") or ""),
+            "ui_pending_action": str(active.get("action") or "") if self._write_pending else "",
+            "ui_pending_since_ms": pending_since_ms if self._write_pending else None,
+            "widget_alive": not bool(getattr(self, "_is_closing", False)),
+            "case_still_current": (
+                not active
+                or not active.get("operation_case_id")
+                or active.get("operation_case_id") == self._current_operation_case_id
+            ),
+        }
+
+    def _enqueue_write(self, description: str, operation, on_success, on_error):
+        if self.is_view_only_mode():
+            logger.info("Operblock view-only write skipped: %s", description)
+            self._write_pending = False
+            self._apply_protocol_controls_state()
+            return
+        action_info = self._start_opblock_action_diagnostics(description)
+
+        def diagnostic_success(result):
+            try:
+                on_success(result)
+            finally:
+                self._finish_opblock_action_diagnostics(action_info, "success")
+
+        def diagnostic_error(exc: Exception):
+            busy_timeout = self._is_interactive_busy_timeout(exc)
+            pending_before = bool(getattr(self, "_write_pending", False))
+            try:
+                on_error(exc)
+            finally:
+                pending_after_handler = bool(getattr(self, "_write_pending", False))
+                if busy_timeout and pending_after_handler:
+                    self._write_pending = False
+                    try:
+                        self._set_protocol_write_controls_enabled(True)
+                    except Exception:
+                        pass
+                if busy_timeout and (pending_before or pending_after_handler or not getattr(self, "_write_pending", False)):
+                    record_metric(
+                        "ui_pending_cleared_after_busy_timeout",
+                        1,
+                        action=str(action_info.get("action") or description),
+                        request_id=str(action_info.get("request_id") or ""),
+                        operation_case_id=action_info.get("operation_case_id"),
+                        admission_id=action_info.get("admission_id"),
+                        foreground_lease_id=str(action_info.get("foreground_lease_id") or ""),
+                        timeout_ms=getattr(exc, "timeout_ms", OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS),
+                    )
+                self._finish_opblock_action_diagnostics(
+                    action_info,
+                    self._diagnostic_result_for_error(exc),
+                    exc,
+                )
+
+        if not self.data_service:
+            try:
+                result = operation()
+            except Exception as exc:
+                diagnostic_error(exc)
+            else:
+                diagnostic_success(result)
+            return
+        write_metadata = {
+            "interactive": True,
+            "role": self._diagnostic_role(),
+            "request_id": str(action_info.get("request_id") or ""),
+            "idle_before_action_ms": action_info.get("idle_before_action_ms"),
+            "foreground_lease_id": str(action_info.get("foreground_lease_id") or ""),
+            "admission_id": action_info.get("admission_id"),
+            "operation_case_id": action_info.get("operation_case_id"),
+            "table_code": str(action_info.get("table_code") or ""),
+            "timeout_ms": OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS,
+        }
+        self.data_service.enqueue_write(
+            description,
+            operation,
+            on_success=diagnostic_success,
+            on_error=diagnostic_error,
+            write_metadata=write_metadata,
+        )
+
+    def _cleanup_route_only_write_suppressions(self) -> None:
+        now = time.monotonic()
+        ttl = float(OPERBLOCK_ROUTE_ONLY_REFRESH_SUPPRESS_SECONDS)
+        self._route_only_write_suppressions = {
+            key: started
+            for key, started in (getattr(self, "_route_only_write_suppressions", {}) or {}).items()
+            if now - float(started or 0.0) <= ttl
+        }
+
+    def _remember_local_write_refresh_suppression(self, description: str, entities) -> None:
+        source = str(description or "").strip()
+        if not source:
+            return
+        self._local_write_refresh_suppressions[source] = {
+            "started": time.monotonic(),
+            "entities": {str(entity) for entity in (entities or []) if entity},
+        }
+
+    def _cleanup_local_write_refresh_suppressions(self) -> None:
+        now = time.monotonic()
+        ttl = float(OPERBLOCK_LOCAL_WRITE_REFRESH_SUPPRESS_SECONDS)
+        self._local_write_refresh_suppressions = {
+            source: data
+            for source, data in (getattr(self, "_local_write_refresh_suppressions", {}) or {}).items()
+            if now - float((data or {}).get("started") or 0.0) <= ttl
+        }
+
+    def _should_skip_local_write_refresh(self, payload: dict) -> bool:
+        self._cleanup_local_write_refresh_suppressions()
+        suppressions = dict(getattr(self, "_local_write_refresh_suppressions", {}) or {})
+        if not suppressions:
+            return False
+        sources = set(self._payload_force_sources(payload or {}))
+        matched_sources = [source for source in sources if source in suppressions]
+        if not matched_sources:
+            return False
+        expected_entities: set[str] = set()
+        for source in matched_sources:
+            expected_entities.update(set((suppressions.get(source) or {}).get("entities") or set()))
+
+        changes = list((payload or {}).get("changes") or [])
+        changed_entities = {
+            str((change or {}).get("entity_name") or "")
+            for change in changes
+            if (change or {}).get("entity_name")
+        }
+        if not changed_entities:
+            changed_entities = {
+                str(entity)
+                for entity in ((payload or {}).get("entities") or (payload or {}).get("changed_entities") or [])
+                if entity
+            }
+        can_skip = not changed_entities or changed_entities.issubset(expected_entities)
+        if can_skip:
+            for source in matched_sources:
+                self._local_write_refresh_suppressions.pop(source, None)
+        return can_skip
+
+    @staticmethod
+    def _payload_force_sources(payload: dict) -> list[str]:
+        sources: list[str] = []
+        raw_many = (payload or {}).get("force_sources") or []
+        if isinstance(raw_many, (list, tuple, set)):
+            sources.extend(str(item) for item in raw_many if item)
+        raw_one = (payload or {}).get("force_source")
+        if raw_one:
+            sources.append(str(raw_one))
+        return list(dict.fromkeys(sources))
+
+    @staticmethod
+    def _route_only_keys_from_sources(sources: list[str]) -> set[tuple[int, int]]:
+        prefix = "operblock_update_order_route:"
+        keys: set[tuple[int, int]] = set()
+        for source in sources:
+            text = str(source or "")
+            if not text.startswith(prefix):
+                continue
+            parts = text[len(prefix) :].split(":")
+            if len(parts) < 2:
+                continue
+            admission_id = _safe_int(parts[0])
+            order_id = _safe_int(parts[1])
+            if admission_id and order_id:
+                keys.add((int(admission_id), int(order_id)))
+        return keys
+
+    def _should_skip_route_only_refresh(self, payload: dict) -> bool:
+        self._cleanup_route_only_write_suppressions()
+        pending = set((getattr(self, "_route_only_write_suppressions", {}) or {}).keys())
+        source_keys = self._route_only_keys_from_sources(self._payload_force_sources(payload or {}))
+        candidate_keys = pending | source_keys
+        if not candidate_keys:
+            return False
+
+        changes = list((payload or {}).get("changes") or [])
+        if changes:
+            changed_keys: set[tuple[int, int]] = set()
+            for change in changes:
+                entity = str((change or {}).get("entity_name") or "")
+                if entity != "orders":
+                    return False
+                admission_id = _safe_int((change or {}).get("admission_id"))
+                order_id = _safe_int((change or {}).get("entity_id"))
+                if not admission_id or not order_id:
+                    return False
+                key = (int(admission_id), int(order_id))
+                if key not in candidate_keys:
+                    return False
+                changed_keys.add(key)
+            return True
+
+        entities = {
+            str(entity)
+            for entity in ((payload or {}).get("entities") or (payload or {}).get("changed_entities") or [])
+            if entity
+        }
+        if entities and entities - {"orders"}:
+            return False
+        if source_keys or pending:
+            return True
+        return False
+
+    def _on_changes_detected(self, payload: dict):
+        if self._is_closing:
+            return
+        if self._should_skip_route_only_refresh(payload):
+            return
+        if self._should_skip_local_write_refresh(payload):
+            return
+        entities = set(payload.get("entities") or payload.get("changed_entities") or [])
+        watched = {
+            "operation_cases",
+            "operation_table_assignments",
+            "operating_tables",
+            "vitals",
+            "orders",
+            "operblock_timeline_events",
+            "administrations",
+        }
+        if not entities or entities.intersection(watched):
+            QTimer.singleShot(0, lambda: self.auto_refresh(force=False))
+
+    def _build_operation_report_pdf(self, operation_case_id: int | None = None, *, trigger_button: QPushButton | None = None):
+        case_id = _safe_int(operation_case_id) or _safe_int(self._current_operation_case_id)
+        if not case_id:
+            CustomMessageBox.warning(self, "Отчет за операцию", "Откройте протокол операции.")
+            return
+        worker = getattr(self, "_operation_report_pdf_worker", None)
+        if worker is not None and worker.isRunning():
+            CustomMessageBox.information(self, "Отчет за операцию", "PDF отчета уже формируется.")
+            return
+        try:
+            pdf_path = self.operblock_service.build_operation_report_pdf_path(int(case_id))
+        except Exception as exc:
+            CustomMessageBox.critical(self, "Отчет за операцию", f"Не удалось подготовить путь PDF:\n{exc}")
+            return
+        from rem_card.ui.operblock_view.operblock_report_pdf_worker import OperBlockReportPdfWorker
+
+        self._set_operation_report_buttons_busy(trigger_button)
+        self._operation_report_pdf_worker = OperBlockReportPdfWorker(
+            self.operblock_service,
+            int(case_id),
+            pdf_path,
+            parent=self,
+        )
+        self._operation_report_pdf_worker.completed.connect(self._on_operation_report_pdf_ready)
+        self._operation_report_pdf_worker.failed.connect(self._on_operation_report_pdf_error)
+        self._operation_report_pdf_worker.finished.connect(self._clear_operation_report_pdf_worker)
+        self._operation_report_pdf_worker.start()
+
+    def _set_operation_report_buttons_busy(self, trigger_button: QPushButton | None = None) -> None:
+        buttons: list[QPushButton] = []
+        if trigger_button is not None:
+            buttons.append(trigger_button)
+        protocol_button = getattr(self, "report_button", None)
+        if protocol_button is not None and all(button is not protocol_button for button in buttons):
+            buttons.append(protocol_button)
+
+        self._operation_report_pdf_buttons = []
+        for button in buttons:
+            try:
+                self._operation_report_pdf_buttons.append((weakref.ref(button), button.text(), button.isEnabled()))
+                button.setEnabled(False)
+                button.setText(" Формирование PDF..." if button is protocol_button else "ФОРМИРОВАНИЕ PDF...")
+            except RuntimeError:
+                continue
+
+    def _restore_operation_report_buttons(self) -> None:
+        buttons = list(getattr(self, "_operation_report_pdf_buttons", []) or [])
+        self._operation_report_pdf_buttons = []
+        for button_ref, text, was_enabled in buttons:
+            try:
+                button = button_ref()
+                if button is None:
+                    continue
+                button.setText(text)
+                button.setEnabled(bool(was_enabled))
+            except RuntimeError:
+                continue
+
+    def _on_operation_report_pdf_ready(self, pdf_path: str):
+        self._restore_operation_report_buttons()
+        open_pdf_file(pdf_path, parent=self)
+
+    def _on_operation_report_pdf_error(self, message: str):
+        self._restore_operation_report_buttons()
+        CustomMessageBox.critical(self, "Отчет за операцию", f"Не удалось сформировать PDF отчета:\n{message}")
+
+    def _clear_operation_report_pdf_worker(self):
+        self._restore_operation_report_buttons()
+        self._operation_report_pdf_worker = None
+
+    def _show_board(self, *, loading_message: str | None = None):
+        action_info = self._start_opblock_action_diagnostics("operblock_show_board")
+        loading_key = self._show_operblock_loading(
+            loading_message,
+            key="show-board",
+            auto_hide_ms=30000,
+        )
+        try:
+            self._set_protocol_chrome(False)
+            self.stack.setCurrentWidget(self.board_page)
+            self._archive_return_operation_case_id = None
+            self._current_operation_case_id = None
+            self._current_admission_id = None
+            self._current_operation_start = None
+            self._current_operation_end = None
+            self._current_case_active = False
+            self._current_operation_has_vitals = False
+            self._current_stage_state = {}
+            self._current_anesthesia_start = None
+            self._current_anesthesia_end = None
+            self._current_surgery_start = None
+            self._current_surgery_end = None
+            self._current_anesthesia_active = False
+            self._current_surgery_active = False
+            self._current_anesthesia_assistance_type = ""
+            self._current_operation_name = ""
+            self._current_protocol_display = ""
+            self._update_protocol_title_label()
+            self._update_operblock_staff_legend()
+            self._vitals_context_key = None
+            self._current_orders_rows = []
+            self._current_timeline_snapshot = None
+            self._current_chart_vitals = []
+            self._pending_orders_snapshot = {"orders": []}
+            self._apply_active_infusions()
+            self.operblock_vitals_service.set_operation_context(
+                operation_case_id=None,
+                admission_id=None,
+                started_at=None,
+                ended_at=None,
+            )
+            if getattr(self, "vitals_chart", None):
+                self.vitals_chart.set_visible_hours(OPERBLOCK_INITIAL_CHART_HOURS)
+                if hasattr(self.vitals_chart, "set_timeline_snapshot"):
+                    self.vitals_chart.set_timeline_snapshot(None, None, force=True)
+                elif hasattr(self.vitals_chart, "set_operation_orders"):
+                    self.vitals_chart.set_operation_orders([], None)
+            self.refresh_board(force=True)
+        finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
+            self._hide_operblock_loading(loading_key)
+
+    def _set_protocol_chrome(self, enabled: bool):
+        self.sector_8_panel.set_protocol_mode(
+            enabled,
+            launcher_back=bool(getattr(self, "_role_launcher_mode", False) and not enabled),
+        )
+        self._apply_view_only_chrome_state()
+
+    def _current_page_requires_back_chrome(self) -> bool:
+        current_widget = self.stack.currentWidget()
+        return any(
+            page is not None and current_widget == page
+            for page in (
+                self.protocol_page,
+                self.archive_page,
+                self.settings_page,
+            )
+        )
+
+    def set_role_launcher_mode(self, enabled: bool):
+        self._role_launcher_mode = bool(enabled)
+        self._set_protocol_chrome(self._current_page_requires_back_chrome())
+
+    def apply_display_settings(self):
+        if hasattr(self, "sector_8_panel"):
+            self.sector_8_panel.apply_display_settings()
+            self._apply_view_only_chrome_state()
+            self._set_protocol_chrome(self._current_page_requires_back_chrome())
+        self._apply_protocol_tab_display_settings()
+
+    def _update_protocol_current_time_label(self):
+        now_dt = datetime.now()
+        label = getattr(self, "protocol_current_time_label", None)
+        if label is not None:
+            label.setText(f"Текущее время: {now_dt.strftime('%H:%M')}")
+        self._refresh_elapsed_infusion_amounts_if_needed(now_dt)
+
+    def _refresh_elapsed_infusion_amounts_if_needed(self, now_dt: datetime):
+        if self._write_pending or self.stack.currentWidget() != self.protocol_page:
+            return
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        if not any(str((interval or {}).get("status") or "") == "active" for interval in snapshot.get("infusion_intervals") or []):
+            return
+        minute_key = now_dt.strftime("%Y-%m-%dT%H:%M")
+        if minute_key == getattr(self, "_last_infusion_elapsed_refresh_minute", ""):
+            return
+        self._last_infusion_elapsed_refresh_minute = minute_key
+        self._apply_active_infusions(force_elapsed=True)
+
+    def on_back_clicked(self):
+        current_widget = self.stack.currentWidget()
+        if self.is_view_only_mode() and current_widget in (self.protocol_page, self.board_page, self.archive_page):
+            self.view_back_requested.emit()
+            return
+        if current_widget == self.settings_page:
+            self._on_settings_back_clicked()
+            return
+        if current_widget == self.archive_page:
+            return_case_id = int(getattr(self, "_archive_return_operation_case_id", 0) or 0)
+            self._archive_return_operation_case_id = None
+            if return_case_id:
+                self._open_protocol(return_case_id)
+                return
+            self._show_board()
+            return
+        if current_widget == self.protocol_page:
+            self._show_board()
+            return
+        if current_widget == self.board_page and getattr(self, "_role_launcher_mode", False):
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "setCurrentIndex"):
+                parent.setCurrentIndex(0)
+
+    def shutdown(self):
+        self._is_closing = True
+        self._close_external_archive_viewer()
+        timer = getattr(self, "_protocol_clock_timer", None)
+        if timer is not None:
+            timer.stop()
+        worker = getattr(self, "_operation_report_pdf_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.wait(1500)
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+
+    def _set_patient_photo(self, label: QLabel, gender: str | None):
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
+        metric_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+        if apply_metrics is not None:
+            apply_metrics["photo_count"] = int(apply_metrics.get("photo_count") or 0) + 1
+        try:
+            path_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+            gender_text = str(gender or "").lower()
+            if gender_text.startswith("жен"):
+                icon_key = OPERBLOCK_PATIENT_FEMALE_ICON_KEY
+                fallback_file = "woman_in_oper_extr.png"
+                fallback_asset = "woman.png"
+            elif gender_text.startswith("муж") or gender_text.startswith("м"):
+                icon_key = OPERBLOCK_PATIENT_MALE_ICON_KEY
+                fallback_file = "man_in_oper_extr.png"
+                fallback_asset = "man.png"
+            else:
+                icon_key = ""
+                fallback_file = ""
+                fallback_asset = "noman.png"
+            operblock_startup_metrics.record_since(
+                "board_apply_card_photo_path_ms",
+                path_started,
+                source="operblock_widget",
+                **metric_fields,
+            )
+            load_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+            target_size = label.size()
+            size_aware_icon_loaded = False
+            if icon_key:
+                source_pixmap = request_operblock_icon_pixmap(
+                    label,
+                    icon_key,
+                    fallback_file=fallback_file,
+                    target_size=target_size,
+                )
+                size_aware_icon_loaded = (
+                    not source_pixmap.isNull()
+                    and target_size.isValid()
+                    and not target_size.isEmpty()
+                )
+            else:
+                source_pixmap = QPixmap(os.path.join(get_patient_assets_dir(), "Patients", fallback_asset))
+            if source_pixmap.isNull():
+                source_pixmap = QPixmap(os.path.join(get_patient_assets_dir(), "Patients", fallback_asset))
+                size_aware_icon_loaded = False
+            if source_pixmap.isNull():
+                source_pixmap = QPixmap(os.path.join(get_patient_assets_dir(), "Patients", "noman.png"))
+                size_aware_icon_loaded = False
+            operblock_startup_metrics.record_since(
+                "board_apply_card_photo_pixmap_load_ms",
+                load_started,
+                source="operblock_widget",
+                cache_hit=False,
+                **metric_fields,
+            )
+            if not source_pixmap.isNull() and target_size.isValid() and not target_size.isEmpty():
+                scale_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+                pixmap = (
+                    source_pixmap
+                    if size_aware_icon_loaded
+                    else source_pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
+                operblock_startup_metrics.record_since(
+                    "board_apply_card_photo_scaled_ms",
+                    scale_started,
+                    source="operblock_widget",
+                    loader_scaled=int(size_aware_icon_loaded),
+                    **metric_fields,
+                )
+                if not pixmap.isNull():
+                    label.setPixmap(pixmap)
+                    return
+            if apply_metrics is not None:
+                apply_metrics["missing_photo_count"] = int(apply_metrics.get("missing_photo_count") or 0) + 1
+            label.setText("Фото")
+        finally:
+            operblock_startup_metrics.record_since(
+                "board_apply_card_photo_total_ms",
+                metric_started,
+                source="operblock_widget",
+                **metric_fields,
+            )
+
+    @staticmethod
+    def _clear_layout(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget:
+                widget.deleteLater()
+            if child_layout:
+                OperBlockMainWidget._clear_layout(child_layout)

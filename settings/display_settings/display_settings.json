@@ -1,0 +1,136 @@
+{
+  "version": 2,
+  "active": {
+    "doctor": {
+      "sector8_buttons": {
+        "order": [
+          "add_patient",
+          "refresh",
+          "user_report",
+          "user_reports",
+          "archive",
+          "calc",
+          "electrolytes_calc",
+          "settings",
+          "back",
+          "exit"
+        ],
+        "visible": {
+          "archive": true,
+          "refresh": true,
+          "user_report": true,
+          "user_reports": false,
+          "add_patient": true,
+          "calc": true,
+          "electrolytes_calc": true,
+          "settings": true,
+          "back": true,
+          "exit": true
+        },
+        "side": {
+          "archive": "right",
+          "refresh": "right",
+          "user_report": "left",
+          "user_reports": "left",
+          "add_patient": "right",
+          "calc": "right",
+          "electrolytes_calc": "right",
+          "settings": "right",
+          "back": "right",
+          "exit": "right"
+        }
+      },
+      "remcard_tabs": {
+        "order": [
+          "vitals",
+          "orders",
+          "balance",
+          "ivl",
+          "procedures",
+          "labs",
+          "events",
+          "print"
+        ],
+        "visible": {
+          "vitals": true,
+          "orders": true,
+          "balance": true,
+          "events": true,
+          "ivl": true,
+          "procedures": true,
+          "labs": true,
+          "print": false
+        }
+      },
+      "w1a_upcoming_orders": {
+        "enabled": false
+      },
+      "w1b_lower_sector": {
+        "enabled": false
+      }
+    },
+    "nurse": {
+      "sector8_buttons": {
+        "order": [
+          "add_patient",
+          "user_report",
+          "user_reports",
+          "archive",
+          "refresh",
+          "calc",
+          "settings",
+          "back",
+          "exit"
+        ],
+        "visible": {
+          "archive": false,
+          "refresh": true,
+          "user_report": true,
+          "user_reports": false,
+          "add_patient": true,
+          "calc": false,
+          "settings": false,
+          "back": true,
+          "exit": true
+        },
+        "side": {
+          "archive": "right",
+          "refresh": "right",
+          "user_report": "left",
+          "user_reports": "left",
+          "add_patient": "right",
+          "calc": "right",
+          "settings": "right",
+          "back": "right",
+          "exit": "right"
+        }
+      },
+      "remcard_tabs": {
+        "order": [
+          "vitals",
+          "orders",
+          "balance",
+          "events",
+          "procedures",
+          "labs",
+          "print"
+        ],
+        "visible": {
+          "vitals": true,
+          "orders": true,
+          "balance": true,
+          "events": false,
+          "procedures": false,
+          "labs": true,
+          "print": false
+        }
+      },
+      "w1a_upcoming_orders": {
+        "enabled": true
+      },
+      "w1b_lower_sector": {
+        "enabled": false
+      }
+    }
+  }
+}

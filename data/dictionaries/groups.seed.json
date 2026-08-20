@@ -1,0 +1,80 @@
+{
+  "vasopressors": {
+    "name_ru": "Вазопрессоры",
+    "priority_level": 1,
+    "offset_min": 0,
+    "color": "#e74c3c"
+  },
+  "anticoagulants": {
+    "name_ru": "Антикоагулянты",
+    "priority_level": 1,
+    "offset_min": 0,
+    "color": "#8e44ad"
+  },
+  "antibiotics": {
+    "name_ru": "Антибиотики",
+    "priority_level": 2,
+    "offset_min": 30,
+    "color": "#2980b9"
+  },
+  "nsaid": {
+    "name_ru": "НПВС",
+    "priority_level": 3,
+    "offset_min": 45,
+    "color": "#f39c12"
+  },
+  "analgesics": {
+    "name_ru": "Анальгетики",
+    "priority_level": 2,
+    "offset_min": 20,
+    "color": "#d35400"
+  },
+  "narcotic_analgesics": {
+    "name_ru": "Наркотические анальгетики",
+    "priority_level": 1,
+    "offset_min": 0,
+    "color": "#c0392b"
+  },
+  "sedatives": {
+    "name_ru": "Седативные и снотворные",
+    "priority_level": 2,
+    "offset_min": 30,
+    "color": "#34495e"
+  },
+  "relaxants": {
+    "name_ru": "Миорелаксанты",
+    "priority_level": 1,
+    "offset_min": 0,
+    "color": "#1abc9c"
+  },
+  "antiarrhythmics": {
+    "name_ru": "Антиаритмические",
+    "priority_level": 1,
+    "offset_min": 0,
+    "color": "#d35400"
+  },
+  "antihypertensives": {
+    "name_ru": "Антигипертензивные",
+    "priority_level": 2,
+    "offset_min": 30,
+    "color": "#27ae60"
+  },
+  "diuretics": {
+    "name_ru": "Диуретики",
+    "priority_level": 2,
+    "offset_min": 20,
+    "color": "#2980b9"
+  },
+  "glucocorticoids": {
+    "name_ru": "Глюкокортикоиды",
+    "priority_level": 3,
+    "offset_min": 45,
+    "color": "#f1c40f"
+  },
+  "fluids": {
+    "name_ru": "Инфузионные среды",
+    "priority_level": 3,
+    "offset_min": 60,
+    "color": "#95a5a6"
+  }
+}

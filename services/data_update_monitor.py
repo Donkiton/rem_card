@@ -1,0 +1,720 @@
+import os
+import threading
+import time
+from contextlib import nullcontext
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from PySide6.QtCore import QThread, Signal
+
+from rem_card.app.db_availability import DatabaseClosedError
+from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
+
+
+REM_CARD_MONITOR_ROLES = {"doctor", "nurse", "врач", "медсестра"}
+OPBLOCK_CHANGE_ENTITIES = {
+    "operating_tables",
+    "operation_cases",
+    "operation_table_assignments",
+    "operblock_timeline_events",
+}
+
+
+def _float_env(name: str, default: float, *, minimum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return max(minimum, float(default))
+    try:
+        return max(minimum, float(raw))
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using default %.3f", name, raw, default)
+        return max(minimum, float(default))
+
+
+class DataUpdateMonitor(QThread):
+    changes_detected = Signal(dict)
+    monitor_error = Signal(str)
+
+    def __init__(
+        self,
+        data_service,
+        *,
+        poll_interval_sec: float | None = None,
+        settings_poll_interval_sec: float | None = None,
+        enabled: bool = True,
+    ):
+        super().__init__()
+        self._data_service = data_service
+        default_poll_interval_sec = _float_env("REMCARD_MONITOR_POLL_INTERVAL_SEC", 2.0, minimum=0.5)
+        self._poll_interval_sec = max(
+            0.5,
+            float(default_poll_interval_sec if poll_interval_sec is None else poll_interval_sec),
+        )
+        settings_interval_value = (
+            _float_env(
+                "REMCARD_SETTINGS_MONITOR_POLL_INTERVAL_SEC",
+                0.0,
+                minimum=0.0,
+            )
+            if settings_poll_interval_sec is None
+            else max(0.0, float(settings_poll_interval_sec))
+        )
+        self._settings_poll_enabled = settings_interval_value > 0.0
+        self._settings_poll_interval_sec = (
+            max(self._poll_interval_sec, settings_interval_value)
+            if self._settings_poll_enabled
+            else 0.0
+        )
+        self._next_settings_poll_monotonic: float = 0.0
+        self._stop_evt = threading.Event()
+        self._wake_evt = threading.Event()
+        self._state_lock = threading.Lock()
+        self._force_emit = False
+        self._force_sources: list[str] = []
+        self._last_seen_id: Optional[int] = None
+        self._last_seen_settings_id: Optional[int] = None
+        self._last_seen_observed_monotonic: float = 0.0
+        self._refresh_request_seq: int = 0
+        self._last_observed_refresh_seq: int = 0
+        self._state_epoch: int = 0
+        self._paused = not bool(enabled)
+        self._paused_ack_evt = threading.Event()
+        if self._paused:
+            self._paused_ack_evt.set()
+        self._persistent_read_conn = None
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._state_lock:
+            self._paused = not bool(enabled)
+            self._paused_ack_evt.clear()
+            if self._paused:
+                self._force_emit = False
+                self._force_sources = []
+            self._state_epoch += 1
+        self._wake_evt.set()
+
+    def is_enabled(self) -> bool:
+        with self._state_lock:
+            return not bool(self._paused)
+
+    def pause_and_wait(self, timeout_sec: float = 5.0) -> bool:
+        """Pause polling and wait until its thread closes the readonly handle."""
+        self.set_enabled(False)
+        if not self.isRunning():
+            return self._persistent_read_conn is None
+        return bool(self._paused_ack_evt.wait(max(0.0, float(timeout_sec or 0.0))))
+
+    def request_refresh(self, *, force_emit: bool = False, source: str = ""):
+        with self._state_lock:
+            if self._paused:
+                return
+            self._refresh_request_seq += 1
+            if force_emit:
+                self._force_emit = True
+                self._next_settings_poll_monotonic = 0.0
+                if source:
+                    self._force_sources.append(str(source))
+        self._wake_evt.set()
+
+    def reset(self):
+        with self._state_lock:
+            self._last_seen_id = None
+            self._last_seen_settings_id = None
+            self._last_seen_observed_monotonic = 0.0
+            self._force_emit = False
+            self._force_sources = []
+            self._refresh_request_seq += 1
+            self._state_epoch += 1
+            self._next_settings_poll_monotonic = 0.0
+        self._wake_evt.set()
+
+    def get_change_state(self) -> Optional[dict[str, Any]]:
+        with self._state_lock:
+            if self._last_seen_id is None:
+                return None
+            return {
+                "change_id": int(self._last_seen_id),
+                "observed_monotonic": float(self._last_seen_observed_monotonic),
+                "refresh_request_seq": int(self._refresh_request_seq),
+                "refresh_observed_seq": int(self._last_observed_refresh_seq),
+                "state_epoch": int(self._state_epoch),
+            }
+
+    def _set_last_seen_id(self, change_id: int, *, observed_refresh_seq: int) -> None:
+        with self._state_lock:
+            self._last_seen_id = int(change_id)
+            self._last_seen_observed_monotonic = time.monotonic()
+            self._last_observed_refresh_seq = max(
+                self._last_observed_refresh_seq,
+                int(observed_refresh_seq),
+            )
+
+    def _set_last_seen_settings_id(self, change_id: int) -> None:
+        with self._state_lock:
+            self._last_seen_settings_id = int(change_id)
+
+    def _increment_state_epoch(self) -> None:
+        with self._state_lock:
+            self._state_epoch += 1
+
+    def stop(self):
+        self._stop_evt.set()
+        self._wake_evt.set()
+
+    def _persistent_read_scope(self):
+        role = str(getattr(self._data_service, "_runtime_role", "") or "").strip().lower()
+        # Only doctor/nurse workstations keep the hot polling connection.  The
+        # admin runtime can rotate the live SQLite file manually; on Windows a
+        # long-lived readonly handle would prevent the atomic rename.
+        if role not in REM_CARD_MONITOR_ROLES:
+            self._close_persistent_read_connection()
+            return nullcontext()
+        db = getattr(self._data_service, "db", None)
+        opener = getattr(db, "open_persistent_readonly_connection", None)
+        scope = getattr(db, "existing_central_read_scope", None)
+        if not callable(opener) or not callable(scope):
+            return nullcontext()
+        if self._persistent_read_conn is None:
+            self._persistent_read_conn = opener(source="data_update_monitor")
+            record_metric("persistent_read_connection_open", 1, component="DataUpdateMonitor")
+        return scope(self._persistent_read_conn, force_central=True)
+
+    def _close_persistent_read_connection(self) -> None:
+        conn = self._persistent_read_conn
+        self._persistent_read_conn = None
+        if conn is None:
+            return
+        try:
+            conn.close()
+            record_metric("persistent_read_connection_close", 1, component="DataUpdateMonitor")
+        except Exception as exc:
+            logger.debug("DataUpdateMonitor readonly connection close failed: %s", exc)
+
+    def _is_shutting_down(self) -> bool:
+        return self._stop_evt.is_set() or bool(getattr(self._data_service, "_shutting_down", False))
+
+    def _should_suppress_poll_error(self, exc: Exception) -> bool:
+        if not self._is_shutting_down():
+            return False
+        if isinstance(exc, DatabaseClosedError):
+            return True
+        return "database connection is closed" in str(exc).lower()
+
+    def run(self):
+        try:
+            while not self._stop_evt.is_set():
+                force_emit = False
+                force_sources: list[str] = []
+                with self._state_lock:
+                    if self._paused:
+                        self._force_emit = False
+                        self._force_sources = []
+                        paused = True
+                    else:
+                        paused = False
+                    force_emit = self._force_emit
+                    force_sources = list(self._force_sources)
+                    self._force_emit = False
+                    self._force_sources = []
+
+                if paused:
+                    self._close_persistent_read_connection()
+                    with self._state_lock:
+                        still_paused = bool(self._paused)
+                        if still_paused:
+                            self._paused_ack_evt.set()
+                    if still_paused:
+                        self._wake_evt.wait()
+                        self._wake_evt.clear()
+                    continue
+
+                self._paused_ack_evt.clear()
+                try:
+                    run_maintenance = getattr(self._data_service, "run_poll_maintenance_tasks", None)
+                    if callable(run_maintenance):
+                        run_maintenance()
+                    with self._persistent_read_scope():
+                        self._poll_once(
+                            force_emit=force_emit,
+                            force_sources=force_sources,
+                            run_maintenance=False,
+                        )
+                except Exception as exc:
+                    self._close_persistent_read_connection()
+                    if self._should_suppress_poll_error(exc):
+                        logger.info("DataUpdateMonitor stopped during shutdown after database connection closed")
+                        return
+                    logger.error("DataUpdateMonitor poll failed: %s", exc, exc_info=True)
+                    self.monitor_error.emit(str(exc))
+
+                if self._stop_evt.is_set():
+                    return
+                if self._wake_evt.wait(self._poll_interval_sec):
+                    self._wake_evt.clear()
+        finally:
+            self._close_persistent_read_connection()
+            self._paused_ack_evt.set()
+
+    def _poll_once(self, *, force_emit: bool, force_sources: list[str], run_maintenance: bool = True):
+        if run_maintenance:
+            maintenance = getattr(self._data_service, "run_poll_maintenance_tasks", None)
+            if callable(maintenance):
+                maintenance()
+
+        if self._stop_evt.is_set():
+            return
+
+        with self._state_lock:
+            previous_change_id = self._last_seen_id
+            previous_settings_change_id = self._last_seen_settings_id
+            observed_refresh_seq = int(self._refresh_request_seq)
+            settings_poll_due = self._settings_poll_enabled and (
+                previous_settings_change_id is None
+                or force_emit
+                or time.monotonic() >= self._next_settings_poll_monotonic
+            )
+
+        current_change_id = int(self._data_service.get_latest_change_id())
+        if settings_poll_due:
+            current_settings_change_id = self._latest_settings_change_id()
+            with self._state_lock:
+                self._next_settings_poll_monotonic = time.monotonic() + self._settings_poll_interval_sec
+        else:
+            current_settings_change_id = int(previous_settings_change_id or 0)
+
+        if self._stop_evt.is_set():
+            return
+
+        if previous_change_id is None:
+            self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+            self._set_last_seen_settings_id(current_settings_change_id)
+            if force_emit:
+                self._emit_payload(
+                    current_change_id=current_change_id,
+                    previous_change_id=current_change_id,
+                    current_settings_change_id=current_settings_change_id,
+                    previous_settings_change_id=current_settings_change_id,
+                    changes=[],
+                    forced=True,
+                    force_sources=force_sources,
+                )
+            return
+
+        if previous_settings_change_id is None:
+            previous_settings_change_id = current_settings_change_id
+            self._set_last_seen_settings_id(current_settings_change_id)
+
+        settings_changes: list[dict[str, Any]] = []
+        settings_changed = settings_poll_due and current_settings_change_id > int(previous_settings_change_id or 0)
+        if settings_changed:
+            rows = self._fetch_settings_changes_since(int(previous_settings_change_id or 0))
+            settings_changes = [self._normalize_settings_row(row) for row in rows]
+
+        if current_change_id < previous_change_id:
+            logger.warning(
+                "Change-log cursor moved backwards: previous=%s current=%s. Forcing full refresh.",
+                previous_change_id,
+                current_change_id,
+            )
+            self._increment_state_epoch()
+            self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+            self._set_last_seen_settings_id(current_settings_change_id)
+            self._emit_payload(
+                current_change_id=current_change_id,
+                previous_change_id=previous_change_id,
+                current_settings_change_id=current_settings_change_id,
+                previous_settings_change_id=int(previous_settings_change_id or 0),
+                changes=[],
+                forced=True,
+                gap_detected=True,
+                reason="cursor_moved_backwards",
+                force_sources=force_sources,
+            )
+            return
+
+        if current_change_id > previous_change_id:
+            rows = self._data_service.fetch_changes_since(previous_change_id)
+            raw_changes = [self._normalize_row(row) for row in rows]
+            if not raw_changes and not settings_changes:
+                self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+                self._set_last_seen_settings_id(current_settings_change_id)
+                logger.warning(
+                    "Change-log gap suspected: previous=%s current=%s rows=0. Forcing full refresh.",
+                    previous_change_id,
+                    current_change_id,
+                )
+                self._emit_payload(
+                    current_change_id=current_change_id,
+                    previous_change_id=previous_change_id,
+                    current_settings_change_id=current_settings_change_id,
+                    previous_settings_change_id=int(previous_settings_change_id or 0),
+                    changes=[],
+                    forced=True,
+                    gap_detected=True,
+                    reason="empty_change_rows",
+                    force_sources=force_sources,
+                )
+                return
+            changes = self._filter_changes_for_runtime_role(raw_changes + settings_changes)
+            self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+            self._set_last_seen_settings_id(current_settings_change_id)
+            if not changes:
+                record_metric(
+                    "change_payload_suppressed",
+                    1,
+                    reason="runtime_role_scope_filter",
+                    role=str(getattr(self._data_service, "_runtime_role", "") or ""),
+                )
+                return
+            self._emit_payload(
+                current_change_id=current_change_id,
+                previous_change_id=previous_change_id,
+                current_settings_change_id=current_settings_change_id,
+                previous_settings_change_id=int(previous_settings_change_id or 0),
+                changes=changes,
+                forced=force_emit,
+                force_sources=force_sources,
+            )
+            return
+
+        self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+        self._set_last_seen_settings_id(current_settings_change_id)
+        if settings_changed:
+            settings_changes = self._filter_changes_for_runtime_role(settings_changes)
+            if not settings_changes:
+                return
+            self._emit_payload(
+                current_change_id=current_change_id,
+                previous_change_id=previous_change_id,
+                current_settings_change_id=current_settings_change_id,
+                previous_settings_change_id=int(previous_settings_change_id or 0),
+                changes=settings_changes,
+                forced=force_emit,
+                force_sources=force_sources,
+            )
+            return
+        if force_emit:
+            self._emit_payload(
+                current_change_id=current_change_id,
+                previous_change_id=previous_change_id,
+                current_settings_change_id=current_settings_change_id,
+                previous_settings_change_id=int(previous_settings_change_id or 0),
+                changes=[],
+                forced=True,
+                force_sources=force_sources,
+            )
+
+    def _filter_changes_for_runtime_role(self, changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        role = str(getattr(self._data_service, "_runtime_role", "") or "").strip().lower()
+        if role not in REM_CARD_MONITOR_ROLES:
+            return changes
+        if not changes:
+            return changes
+        result: list[dict[str, Any]] = []
+        scope_by_change_id = self._classify_change_scopes(changes)
+        filtered_count = 0
+        for change in changes:
+            if self._is_operblock_only_change(change, scope_by_change_id.get(int(change.get("id") or 0), {})):
+                filtered_count += 1
+                continue
+            result.append(change)
+        if filtered_count:
+            record_metric(
+                "opblock_only_change_filtered",
+                filtered_count,
+                role=role,
+                total_changes=len(changes),
+            )
+            logger.debug(
+                "Filtered %s opblock-only change(s) for runtime role %s (total=%s)",
+                filtered_count,
+                role,
+                len(changes),
+            )
+        return result
+
+    def _classify_change_scopes(self, changes: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+        medical_changes = [
+            change for change in changes
+            if not change.get("settings_change") and change.get("id") is not None
+        ]
+        if not medical_changes:
+            return {}
+        values_sql = ",".join("(?, ?, ?, ?)" for _ in medical_changes)
+        params: list[Any] = []
+        for change in medical_changes:
+            params.extend(
+                [
+                    int(change.get("id") or 0),
+                    str(change.get("entity_name") or ""),
+                    change.get("entity_id"),
+                    change.get("admission_id"),
+                ]
+            )
+        query = f"""
+            WITH input(change_id, entity_name, entity_id, admission_id) AS (
+                VALUES {values_sql}
+            )
+            SELECT
+                i.change_id,
+                LOWER(TRIM(COALESCE(a.unit_scope, ''))) AS admission_unit_scope,
+                LOWER(TRIM(COALESCE(a.admission_type, ''))) AS admission_type,
+                COALESCE(
+                    oc.future_rao_admission_id,
+                    oc_assignment.future_rao_admission_id,
+                    oc_event.future_rao_admission_id,
+                    (
+                        SELECT oc_by_admission.future_rao_admission_id
+                        FROM operation_cases oc_by_admission
+                        WHERE oc_by_admission.admission_id = i.admission_id
+                          AND oc_by_admission.future_rao_admission_id IS NOT NULL
+                        LIMIT 1
+                    )
+                ) AS future_rao_admission_id,
+                CASE
+                    WHEN i.entity_name = 'patients'
+                     AND EXISTS (
+                        SELECT 1
+                        FROM admissions patient_admission
+                        WHERE patient_admission.patient_id = i.entity_id
+                          AND (
+                            LOWER(TRIM(COALESCE(patient_admission.unit_scope, ''))) = 'operblock'
+                            OR LOWER(TRIM(COALESCE(patient_admission.admission_type, ''))) = 'operblock'
+                          )
+                     )
+                    THEN 1 ELSE 0
+                END AS patient_has_operblock_admission,
+                CASE
+                    WHEN i.entity_name = 'patients'
+                     AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM admissions visible_admission
+                            WHERE visible_admission.patient_id = i.entity_id
+                              AND LOWER(TRIM(COALESCE(visible_admission.unit_scope, ''))) <> 'operblock'
+                              AND LOWER(TRIM(COALESCE(visible_admission.admission_type, ''))) <> 'operblock'
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM operation_cases visible_case
+                            WHERE visible_case.patient_id = i.entity_id
+                              AND visible_case.future_rao_admission_id IS NOT NULL
+                        )
+                     )
+                    THEN 1 ELSE 0
+                END AS patient_has_visible_admission
+            FROM input i
+            LEFT JOIN admissions a ON a.id = i.admission_id
+            LEFT JOIN operation_cases oc
+                ON i.entity_name = 'operation_cases'
+               AND oc.id = i.entity_id
+            LEFT JOIN operation_table_assignments ota
+                ON i.entity_name = 'operation_table_assignments'
+               AND ota.id = i.entity_id
+            LEFT JOIN operation_cases oc_assignment
+                ON oc_assignment.id = ota.operation_case_id
+            LEFT JOIN operblock_timeline_events ote
+                ON i.entity_name = 'operblock_timeline_events'
+               AND ote.id = i.entity_id
+            LEFT JOIN operation_cases oc_event
+                ON oc_event.id = ote.operation_case_id
+        """
+        db = getattr(self._data_service, "db", None)
+        fetch_all = getattr(db, "fetch_all_remcard", None)
+        if not callable(fetch_all):
+            return {}
+        try:
+            rows = fetch_all(query, tuple(params))
+        except Exception as exc:
+            logger.debug("Change scope classification failed; keeping changes unfiltered: %s", exc)
+            return {}
+        result: dict[int, dict[str, Any]] = {}
+        for row in rows or []:
+            change_id = int(row["change_id"] if hasattr(row, "keys") else row[0])
+            if hasattr(row, "keys"):
+                result[change_id] = {
+                    "admission_unit_scope": str(row["admission_unit_scope"] or ""),
+                    "admission_type": str(row["admission_type"] or ""),
+                    "future_rao_admission_id": row["future_rao_admission_id"],
+                    "patient_has_operblock_admission": bool(row["patient_has_operblock_admission"]),
+                    "patient_has_visible_admission": bool(row["patient_has_visible_admission"]),
+                }
+            else:
+                result[change_id] = {
+                    "admission_unit_scope": str(row[1] or ""),
+                    "admission_type": str(row[2] or ""),
+                    "future_rao_admission_id": row[3],
+                    "patient_has_operblock_admission": bool(row[4]),
+                    "patient_has_visible_admission": bool(row[5]),
+                }
+        return result
+
+    @staticmethod
+    def _is_operblock_only_change(change: dict[str, Any], scope: dict[str, Any]) -> bool:
+        if change.get("settings_change"):
+            return str(change.get("settings_scope") or "").strip().lower() == "operblock"
+        entity_name = str(change.get("entity_name") or "")
+        if entity_name == "operating_tables":
+            return True
+        if scope.get("future_rao_admission_id") not in (None, "", 0):
+            return False
+        if entity_name in OPBLOCK_CHANGE_ENTITIES:
+            return True
+        if str(scope.get("admission_unit_scope") or "") == "operblock":
+            return True
+        if str(scope.get("admission_type") or "") == "operblock":
+            return True
+        if entity_name == "patients" and scope.get("patient_has_operblock_admission"):
+            return not bool(scope.get("patient_has_visible_admission"))
+        return False
+
+    def _emit_payload(
+        self,
+        *,
+        current_change_id: int,
+        previous_change_id: int,
+        changes: list[dict[str, Any]],
+        forced: bool,
+        current_settings_change_id: int = 0,
+        previous_settings_change_id: int = 0,
+        force_sources: list[str] | None = None,
+        gap_detected: bool = False,
+        reason: str = "",
+    ):
+        changed_entities = sorted(
+            {
+                str(change.get("entity_name"))
+                for change in changes
+                if change.get("entity_name")
+            }
+        )
+        admission_ids = sorted(
+            {
+                int(change["admission_id"])
+                for change in changes
+                if change.get("admission_id") is not None
+            }
+        )
+        payload = {
+            "scope": "global",
+            "previous_change_id": int(previous_change_id),
+            "last_change_id": int(current_change_id),
+            "previous_settings_change_id": int(previous_settings_change_id or 0),
+            "last_settings_change_id": int(current_settings_change_id or 0),
+            "forced": bool(forced),
+            "gap_detected": bool(gap_detected),
+            "reason": str(reason or ""),
+            "force_source": str((force_sources or [""])[-1] or ""),
+            "force_sources": list(force_sources or []),
+            "changes": changes,
+            "changed_entities": changed_entities,
+            "admission_ids": admission_ids,
+        }
+        record_metric("latest_change_id", int(current_change_id), component="DataUpdateMonitor")
+        if forced:
+            record_metric("forced_refresh_count", 1, reason=str(reason or ""), force_sources=list(force_sources or []))
+        if gap_detected or str(reason or "") in {"cursor_moved_backwards", "empty_change_rows"}:
+            record_metric("full_snapshot_count", 1, reason=str(reason or "gap_detected"))
+        lag_ms = self._change_log_lag_ms(changes)
+        if lag_ms is not None:
+            record_metric("change_log_lag_ms", lag_ms, last_change_id=int(current_change_id))
+        settings_lag_ms = self._change_log_lag_ms([change for change in changes if change.get("settings_change")])
+        if settings_lag_ms is not None:
+            record_metric("settings_change_lag_ms", settings_lag_ms, last_settings_change_id=int(current_settings_change_id or 0))
+        self.changes_detected.emit(payload)
+
+    def _latest_settings_change_id(self) -> int:
+        method = getattr(self._data_service, "get_latest_settings_change_id", None)
+        if not callable(method):
+            return 0
+        return int(method() or 0)
+
+    def _fetch_settings_changes_since(self, last_change_id: int) -> list[Any]:
+        method = getattr(self._data_service, "fetch_settings_changes_since", None)
+        if not callable(method):
+            return []
+        return list(method(int(last_change_id or 0)) or [])
+
+    @staticmethod
+    def _change_log_lag_ms(changes: list[dict[str, Any]]) -> Optional[int]:
+        latest_ts = ""
+        for change in changes or []:
+            changed_at = str(change.get("changed_at") or "")
+            if changed_at > latest_ts:
+                latest_ts = changed_at
+        if not latest_ts:
+            return None
+        try:
+            normalized = latest_ts.replace("Z", "+00:00")
+            if "T" not in normalized and " " in normalized:
+                normalized = normalized.replace(" ", "T", 1)
+            changed_dt = datetime.fromisoformat(normalized)
+            if changed_dt.tzinfo is not None:
+                lag_sec = time.time() - changed_dt.timestamp()
+            else:
+                # SQLite CURRENT_TIMESTAMP is UTC but stored without a timezone suffix.
+                lag_sec = time.time() - changed_dt.replace(tzinfo=timezone.utc).timestamp()
+            return max(0, int(lag_sec * 1000.0))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _normalize_row(row: Any) -> dict[str, Any]:
+        if row is None:
+            return {}
+        if hasattr(row, "keys"):
+            return {
+                "id": int(row["id"]) if row["id"] is not None else None,
+                "entity_name": row["entity_name"],
+                "entity_id": row["entity_id"],
+                "admission_id": row["admission_id"],
+                "action": row["action"],
+                "changed_at": row["changed_at"],
+                "changed_by": row["changed_by"],
+                "version": row["version"],
+            }
+        return {
+            "id": int(row[0]) if len(row) > 0 and row[0] is not None else None,
+            "entity_name": row[1] if len(row) > 1 else None,
+            "entity_id": row[2] if len(row) > 2 else None,
+            "admission_id": row[3] if len(row) > 3 else None,
+            "action": row[4] if len(row) > 4 else None,
+            "changed_at": row[5] if len(row) > 5 else None,
+            "changed_by": row[6] if len(row) > 6 else None,
+            "version": row[7] if len(row) > 7 else None,
+        }
+
+    @staticmethod
+    def _normalize_settings_row(row: Any) -> dict[str, Any]:
+        if row is None:
+            return {}
+        if hasattr(row, "keys"):
+            return {
+                "id": int(row["id"]) if row["id"] is not None else None,
+                "entity_name": row["entity_type"],
+                "entity_id": row["entity_id"],
+                "admission_id": None,
+                "action": row["operation"],
+                "changed_at": row["changed_at"],
+                "changed_by": row["changed_by_user"] or row["changed_by_role"],
+                "version": row["version"],
+                "settings_change": True,
+                "settings_scope": row["scope"],
+                "source_client_id": row["source_client_id"],
+                "content_hash": row["content_hash"],
+            }
+        return {
+            "id": int(row[0]) if len(row) > 0 and row[0] is not None else None,
+            "entity_name": row[1] if len(row) > 1 else None,
+            "entity_id": row[2] if len(row) > 2 else None,
+            "admission_id": None,
+            "action": row[3] if len(row) > 3 else None,
+            "changed_at": row[6] if len(row) > 6 else None,
+            "changed_by": row[8] if len(row) > 8 else row[7] if len(row) > 7 else None,
+            "version": row[5] if len(row) > 5 else None,
+            "settings_change": True,
+            "settings_scope": row[4] if len(row) > 4 else None,
+            "source_client_id": row[9] if len(row) > 9 else None,
+            "content_hash": row[10] if len(row) > 10 else None,
+        }

@@ -1,0 +1,4562 @@
+from rem_card.ui.shared.custom_message_box import CustomMessageBox
+import os
+import sqlite3
+import time
+from copy import copy, deepcopy
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, 
+    QHeaderView, QAbstractItemView, QFrame, QSizePolicy, QApplication
+)
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, QTimer, Signal
+from datetime import datetime, timedelta
+from .template_dialog import TemplateSelectionDialog
+from ..shared.orders_model import OrdersModel
+from ..shared.orders_delegate import OrdersDelegate
+from ..shared.async_call import AsyncCallThread
+from .components.order_template_builder import build_orders_from_template
+from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
+from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
+from rem_card.services.read_coordinator import OrdersRefreshCancelled
+from rem_card.services.orders_sync_observability import record_orders_sync_event
+from rem_card.services.order_service import OrderConflictError
+from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
+from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, TEXT_SECONDARY,
+                            BORDER_COLOR, BG_LIGHT, STYLE_ORDERS_VERTICAL_SCROLLBAR)
+
+ORDERS_CELL_REPEAT_GUARD_SEC = max(
+    0.15,
+    float(os.getenv("REMCARD_ORDERS_CELL_REPEAT_GUARD_SEC", "0.45")),
+)
+ORDERS_POST_FINALIZE_WATCHDOG_MS = max(
+    1000,
+    int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_WATCHDOG_MS", "7000")),
+)
+ORDERS_POST_FINALIZE_MAX_RETRIES = max(
+    1,
+    int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_MAX_RETRIES", "3")),
+)
+ORDERS_POST_FINALIZE_RETRY_BACKOFF_MS = max(
+    1000,
+    int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_RETRY_BACKOFF_MS", "5000")),
+)
+ORDERS_POST_FINALIZE_RETRY_MAX_BACKOFF_MS = max(
+    ORDERS_POST_FINALIZE_RETRY_BACKOFF_MS,
+    int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_RETRY_MAX_BACKOFF_MS", "30000")),
+)
+ORDERS_FORCED_RELOAD_COOLDOWN_MS = max(
+    250,
+    int(os.getenv("REMCARD_ORDERS_FORCED_RELOAD_COOLDOWN_MS", "1500")),
+)
+
+
+class _OptimisticAdminChanges:
+    def __init__(self, widget: "OrdersWidget", op_prefix: str):
+        self.widget = widget
+        self.op_prefix = op_prefix
+        self.previous_by_key: dict = {}
+        self.changed_keys: list = []
+
+    def _remember(self, item_key) -> None:
+        if item_key in self.previous_by_key:
+            return
+        admin_map = self.widget.model.admin_map
+        had_previous = item_key in admin_map
+        self.previous_by_key[item_key] = (
+            had_previous,
+            copy(admin_map[item_key]) if had_previous else None,
+        )
+
+    def set_admin(self, item_key, next_admin) -> None:
+        admin_map = self.widget.model.admin_map
+        if admin_map.get(item_key) == next_admin:
+            return
+        self._remember(item_key)
+        if next_admin is not None:
+            next_admin.is_committed = 0
+            setattr(next_admin, "_pending_cell_action", self.op_prefix)
+        admin_map[item_key] = next_admin
+        self.changed_keys.append(item_key)
+
+    def remove_admin(self, item_key) -> None:
+        admin_map = self.widget.model.admin_map
+        if item_key not in admin_map:
+            return
+        self._remember(item_key)
+        existing = admin_map.get(item_key)
+        existing_status = str(getattr(existing, "status", "") or "")
+        if (
+            existing is not None
+            and existing_status == "planned"
+            and self.widget._is_committed_value(getattr(existing, "is_committed", 0))
+        ):
+            tombstone = copy(existing)
+            tombstone.status = "deleted"
+            tombstone.is_committed = 0
+            tombstone.comment = ""
+            tombstone.actual_time = None
+            setattr(tombstone, "_pending_cell_action", self.op_prefix)
+            admin_map[item_key] = tombstone
+        else:
+            del admin_map[item_key]
+        self.changed_keys.append(item_key)
+
+
+class OrdersWidget(QWidget):
+    draftStatusChanged = Signal(bool)
+    administrationStatusChanged = Signal(bool)
+    ordersPresenceChanged = Signal(bool)
+    localBalanceChanged = Signal()
+    localDraftResolutionFinished = Signal(bool)
+    _LOCAL_SILENT_FORCE_PREFIXES = (
+        "orders_add_input:",
+        "orders_add_cvp:",
+        "orders_edit_input:",
+        "orders_left_click:",
+        "orders_middle_click:",
+        "orders_right_click:",
+        "orders_finalize:",
+    )
+    _ORDERS_CHANGE_ENTITIES = {"orders", "administrations"}
+
+    def __init__(self, service=None, admission_id=None, shift_date=None, parent=None, defer_ui=False):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.service = service
+        self.admission_id = admission_id
+        self.shift_date = shift_date
+        self._defer_ui = defer_ui
+        
+        self.main_layout = None
+        self.model = None
+        self._last_polled_change_id = 0
+        self._last_polled_context_key = None
+        self._fast_sync_timer = QTimer(self)
+        self._fast_sync_timer.setSingleShot(True)
+        self._fast_sync_timer.timeout.connect(self._run_fast_sync)
+        self._silent_sync_delay_ms = max(250, int(os.getenv("REMCARD_ORDERS_SILENT_SYNC_DELAY_MS", "500")))
+        self._admin_only_snapshot_window_sec = max(
+            3.0,
+            float(os.getenv("REMCARD_ORDERS_ADMIN_ONLY_WINDOW_SEC", "15")),
+        )
+        self._state_sync_timer = QTimer(self)
+        self._state_sync_timer.setSingleShot(True)
+        self._state_sync_timer.timeout.connect(self.check_drafts)
+        self._last_poll_monotonic = 0.0
+        self._min_poll_interval_sec = max(0.1, float(os.getenv("REMCARD_ORDERS_POLL_MIN_INTERVAL_SEC", "0.8")))
+        self._pending_structure_change_id = 0
+        self._applying_pending_structure_sync = False
+        self._forced_read_only = False
+        self._is_closing = False
+        self._snapshot_worker = None
+        self._snapshot_pending = False
+        self._snapshot_force_pending = False
+        self._snapshot_pending_source = "refresh"
+        self._snapshot_pending_priority = "MEDIUM"
+        self._snapshot_pending_reason = None
+        self._active_request_context_key = None
+        self._active_request_force = False
+        self._active_request_priority = "MEDIUM"
+        self._active_request_seq = 0
+        self._active_request_id = ""
+        self._active_request_generation = 0
+        self._active_request_source = "refresh"
+        self._active_request_started_monotonic = 0.0
+        self._forced_reload_cooldown_ms = ORDERS_FORCED_RELOAD_COOLDOWN_MS
+        self._forced_reload_recent = {}
+        self._forced_reload_active_key = None
+        self._forced_reload_pending_key = None
+        self._forced_reload_after_guard_key = None
+        self._forced_reload_after_guard_reason = None
+        self._active_snapshot_worker_state = {}
+        self._retired_snapshot_worker_states = {}
+        self._post_finalize_retry_count = 0
+        self._post_finalize_retry_after_cancel = False
+        self._post_finalize_retry_context_hash = None
+        self._refresh_status_label = None
+        self._snapshot_stale = False
+        self._snapshot_seq = 0
+        self._last_applied_snapshot_signature = None
+        self._cached_has_drafts = False
+        self._cached_has_administrations = False
+        self._cached_has_orders = False
+        self._admin_only_snapshot_until = 0.0
+        self._orders_click_seq = 0
+        self._pending_admin_write_count = 0
+        self._pending_admin_cell_write_keys = set()
+        self._recent_admin_cell_clicks = {}
+        self._local_cell_draft_guard = False
+        self._local_cell_draft_guard_signatures = {}
+        self._legacy_direct_snapshot_warned = False
+        self._load_yesterday_worker = None
+        self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
+        self._pending_change_context_key = None
+        self._pending_change_reload = False
+        self._pending_change_invalidated = False
+        self._pending_change_count = 0
+        self._soft_update_delay_ms = max(100, int(os.getenv("REMCARD_ORDERS_SOFT_UPDATE_DELAY_MS", "150")))
+        self._soft_update_message = ""
+        self._change_batch_timer = QTimer(self)
+        self._change_batch_timer.setSingleShot(True)
+        self._change_batch_timer.timeout.connect(self._flush_change_batch)
+        self._soft_update_timer = QTimer(self)
+        self._soft_update_timer.setSingleShot(True)
+        self._soft_update_timer.timeout.connect(self._show_soft_update_if_needed)
+        self._post_finalize_watchdog_timer = QTimer(self)
+        self._post_finalize_watchdog_timer.setSingleShot(True)
+        self._post_finalize_watchdog_timer.timeout.connect(self._on_post_finalize_snapshot_watchdog)
+        self._perf_enabled = os.getenv("REMCARD_PROFILE_ORDERS_CLICK", "0") == "1"
+        self._perf_next_click_id = 0
+        self._perf_clicks = {}
+        self._pending_reorder_order_ids = []
+        self._draft_baseline_snapshot = None
+        self._draft_baseline_admin_map = {}
+        self._local_draft_dirty_order_ids = set()
+        self._local_draft_dirty_admin_keys = set()
+        self._local_deleted_orders = {}
+        self._local_draft_save_pending = False
+        self._legacy_central_draft_detected = False
+        self._next_local_order_id = -1
+        self._next_local_admin_id = -1
+        self._row_drag_state = None
+        self._row_drag_ghost = None
+        self._row_drag_indicator = None
+        if not self._defer_ui:
+            self.setup_ui()
+        
+        # Таймер для обновления маркера "Сейчас"
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_now_marker)
+        self.timer.start(60000)
+
+    def _current_model_order_ids(self):
+        if not self.model:
+            return []
+        return [o.id for o in self.model.orders if o and o.status != OrderStatus.DELETED]
+
+    def _reset_change_cursor(self):
+        self._last_polled_change_id = 0
+        self._last_polled_context_key = None
+        self._last_poll_monotonic = 0.0
+
+    def _reset_cached_state(self):
+        self._cached_has_drafts = False
+        self._cached_has_administrations = False
+        self._cached_has_orders = False
+        self._last_applied_snapshot_signature = None
+        self._legacy_central_draft_detected = False
+        self._pending_admin_cell_write_keys.clear()
+        self._recent_admin_cell_clicks.clear()
+        self._discard_deferred_forced_reload_after_guard(discard_reason="context_reset")
+        self._clear_local_cell_draft_guard()
+        self._reset_local_draft_tracking(clear_baseline=True)
+
+    def _reset_local_draft_tracking(self, *, clear_baseline: bool = False):
+        self._local_draft_dirty_order_ids.clear()
+        self._local_draft_dirty_admin_keys.clear()
+        self._local_deleted_orders.clear()
+        self._next_local_order_id = -1
+        self._next_local_admin_id = -1
+        if clear_baseline:
+            self._draft_baseline_snapshot = None
+            self._draft_baseline_admin_map = {}
+
+    def _capture_local_draft_baseline(self, snapshot):
+        if self._has_local_draft_changes() or self.model is None or self._legacy_central_draft_detected:
+            return
+        baseline = dict(snapshot or {})
+        baseline["orders"] = deepcopy(list(snapshot.get("orders") or []))
+        baseline["admin_rows"] = [dict(row) for row in (snapshot.get("admin_rows") or [])]
+        baseline["has_any_draft"] = False
+        baseline["only_committed"] = True
+        self._draft_baseline_snapshot = baseline
+        self._draft_baseline_admin_map = {
+            key: deepcopy(value)
+            for key, value in getattr(self.model, "admin_map", {}).items()
+        }
+        self._reset_local_draft_tracking(clear_baseline=False)
+
+    def _has_local_draft_changes(self) -> bool:
+        return bool(
+            self._local_draft_dirty_order_ids
+            or self._local_draft_dirty_admin_keys
+            or self._pending_reorder_order_ids
+        )
+
+    def _allocate_local_order_id(self) -> int:
+        value = int(self._next_local_order_id)
+        self._next_local_order_id -= 1
+        return value
+
+    def _allocate_local_admin_id(self) -> int:
+        value = int(self._next_local_admin_id)
+        self._next_local_admin_id -= 1
+        return value
+
+    def _mark_local_order_dirty(self, order_id):
+        if order_id is None:
+            return
+        self._local_draft_dirty_order_ids.add(int(order_id))
+        self._cached_has_drafts = True
+        if self.model is not None:
+            self.model._set_has_any_draft(True, emit_order_column=True)
+        self._local_cell_draft_guard = True
+        self.check_drafts()
+
+    def _mark_local_admin_dirty(self, keys):
+        for key in keys or ():
+            if key is None:
+                continue
+            normalized_key = (int(key[0]), str(key[1]))
+            current = self.model.admin_map.get(normalized_key) if self.model is not None else None
+            baseline = self._draft_baseline_admin_map.get(normalized_key)
+
+            def shape(admin):
+                if admin is None:
+                    return None
+                status = str(getattr(admin, "status", "") or "")
+                if status in {"deleted", "cancelled"} and baseline is None:
+                    return None
+                return (
+                    status,
+                    str(getattr(admin, "cell_role", "") or ""),
+                    str(getattr(admin, "big_chain_id", "") or ""),
+                    float(getattr(admin, "volume_ml", 0.0) or 0.0),
+                )
+
+            if shape(current) == shape(baseline):
+                self._local_draft_dirty_admin_keys.discard(normalized_key)
+                if self.model is not None:
+                    if baseline is None:
+                        self.model.admin_map.pop(normalized_key, None)
+                    else:
+                        self.model.admin_map[normalized_key] = deepcopy(baseline)
+                continue
+            self._local_draft_dirty_admin_keys.add(normalized_key)
+        if self._local_draft_dirty_admin_keys:
+            self._cached_has_drafts = True
+            self._local_cell_draft_guard = True
+
+    def _build_local_draft_payload(self):
+        if self.model is None:
+            return None
+        deleted_orders = [
+            deepcopy(entry[1])
+            for entry in self._local_deleted_orders.values()
+        ]
+        expected_revisions = self._visible_order_revision_map()
+        for deleted_order in deleted_orders:
+            order_id = int(getattr(deleted_order, "id", 0) or 0)
+            if order_id > 0:
+                expected_revisions[order_id] = int(getattr(deleted_order, "revision", 0) or 0)
+        return {
+            "orders": deepcopy(list(self.model.orders)) + deleted_orders,
+            "admin_map": deepcopy(dict(self.model.admin_map)),
+            "dirty_admin_keys": tuple(sorted(self._local_draft_dirty_admin_keys)),
+            "baseline_admin_map": deepcopy(dict(self._draft_baseline_admin_map)),
+            "expected_revisions": expected_revisions,
+            "expected_active_order_ids": tuple(sorted(
+                int(order.id)
+                for order in (self._draft_baseline_snapshot or {}).get("orders", ())
+                if order is not None
+                and getattr(order, "id", None) is not None
+                and int(order.id) > 0
+                and self._is_committed_value(getattr(order, "is_committed", 0))
+                and getattr(order, "status", None) not in {OrderStatus.DELETED, OrderStatus.CANCELLED}
+            )),
+        }
+
+    def is_draft_save_pending(self) -> bool:
+        return bool(self._local_draft_save_pending)
+
+    def _restore_local_draft_baseline(self) -> bool:
+        if self.model is None or not self._draft_baseline_snapshot:
+            return False
+        scroll_value = self._capture_table_scroll()
+        self.model.apply_snapshot(deepcopy(self._draft_baseline_snapshot))
+        self._clear_pending_reorder()
+        self._reset_local_draft_tracking(clear_baseline=False)
+        self._cached_has_drafts = False
+        self._cached_has_administrations = self._model_has_administrations()
+        self._cached_has_orders = any(
+            order and order.status != OrderStatus.DELETED
+            for order in self.model.orders
+        )
+        self._clear_local_cell_draft_guard()
+        self._restore_table_scroll(scroll_value)
+        self.check_drafts()
+        self.localBalanceChanged.emit()
+        return True
+
+    def _order_has_committed_execution(self, order_id) -> bool:
+        if self.model is None or order_id is None:
+            return False
+        for (candidate_id, _planned), admin in self.model.admin_map.items():
+            if int(candidate_id) != int(order_id) or admin is None:
+                continue
+            if not self._is_committed_value(getattr(admin, "is_committed", 0)):
+                continue
+            if str(getattr(admin, "comment", "") or "") in {
+                NURSE_MARK_EXECUTED,
+                NURSE_MARK_NOT_EXECUTED,
+            }:
+                return True
+        return False
+
+    def _clone_order_as_local_draft(self, source: OrderDTO, *, created_at: datetime | None = None) -> OrderDTO:
+        order = deepcopy(source)
+        order.id = self._allocate_local_order_id()
+        order.admission_id = int(self.admission_id)
+        order.is_committed = 0
+        order.revision = 0
+        order.draft_sort_order = None
+        order.status = OrderStatus.ACTIVE
+        order.created_at = created_at or getattr(order, "created_at", None) or datetime.now()
+        order.administrations = []
+        if hasattr(order, "_pending_delete"):
+            delattr(order, "_pending_delete")
+        return order
+
+    def _insert_local_orders_batch(
+        self,
+        orders,
+        *,
+        replace_existing: bool = False,
+        source_admin_rows=None,
+        source_shift_date: datetime | None = None,
+    ):
+        self._ensure_model_initialized()
+        if self.model is None:
+            return False
+        sources = list(orders or ())
+        if not sources:
+            return False
+        if replace_existing:
+            blocked = [
+                order for order in self.model.orders
+                if order is not None
+                and int(getattr(order, "id", 0) or 0) > 0
+                and self._order_has_committed_execution(order.id)
+            ]
+            if blocked:
+                self._show_warning(
+                    "Лист содержит уже выполненные назначения. Они сохранены как медицинский факт; "
+                    "удалите только будущие ячейки или добавьте назначения без полной замены листа."
+                )
+                return False
+
+        start, end = self.service.get_day_period(self.shift_date)
+        now = datetime.now()
+        created_at = now if start <= now < end else start
+        source_to_local_order_id = {}
+        local_orders = []
+        for source in sources:
+            local_order = self._clone_order_as_local_draft(source, created_at=created_at)
+            source_id = getattr(source, "id", None)
+            if source_id is not None:
+                source_to_local_order_id[int(source_id)] = int(local_order.id)
+            local_orders.append(local_order)
+
+        local_admin_rows = []
+        if source_admin_rows and source_shift_date is not None:
+            source_start, _ = self.service.get_day_period(source_shift_date)
+            time_diff = start - source_start
+            copied_chain_ids = {}
+
+            def row_value(row, name, default=None):
+                if isinstance(row, dict):
+                    return row.get(name, default)
+                try:
+                    return row[name]
+                except Exception:
+                    return getattr(row, name, default)
+
+            for source_admin in source_admin_rows:
+                source_order_id = int(row_value(source_admin, "order_id", 0) or 0)
+                local_order_id = source_to_local_order_id.get(source_order_id)
+                if local_order_id is None:
+                    continue
+                source_planned = datetime.fromisoformat(
+                    str(row_value(source_admin, "planned_time")).replace(" ", "T")
+                )
+                local_planned = source_planned + time_diff
+                if not (start <= local_planned < end):
+                    continue
+                source_chain_id = str(row_value(source_admin, "big_chain_id", "") or "")
+                local_chain_id = None
+                if source_chain_id:
+                    chain_key = (source_order_id, source_chain_id)
+                    local_chain_id = copied_chain_ids.setdefault(
+                        chain_key,
+                        f"local-copy:{local_order_id}:{len(copied_chain_ids) + 1}",
+                    )
+                admin = AdministrationDTO(
+                    id=self._allocate_local_admin_id(),
+                    order_id=local_order_id,
+                    big_chain_id=local_chain_id,
+                    cell_role=str(row_value(source_admin, "cell_role", "single") or "single"),
+                    planned_time=local_planned,
+                    status=str(row_value(source_admin, "status", "planned") or "planned"),
+                    is_committed=0,
+                    comment="",
+                    volume_ml=float(row_value(source_admin, "volume_ml", 0.0) or 0.0),
+                )
+                key = (local_order_id, local_planned.isoformat())
+                local_admin_rows.append((key, admin))
+
+        # Сначала полностью подготавливаем новый пакет. Так ошибка в исходных
+        # данных не оставит текущий лист частично помеченным на удаление.
+        if replace_existing:
+            for row in range(len(self.model.orders) - 1, -1, -1):
+                order = self.model.orders[row]
+                if order is not None:
+                    self._mark_local_order_row_deleted(
+                        row,
+                        order,
+                        was_committed=self._is_committed_value(getattr(order, "is_committed", 0)),
+                    )
+
+        for local_order in local_orders:
+            self._insert_local_order_after_add(local_order)
+
+        copied_admin_keys = []
+        for key, admin in local_admin_rows:
+            self.model.admin_map[key] = admin
+            copied_admin_keys.append(key)
+        if copied_admin_keys:
+            self._mark_local_admin_dirty(copied_admin_keys)
+            self._emit_admin_cell_changes(copied_admin_keys)
+            self.localBalanceChanged.emit()
+        return True
+
+    def _clear_local_times(self):
+        if self.model is None:
+            return
+        changed_keys = []
+        preserved_fact = False
+        for key, admin in list(self.model.admin_map.items()):
+            if admin is None or str(getattr(admin, "status", "") or "") in {"deleted", "cancelled"}:
+                continue
+            if (
+                self._is_committed_value(getattr(admin, "is_committed", 0))
+                and str(getattr(admin, "comment", "") or "") in {NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED}
+            ):
+                preserved_fact = True
+                continue
+            baseline = self._draft_baseline_admin_map.get(key)
+            if baseline is None:
+                self.model.admin_map.pop(key, None)
+            else:
+                tombstone = deepcopy(admin)
+                tombstone.id = self._allocate_local_admin_id()
+                tombstone.status = "deleted"
+                tombstone.is_committed = 0
+                tombstone.comment = ""
+                tombstone.actual_time = None
+                tombstone.performer_id = None
+                self.model.admin_map[key] = tombstone
+            changed_keys.append(key)
+        if changed_keys:
+            self._emit_admin_cell_changes(changed_keys)
+        if preserved_fact:
+            self._show_warning(
+                "Выполненные и отмеченные как невыполненные ячейки оставлены как медицинский факт."
+            )
+
+    def _clear_local_orders(self):
+        if self.model is None:
+            return
+        blocked = False
+        for row in range(len(self.model.orders) - 1, -1, -1):
+            order = self.model.orders[row]
+            if order is None or getattr(order, "_pending_delete", False):
+                continue
+            if int(getattr(order, "id", 0) or 0) > 0 and self._order_has_committed_execution(order.id):
+                blocked = True
+                continue
+            self._mark_local_order_row_deleted(
+                row,
+                order,
+                was_committed=self._is_committed_value(getattr(order, "is_committed", 0)),
+            )
+        if blocked:
+            self._show_warning(
+                "Назначения с выполненными введениями оставлены как медицинский факт. "
+                "Для них можно убрать только будущие ячейки."
+            )
+
+    def _reset_pending_snapshot_request(self):
+        self._snapshot_pending = False
+        self._snapshot_force_pending = False
+        self._snapshot_pending_source = "refresh"
+        self._snapshot_pending_priority = "MEDIUM"
+        self._snapshot_pending_reason = None
+        self._forced_reload_pending_key = None
+
+    def _disconnect_snapshot_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._apply_snapshot),
+            (worker.failed, self._on_snapshot_failed),
+            (worker.finished, self._on_snapshot_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def _retire_snapshot_worker_state(
+        self,
+        *,
+        state: str,
+        reason: str,
+        replacement_request_id: str | None = None,
+    ):
+        active = dict(getattr(self, "_active_snapshot_worker_state", {}) or {})
+        if not active and self._active_request_id:
+            active = {
+                "request_id": self._active_request_id,
+                "generation": self._active_request_generation,
+                "source": self._active_request_source,
+                "priority": self._active_request_priority,
+                "admission_id": self.admission_id,
+                "started_monotonic": self._active_request_started_monotonic,
+                "context_key": self._active_request_context_key,
+                "seq": self._active_request_seq,
+                "force": self._active_request_force,
+            }
+        if not active:
+            return {}
+        active["state"] = state
+        active["retired_reason"] = reason
+        active["retired_at"] = datetime.now().isoformat(timespec="milliseconds")
+        active["replacement_request_id"] = replacement_request_id
+        request_id = str(active.get("request_id") or "")
+        if request_id:
+            self._retired_snapshot_worker_states[request_id] = active
+            while len(self._retired_snapshot_worker_states) > 50:
+                oldest_key = next(iter(self._retired_snapshot_worker_states))
+                self._retired_snapshot_worker_states.pop(oldest_key, None)
+        self._active_snapshot_worker_state = {}
+        return active
+
+    def _reset_active_snapshot_request(self):
+        self._active_request_context_key = None
+        self._active_request_force = False
+        self._active_request_priority = "MEDIUM"
+        self._active_request_seq = 0
+        self._active_request_id = ""
+        self._active_request_generation = 0
+        self._active_request_source = "refresh"
+        self._active_request_started_monotonic = 0.0
+        self._forced_reload_active_key = None
+        self._active_snapshot_worker_state = {}
+
+    def _detach_snapshot_worker(
+        self,
+        worker,
+        *,
+        state: str,
+        reason: str,
+        replacement_request_id: str | None = None,
+    ):
+        retired = self._retire_snapshot_worker_state(
+            state=state,
+            reason=reason,
+            replacement_request_id=replacement_request_id,
+        )
+        self._disconnect_snapshot_worker(worker)
+        try:
+            worker.quit()
+        except Exception:
+            pass
+        if self._snapshot_worker is worker:
+            self._snapshot_worker = None
+        self._post_finalize_watchdog_timer.stop()
+        self._reset_active_snapshot_request()
+        logger.warning(
+            "[OrdersWidget] snapshot_worker_detached admission_id=%s request_id=%s source=%s priority=%s state=%s reason=%s replacement_request_id=%s",
+            self.admission_id,
+            retired.get("request_id"),
+            retired.get("source"),
+            retired.get("priority"),
+            state,
+            reason,
+            replacement_request_id,
+        )
+        record_metric(
+            "orders_snapshot_worker_detached",
+            1,
+            admission_id=self.admission_id,
+            source=str(retired.get("source") or "refresh"),
+            priority=str(retired.get("priority") or "MEDIUM"),
+            request_id=retired.get("request_id"),
+            generation=retired.get("generation"),
+            state=state,
+            reason=reason,
+            replacement_request_id=replacement_request_id,
+        )
+        return retired
+
+    def _active_snapshot_context_key(self):
+        state = getattr(self, "_active_snapshot_worker_state", {}) or {}
+        return state.get("context_key") or self._active_request_context_key
+
+    def _record_snapshot_worker_superseded_context_switch(
+        self,
+        *,
+        retired: dict,
+        new_context_key,
+        new_context_hash: str | None,
+        replacement_request_id: str | None,
+    ) -> None:
+        logger.warning(
+            "[OrdersWidget] orders_snapshot_worker_superseded_context_switch old_admission_id=%s new_admission_id=%s request_id=%s replacement_request_id=%s old_context=%s new_context=%s",
+            retired.get("admission_id"),
+            self.admission_id,
+            retired.get("request_id"),
+            replacement_request_id,
+            retired.get("context_key"),
+            new_context_key,
+        )
+        record_metric(
+            "orders_snapshot_worker_superseded_context_switch",
+            1,
+            role="doctor",
+            admission_id=int(self.admission_id or 0),
+            old_admission_id=retired.get("admission_id"),
+            request_id=retired.get("request_id"),
+            generation=retired.get("generation"),
+            replacement_request_id=replacement_request_id,
+            old_context_key=str(retired.get("context_key") or ""),
+            new_context_key=str(new_context_key or ""),
+            context_hash=str(new_context_hash or ""),
+            source=str(retired.get("source") or "refresh"),
+            priority=str(retired.get("priority") or "MEDIUM"),
+        )
+
+    def _detach_active_snapshot_for_context_switch(
+        self,
+        *,
+        new_context_key,
+        new_context_hash: str | None = None,
+        replacement_request_id: str | None = None,
+    ) -> bool:
+        worker = self._snapshot_worker
+        if worker is None:
+            return False
+        try:
+            worker_running = bool(worker.isRunning())
+        except Exception:
+            worker_running = False
+        if not worker_running:
+            return False
+        old_context_key = self._active_snapshot_context_key()
+        if old_context_key == new_context_key:
+            return False
+        retired = self._detach_snapshot_worker(
+            worker,
+            state="superseded",
+            reason="context_switch",
+            replacement_request_id=replacement_request_id,
+        )
+        self._record_snapshot_worker_superseded_context_switch(
+            retired=retired,
+            new_context_key=new_context_key,
+            new_context_hash=new_context_hash,
+            replacement_request_id=replacement_request_id,
+        )
+        return True
+
+    def _disconnect_load_yesterday_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._on_load_yesterday_ready),
+            (worker.failed, self._on_load_yesterday_failed),
+            (worker.finished, self._on_load_yesterday_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def shutdown(self, timeout_ms: int = 1200):
+        self._is_closing = True
+        self._reset_pending_snapshot_request()
+        for timer_name in (
+            "_fast_sync_timer",
+            "_state_sync_timer",
+            "_change_batch_timer",
+            "_soft_update_timer",
+            "_post_finalize_watchdog_timer",
+            "timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
+
+        worker = self._snapshot_worker
+        self._snapshot_worker = None
+        self._post_finalize_retry_after_cancel = False
+        self._post_finalize_retry_context_hash = None
+        self._reset_active_snapshot_request()
+        self._disconnect_snapshot_worker(worker)
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(timeout_ms)
+
+        load_worker = self._load_yesterday_worker
+        self._load_yesterday_worker = None
+        self._disconnect_load_yesterday_worker(load_worker)
+        if load_worker is not None and load_worker.isRunning():
+            load_worker.quit()
+            load_worker.wait(timeout_ms)
+
+    def _clear_local_cell_draft_guard(self):
+        self._local_cell_draft_guard = False
+        self._local_cell_draft_guard_signatures = {}
+        self._flush_deferred_forced_reload_after_guard()
+
+    def _discard_deferred_forced_reload_after_guard(self, *, discard_reason: str):
+        key = self._forced_reload_after_guard_key
+        reason = self._forced_reload_after_guard_reason
+        if key is None:
+            return
+        self._forced_reload_after_guard_key = None
+        self._forced_reload_after_guard_reason = None
+        reload_reason = str(reason or key[2])
+        logger.info(
+            "[OrdersSync] orders_deferred_reload_discarded_context_reset role=doctor old_admission_id=%s current_admission_id=%s reason=%s context_hash=%s discard_reason=%s",
+            key[0],
+            self.admission_id,
+            reload_reason,
+            key[1],
+            discard_reason,
+        )
+        record_metric(
+            "orders_deferred_reload_discarded_context_reset",
+            1,
+            role="doctor",
+            admission_id=key[0],
+            current_admission_id=int(self.admission_id or 0),
+            context_hash=key[1],
+            reason=reload_reason,
+            discard_reason=discard_reason,
+        )
+
+    def _mark_local_cell_draft_guard(self, changed_keys=None):
+        if self.has_drafts():
+            self._local_cell_draft_guard = True
+            if changed_keys and self.model is not None:
+                for key in changed_keys:
+                    self._local_cell_draft_guard_signatures[key] = self._admin_guard_signature(
+                        self.model.admin_map.get(key)
+                    )
+            self._admin_only_snapshot_until = max(
+                self._admin_only_snapshot_until,
+                time.monotonic() + self._admin_only_snapshot_window_sec,
+            )
+
+    @staticmethod
+    def _admin_guard_signature(admin):
+        if admin is None:
+            return None
+        return (
+            str(getattr(admin, "status", "") or ""),
+            str(getattr(admin, "cell_role", "") or ""),
+            int(getattr(admin, "is_committed", 0) or 0),
+        )
+
+    @staticmethod
+    def _admin_row_guard_signature(row):
+        if row is None:
+            return None
+        return (
+            str(row.get("status") or ""),
+            str(row.get("cell_role") or ""),
+            int(row.get("is_committed") or 0),
+        )
+
+    @staticmethod
+    def _admin_row_key(row):
+        try:
+            planned_time = datetime.fromisoformat(str(row.get("planned_time")))
+            planned_key = planned_time.isoformat()
+        except Exception:
+            planned_key = str(row.get("planned_time") or "")
+        try:
+            order_id = int(row.get("order_id"))
+        except Exception:
+            order_id = row.get("order_id")
+        return (order_id, planned_key)
+
+    def _snapshot_matches_local_cell_guard(self, snapshot) -> bool:
+        guard_signatures = dict(self._local_cell_draft_guard_signatures or {})
+        if not guard_signatures:
+            return bool(snapshot.get("has_any_draft", False))
+
+        snapshot_by_key = {}
+        for row in snapshot.get("admin_rows") or []:
+            if not isinstance(row, dict):
+                row = dict(row)
+            snapshot_by_key[self._admin_row_key(row)] = row
+
+        return all(
+            self._admin_row_guard_signature(snapshot_by_key.get(key)) == signature
+            for key, signature in guard_signatures.items()
+        )
+
+    def _should_preserve_local_cell_draft(self, snapshot) -> bool:
+        if self._has_local_draft_changes():
+            self._local_cell_draft_guard = True
+            return True
+        if not self._local_cell_draft_guard:
+            return False
+        if self._snapshot_matches_local_cell_guard(snapshot):
+            self._clear_local_cell_draft_guard()
+            return False
+        if not self.has_drafts():
+            self._clear_local_cell_draft_guard()
+            return False
+        if time.monotonic() >= self._admin_only_snapshot_until:
+            self._clear_local_cell_draft_guard()
+            return False
+        return True
+
+    def _is_read_only(self) -> bool:
+        """
+        Проверяет, заблокирована ли карта для редактирования.
+        В данной версии редактирование назначений врачом разрешено ВСЕГДА, 
+        независимо от статуса пациента (в т.ч. при Исходе).
+        """
+        return bool(self._forced_read_only or self._legacy_central_draft_detected)
+
+    def set_forced_read_only(self, enabled: bool):
+        self._forced_read_only = bool(enabled)
+        if hasattr(self, "input_widget") and self.input_widget is not None:
+            self.input_widget.setEnabled(not self._forced_read_only and not self._legacy_central_draft_detected)
+        if hasattr(self, "table_view") and self.table_view is not None:
+            self.table_view.viewport().update()
+
+    def has_drafts(self) -> bool:
+        if self.model is not None:
+            return bool(
+                self._has_local_draft_changes()
+                or self._cached_has_drafts
+                or getattr(self.model, "has_any_draft", False)
+            )
+        return False
+
+    def has_administrations(self) -> bool:
+        if self.model is not None:
+            return bool(self._cached_has_administrations)
+        return False
+
+    def _model_has_administrations(self) -> bool:
+        if self.model is None:
+            return False
+        return any(
+            admin is not None and str(getattr(admin, "status", "") or "") not in ("deleted", "cancelled")
+            for admin in getattr(self.model, "admin_map", {}).values()
+        )
+
+    def has_orders(self) -> bool:
+        if self.model is not None:
+            return bool(self._cached_has_orders)
+        return False
+
+    def _known_current_context_without_drafts(self) -> bool:
+        if self.model is None:
+            return False
+        if self.model.admission_id != self.admission_id or self.model.shift_date != self.shift_date:
+            return False
+        if self.has_drafts():
+            return False
+        return bool(
+            self._last_applied_snapshot_signature is not None
+            or self._cached_has_orders
+            or self._cached_has_administrations
+            or getattr(self.model, "orders", None)
+            or getattr(self.model, "admin_map", None)
+        )
+
+    def _source_has_order_drafts(self) -> bool | None:
+        if not self.service or not self.admission_id:
+            return None
+        checker = getattr(self.service, "has_order_drafts", None)
+        if not callable(checker):
+            return None
+        try:
+            return bool(checker(self.admission_id, self.shift_date))
+        except Exception as exc:
+            logger.debug("OrdersWidget draft probe failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _is_committed_value(value) -> bool:
+        try:
+            return bool(int(value or 0))
+        except Exception:
+            return str(value or "").strip().lower() in {"1", "true", "yes"}
+
+    def check_drafts(self):
+        self.draftStatusChanged.emit(self.has_drafts())
+        self.administrationStatusChanged.emit(self.has_administrations())
+        self.ordersPresenceChanged.emit(self.has_orders())
+        self._try_apply_pending_structure_sync()
+
+    def _visible_order_ids(self):
+        if not self.model:
+            return []
+        return [
+            int(order.id)
+            for order in self.model.orders
+            if order and order.id is not None and order.status != OrderStatus.DELETED
+        ]
+
+    def _visible_order_revision_map(self, order_ids=None):
+        if not self.model:
+            return {}
+        allowed = {int(item) for item in order_ids if item is not None} if order_ids is not None else None
+        revisions = {}
+        for order in self.model.orders:
+            order_id = getattr(order, "id", None)
+            if order_id is None:
+                continue
+            order_id = int(order_id)
+            if order_id <= 0:
+                continue
+            if allowed is not None and order_id not in allowed:
+                continue
+            revisions[order_id] = int(getattr(order, "revision", 0) or 0)
+        return revisions
+
+    def _is_current_context(self, admission_id, shift_date) -> bool:
+        try:
+            same_admission = int(self.admission_id or 0) == int(admission_id or 0)
+        except Exception:
+            same_admission = self.admission_id == admission_id
+        return same_admission and self.shift_date == shift_date
+
+    def _refresh_model_if_current(self, admission_id, shift_date):
+        if self._is_current_context(admission_id, shift_date):
+            self._refresh_model()
+
+    def _clear_pending_reorder(self):
+        self._pending_reorder_order_ids = []
+
+    def _mark_local_reorder_draft(self):
+        self._pending_reorder_order_ids = self._visible_order_ids()
+        self._local_draft_dirty_order_ids.update(self._pending_reorder_order_ids)
+        self._cached_has_drafts = True
+        if self.model is not None:
+            if hasattr(self.model, "_set_has_any_draft"):
+                self.model._set_has_any_draft(True, emit_order_column=True)
+            else:
+                self.model.has_any_draft = True
+        self.check_drafts()
+
+    def _persist_reorder_draft(self):
+        # Reordering is part of the in-memory overlay.  The final order is
+        # persisted together with the rest of the draft by finalize_card().
+        return
+
+    def _apply_pending_reorder_to_model(self):
+        if not self._pending_reorder_order_ids or not self.model:
+            return False
+        changed = self.model.reorder_by_order_ids(
+            self._pending_reorder_order_ids,
+            mark_draft=True,
+        )
+        self._cached_has_drafts = True
+        return changed
+
+    def _mark_local_order_row_deleted(self, row: int, order: OrderDTO, *, was_committed: bool):
+        if not self.model or row < 0 or row >= len(self.model.orders):
+            return
+
+        order_id = int(getattr(order, "id"))
+        tombstone = deepcopy(order)
+        setattr(tombstone, "_pending_delete", True)
+
+        self.model.beginRemoveRows(QModelIndex(), row, row)
+        try:
+            self.model.orders.pop(row)
+        finally:
+            self.model.endRemoveRows()
+
+        self._pending_reorder_order_ids = [
+            candidate_id
+            for candidate_id in self._pending_reorder_order_ids
+            if int(candidate_id) != order_id
+        ]
+        removed_admin_keys = [
+            key for key in self.model.admin_map
+            if int(key[0]) == order_id
+        ]
+        for key in removed_admin_keys:
+            self.model.admin_map.pop(key, None)
+            self._local_draft_dirty_admin_keys.discard((int(key[0]), str(key[1])))
+        if order_id > 0:
+            self._local_deleted_orders[order_id] = (row, tombstone)
+            self._local_draft_dirty_order_ids.add(order_id)
+        else:
+            self._local_deleted_orders.pop(order_id, None)
+            self._local_draft_dirty_order_ids.discard(order_id)
+
+        has_local_draft = self._has_local_draft_changes()
+        if hasattr(self.model, "_set_has_any_draft"):
+            self.model._set_has_any_draft(has_local_draft, emit_order_column=True)
+        else:
+            self.model.has_any_draft = has_local_draft
+        self._cached_has_drafts = has_local_draft
+        self._cached_has_orders = any(
+            item is not None and item.status != OrderStatus.DELETED
+            for item in self.model.orders
+        )
+        self._cached_has_administrations = self._model_has_administrations()
+        self.check_drafts()
+        self.localBalanceChanged.emit()
+
+    def _clear_local_order_row_pending_delete(self, order_id):
+        if self.model is None:
+            return
+        entry = self._local_deleted_orders.pop(int(order_id), None)
+        if entry is None:
+            return
+        original_row, order = entry
+        if hasattr(order, "_pending_delete"):
+            delattr(order, "_pending_delete")
+        insert_row = max(0, min(int(original_row), len(self.model.orders)))
+        self.model.beginInsertRows(QModelIndex(), insert_row, insert_row)
+        try:
+            self.model.orders.insert(insert_row, order)
+        finally:
+            self.model.endInsertRows()
+        restored_admin_keys = []
+        for key, admin in self._draft_baseline_admin_map.items():
+            if int(key[0]) != int(order_id):
+                continue
+            self.model.admin_map[key] = deepcopy(admin)
+            restored_admin_keys.append(key)
+        if restored_admin_keys:
+            self._emit_admin_cell_changes(restored_admin_keys, mark_draft=False)
+        self._local_draft_dirty_order_ids.discard(int(order_id))
+        has_local_draft = self._has_local_draft_changes()
+        if hasattr(self.model, "_set_has_any_draft"):
+            self.model._set_has_any_draft(has_local_draft, emit_order_column=True)
+        else:
+            self.model.has_any_draft = has_local_draft
+        self._cached_has_drafts = has_local_draft
+        self._cached_has_orders = bool(self.model.orders)
+        self.check_drafts()
+        self.localBalanceChanged.emit()
+
+    def _mark_pending_structure_sync(self, change_id: int):
+        try:
+            change_id_int = int(change_id or 0)
+        except Exception:
+            change_id_int = 0
+        if change_id_int <= 0:
+            return
+        if change_id_int > self._pending_structure_change_id:
+            self._pending_structure_change_id = change_id_int
+
+    def _try_apply_pending_structure_sync(self):
+        if self._applying_pending_structure_sync:
+            return
+        if self._pending_structure_change_id <= 0:
+            return
+        if not self.model or not self.admission_id or not self.service:
+            return
+        if self.has_drafts():
+            return
+
+        self._applying_pending_structure_sync = True
+        try:
+            logger.info(
+                "[OrdersWidget] Applying deferred external structure sync: pending=%s",
+                self._pending_structure_change_id,
+            )
+            self.request_refresh(force=True)
+            self._pending_structure_change_id = 0
+        except Exception:
+            logger.exception("[OrdersWidget] Failed to apply deferred structure sync")
+        finally:
+            self._applying_pending_structure_sync = False
+
+    def request_refresh(self, *, force: bool = False, source: str = "refresh", priority: str = "HIGH"):
+        logger.info(
+            "[OrdersClick] request_refresh role=doctor admission_id=%s force=%s source=%s",
+            self.admission_id,
+            int(bool(force)),
+            source,
+        )
+        self._request_snapshot(
+            force=force,
+            source=source,
+            priority=priority,
+            invalidate_reason="widget_refresh_force" if force else "widget_refresh",
+        )
+
+    def set_context(self, *, service=None, admission_id=None, shift_date=None):
+        previous_context_key = self._current_context_key()
+        if service is not None:
+            self.service = service
+        self.admission_id = admission_id
+        self.shift_date = shift_date
+        current_context_key = self._current_context_key()
+        if previous_context_key != current_context_key:
+            self._detach_active_snapshot_for_context_switch(
+                new_context_key=current_context_key,
+                new_context_hash=None,
+                replacement_request_id=None,
+            )
+            self._clear_pending_reorder()
+            if self.model is not None:
+                self.model.clear_for_context(self.admission_id, self.shift_date)
+            self._reset_cached_state()
+            self._reset_change_cursor()
+            self._snapshot_stale = False
+            self._reset_change_batch(stop_timer=True)
+            self._clear_soft_update_state()
+
+    def _get_read_coordinator(self):
+        return getattr(self.service, "read_coordinator", None)
+
+    def _resolve_read_mode(self) -> str:
+        explicit_mode = str(getattr(self.service, "read_mode", "") or "").strip().lower()
+        if explicit_mode in {"live", "archive"}:
+            return explicit_mode
+        if self._forced_read_only and getattr(self.service, "source_db_path", None):
+            return "archive"
+        return "live"
+
+    def _resolve_source_db(self) -> str:
+        if self._resolve_read_mode() == "archive":
+            path = str(getattr(self.service, "source_db_path", "") or "").strip()
+            return path or "archive"
+        return "live"
+
+    def _build_orders_context(self):
+        coordinator = self._get_read_coordinator()
+        if coordinator is None:
+            raise RuntimeError("ReadCoordinator unavailable for OrdersWidget")
+        if not self.admission_id or not self.shift_date:
+            raise RuntimeError("OrdersWidget context is incomplete")
+        return coordinator.make_orders_context(
+            source_db=self._resolve_source_db(),
+            admission_id=int(self.admission_id),
+            shift_date=self.shift_date,
+            role="doctor",
+            mode=self._resolve_read_mode(),
+            variant="full" if self._legacy_central_draft_detected else "committed",
+        )
+
+    def _current_context_key(self):
+        try:
+            return self._build_orders_context().cache_key()
+        except Exception:
+            return None
+
+    def _ensure_model_initialized(self):
+        if self.model is None:
+            self.model = OrdersModel(self.service, self.admission_id, self.shift_date)
+        self._bind_model_to_table()
+
+    def _bind_model_to_table(self):
+        if self.model is None or not hasattr(self, "table_view"):
+            return
+        if self.table_view.model() is not self.model:
+            self.table_view.setModel(self.model)
+        self.table_view.verticalHeader().setDefaultSectionSize(45)
+        self._apply_table_header_layout()
+
+    def _warn_legacy_direct_snapshot_path(self):
+        if self._legacy_direct_snapshot_warned:
+            return
+        coordinator = getattr(self.service, "read_coordinator", None)
+        if coordinator is None:
+            return
+        self._legacy_direct_snapshot_warned = True
+        try:
+            context = coordinator.make_orders_context(
+                source_db="live",
+                admission_id=int(self.admission_id or 0),
+                shift_date=self.shift_date,
+                role="doctor",
+                mode="archive" if bool(getattr(self, "_forced_read_only", False)) else "live",
+                variant="full",
+            )
+            context_hash = context.hash()
+        except Exception:
+            context_hash = "unknown"
+        logger.warning(
+            "[OrdersWidget] legacy_direct_orders_snapshot_path admission_id=%s shift_date=%s context_hash=%s",
+            self.admission_id,
+            self.shift_date.isoformat() if self.shift_date else None,
+            context_hash,
+        )
+
+    def handle_data_changes(self, payload: dict, *, tab_active: bool = True):
+        if self._is_closing or not self.service or not self.admission_id:
+            return
+        has_scoped_change, scoped_change_id = self._extract_scoped_orders_change_id(payload)
+        changed_entities = {
+            str(entity)
+            for entity in (payload.get("changed_entities") or [])
+            if entity is not None
+        }
+        if not changed_entities:
+            changed_entities = {
+                str(change.get("entity_name") or "")
+                for change in (payload.get("changes") or [])
+                if change.get("entity_name")
+            }
+        if self._is_local_silent_force_payload(payload, changed_entities):
+            logger.info(
+                "[OrdersWidget] skip local forced orders refresh admission_id=%s sources=%s entities=%s",
+                self.admission_id,
+                self._payload_force_sources(payload),
+                sorted(changed_entities),
+            )
+            return
+        if not payload.get("forced") and not changed_entities.intersection({"orders", "administrations"}):
+            return
+        if not payload.get("forced") and payload.get("changes") and not has_scoped_change:
+            return
+        coordinator = self._get_read_coordinator()
+        if coordinator is None:
+            logger.warning("[OrdersWidget] ReadCoordinator unavailable during handle_data_changes")
+            return
+        try:
+            context = self._build_orders_context()
+        except Exception:
+            logger.exception("[OrdersWidget] Failed to build context for handle_data_changes")
+            return
+        context_key = context.cache_key()
+        self._snapshot_stale = True
+        if scoped_change_id > 0:
+            self._last_polled_change_id = max(int(self._last_polled_change_id or 0), scoped_change_id)
+            self._last_polled_context_key = context_key
+        if self._pending_change_context_key not in (None, context_key):
+            self._reset_change_batch(stop_timer=True)
+        self._pending_change_context_key = context_key
+        self._pending_change_reload = self._pending_change_reload or bool(tab_active)
+        self._pending_change_count += 1
+        if not self._pending_change_invalidated:
+            coordinator.invalidate_tab(context, reason="change_log_orders")
+            self._pending_change_invalidated = True
+        self._change_batch_timer.start(self._change_debounce_ms)
+
+    @staticmethod
+    def _payload_force_sources(payload: dict) -> list[str]:
+        sources: list[str] = []
+        raw_many = payload.get("force_sources") or []
+        if isinstance(raw_many, (list, tuple, set)):
+            sources.extend(str(item) for item in raw_many if item)
+        raw_one = payload.get("force_source")
+        if raw_one:
+            sources.append(str(raw_one))
+        return list(dict.fromkeys(sources))
+
+    def _is_local_silent_force_payload(self, payload: dict, changed_entities: set[str]) -> bool:
+        if not payload.get("forced"):
+            return False
+        sources = self._payload_force_sources(payload)
+        if not sources:
+            return False
+        if changed_entities and not set(changed_entities).issubset(self._ORDERS_CHANGE_ENTITIES):
+            return False
+        matched_prefixes = {
+            prefix
+            for source in sources
+            for prefix in self._LOCAL_SILENT_FORCE_PREFIXES
+            if source.startswith(prefix)
+        }
+        if not matched_prefixes:
+            return False
+        if "orders_finalize:" in matched_prefixes:
+            try:
+                payload_change_id = int(payload.get("last_change_id") or 0)
+                applied_change_id = int(self._last_polled_change_id or 0)
+            except (TypeError, ValueError):
+                return False
+            return payload_change_id > 0 and applied_change_id >= payload_change_id
+        return True
+
+    def _extract_scoped_orders_change_id(self, payload: dict) -> tuple[bool, int]:
+        try:
+            current_admission_id = int(self.admission_id or 0)
+        except Exception:
+            current_admission_id = 0
+        if current_admission_id <= 0:
+            return False, 0
+
+        has_relevant_change = False
+        max_scoped_change_id = 0
+        for change in payload.get("changes") or []:
+            entity_name = str(change.get("entity_name") or "")
+            if entity_name not in {"orders", "administrations"}:
+                continue
+
+            admission_id = change.get("admission_id")
+            if admission_id is None:
+                # Unscoped order changes are relevant enough to reload, but not enough
+                # to advance the admission-scoped stale-snapshot guard.
+                has_relevant_change = True
+                logger.warning(
+                    "[OrdersSync] orders_change_without_admission_id role=doctor current_admission_id=%s "
+                    "change_id=%s entity=%s action=%s payload_last_change_id=%s",
+                    current_admission_id,
+                    change.get("id"),
+                    entity_name,
+                    change.get("action"),
+                    payload.get("last_change_id"),
+                )
+                continue
+            try:
+                if int(admission_id) != current_admission_id:
+                    continue
+            except Exception:
+                continue
+
+            has_relevant_change = True
+            try:
+                max_scoped_change_id = max(max_scoped_change_id, int(change.get("id") or 0))
+            except Exception:
+                pass
+        return has_relevant_change, max_scoped_change_id
+
+    def _forced_reload_key(self, *, context_hash=None, reason: str):
+        return (
+            int(self.admission_id or 0),
+            str(context_hash or "unknown"),
+            str(reason or "unknown"),
+        )
+
+    def _record_forced_reload_metric(self, name: str, value=1, *, key=None, reason: str = "", **fields):
+        admission_id, context_hash, key_reason = key or self._forced_reload_key(
+            context_hash=fields.get("context_hash"),
+            reason=reason,
+        )
+        record_metric(
+            name,
+            value,
+            role="doctor",
+            admission_id=admission_id,
+            context_hash=context_hash,
+            reason=reason or key_reason,
+            **fields,
+        )
+
+    def _is_forced_reload_coalesced(self, *, key, now_ms: float, reason: str, guard_active: bool) -> bool:
+        active_same = self._forced_reload_active_key == key
+        pending_same = self._forced_reload_pending_key == key
+        guard_deferred_same = self._forced_reload_after_guard_key == key
+        last_ms = float((self._forced_reload_recent or {}).get(key) or 0.0)
+        elapsed_ms = max(0.0, now_ms - last_ms) if last_ms > 0 else None
+        cooldown_ms = float(self._forced_reload_cooldown_ms or 0)
+        in_cooldown = elapsed_ms is not None and cooldown_ms > 0 and elapsed_ms < cooldown_ms
+
+        suppress_reason = ""
+        if active_same:
+            suppress_reason = "active"
+        elif pending_same:
+            suppress_reason = "pending"
+        elif guard_deferred_same:
+            suppress_reason = "guard_deferred"
+        elif in_cooldown:
+            suppress_reason = "cooldown"
+
+        if not suppress_reason:
+            return False
+
+        if in_cooldown:
+            remaining_ms = max(0.0, cooldown_ms - float(elapsed_ms or 0.0))
+            self._record_forced_reload_metric(
+                "orders_forced_reload_cooldown_ms",
+                round(remaining_ms, 3),
+                key=key,
+                reason=reason,
+                suppress_reason=suppress_reason,
+                guard_active=int(bool(guard_active)),
+            )
+        self._record_forced_reload_metric(
+            "orders_forced_reload_coalesced",
+            1,
+            key=key,
+            reason=reason,
+            suppress_reason=suppress_reason,
+            guard_active=int(bool(guard_active)),
+        )
+        self._record_forced_reload_metric(
+            "orders_forced_reload_suppressed",
+            1,
+            key=key,
+            reason=reason,
+            suppress_reason=suppress_reason,
+            guard_active=int(bool(guard_active)),
+        )
+        logger.debug(
+            "[OrdersSync] forced_reload_after_stale_block_suppressed role=doctor admission_id=%s reason=%s suppress_reason=%s context_hash=%s",
+            key[0],
+            reason,
+            suppress_reason,
+            key[1],
+        )
+        return True
+
+    def _enqueue_forced_reload(self, *, key, reason: str, log_warning: bool):
+        self._forced_reload_pending_key = key
+        pending_inflight = bool(self._snapshot_worker is not None)
+        log = logger.warning if log_warning else logger.info
+        log(
+            "[OrdersSync] forced_reload_after_stale_block role=doctor admission_id=%s reason=%s pending_inflight=%s context_hash=%s",
+            self.admission_id,
+            reason,
+            int(pending_inflight),
+            key[1],
+        )
+        record_orders_sync_event(
+            "forced_reload",
+            role="doctor",
+            admission_id=int(self.admission_id or 0),
+            context_hash=key[1],
+            reason=reason,
+            immediate=bool(log_warning),
+        )
+        if self._snapshot_worker is not None:
+            self._snapshot_pending = True
+            self._snapshot_force_pending = True
+            self._snapshot_pending_priority = self._merge_priority(self._snapshot_pending_priority, "HIGH")
+            self._snapshot_pending_source = "stale_snapshot"
+            self._snapshot_pending_reason = reason
+            return
+
+        self._defer_snapshot_request(
+            force=True,
+            source="stale_snapshot",
+            priority="HIGH",
+            invalidate_reason=reason,
+        )
+
+    def _flush_deferred_forced_reload_after_guard(self):
+        if self._is_closing or self._local_cell_draft_guard:
+            return
+        key = self._forced_reload_after_guard_key
+        reason = self._forced_reload_after_guard_reason
+        if key is None:
+            return
+        self._forced_reload_after_guard_key = None
+        self._forced_reload_after_guard_reason = None
+        if self._forced_reload_active_key == key or self._forced_reload_pending_key == key:
+            self._record_forced_reload_metric(
+                "orders_forced_reload_coalesced",
+                1,
+                key=key,
+                reason=str(reason or key[2]),
+                suppress_reason="guard_release_already_scheduled",
+                guard_active=0,
+            )
+            return
+        self._enqueue_forced_reload(key=key, reason=str(reason or key[2]), log_warning=False)
+
+    def _queue_forced_reload_after_stale_snapshot(self, *, reason: str):
+        if self._is_closing:
+            return
+        pending_inflight = bool(self._snapshot_worker is not None)
+        try:
+            context_hash = self._build_orders_context().hash()
+        except Exception:
+            context_hash = None
+        key = self._forced_reload_key(context_hash=context_hash, reason=reason)
+        now_ms = time.monotonic() * 1000.0
+        guard_active = bool(self._local_cell_draft_guard)
+        self._record_forced_reload_metric(
+            "orders_forced_reload_requested",
+            1,
+            key=key,
+            reason=reason,
+            pending_inflight=int(pending_inflight),
+            guard_active=int(guard_active),
+        )
+
+        if self._is_forced_reload_coalesced(key=key, now_ms=now_ms, reason=reason, guard_active=guard_active):
+            return
+
+        self._forced_reload_recent[key] = now_ms
+        while len(self._forced_reload_recent) > 32:
+            oldest_key = next(iter(self._forced_reload_recent))
+            self._forced_reload_recent.pop(oldest_key, None)
+
+        if guard_active:
+            self._forced_reload_after_guard_key = key
+            self._forced_reload_after_guard_reason = reason
+            self._record_forced_reload_metric(
+                "orders_stale_block_guard_active",
+                1,
+                key=key,
+                reason=reason,
+                pending_inflight=int(pending_inflight),
+            )
+            logger.warning(
+                "[OrdersSync] forced_reload_after_stale_block role=doctor admission_id=%s reason=%s pending_inflight=%s context_hash=%s deferred=local_cell_draft_guard",
+                self.admission_id,
+                reason,
+                int(pending_inflight),
+                context_hash,
+            )
+            return
+
+        self._enqueue_forced_reload(key=key, reason=reason, log_warning=True)
+
+    def _defer_snapshot_request(
+        self,
+        *,
+        force: bool,
+        source: str,
+        priority: str,
+        invalidate_reason: str | None = None,
+    ):
+        if self._is_closing:
+            return
+        QTimer.singleShot(
+            0,
+            lambda: self._request_snapshot(
+                force=force,
+                source=source,
+                priority=priority,
+                invalidate_reason=invalidate_reason,
+            ),
+        )
+
+    def _request_snapshot(
+        self,
+        *,
+        force: bool = False,
+        source: str = "refresh",
+        priority: str = "MEDIUM",
+        invalidate_reason: str | None = None,
+    ):
+        if self._is_closing or not self.service or not self.admission_id:
+            return
+
+        coordinator = self._get_read_coordinator()
+        if coordinator is None:
+            logger.error(
+                "[OrdersWidget] ReadCoordinator unavailable admission_id=%s shift_date=%s",
+                self.admission_id,
+                self.shift_date.isoformat() if self.shift_date else None,
+            )
+            return
+
+        try:
+            context = self._build_orders_context()
+        except Exception as exc:
+            logger.error("[OrdersWidget] Failed to build orders context: %s", exc, exc_info=True)
+            return
+
+        priority_name = self._normalize_priority(priority)
+        context_key = context.cache_key()
+        normalized_source = self._normalize_snapshot_source(source)
+        forced_reload_key = None
+        if bool(force) and normalized_source == "monitor" and str(source or "").strip().lower() == "stale_snapshot":
+            forced_reload_key = self._forced_reload_pending_key or self._forced_reload_key(
+                context_hash=context.hash(),
+                reason=str(invalidate_reason or "stale_snapshot"),
+            )
+
+        if self._snapshot_worker is not None:
+            worker_running = self._snapshot_worker.isRunning()
+            request_id_preview = f"orders-ui-{self._snapshot_seq + 1}-{context.hash()[:6]}"
+            if not worker_running:
+                self._snapshot_worker = None
+                self._retire_snapshot_worker_state(state="finished", reason="worker_not_running")
+            elif self._detach_active_snapshot_for_context_switch(
+                new_context_key=context_key,
+                new_context_hash=context.hash(),
+                replacement_request_id=request_id_preview,
+            ):
+                pass
+            elif self._should_supersede_active_snapshot_worker(
+                context_key=context_key,
+                source=source,
+                priority=priority_name,
+            ):
+                self._detach_snapshot_worker(
+                    self._snapshot_worker,
+                    state="superseded",
+                    reason="higher_priority_request",
+                    replacement_request_id=request_id_preview,
+                )
+            else:
+                if (
+                    worker_running
+                    and self._is_request_covered_by_active(
+                        context_key=context_key,
+                        source=source,
+                        force=force,
+                        priority=priority_name,
+                    )
+                ):
+                    if hasattr(coordinator, "record_orders_ui_event"):
+                        coordinator.record_orders_ui_event(
+                            "duplicate_load_prevented",
+                            role="doctor",
+                            context_hash=context.hash(),
+                        )
+                    logger.info(
+                        "[OrdersWidget] skipped duplicate in-flight request admission_id=%s priority=%s force=%s source=%s context_hash=%s",
+                        context.admission_id,
+                        priority_name,
+                        int(bool(force)),
+                        source,
+                        context.hash(),
+                    )
+                    return
+                self._snapshot_pending = True
+                self._snapshot_force_pending = self._snapshot_force_pending or force
+                self._snapshot_pending_priority = self._merge_priority(self._snapshot_pending_priority, priority)
+                self._snapshot_pending_source = self._merge_source(
+                    self._snapshot_pending_source,
+                    source,
+                    self._snapshot_pending_priority,
+                    priority,
+                )
+                self._snapshot_pending_reason = invalidate_reason or self._snapshot_pending_reason
+                return
+
+        if self._snapshot_worker is not None:
+            # Defensive guard: supersede/detach above must clear the active worker before
+            # a higher-priority request can start.
+            return
+
+        self._snapshot_seq += 1
+        seq = self._snapshot_seq
+        request_id = f"orders-ui-{seq}-{context.hash()[:6]}"
+        request_generation = seq
+        admission_id = context.admission_id
+        shift_date = context.shift_date
+        context_hash = context.hash()
+        self._active_request_context_key = context_key
+        self._active_request_force = bool(force)
+        self._active_request_priority = priority_name
+        self._active_request_seq = seq
+        self._active_request_id = request_id
+        self._active_request_generation = request_generation
+        self._active_request_source = str(source or "refresh").strip().lower() or "refresh"
+        self._active_request_started_monotonic = time.monotonic()
+        self._forced_reload_active_key = forced_reload_key
+        if forced_reload_key is not None and self._forced_reload_pending_key == forced_reload_key:
+            self._forced_reload_pending_key = None
+        self._active_snapshot_worker_state = {
+            "request_id": request_id,
+            "generation": request_generation,
+            "source": self._active_request_source,
+            "priority": priority_name,
+            "admission_id": admission_id,
+            "started_at": datetime.now().isoformat(timespec="milliseconds"),
+            "started_monotonic": self._active_request_started_monotonic,
+            "state": "active",
+            "context_key": context_key,
+            "seq": seq,
+            "force": bool(force),
+        }
+        self._schedule_soft_update_state(source=source)
+        if self._active_request_source == "post_finalize":
+            self._set_refresh_status("Сохранено, обновляю назначения...")
+        self._post_finalize_watchdog_timer.start(ORDERS_POST_FINALIZE_WATCHDOG_MS)
+
+        def cancel_check():
+            return (
+                self._is_closing
+                or str(self._active_request_id or "") != request_id
+                or int(self._active_request_generation or 0) != request_generation
+                or self._active_request_context_key != context_key
+            )
+
+        def job():
+            if force:
+                coordinator.invalidate_tab(
+                    context,
+                    reason=str(invalidate_reason or f"orders_widget_{source}"),
+                )
+            snapshot = coordinator.load_orders_tab(
+                context,
+                source=source,
+                priority=priority_name,
+                force_refresh=force,
+                cancel_check=cancel_check,
+            )
+            return {
+                "seq": seq,
+                "admission_id": admission_id,
+                "shift_date": shift_date,
+                "context_key": context_key,
+                "context_hash": context_hash,
+                "priority": priority_name,
+                "source": source,
+                "request_id": request_id,
+                "generation": request_generation,
+                "snapshot_request_id": (snapshot or {}).get("load_trace_id"),
+                "snapshot_generation": (snapshot or {}).get("generation", 0),
+                "snapshot": snapshot,
+            }
+
+        self._snapshot_worker = AsyncCallThread(job)
+        self._snapshot_worker.succeeded.connect(self._apply_snapshot)
+        self._snapshot_worker.failed.connect(self._on_snapshot_failed)
+        self._snapshot_worker.finished.connect(self._on_snapshot_finished)
+        self._snapshot_worker.start()
+
+    def _apply_snapshot(self, payload):
+        if self._is_closing:
+            return
+        try:
+            if not isinstance(payload, dict):
+                return
+            payload_request_id = str(payload.get("request_id") or "")
+            retired_state = self._retired_snapshot_worker_states.get(payload_request_id)
+            if retired_state and str(retired_state.get("state") or "") in {"stalled", "superseded", "detached"}:
+                self._record_late_result_ignored(payload, reason=f"retired_{retired_state.get('state')}")
+                return
+            if payload.get("seq") != self._snapshot_seq:
+                self._record_late_result_ignored(payload, reason="seq_mismatch")
+                logger.info(
+                    "[OrdersWidget] discard stale snapshot seq request_seq=%s current_seq=%s context_hash=%s trace_id=%s",
+                    payload.get("seq"),
+                    self._snapshot_seq,
+                    payload.get("context_hash"),
+                    (payload.get("snapshot") or {}).get("load_trace_id"),
+                )
+                return
+            expected_request_id = str(self._active_request_id or "")
+            if expected_request_id and str(payload.get("request_id") or "") != expected_request_id:
+                self._record_late_result_ignored(payload, reason="request_id_mismatch")
+                return
+            expected_generation = int(self._active_request_generation or 0)
+            if expected_generation and int(payload.get("generation") or 0) != expected_generation:
+                self._record_late_result_ignored(payload, reason="generation_mismatch")
+                return
+            if payload.get("admission_id") != self.admission_id:
+                self._record_late_result_ignored(payload, reason="admission_mismatch")
+                logger.info(
+                    "[OrdersWidget] discard stale snapshot admission request_admission_id=%s current_admission_id=%s context_hash=%s trace_id=%s",
+                    payload.get("admission_id"),
+                    self.admission_id,
+                    payload.get("context_hash"),
+                    (payload.get("snapshot") or {}).get("load_trace_id"),
+                )
+                return
+            applied = self._apply_snapshot_data(
+                snapshot=payload.get("snapshot") or {},
+                admission_id=payload.get("admission_id"),
+                shift_date=payload.get("shift_date"),
+                context_key=payload.get("context_key"),
+            )
+            if applied and str(payload.get("source") or "").strip().lower() == "post_finalize":
+                self._post_finalize_retry_count = 0
+        except Exception:
+            logger.exception("[OrdersWidget] Failed to apply orders snapshot")
+
+    def _record_late_result_ignored(self, payload, *, reason: str):
+        snapshot = (payload or {}).get("snapshot") or {}
+        logger.info(
+            "[OrdersWidget] orders_refresh_late_result_ignored reason=%s admission_id=%s request_id=%s generation=%s current_request_id=%s current_generation=%s context_hash=%s trace_id=%s",
+            reason,
+            (payload or {}).get("admission_id"),
+            (payload or {}).get("request_id"),
+            (payload or {}).get("generation"),
+            self._active_request_id,
+            self._active_request_generation,
+            (payload or {}).get("context_hash"),
+            snapshot.get("load_trace_id"),
+        )
+        record_metric(
+            "orders_refresh_late_result_ignored",
+            1,
+            admission_id=(payload or {}).get("admission_id"),
+            source=str((payload or {}).get("source") or "refresh"),
+            reason=reason,
+            request_id=(payload or {}).get("request_id"),
+            generation=(payload or {}).get("generation"),
+            current_request_id=self._active_request_id,
+            current_generation=self._active_request_generation,
+            context_hash=(payload or {}).get("context_hash"),
+            trace_id=snapshot.get("load_trace_id"),
+        )
+
+    def _capture_table_scroll(self):
+        if not hasattr(self, "table_view"):
+            return None
+        try:
+            return int(self.table_view.verticalScrollBar().value())
+        except Exception:
+            return None
+
+    def _restore_table_scroll(self, value):
+        if value is None or not hasattr(self, "table_view"):
+            return
+
+        def restore():
+            try:
+                bar = self.table_view.verticalScrollBar()
+                bar.setValue(max(0, min(int(value), bar.maximum())))
+            except Exception:
+                pass
+
+        restore()
+        QTimer.singleShot(0, restore)
+
+    def _apply_snapshot_data(self, *, snapshot, admission_id, shift_date, context_key=None) -> bool:
+        if self._is_closing:
+            return False
+        if admission_id != self.admission_id:
+            return False
+        current_context_key = self._current_context_key()
+        if context_key is not None and current_context_key is not None and context_key != current_context_key:
+            coordinator = self._get_read_coordinator()
+            if coordinator is not None and hasattr(coordinator, "record_orders_ui_event"):
+                coordinator.record_orders_ui_event(
+                    "race_reject",
+                    role="doctor",
+                    context_hash=snapshot.get("context_hash"),
+                )
+            logger.info(
+                "[OrdersWidget] discard stale snapshot admission_id=%s request_context=%s current_context=%s context_hash=%s trace_id=%s",
+                admission_id,
+                context_key,
+                current_context_key,
+                snapshot.get("context_hash"),
+                snapshot.get("load_trace_id"),
+            )
+            return False
+        if context_key is None and shift_date != self.shift_date:
+            logger.info(
+                "[OrdersWidget] discard stale snapshot shift request_shift_date=%s current_shift_date=%s context_hash=%s trace_id=%s",
+                shift_date.isoformat() if hasattr(shift_date, "isoformat") else shift_date,
+                self.shift_date.isoformat() if hasattr(self.shift_date, "isoformat") else self.shift_date,
+                snapshot.get("context_hash"),
+                snapshot.get("load_trace_id"),
+            )
+            return False
+        snapshot_change_id = int(snapshot.get("change_id") or 0)
+        known_change_id = int(self._last_polled_change_id or 0)
+        if known_change_id > 0 and self._last_polled_context_key not in (None, current_context_key):
+            logger.info(
+                "[OrdersWidget] reset stale cursor after context drift previous_context=%s current_context=%s known_change_id=%s",
+                self._last_polled_context_key,
+                current_context_key,
+                known_change_id,
+            )
+            self._reset_change_cursor()
+            known_change_id = 0
+        self._snapshot_stale = snapshot_change_id < known_change_id
+        if self._snapshot_stale:
+            coordinator = self._get_read_coordinator()
+            if coordinator is not None and hasattr(coordinator, "record_orders_ui_event"):
+                coordinator.record_orders_ui_event(
+                    "stale_apply_blocked",
+                    role="doctor",
+                    context_hash=snapshot.get("context_hash"),
+                )
+            record_orders_sync_event(
+                "stale_blocked",
+                role="doctor",
+                admission_id=int(admission_id or 0),
+                context_hash=snapshot.get("context_hash"),
+                reason="snapshot_change_id_lt_known",
+                immediate=True,
+            )
+            logger.warning(
+                "[OrdersSync] stale_apply_blocked role=doctor admission_id=%s snapshot_change_id=%s known_change_id=%s context_hash=%s trace_id=%s",
+                admission_id,
+                snapshot_change_id,
+                known_change_id,
+                snapshot.get("context_hash"),
+                snapshot.get("load_trace_id"),
+            )
+            self._queue_forced_reload_after_stale_snapshot(
+                reason="stale_apply_blocked",
+            )
+            return False
+
+        if self._should_preserve_local_cell_draft(snapshot):
+            logger.info(
+                "[OrdersClick] snapshot_skip_local_cell_draft_guard role=doctor admission_id=%s source=%s trace_id=%s current_has_drafts=%s snapshot_has_drafts=%s",
+                admission_id,
+                snapshot.get("source"),
+                snapshot.get("load_trace_id"),
+                int(self.has_drafts()),
+                int(bool(snapshot.get("has_any_draft", False))),
+            )
+            self._queue_forced_reload_after_stale_snapshot(
+                reason="local_cell_draft_guard",
+            )
+            return True
+
+        snapshot_signature = self._snapshot_apply_signature(snapshot, context_key)
+        if (
+            snapshot_signature is not None
+            and snapshot_signature == self._last_applied_snapshot_signature
+            and not self._pending_reorder_order_ids
+        ):
+            logger.info(
+                "[OrdersWidget] skip duplicate applied snapshot admission_id=%s context_hash=%s trace_id=%s version=%s",
+                admission_id,
+                snapshot.get("context_hash"),
+                snapshot.get("load_trace_id"),
+                snapshot.get("version"),
+            )
+            snapshot_source = str(snapshot.get("source") or "refresh").strip().lower()
+            metric_source = {
+                "user": "click",
+                "click": "click",
+                "post_finalize": "post_finalize",
+                "cache": "cache",
+            }.get(snapshot_source, "monitor")
+            record_metric(
+                "orders_snapshot_apply_skipped",
+                1,
+                admission_id=admission_id,
+                source=metric_source,
+                snapshot_source=snapshot_source,
+                reason="duplicate_snapshot",
+                context_hash=snapshot.get("context_hash"),
+                trace_id=snapshot.get("load_trace_id"),
+                version=snapshot.get("version"),
+            )
+            self._clear_soft_update_state()
+            return True
+
+        self._ensure_model_initialized()
+        scroll_value = self._capture_table_scroll()
+        if self._try_apply_admin_only_snapshot(
+            snapshot=snapshot,
+            admission_id=admission_id,
+            known_change_id=known_change_id,
+            snapshot_change_id=snapshot_change_id,
+            current_context_key=current_context_key,
+            snapshot_signature=snapshot_signature,
+        ):
+            return True
+
+        logger.info(
+            "[OrdersClick] snapshot_apply_reset role=doctor admission_id=%s source=%s trace_id=%s rows_before=%s orders=%s admin_rows=%s scroll=%s",
+            admission_id,
+            snapshot.get("source"),
+            snapshot.get("load_trace_id"),
+            self.model.rowCount() if self.model is not None else None,
+            len(snapshot.get("orders") or []),
+            len(snapshot.get("admin_rows") or []),
+            scroll_value,
+        )
+        self._apply_full_snapshot_to_model(snapshot)
+        legacy_preflight_detected = bool(
+            snapshot.get("only_committed", False)
+            and snapshot.get("has_any_draft", False)
+            and not self._has_local_draft_changes()
+        )
+        if legacy_preflight_detected:
+            self._legacy_central_draft_detected = True
+        elif not snapshot.get("has_any_draft", False):
+            self._legacy_central_draft_detected = False
+        self.set_forced_read_only(self._forced_read_only)
+        self._apply_pending_reorder_to_model()
+        self._restore_table_scroll(scroll_value)
+        self._cached_has_drafts = bool(snapshot.get("has_any_draft", False)) or bool(self._pending_reorder_order_ids)
+        self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
+        self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
+        self._last_polled_change_id = max(known_change_id, snapshot_change_id)
+        if self._last_polled_change_id > 0:
+            self._last_polled_context_key = current_context_key
+        self._apply_table_header_layout()
+        self.check_drafts()
+        self.localBalanceChanged.emit()
+        self._clear_soft_update_state()
+        record_orders_sync_event(
+            "applied",
+            role="doctor",
+            admission_id=int(admission_id or 0),
+            context_hash=snapshot.get("context_hash"),
+            reason=str(snapshot.get("source") or ""),
+        )
+        logger.info(
+            "[OrdersWidget] applied snapshot admission_id=%s source=%s context_hash=%s trace_id=%s version=%s",
+            admission_id,
+            snapshot.get("source"),
+            snapshot.get("context_hash"),
+            snapshot.get("load_trace_id"),
+            snapshot.get("version"),
+        )
+        self._last_applied_snapshot_signature = snapshot_signature
+        if legacy_preflight_detected:
+            QTimer.singleShot(
+                0,
+                lambda: self._request_snapshot(
+                    force=True,
+                    source="legacy_central_draft_review",
+                    priority="HIGH",
+                    invalidate_reason="legacy_central_draft_review",
+                ) if not self._is_closing and self._legacy_central_draft_detected else None,
+            )
+        return True
+
+    def _try_apply_admin_only_snapshot(
+        self,
+        *,
+        snapshot,
+        admission_id,
+        known_change_id,
+        snapshot_change_id,
+        current_context_key,
+        snapshot_signature,
+    ) -> bool:
+        if self._pending_admin_write_count > 0:
+            logger.info(
+                "[OrdersClick] snapshot_skip_pending_local_write role=doctor admission_id=%s pending=%s source=%s trace_id=%s change_id=%s",
+                admission_id,
+                self._pending_admin_write_count,
+                snapshot.get("source"),
+                snapshot.get("load_trace_id"),
+                snapshot.get("change_id"),
+            )
+            return True
+        if self._should_preserve_local_cell_draft(snapshot):
+            logger.info(
+                "[OrdersClick] snapshot_admin_only_skip_local_cell_draft_guard role=doctor admission_id=%s source=%s trace_id=%s",
+                admission_id,
+                snapshot.get("source"),
+                snapshot.get("load_trace_id"),
+            )
+            self._queue_forced_reload_after_stale_snapshot(
+                reason="local_cell_draft_guard_admin_only",
+            )
+            return True
+        if (
+            self.model is None
+            or self._pending_reorder_order_ids
+            or time.monotonic() >= self._admin_only_snapshot_until
+            or not hasattr(self.model, "apply_admin_rows_snapshot")
+            or not self.model.apply_admin_rows_snapshot(snapshot)
+        ):
+            return False
+
+        self._cached_has_drafts = bool(snapshot.get("has_any_draft", False))
+        self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
+        self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
+        self._last_polled_change_id = max(known_change_id, snapshot_change_id)
+        if self._last_polled_change_id > 0:
+            self._last_polled_context_key = current_context_key
+        self.check_drafts()
+        self._clear_soft_update_state()
+        record_orders_sync_event(
+            "applied",
+            role="doctor",
+            admission_id=int(admission_id or 0),
+            context_hash=snapshot.get("context_hash"),
+            reason=str(snapshot.get("source") or ""),
+        )
+        logger.info(
+            "[OrdersClick] snapshot_apply_admin_only role=doctor admission_id=%s source=%s trace_id=%s rows=%s admin_rows=%s",
+            admission_id,
+            snapshot.get("source"),
+            snapshot.get("load_trace_id"),
+            self.model.rowCount(),
+            len(snapshot.get("admin_rows") or []),
+        )
+        self._last_applied_snapshot_signature = snapshot_signature
+        return True
+
+    def _snapshot_apply_signature(self, snapshot, context_key):
+        try:
+            return (
+                context_key or snapshot.get("cache_key"),
+                int(snapshot.get("version") or snapshot.get("change_id") or 0),
+                str(snapshot.get("content_hash") or ""),
+                str(snapshot.get("dedup_signature") or ""),
+            )
+        except Exception:
+            return None
+
+    def _apply_full_snapshot_to_model(self, snapshot):
+        table = getattr(self, "table_view", None)
+        previous_signals = None
+        sorting_enabled = False
+        if table is not None:
+            try:
+                previous_signals = table.blockSignals(True)
+            except Exception:
+                previous_signals = None
+            try:
+                sorting_enabled = bool(table.isSortingEnabled())
+                if sorting_enabled:
+                    table.setSortingEnabled(False)
+            except Exception:
+                sorting_enabled = False
+        try:
+            self.model.apply_snapshot(snapshot)
+            self._capture_local_draft_baseline(snapshot)
+        finally:
+            if table is not None:
+                try:
+                    if sorting_enabled:
+                        table.setSortingEnabled(True)
+                except Exception:
+                    pass
+                try:
+                    if previous_signals is not None:
+                        table.blockSignals(previous_signals)
+                except Exception:
+                    pass
+
+    def _on_snapshot_failed(self, exc):
+        if self._is_closing:
+            return
+        if isinstance(exc, OrdersRefreshCancelled):
+            request_source = str(self._active_request_source or "refresh").strip().lower()
+            if request_source == "post_finalize":
+                try:
+                    context_hash = self._build_orders_context().hash()
+                except Exception:
+                    context_hash = None
+                self._post_finalize_retry_after_cancel = True
+                self._post_finalize_retry_context_hash = context_hash
+                logger.info("[OrdersWidget] post_finalize snapshot load cancelled; retry will be scheduled: %s", exc)
+                return
+            self._clear_soft_update_state()
+            logger.info("[OrdersWidget] Orders snapshot load cancelled: %s", exc)
+            return
+        self._clear_soft_update_state()
+        logger.warning("[OrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)
+
+    def _on_post_finalize_snapshot_watchdog(self):
+        if self._is_closing:
+            return
+        worker = self._snapshot_worker
+        if worker is None or not worker.isRunning():
+            return
+
+        elapsed_ms = max(0.0, (time.monotonic() - self._active_request_started_monotonic) * 1000.0)
+        stale_seq = int(self._active_request_seq or 0)
+        request_source = str(self._active_request_source or "refresh")
+        request_id = str(self._active_request_id or "")
+        state = dict(getattr(self, "_active_snapshot_worker_state", {}) or {})
+        if state:
+            state["state"] = "stalled"
+            state["stalled_at"] = datetime.now().isoformat(timespec="milliseconds")
+            self._active_snapshot_worker_state = state
+        try:
+            context = self._build_orders_context()
+            context_hash = context.hash()
+        except Exception:
+            context = None
+            context_hash = None
+        logger.warning(
+            "[OrdersWidget] snapshot_worker_stalled admission_id=%s seq=%s request_id=%s source=%s elapsed_ms=%.2f context_hash=%s",
+            self.admission_id,
+            stale_seq,
+            request_id,
+            request_source,
+            elapsed_ms,
+            context_hash,
+        )
+        record_metric(
+            "orders_snapshot_worker_stalled",
+            round(elapsed_ms, 3),
+            admission_id=self.admission_id,
+            source=request_source,
+            request_id=request_id,
+            seq=stale_seq,
+            context_hash=context_hash,
+            threshold_ms=ORDERS_POST_FINALIZE_WATCHDOG_MS,
+        )
+        if request_source == "post_finalize":
+            record_metric(
+                "orders_post_finalize_snapshot_stalled",
+                round(elapsed_ms, 3),
+                admission_id=self.admission_id,
+                source="post_finalize",
+                request_id=request_id,
+                seq=stale_seq,
+                context_hash=context_hash,
+                threshold_ms=ORDERS_POST_FINALIZE_WATCHDOG_MS,
+            )
+
+        self._detach_snapshot_worker(
+            worker,
+            state="detached",
+            reason="watchdog_stalled",
+        )
+        self._snapshot_seq += 1
+        self._clear_soft_update_state()
+        if request_source == "post_finalize" and context is not None:
+            self._set_refresh_status("Сохранено, данные обновляются...")
+            self._schedule_post_finalize_retry(context_hash=context_hash)
+        if self._snapshot_pending:
+            force = self._snapshot_force_pending
+            source = self._snapshot_pending_source
+            priority = self._snapshot_pending_priority
+            invalidate_reason = self._snapshot_pending_reason
+            self._reset_pending_snapshot_request()
+            self._defer_snapshot_request(
+                force=force,
+                source=source,
+                priority=priority,
+                invalidate_reason=invalidate_reason,
+            )
+        else:
+            self._flush_deferred_forced_reload_after_guard()
+
+    def _schedule_post_finalize_retry(self, *, context_hash=None):
+        if self._is_closing:
+            return
+        if self._post_finalize_retry_count >= ORDERS_POST_FINALIZE_MAX_RETRIES:
+            logger.warning(
+                "[OrdersWidget] post_finalize_retry_limit admission_id=%s retries=%s context_hash=%s",
+                self.admission_id,
+                self._post_finalize_retry_count,
+                context_hash,
+            )
+            record_metric(
+                "orders_post_finalize_retry_limit",
+                1,
+                admission_id=self.admission_id,
+                source="post_finalize",
+                retries=self._post_finalize_retry_count,
+                context_hash=context_hash,
+            )
+            self._set_refresh_status("Сохранено. Не удалось обновить список назначений автоматически.")
+            return
+        self._post_finalize_retry_count += 1
+        retry_index = self._post_finalize_retry_count
+        delay_ms = 0
+        if retry_index > 1:
+            delay_ms = min(
+                ORDERS_POST_FINALIZE_RETRY_MAX_BACKOFF_MS,
+                ORDERS_POST_FINALIZE_RETRY_BACKOFF_MS * (2 ** max(0, retry_index - 2)),
+            )
+        logger.warning(
+            "[OrdersWidget] post_finalize_retry_scheduled admission_id=%s retry=%s delay_ms=%s context_hash=%s",
+            self.admission_id,
+            retry_index,
+            delay_ms,
+            context_hash,
+        )
+        record_metric(
+            "orders_post_finalize_retry_scheduled",
+            1,
+            admission_id=self.admission_id,
+            source="post_finalize",
+            retry=retry_index,
+            delay_ms=delay_ms,
+            context_hash=context_hash,
+        )
+        QTimer.singleShot(
+            delay_ms,
+            lambda: self._request_snapshot(
+                force=True,
+                source="post_finalize",
+                priority="HIGH",
+                invalidate_reason=f"post_finalize_retry_{retry_index}",
+            ),
+        )
+
+    def _on_snapshot_finished(self):
+        worker = self.sender()
+        if worker is not None and self._snapshot_worker is not worker:
+            return
+        self._post_finalize_watchdog_timer.stop()
+        self._snapshot_worker = None
+        self._retire_snapshot_worker_state(state="finished", reason="worker_finished")
+        self._reset_active_snapshot_request()
+        self._clear_soft_update_state()
+        if self._is_closing:
+            self._reset_pending_snapshot_request()
+            return
+        if self._post_finalize_retry_after_cancel:
+            context_hash = self._post_finalize_retry_context_hash
+            self._post_finalize_retry_after_cancel = False
+            self._post_finalize_retry_context_hash = None
+            try:
+                context = self._build_orders_context()
+                context_hash = context_hash or context.hash()
+            except Exception:
+                context = None
+            self._set_refresh_status("Сохранено, данные обновляются...")
+            self._schedule_post_finalize_retry(context_hash=context_hash)
+            return
+        if self._snapshot_pending:
+            force = self._snapshot_force_pending
+            source = self._snapshot_pending_source
+            priority = self._snapshot_pending_priority
+            invalidate_reason = self._snapshot_pending_reason
+            self._reset_pending_snapshot_request()
+            self._defer_snapshot_request(
+                force=force,
+                source=source,
+                priority=priority,
+                invalidate_reason=invalidate_reason,
+            )
+        else:
+            self._flush_deferred_forced_reload_after_guard()
+
+    @staticmethod
+    def _normalize_priority(value: str) -> str:
+        name = str(value or "MEDIUM").strip().upper()
+        if name not in {"HIGH", "MEDIUM", "LOW"}:
+            return "MEDIUM"
+        return name
+
+    @classmethod
+    def _merge_priority(cls, current: str, incoming: str) -> str:
+        weights = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+        current_name = cls._normalize_priority(current)
+        incoming_name = cls._normalize_priority(incoming)
+        if weights[incoming_name] > weights[current_name]:
+            return incoming_name
+        return current_name
+
+    @classmethod
+    def _merge_source(cls, current: str, incoming: str, current_priority: str, incoming_priority: str) -> str:
+        if cls._merge_priority(current_priority, incoming_priority) == cls._normalize_priority(incoming_priority):
+            return str(incoming or current or "refresh")
+        return str(current or incoming or "refresh")
+
+    @staticmethod
+    def _normalize_snapshot_source(value: str) -> str:
+        source = str(value or "refresh").strip().lower() or "refresh"
+        if source in {"user", "click", "user_click"}:
+            return "click"
+        if source in {"post_finalize", "cache", "monitor", "background", "visible_tab", "refresh"}:
+            return source
+        if source in {"local_silent_sync", "stale_snapshot", "poll_external_updates"}:
+            return "monitor"
+        return "refresh"
+
+    @classmethod
+    def _snapshot_request_rank(cls, source: str, priority: str) -> int:
+        priority_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}.get(cls._normalize_priority(priority), 1)
+        source_rank = {
+            "cache": 0,
+            "monitor": 0,
+            "background": 0,
+            "refresh": 1,
+            "visible_tab": 2,
+            "click": 2,
+            "post_finalize": 3,
+        }.get(cls._normalize_snapshot_source(source), 1)
+        return source_rank * 10 + priority_rank
+
+    def _should_supersede_active_snapshot_worker(self, *, context_key, source: str, priority: str) -> bool:
+        state = getattr(self, "_active_snapshot_worker_state", {}) or {}
+        if not state or state.get("context_key") != context_key:
+            return False
+        active_state = str(state.get("state") or "active")
+        if active_state not in {"active", "stalled"}:
+            return False
+        incoming_rank = self._snapshot_request_rank(source, priority)
+        active_rank = self._snapshot_request_rank(
+            str(state.get("source") or self._active_request_source),
+            str(state.get("priority") or self._active_request_priority),
+        )
+        return incoming_rank > active_rank
+
+    def _is_request_covered_by_active(self, *, context_key, source: str, force: bool, priority: str) -> bool:
+        if self._active_request_context_key != context_key:
+            return False
+        state = getattr(self, "_active_snapshot_worker_state", {}) or {}
+        active_rank = self._snapshot_request_rank(
+            str(state.get("source") or self._active_request_source),
+            str(state.get("priority") or self._active_request_priority),
+        )
+        incoming_rank = self._snapshot_request_rank(source, priority)
+        if self._active_request_force and not force:
+            return True
+        if self._active_request_force == bool(force) and active_rank >= incoming_rank:
+            return True
+        return False
+
+    def _apply_table_header_layout(self):
+        if not hasattr(self, "table_view"):
+            return
+        header = self.table_view.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.resizeSection(0, 350)
+
+    def _reset_change_batch(self, *, stop_timer: bool):
+        if stop_timer and self._change_batch_timer.isActive():
+            self._change_batch_timer.stop()
+        self._pending_change_context_key = None
+        self._pending_change_reload = False
+        self._pending_change_invalidated = False
+        self._pending_change_count = 0
+
+    def _flush_change_batch(self):
+        if self._is_closing:
+            self._reset_change_batch(stop_timer=False)
+            return
+        pending_context_key = self._pending_change_context_key
+        should_reload = bool(self._pending_change_reload)
+        batch_count = int(self._pending_change_count or 0)
+        self._reset_change_batch(stop_timer=False)
+        current_context_key = self._current_context_key()
+        if pending_context_key is None or current_context_key is None or pending_context_key != current_context_key:
+            logger.info(
+                "[OrdersWidget] discard debounced change batch pending_context=%s current_context=%s",
+                pending_context_key,
+                current_context_key,
+            )
+            return
+        logger.info(
+            "[OrdersWidget] flush debounced change batch count=%s reload=%s context_key=%s",
+            batch_count,
+            int(should_reload),
+            pending_context_key,
+        )
+        if should_reload:
+            self._request_snapshot(
+                force=False,
+                source="refresh",
+                priority="MEDIUM",
+                invalidate_reason=None,
+            )
+
+    def _should_show_soft_update(self, source: str) -> bool:
+        return False
+
+    def _schedule_soft_update_state(self, *, source: str):
+        self._soft_update_timer.stop()
+        self._clear_soft_update_state()
+
+    def _show_soft_update_if_needed(self):
+        return
+
+    def _set_refresh_status(self, text: str):
+        label = getattr(self, "_refresh_status_label", None)
+        if label is None:
+            return
+        value = str(text or "").strip()
+        label.setText(value)
+        label.setVisible(bool(value))
+
+    def _clear_soft_update_state(self):
+        self._soft_update_timer.stop()
+        self._soft_update_message = ""
+        self._set_refresh_status("")
+
+    @staticmethod
+    def _is_foreign_key_error(exc: Exception) -> bool:
+        if isinstance(exc, sqlite3.IntegrityError) and "foreign key" in str(exc).lower():
+            return True
+        return "foreign key" in str(exc).lower()
+
+    def _patient_error_label(self, admission_id) -> str:
+        try:
+            patient = self.service.get_patient(int(admission_id)) if self.service else None
+        except Exception:
+            patient = None
+        if not patient:
+            return f"госпитализация #{admission_id}"
+
+        name = str(getattr(patient, "full_name", "") or "").strip() or f"госпитализация #{admission_id}"
+        details = []
+        history = str(getattr(patient, "history_number", "") or "").strip()
+        bed = getattr(patient, "bed_number", None)
+        if history:
+            details.append(f"ИБ {history}")
+        if bed not in (None, ""):
+            details.append(f"койка {bed}")
+        return f"{name} ({', '.join(details)})" if details else name
+
+    @staticmethod
+    def _description_target_admission_id(description: str, fallback):
+        parts = str(description or "").split(":")
+        if len(parts) >= 2 and parts[0] == "orders_clear_drafts":
+            try:
+                return int(parts[1])
+            except Exception:
+                return fallback
+        return fallback
+
+    def _format_foreign_key_write_error(self, description: str, exc: Exception) -> str:
+        target_admission_id = self._description_target_admission_id(description, self.admission_id)
+        patient_label = self._patient_error_label(target_admission_id)
+
+        if str(description or "").startswith("orders_clear_drafts:"):
+            action = "очистка черновиков назначений при открытии или смене карты"
+            reason = (
+                "в карте есть назначение, которое база считает черновиком, "
+                "но к нему уже привязаны сохраненные отметки выполнения."
+            )
+            next_step = "Нажмите «Исправить карту»: программа проверит назначения этого пациента и сохранит такие строки корректно."
+        else:
+            action = "сохранение данных карты"
+            reason = "одна из сохраняемых строк ссылается на запись, которую база не нашла."
+            next_step = "Обновите карту. Если сообщение повторится, передайте разработчику это окно."
+
+        return (
+            f"Не удалось выполнить действие: {action}.\n\n"
+            f"Пациент: {patient_label}\n"
+            f"Причина: {reason}\n\n"
+            f"{next_step}\n\n"
+            f"Техническая деталь: {exc}"
+        )
+
+    def _repair_order_draft_integrity(self, admission_id, shift_date):
+        if not self.service or admission_id is None:
+            return
+
+        target_admission_id = int(admission_id)
+        target_shift_date = shift_date
+        result_holder = {}
+
+        def operation():
+            result_holder["result"] = self.service.repair_order_draft_integrity(
+                target_admission_id,
+                target_shift_date,
+            )
+
+        def on_success():
+            result = result_holder.get("result") or {}
+            rescued = int(result.get("rescued_orders", 0) or 0)
+            removed_admins = int(result.get("removed_admins", 0) or 0)
+            self.request_refresh(force=True)
+            self._show_info(
+                "Проверка назначений выполнена.\n\n"
+                f"Исправлено назначений: {rescued}\n"
+                f"Удалено черновых отметок выполнения: {removed_admins}"
+            )
+
+        def on_error(exc):
+            self._show_warning(
+                "Автоматическое исправление не выполнено.\n\n"
+                f"Пациент: {self._patient_error_label(target_admission_id)}\n"
+                f"Причина: {exc}"
+            )
+
+        self._enqueue_write(
+            f"orders_repair_integrity:{target_admission_id}",
+            operation=operation,
+            on_success=on_success,
+            on_error=on_error,
+            show_error=False,
+        )
+
+    def _show_write_error(self, description: str, exc: Exception):
+        if isinstance(exc, OrderConflictError):
+            self._show_warning(
+                "Назначения были изменены на другом рабочем месте. "
+                "Несохранённые изменения отклонены, загружается актуальный лист. "
+                "После обновления повторите нужное изменение."
+            )
+            return
+        if not self._is_foreign_key_error(exc):
+            self._show_warning(f"Ошибка сохранения: {exc}")
+            return
+
+        target_admission_id = self._description_target_admission_id(description, self.admission_id)
+        result = CustomMessageBox.warning_with_actions(
+            self,
+            "Проверка назначений",
+            self._format_foreign_key_write_error(description, exc),
+            [
+                ("Исправить карту", 1),
+                ("Закрыть", CustomMessageBox.Cancel),
+            ],
+        )
+        if result == 1:
+            self._repair_order_draft_integrity(target_admission_id, self.shift_date)
+
+    def _enqueue_write(
+        self,
+        description: str,
+        operation,
+        on_success=None,
+        on_error=None,
+        *,
+        block_ui: bool = True,
+        show_error: bool = True,
+        perf_click_id: int | None = None,
+        pass_result_to_success: bool = False,
+    ):
+        if self._is_closing or not self.service:
+            return
+
+        queued_at = time.perf_counter()
+        logger.info(
+            "[OrdersClick] write_enqueue role=doctor admission_id=%s description=%s block_ui=%s",
+            self.admission_id,
+            description,
+            int(bool(block_ui)),
+        )
+        if block_ui and hasattr(self, "frame_container"):
+            self.frame_container.setEnabled(False)
+
+        def _on_success(result):
+            if block_ui and hasattr(self, "frame_container"):
+                self.frame_container.setEnabled(True)
+            logger.info(
+                "[OrdersClick] write_success role=doctor admission_id=%s description=%s elapsed_ms=%s",
+                self.admission_id,
+                description,
+                round((time.perf_counter() - queued_at) * 1000.0, 1),
+            )
+            self._perf_mark_click(perf_click_id, "write_ok")
+            if on_success:
+                if pass_result_to_success:
+                    on_success(result)
+                else:
+                    on_success()
+
+        def _on_error(exc):
+            if block_ui and hasattr(self, "frame_container"):
+                self.frame_container.setEnabled(True)
+            logger.info(
+                "[OrdersClick] write_error role=doctor admission_id=%s description=%s elapsed_ms=%s error=%s",
+                self.admission_id,
+                description,
+                round((time.perf_counter() - queued_at) * 1000.0, 1),
+                exc,
+            )
+            self._perf_mark_click(perf_click_id, "write_error", extra=str(exc))
+            try:
+                if on_error:
+                    on_error(exc)
+            finally:
+                if show_error:
+                    self._show_write_error(description, exc)
+
+        self.service.enqueue_write(
+            description=description,
+            operation=operation,
+            on_success=_on_success,
+            on_error=_on_error,
+        )
+
+    def _schedule_fast_sync(self):
+        self._fast_sync_timer.start(self._silent_sync_delay_ms)
+
+    def _schedule_state_sync(self, delay_ms: int = 120):
+        self._state_sync_timer.start(delay_ms)
+
+    def _begin_admin_write(self):
+        self._pending_admin_write_count += 1
+
+    def _finish_admin_write(self):
+        self._pending_admin_write_count = max(0, self._pending_admin_write_count - 1)
+
+    @staticmethod
+    def _admin_cell_write_key(order_id, planned_time):
+        if order_id is None or planned_time is None:
+            return None
+        try:
+            normalized_order_id = int(order_id)
+        except Exception:
+            normalized_order_id = order_id
+        planned_key = planned_time.isoformat() if hasattr(planned_time, "isoformat") else str(planned_time)
+        return (normalized_order_id, planned_key)
+
+    def _prune_recent_admin_cell_clicks(self):
+        if not self._recent_admin_cell_clicks:
+            return
+        cutoff = time.monotonic() - ORDERS_CELL_REPEAT_GUARD_SEC
+        for key, clicked_at in list(self._recent_admin_cell_clicks.items()):
+            if float(clicked_at or 0.0) < cutoff:
+                self._recent_admin_cell_clicks.pop(key, None)
+
+    def _skip_reason_for_admin_cell_click(self, key) -> str:
+        if key is None:
+            return ""
+        if key in self._pending_admin_cell_write_keys:
+            return "pending_write"
+        self._prune_recent_admin_cell_clicks()
+        clicked_at = self._recent_admin_cell_clicks.get(key)
+        if clicked_at is not None and (time.monotonic() - float(clicked_at or 0.0)) < ORDERS_CELL_REPEAT_GUARD_SEC:
+            return "repeat_click"
+        return ""
+
+    def _mark_admin_cell_click_accepted(self, key):
+        if key is not None:
+            self._recent_admin_cell_clicks[key] = time.monotonic()
+
+    def _mark_pending_admin_cell_writes(self, keys):
+        for key in keys or ():
+            if key is not None:
+                self._pending_admin_cell_write_keys.add(key)
+
+    def _clear_pending_admin_cell_writes(self, keys):
+        for key in keys or ():
+            self._pending_admin_cell_write_keys.discard(key)
+
+    def _run_fast_sync(self):
+        """
+        После optimistic update делаем один отложенный тихий snapshot-refresh.
+        UI уже обновился локально, а source-of-truth подтягивается вне GUI-потока.
+        """
+        t0 = time.perf_counter() if self._perf_enabled else None
+        try:
+            logger.info(
+                "[OrdersClick] silent_sync_start role=doctor admission_id=%s pending=%s",
+                self.admission_id,
+                self._pending_admin_write_count,
+            )
+            if self._pending_admin_write_count > 0:
+                self._schedule_fast_sync()
+                return
+            self._request_snapshot(
+                force=False,
+                source="local_silent_sync",
+                priority="LOW",
+                invalidate_reason=None,
+            )
+            self._schedule_state_sync()
+        except Exception:
+            logger.info("[OrdersClick] silent_sync_exception role=doctor admission_id=%s", self.admission_id)
+        finally:
+            if self._perf_enabled and t0 is not None:
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                logger.debug(f"[OrdersPerf] silent_sync +{elapsed_ms:.1f}ms")
+
+    def _on_cell_write_failed(self, _exc: Exception):
+        # На ошибке возвращаемся к source-of-truth из БД.
+        self.request_refresh(force=True)
+
+    def _emit_admin_cell_changes(self, changed_keys, *, mark_draft: bool = True):
+        if self.model is None or not changed_keys:
+            return
+        changed_keys = list(dict.fromkeys(changed_keys))
+        if mark_draft:
+            self._mark_local_admin_dirty(changed_keys)
+        if hasattr(self.model, "_recompute_draft_flag"):
+            self.model._recompute_draft_flag(emit_order_column=True)
+        self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
+        self._cached_has_administrations = self._model_has_administrations()
+        if hasattr(self.model, "_emit_admin_cell_changes"):
+            self.model._emit_admin_cell_changes(changed_keys)
+        else:
+            for key in changed_keys:
+                row = next(
+                    (
+                        row_idx
+                        for row_idx, item in enumerate(getattr(self.model, "orders", []))
+                        if item and getattr(item, "id", None) == key[0]
+                    ),
+                    None,
+                )
+                col = next(
+                    (
+                        col_idx + 1
+                        for col_idx, slot in enumerate(getattr(self.model, "time_slots", []))
+                        if slot.isoformat() == key[1]
+                    ),
+                    None,
+                )
+                if row is not None and col is not None:
+                    idx = self.model.index(row, col)
+                    self.model.dataChanged.emit(idx, idx, [Qt.UserRole])
+        self.check_drafts()
+        self.localBalanceChanged.emit()
+
+    def _restore_admin_cells(self, previous_by_key: dict):
+        if self.model is None or not previous_by_key:
+            return
+        changed_keys = []
+        for key, previous in previous_by_key.items():
+            had_previous, previous_admin = previous
+            if had_previous and previous_admin is not None:
+                self.model.admin_map[key] = copy(previous_admin)
+            else:
+                self.model.admin_map.pop(key, None)
+            changed_keys.append(key)
+        self._mark_local_admin_dirty(changed_keys)
+        self._emit_admin_cell_changes(changed_keys, mark_draft=False)
+
+    @staticmethod
+    def _admin_key_from_admin(admin):
+        if admin is None:
+            return None
+        planned_time = getattr(admin, "planned_time", None)
+        if isinstance(planned_time, str):
+            try:
+                planned_time = datetime.fromisoformat(planned_time)
+            except Exception:
+                return None
+        order_id = getattr(admin, "order_id", None)
+        if planned_time is None or order_id is None:
+            return None
+        return (order_id, planned_time.isoformat())
+
+    def _apply_pending_order_mark(self, index, admin, mark: str) -> dict:
+        if not self.model or not index.isValid() or admin is None:
+            return {}
+        key = self._admin_key_from_admin(admin)
+        if key is None:
+            return {}
+        previous = copy(self.model.admin_map.get(key)) if key in self.model.admin_map else None
+        pending_admin = copy(admin)
+        pending_admin.comment = mark or ""
+        pending_admin.actual_time = datetime.now() if mark else None
+        setattr(pending_admin, "_pending_mark", mark or "")
+        self.model.admin_map[key] = pending_admin
+        self._emit_admin_cell_changes([key], mark_draft=False)
+        return {key: (previous is not None, previous)}
+
+    def _apply_committed_order_mark(self, index, admin, mark: str):
+        if not self.model or not index.isValid() or admin is None:
+            return
+        key = self._admin_key_from_admin(admin)
+        if key is None:
+            return
+        committed_admin = copy(admin)
+        committed_admin.comment = mark or ""
+        committed_admin.actual_time = datetime.now() if mark else None
+        if hasattr(committed_admin, "_pending_mark"):
+            delattr(committed_admin, "_pending_mark")
+        self.model.admin_map[key] = committed_admin
+        self._emit_admin_cell_changes([key], mark_draft=False)
+
+    def _apply_pending_cell(
+        self,
+        index,
+        order: OrderDTO,
+        admin: AdministrationDTO,
+        planned_time: datetime,
+        op_prefix: str,
+    ) -> dict:
+        if not self.model or not index.isValid():
+            return {}
+        key = (getattr(order, "id", None), planned_time.isoformat())
+        if key[0] is None:
+            return {}
+        had_previous = key in self.model.admin_map
+        previous_admin = copy(self.model.admin_map[key]) if had_previous else None
+        pending_admin = copy(previous_admin) if previous_admin is not None else self._new_optimistic_admin(
+            order,
+            planned_time,
+            role="single",
+            previous_admin=admin,
+        )
+        setattr(pending_admin, "_pending_cell_action", op_prefix)
+        self.model.admin_map[key] = pending_admin
+        self._emit_admin_cell_changes([key])
+        return {key: (had_previous, previous_admin)}
+
+    @staticmethod
+    def _is_long_order(order: OrderDTO) -> bool:
+        try:
+            duration = int(getattr(order, "duration_min", 0) or 0)
+        except Exception:
+            return False
+        return duration == -1 or duration >= 61
+
+    def _chain_keys_for_admin(self, key, admin):
+        if self.model is None:
+            return []
+        chain_id = getattr(admin, "big_chain_id", None)
+        if not chain_id:
+            return [key] if key in self.model.admin_map else []
+        keys = [
+            item_key
+            for item_key, item_admin in self.model.admin_map.items()
+            if item_key[0] == key[0]
+            and getattr(item_admin, "big_chain_id", None) == chain_id
+            and str(getattr(item_admin, "status", "") or "") == "planned"
+        ]
+        keys = sorted(keys, key=lambda item: item[1])
+        if key not in keys:
+            return [key] if key in self.model.admin_map else []
+
+        center = keys.index(key)
+        left = center
+        while left > 0:
+            if datetime.fromisoformat(keys[left][1]) - datetime.fromisoformat(keys[left - 1][1]) != timedelta(hours=1):
+                break
+            left -= 1
+
+        right = center
+        while right + 1 < len(keys):
+            if datetime.fromisoformat(keys[right + 1][1]) - datetime.fromisoformat(keys[right][1]) != timedelta(hours=1):
+                break
+            right += 1
+
+        return keys[left:right + 1]
+
+    def _optimistic_chain_slots(self, order: OrderDTO, planned_time: datetime) -> list[datetime]:
+        if self.model is None:
+            return []
+        try:
+            duration = int(getattr(order, "duration_min", 0) or 0)
+        except Exception:
+            duration = 0
+        limit_time = planned_time.replace(hour=8, minute=0, second=0, microsecond=0)
+        if planned_time.hour >= 8:
+            limit_time += timedelta(days=1)
+        if duration == -1:
+            num_desired = int((limit_time - planned_time).total_seconds() / 3600)
+        else:
+            num_desired = (duration - 1) // 60 + 1
+        if num_desired <= 0:
+            return []
+
+        slot_by_iso = {slot.isoformat(): slot for slot in getattr(self.model, "time_slots", [])}
+        desired_slots = []
+        for offset in range(num_desired):
+            slot = planned_time + timedelta(hours=offset)
+            if slot >= limit_time:
+                break
+            model_slot = slot_by_iso.get(slot.isoformat())
+            if model_slot is not None:
+                desired_slots.append(model_slot)
+        return desired_slots
+
+    def _new_optimistic_admin(
+        self,
+        order: OrderDTO,
+        planned_time: datetime,
+        *,
+        role: str,
+        chain_id: str | None = None,
+        status: str = "planned",
+        previous_admin: AdministrationDTO | None = None,
+    ) -> AdministrationDTO:
+        return AdministrationDTO(
+            id=self._allocate_local_admin_id(),
+            order_id=order.id,
+            big_chain_id=chain_id,
+            cell_role=role,
+            planned_time=planned_time,
+            status=status,
+            is_committed=0,
+            comment="",
+            volume_ml=float(getattr(previous_admin, "volume_ml", 0.0) or 0.0),
+        )
+
+    def _add_optimistic_single(
+        self,
+        changes: _OptimisticAdminChanges,
+        key,
+        order: OrderDTO,
+        admin: AdministrationDTO,
+        planned_time: datetime,
+    ) -> None:
+        changes.set_admin(
+            key,
+            self._new_optimistic_admin(
+                order,
+                planned_time,
+                role="single",
+                previous_admin=admin,
+            ),
+        )
+
+    def _add_optimistic_chain(
+        self,
+        changes: _OptimisticAdminChanges,
+        order: OrderDTO,
+        planned_time: datetime,
+    ) -> None:
+        desired_slots = self._optimistic_chain_slots(order, planned_time)
+        available_slots = []
+        for pos, slot in enumerate(desired_slots):
+            item_key = (order.id, slot.isoformat())
+            existing = self.model.admin_map.get(item_key)
+            if (
+                existing
+                and str(getattr(existing, "status", "") or "") == "planned"
+                and pos > 0
+            ):
+                break
+            available_slots.append(slot)
+        if not available_slots:
+            return
+
+        chain_id = (
+            f"optimistic:{order.id}:{planned_time.isoformat()}"
+            if len(available_slots) > 1
+            else None
+        )
+        for pos, slot in enumerate(available_slots):
+            if len(available_slots) == 1:
+                role = "single"
+            elif pos == 0:
+                role = "start"
+            elif pos == len(available_slots) - 1:
+                role = "end"
+            else:
+                role = "body"
+            item_key = (order.id, slot.isoformat())
+            changes.set_admin(
+                item_key,
+                self._new_optimistic_admin(
+                    order,
+                    slot,
+                    role=role,
+                    chain_id=chain_id,
+                    previous_admin=self.model.admin_map.get(item_key),
+                ),
+            )
+
+    def _apply_middle_click_optimistic(
+        self,
+        changes: _OptimisticAdminChanges,
+        key,
+        admin: AdministrationDTO | None,
+        *,
+        status: str,
+        role: str,
+    ) -> None:
+        if admin is None:
+            return
+        if status == "cancelled":
+            changes.remove_admin(key)
+            return
+        if status != "planned":
+            return
+
+        chain_keys = self._chain_keys_for_admin(key, admin)
+        chain_id = getattr(admin, "big_chain_id", None)
+        if role == "start":
+            cancelled_admin = copy(admin)
+            cancelled_admin.status = "cancelled"
+            cancelled_admin.cell_role = role
+            changes.set_admin(key, cancelled_admin)
+            for item_key in chain_keys:
+                if item_key != key:
+                    changes.remove_admin(item_key)
+            return
+        if role == "body":
+            end_admin = copy(admin)
+            end_admin.status = "planned"
+            end_admin.cell_role = "end"
+            changes.set_admin(key, end_admin)
+            for item_key in chain_keys:
+                if item_key[1] > key[1]:
+                    changes.remove_admin(item_key)
+            return
+        if role == "end":
+            cancelled_admin = copy(admin)
+            cancelled_admin.status = "cancelled"
+            cancelled_admin.cell_role = "single"
+            cancelled_admin.big_chain_id = chain_id
+            changes.set_admin(key, cancelled_admin)
+            remaining_keys = [item_key for item_key in chain_keys if item_key != key]
+            if remaining_keys:
+                prev_key = max(remaining_keys, key=lambda item: item[1])
+                prev_admin = copy(self.model.admin_map.get(prev_key))
+                if prev_admin is not None:
+                    prev_admin.cell_role = "single" if len(remaining_keys) == 1 else "end"
+                    changes.set_admin(prev_key, prev_admin)
+            return
+
+        cancelled_admin = copy(admin)
+        cancelled_admin.status = "cancelled"
+        cancelled_admin.cell_role = "single"
+        cancelled_admin.big_chain_id = chain_id
+        changes.set_admin(key, cancelled_admin)
+
+    def _trim_optimistic_chain(
+        self,
+        changes: _OptimisticAdminChanges,
+        key,
+        admin: AdministrationDTO,
+        *,
+        role: str,
+    ) -> None:
+        chain_keys = self._chain_keys_for_admin(key, admin)
+        if role == "start":
+            for item_key in chain_keys:
+                changes.remove_admin(item_key)
+            return
+        if role == "body":
+            end_admin = copy(admin)
+            end_admin.cell_role = "end"
+            changes.set_admin(key, end_admin)
+            for item_key in chain_keys:
+                if item_key[1] > key[1]:
+                    changes.remove_admin(item_key)
+            return
+        if role != "end":
+            return
+
+        remaining_keys = [item_key for item_key in chain_keys if item_key != key]
+        changes.remove_admin(key)
+        prev_keys = [item_key for item_key in remaining_keys if item_key[1] < key[1]]
+        if not prev_keys:
+            return
+        prev_key = max(prev_keys, key=lambda item: item[1])
+        prev_admin = copy(self.model.admin_map.get(prev_key))
+        if prev_admin is not None:
+            prev_admin.cell_role = "single" if len(remaining_keys) == 1 else "end"
+            changes.set_admin(prev_key, prev_admin)
+
+    def _apply_primary_click_optimistic(
+        self,
+        changes: _OptimisticAdminChanges,
+        key,
+        order: OrderDTO,
+        admin: AdministrationDTO | None,
+        planned_time: datetime,
+        *,
+        status: str,
+        role: str,
+        is_long: bool,
+    ) -> None:
+        if admin is None or status in ("deleted", "cancelled"):
+            if is_long:
+                self._add_optimistic_chain(changes, order, planned_time)
+            else:
+                self._add_optimistic_single(changes, key, order, admin, planned_time)
+            return
+        if status != "planned":
+            return
+        if is_long and role in ("start", "body", "end"):
+            self._trim_optimistic_chain(changes, key, admin, role=role)
+        elif role == "single":
+            changes.remove_admin(key)
+
+    def _apply_optimistic_cell(
+        self,
+        index,
+        order: OrderDTO,
+        admin: AdministrationDTO,
+        planned_time: datetime,
+        op_prefix: str,
+        *,
+        perf_click_id: int | None = None,
+    ) -> dict:
+        """
+        Мгновенная визуальная реакция на клик:
+        - одиночные назначения меняем точечно;
+        - длительные инфузии строим/режем локально теми же правилами, что и доменный сервис.
+        """
+        if not self.model or not index.isValid():
+            return {}
+
+        key = (order.id, planned_time.isoformat())
+        if key[0] is None:
+            self._perf_mark_click(perf_click_id, "optimistic_skip")
+            return {}
+
+        changes = _OptimisticAdminChanges(self, op_prefix)
+        status = str(getattr(admin, "status", "") or "") if admin else ""
+        role = str(getattr(admin, "cell_role", "") or "") if admin else ""
+        is_long = self._is_long_order(order)
+
+        if op_prefix == "orders_middle_click":
+            self._apply_middle_click_optimistic(
+                changes,
+                key,
+                admin,
+                status=status,
+                role=role,
+            )
+        elif op_prefix != "orders_right_click":
+            self._apply_primary_click_optimistic(
+                changes,
+                key,
+                order,
+                admin,
+                planned_time,
+                status=status,
+                role=role,
+                is_long=is_long,
+            )
+
+        if changes.changed_keys:
+            self._emit_admin_cell_changes(changes.changed_keys)
+            self._mark_local_cell_draft_guard(changes.changed_keys)
+            logger.info(
+                "[OrdersClick] local_cell_update role=doctor admission_id=%s op=%s order_id=%s changed_cells=%s",
+                self.admission_id,
+                op_prefix,
+                getattr(order, "id", None),
+                len(set(changes.changed_keys)),
+            )
+            self._perf_mark_click(perf_click_id, "optimistic")
+        else:
+            self._perf_mark_click(perf_click_id, "optimistic_skip")
+        return changes.previous_by_key
+
+    def _enqueue_cell_write(
+        self,
+        description: str,
+        operation,
+        index,
+        order: OrderDTO,
+        admin: AdministrationDTO,
+        planned_time: datetime,
+        *,
+        op_prefix: str,
+        perf_click_id: int | None = None,
+    ):
+        if self._is_closing or not self.service:
+            return
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
+        target_key = self._admin_cell_write_key(getattr(order, "id", None), planned_time)
+        self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
+        self._begin_admin_write()
+        previous_by_key = self._apply_optimistic_cell(
+            index,
+            order,
+            admin,
+            planned_time,
+            op_prefix,
+            perf_click_id=perf_click_id,
+        )
+        pending_keys = set(previous_by_key.keys()) if previous_by_key else set()
+        if target_key is not None:
+            pending_keys.add(target_key)
+        self._mark_pending_admin_cell_writes(pending_keys)
+
+        def on_success():
+            self._clear_pending_admin_cell_writes(pending_keys)
+            self._finish_admin_write()
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            self._schedule_fast_sync()
+            self._schedule_state_sync()
+
+        def on_error(exc):
+            self._clear_pending_admin_cell_writes(pending_keys)
+            self._finish_admin_write()
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            self._restore_admin_cells(previous_by_key)
+            self.request_refresh(force=True)
+
+        self._enqueue_write(
+            description,
+            operation=operation,
+            on_success=on_success,
+            on_error=on_error,
+            block_ui=False,
+            perf_click_id=perf_click_id,
+        )
+
+    def _perf_start_click(self, index, op_prefix: str) -> int | None:
+        if not self._perf_enabled:
+            return None
+
+        self._perf_prune_clicks()
+        self._perf_next_click_id += 1
+        click_id = self._perf_next_click_id
+        self._perf_clicks[click_id] = {
+            "t0": time.perf_counter(),
+            "row": index.row(),
+            "col": index.column(),
+            "op": op_prefix,
+            "optimistic": None,
+            "paint": None,
+            "write": None,
+        }
+        logger.debug(
+            f"[OrdersPerf] click#{click_id} start op={op_prefix} cell=({index.row()},{index.column()})"
+        )
+        return click_id
+
+    def _perf_mark_click(self, click_id: int | None, stage: str, *, extra: str = ""):
+        if not self._perf_enabled or click_id is None:
+            return
+
+        info = self._perf_clicks.get(click_id)
+        if not info:
+            return
+
+        elapsed_ms = (time.perf_counter() - info["t0"]) * 1000.0
+        if stage == "optimistic":
+            info["optimistic"] = elapsed_ms
+        elif stage == "paint":
+            info["paint"] = elapsed_ms
+        elif stage in ("write_ok", "write_error"):
+            info["write"] = elapsed_ms
+        logger.debug(
+            f"[OrdersPerf] click#{click_id} {stage} +{elapsed_ms:.1f}ms"
+            + (f" ({extra})" if extra else "")
+        )
+        self._perf_try_finalize(click_id)
+
+    def _perf_try_finalize(self, click_id: int):
+        if not self._perf_enabled:
+            return
+        info = self._perf_clicks.get(click_id)
+        if not info:
+            return
+        if info["paint"] is None or info["write"] is None:
+            return
+
+        logger.debug(
+            f"[OrdersPerf] click#{click_id} total: paint={info['paint']:.1f}ms, write={info['write']:.1f}ms, "
+            f"optimistic={('%.1fms' % info['optimistic']) if info['optimistic'] is not None else 'n/a'} "
+            f"op={info['op']} cell=({info['row']},{info['col']})"
+        )
+        self._perf_clicks.pop(click_id, None)
+
+    def _perf_mark_first_unpainted(self):
+        if not self._perf_enabled:
+            return
+
+        self._perf_prune_clicks()
+        for click_id in sorted(self._perf_clicks.keys()):
+            info = self._perf_clicks.get(click_id)
+            if not info:
+                continue
+            if info["paint"] is None:
+                self._perf_mark_click(click_id, "paint")
+                return
+
+    def _perf_prune_clicks(self):
+        if not self._perf_enabled:
+            return
+        now = time.perf_counter()
+        stale_ids = []
+        for click_id, info in self._perf_clicks.items():
+            if now - info["t0"] > 15.0:
+                stale_ids.append(click_id)
+        for click_id in stale_ids:
+            self._perf_clicks.pop(click_id, None)
+
+    def finalize_card(self):
+        if not self.admission_id or self._forced_read_only: return
+        if self._local_draft_save_pending:
+            return
+        if not self._has_local_draft_changes():
+            if self._legacy_central_draft_detected:
+                target_admission_id = self.admission_id
+                target_shift_date = self.shift_date
+
+                def legacy_success():
+                    self._local_draft_save_pending = False
+                    if not self._is_current_context(target_admission_id, target_shift_date):
+                        return
+                    self._legacy_central_draft_detected = False
+                    self._cached_has_drafts = False
+                    self._refresh_model(source="post_finalize")
+                    self.localDraftResolutionFinished.emit(True)
+
+                def legacy_error(_exc):
+                    self._local_draft_save_pending = False
+                    self.check_drafts()
+                    self.localDraftResolutionFinished.emit(False)
+
+                self._local_draft_save_pending = True
+                try:
+                    self._enqueue_write(
+                        f"orders_finalize_legacy:{target_admission_id}",
+                        operation=lambda: self.service.finalize_order_card(
+                            target_admission_id,
+                            shift_date=target_shift_date,
+                            expected_revisions=self._visible_order_revision_map(),
+                        ),
+                        on_success=legacy_success,
+                        on_error=legacy_error,
+                    )
+                except Exception:
+                    self._local_draft_save_pending = False
+                    raise
+            return
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
+        payload = self._build_local_draft_payload()
+        if not payload:
+            return
+
+        def after_success(result):
+            self._local_draft_save_pending = False
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            from rem_card.app.logger import logger
+            logger.info(f"Карта назначений для ID {target_admission_id} успешно сохранена")
+            self._reset_local_draft_tracking(clear_baseline=True)
+            self._cached_has_drafts = False
+            self._discard_deferred_forced_reload_after_guard(discard_reason="post_finalize")
+            self._clear_local_cell_draft_guard()
+            self._admin_only_snapshot_until = 0.0
+            self._clear_pending_reorder()
+            self._post_finalize_retry_count = 0
+            self._last_applied_snapshot_signature = None
+
+            snapshot = result.get("snapshot") if isinstance(result, dict) else None
+            snapshot_applied = False
+            if isinstance(snapshot, dict):
+                snapshot_admission_id = int(snapshot.get("admission_id") or 0)
+                snapshot_shift_date = snapshot.get("shift_date")
+                if (
+                    snapshot_admission_id == int(target_admission_id)
+                    and snapshot_shift_date == target_shift_date
+                    and bool(snapshot.get("only_committed", False))
+                ):
+                    try:
+                        coordinator = self._get_read_coordinator()
+                        if coordinator is not None:
+                            snapshot = coordinator.accept_committed_orders_snapshot(
+                                self._build_orders_context(),
+                                snapshot,
+                            )
+                        snapshot_applied = self._apply_snapshot_data(
+                            snapshot=snapshot,
+                            admission_id=target_admission_id,
+                            shift_date=target_shift_date,
+                            context_key=self._current_context_key(),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[OrdersWidget] committed snapshot apply failed admission_id=%s",
+                            target_admission_id,
+                        )
+
+            if snapshot_applied:
+                record_metric(
+                    "orders_post_finalize_snapshot_apply",
+                    1,
+                    admission_id=target_admission_id,
+                    source="post_finalize",
+                    result="success",
+                    path="write_result",
+                )
+            else:
+                if self.model is not None:
+                    self.model._set_has_any_draft(False, emit_order_column=True)
+                record_metric(
+                    "orders_post_finalize_snapshot_apply",
+                    1,
+                    admission_id=target_admission_id,
+                    source="post_finalize",
+                    result="fallback",
+                    path="async_refresh",
+                )
+                self._refresh_model(source="post_finalize")
+            self.localDraftResolutionFinished.emit(True)
+
+        def after_error(exc):
+            self._local_draft_save_pending = False
+            if isinstance(exc, OrderConflictError):
+                coordinator = self._get_read_coordinator()
+                conflict_context_hash = None
+                if coordinator is not None:
+                    coordinator.invalidate_orders_for_admission(
+                        target_admission_id,
+                        shift_date=target_shift_date,
+                        reason=f"write_conflict:{getattr(exc, 'reason', 'unknown')}",
+                    )
+                    if self._is_current_context(target_admission_id, target_shift_date):
+                        conflict_context_hash = self._build_orders_context().hash()
+                record_orders_sync_event(
+                    "conflict",
+                    role="doctor",
+                    admission_id=int(target_admission_id or 0),
+                    context_hash=conflict_context_hash,
+                    reason=str(getattr(exc, "reason", "unknown")),
+                    immediate=True,
+                )
+                if coordinator is not None and self._is_current_context(target_admission_id, target_shift_date):
+                    self._reset_local_draft_tracking(clear_baseline=True)
+                    self._clear_pending_reorder()
+                    self._cached_has_drafts = False
+                    if self.model is not None:
+                        self.model._set_has_any_draft(False, emit_order_column=True)
+                    self._discard_deferred_forced_reload_after_guard(discard_reason="write_conflict")
+                    self._clear_local_cell_draft_guard()
+                    self._request_snapshot(
+                        force=True,
+                        source="write_conflict",
+                        priority="HIGH",
+                        invalidate_reason="write_conflict",
+                    )
+            self.check_drafts()
+            self.localDraftResolutionFinished.emit(False)
+
+        self._local_draft_save_pending = True
+        try:
+            self._enqueue_write(
+                f"orders_finalize:{target_admission_id}",
+                operation=lambda data=payload: self.service.commit_local_order_draft(
+                    target_admission_id,
+                    target_shift_date,
+                    orders=data["orders"],
+                    admin_map=data["admin_map"],
+                    dirty_admin_keys=data["dirty_admin_keys"],
+                    baseline_admin_map=data["baseline_admin_map"],
+                    expected_revisions=data["expected_revisions"],
+                    expected_active_order_ids=data["expected_active_order_ids"],
+                ),
+                on_success=after_success,
+                on_error=after_error,
+                pass_result_to_success=True,
+            )
+        except Exception:
+            self._local_draft_save_pending = False
+            raise
+
+    def clear_drafts(self):
+        if not self.admission_id or self._forced_read_only: return
+        if self._local_draft_save_pending:
+            return
+        if not self._has_local_draft_changes():
+            if self._legacy_central_draft_detected:
+                target_admission_id = self.admission_id
+                target_shift_date = self.shift_date
+
+                def legacy_success():
+                    self._local_draft_save_pending = False
+                    if not self._is_current_context(target_admission_id, target_shift_date):
+                        return
+                    self._legacy_central_draft_detected = False
+                    self._cached_has_drafts = False
+                    self._refresh_model(source="orders_discard_legacy_draft")
+                    self.localDraftResolutionFinished.emit(True)
+
+                def legacy_error(_exc):
+                    self._local_draft_save_pending = False
+                    self.check_drafts()
+                    self.localDraftResolutionFinished.emit(False)
+
+                self._local_draft_save_pending = True
+                try:
+                    self._enqueue_write(
+                        f"orders_discard_legacy:{target_admission_id}",
+                        operation=lambda: self.service.clear_order_drafts(
+                            target_admission_id,
+                            target_shift_date,
+                            expected_revisions=self._visible_order_revision_map(),
+                        ),
+                        on_success=legacy_success,
+                        on_error=legacy_error,
+                    )
+                except Exception:
+                    self._local_draft_save_pending = False
+                    raise
+            return
+        if not self._restore_local_draft_baseline():
+            self.request_refresh(force=True, source="orders_discard_local_draft", priority="HIGH")
+
+    def setup_data(self):
+        """Обновление только данных (без пересоздания виджетов)."""
+        if self.main_layout is None:
+            self.setup_ui()
+
+        if self.service and self.admission_id:
+            self._ensure_model_initialized()
+            if self.model is not None:
+                self.model.clear_for_context(self.admission_id, self.shift_date)
+            self._reset_cached_state()
+            self._apply_table_header_layout()
+            self._reset_change_cursor()
+            self._request_snapshot(
+                force=False,
+                source="user",
+                priority="HIGH",
+                invalidate_reason=None,
+            )
+        else:
+            self._reset_change_cursor()
+            self._reset_cached_state()
+            if self.model is not None:
+                self.model.clear_for_context(self.admission_id, self.shift_date)
+
+        self.check_drafts()
+        self.update_now_marker()
+
+    def setup_ui(self):
+        """Инициализация интерфейса (выполняется один раз)."""
+        if self.main_layout:
+            self.setup_data()
+            return
+
+        self.main_layout = QVBoxLayout(self)
+        layout = self.main_layout
+        # Отступ 3px сверху для унификации с другими вкладками (2в, ИВЛ и т.д.)
+        layout.setContentsMargins(0, 3, 0, 5) 
+        layout.setSpacing(0)
+        
+        self.frame_container = QFrame()
+        self.frame_container.setObjectName("orders_frame_container")
+        self.frame_container.setStyleSheet(f"""
+            QFrame#orders_frame_container {{ 
+                border: 1.5px solid {BORDER_COLOR}; 
+                border-radius: 5px; 
+                background-color: {BG_CARD}; 
+            }}
+        """)
+        self.frame_layout = QVBoxLayout(self.frame_container)
+        self.frame_layout.setContentsMargins(2, 2, 2, 2)
+        self.frame_layout.setSpacing(5) 
+        layout.addWidget(self.frame_container, 1)
+
+        # 1. Поле поиска
+        self.top_container = QFrame()
+        self.top_container.setStyleSheet("background-color: transparent;")
+        self.top_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        top_layout = QHBoxLayout(self.top_container)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        from .prescription_input_widget import PrescriptionInputWidget
+
+        self.input_widget = PrescriptionInputWidget()
+        self.input_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.input_widget.prescription_generated.connect(self.on_prescription_input)
+        top_layout.addWidget(self.input_widget, 1)
+        self._refresh_status_label = QLabel("")
+        self._refresh_status_label.setVisible(False)
+        self._refresh_status_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9pt; padding: 0 6px;")
+        top_layout.addWidget(self._refresh_status_label, 0)
+        self.frame_layout.addWidget(self.top_container, 0)
+
+        # 2. Таблица
+        self.table_clip_widget = QWidget()
+        self.table_clip_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table_clip_layout = QVBoxLayout(self.table_clip_widget)
+        self.table_clip_layout.setContentsMargins(0, 0, 0, 0)
+        self.frame_layout.addWidget(self.table_clip_widget, 1)
+
+        self.table_view = QTableView()
+        self.table_view.setMinimumHeight(120)
+        self.table_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.delegate = OrdersDelegate()
+        self.table_view.setItemDelegate(self.delegate)
+        
+        self.table_view.verticalHeader().setDefaultSectionSize(45)
+        self.table_view.verticalHeader().setVisible(False)
+        self.table_view.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table_view.setFocusPolicy(Qt.NoFocus)
+        self.table_view.setShowGrid(False)
+        self.table_view.clicked.connect(self.on_cell_clicked)
+        self.table_view.viewport().installEventFilter(self)
+        
+        self.table_view.setStyleSheet(
+            f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} "
+            f"QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 4px; border: 1 solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 9pt; }}"
+            + STYLE_ORDERS_VERTICAL_SCROLLBAR
+        )
+        self.table_clip_layout.addWidget(self.table_view)
+
+        self.bottom_footer = QWidget()
+        self.bottom_footer.setFixedHeight(15)
+        self.frame_layout.addWidget(self.bottom_footer)
+
+        self.setStyleSheet(f"OrdersWidget {{ background-color: {BG_MAIN}; }} QWidget#table_clip {{ background-color: {BG_CARD}; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QWidget#orders_footer_frame {{ background-color: {BG_MAIN}; border-top: 1px solid {BORDER_COLOR}; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }} QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 6px; border: none; border-bottom: 0.5px solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 10pt; }} QHeaderView {{ background-color: {BG_LIGHT}; border-top-left-radius: 5px; border-top-right-radius: 5px; }}")
+        
+        self._bind_model_to_table()
+        self.set_forced_read_only(self._forced_read_only)
+
+    def ensure_ready_for_show(self):
+        """Ленивая инициализация таблицы перед первым показом вкладки."""
+        if self.main_layout is None:
+            self.setup_ui()
+
+        if self.model is None:
+            self.setup_data()
+            return
+
+        if self.model.admission_id != self.admission_id or self.model.shift_date != self.shift_date:
+            self.setup_data()
+            return
+
+        if self.has_drafts():
+            return
+
+        if self._snapshot_stale:
+            self._request_snapshot(
+                force=False,
+                source="refresh",
+                priority="HIGH",
+                invalidate_reason=None,
+            )
+            return
+
+        if not self.model.orders:
+            self._request_snapshot(
+                force=False,
+                source="user",
+                priority="HIGH",
+                invalidate_reason=None,
+            )
+
+    def _insert_local_order_after_add(self, order: OrderDTO):
+        if order is None or getattr(order, "id", None) is None:
+            logger.warning(
+                "[OrdersWidget] local order insert skipped: id unavailable admission_id=%s",
+                self.admission_id,
+            )
+            self._schedule_fast_sync()
+            return
+        self._ensure_model_initialized()
+        if self.model is None:
+            self._schedule_fast_sync()
+            return
+
+        order_id = int(order.id)
+        if any(existing and getattr(existing, "id", None) is not None and int(existing.id) == order_id for existing in self.model.orders):
+            self._schedule_fast_sync()
+            return
+
+        scroll_value = self._capture_table_scroll()
+        row = len(self.model.orders)
+        draft_changed = False
+        local_order = copy(order)
+        local_order.sort_order = max(
+            (int(getattr(existing, "sort_order", 0) or 0) for existing in self.model.orders if existing is not None),
+            default=-1,
+        ) + 1
+        self.model.beginInsertRows(QModelIndex(), row, row)
+        try:
+            self.model.orders.append(local_order)
+            if hasattr(self.model, "_recompute_draft_flag"):
+                draft_changed = bool(self.model._recompute_draft_flag())
+        finally:
+            self.model.endInsertRows()
+        if draft_changed and hasattr(self.model, "_emit_order_column_changes"):
+            self.model._emit_order_column_changes()
+
+        self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False)) or bool(self._pending_reorder_order_ids)
+        self._cached_has_orders = any(
+            item and item.status != OrderStatus.DELETED
+            for item in self.model.orders
+        )
+        self._cached_has_administrations = self._model_has_administrations()
+        self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
+        self._apply_table_header_layout()
+        self._restore_table_scroll(scroll_value)
+        self._mark_local_order_dirty(order_id)
+        self.check_drafts()
+        self.localBalanceChanged.emit()
+
+    def _replace_local_order_after_edit(self, row: int, order_id: int, updated_order: OrderDTO):
+        self._ensure_model_initialized()
+        if self.model is None or updated_order is None:
+            self._schedule_fast_sync()
+            return
+
+        target_row = row
+        if target_row < 0 or target_row >= len(self.model.orders) or getattr(self.model.orders[target_row], "id", None) != order_id:
+            target_row = next(
+                (
+                    idx
+                    for idx, item in enumerate(self.model.orders)
+                    if item and getattr(item, "id", None) == order_id
+                ),
+                -1,
+            )
+        if target_row < 0:
+            self._schedule_fast_sync()
+            return
+
+        local_order = copy(updated_order)
+        local_order.id = order_id
+        local_order.admission_id = self.admission_id
+        self.model.orders[target_row] = local_order
+        self._mark_local_order_dirty(order_id)
+        if hasattr(self.model, "_recompute_draft_flag"):
+            self.model._recompute_draft_flag(emit_order_column=True)
+        self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
+        self._cached_has_orders = any(
+            item and item.status != OrderStatus.DELETED
+            for item in self.model.orders
+        )
+        self._cached_has_administrations = self._model_has_administrations()
+        self._last_applied_snapshot_signature = None
+        idx_left = self.model.index(target_row, 0)
+        idx_right = self.model.index(target_row, max(0, self.model.columnCount() - 1))
+        self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
+        self.check_drafts()
+        self.localBalanceChanged.emit()
+
+    def on_prescription_input(self, text):
+        if self._is_read_only(): return
+        from .components.order_input_handler import OrderInputHandler
+
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
+        new_order = OrderInputHandler.parse_input_to_dto(text, self.admission_id)
+        new_order.id = self._allocate_local_order_id()
+        new_order.is_committed = 0
+        now = datetime.now()
+        start, end = self.service.get_day_period(self.shift_date)
+        new_order.created_at = now if start <= now < end else start
+
+        if self._is_current_context(target_admission_id, target_shift_date):
+            self._insert_local_order_after_add(new_order)
+
+    def has_cvp_order(self) -> bool:
+        from rem_card.services.order_service import CVP_QUICK_ORDER_KEY, OrderService
+
+        model_has_cvp = self.model is not None and any(
+            str(getattr(order, "drug_key", "") or "") == CVP_QUICK_ORDER_KEY
+            or OrderService._is_cvp_order_text(getattr(order, "latin", ""))
+            or OrderService._is_cvp_order_text(getattr(order, "_order_text", ""))
+            for order in self.model.orders
+            if order is not None
+        )
+        if model_has_cvp:
+            return True
+        if self._draft_baseline_snapshot is not None:
+            return False
+        checker = getattr(self.service, "has_cvp_order", None)
+        if not callable(checker) or not self.admission_id or not self.shift_date:
+            return False
+        try:
+            return bool(checker(self.admission_id, self.shift_date))
+        except Exception as exc:
+            logger.warning("CVP order fallback probe failed: %s", exc)
+            return False
+
+    def add_cvp_order_if_missing(self):
+        if self._is_read_only() or not self.service or not self.admission_id or not self.shift_date:
+            return None, False
+        from rem_card.services.order_service import CVP_QUICK_ORDER_KEY, CVP_QUICK_ORDER_TEXT, OrderService
+
+        self._ensure_model_initialized()
+        if self.model is not None:
+            existing = next(
+                (
+                    order
+                    for order in self.model.orders
+                    if order is not None
+                    and (
+                        str(getattr(order, "drug_key", "") or "") == CVP_QUICK_ORDER_KEY
+                        or OrderService._is_cvp_order_text(getattr(order, "latin", ""))
+                        or OrderService._is_cvp_order_text(getattr(order, "_order_text", ""))
+                    )
+                ),
+                None,
+            )
+            if existing is not None:
+                return existing, False
+        if self._draft_baseline_snapshot is None and self.has_cvp_order():
+            return None, False
+
+        now = datetime.now()
+        start, end = self.service.get_day_period(self.shift_date)
+        created_at = now if start <= now < end else start
+        order = OrderDTO(
+            id=self._allocate_local_order_id(),
+            admission_id=int(self.admission_id),
+            drug_key=CVP_QUICK_ORDER_KEY,
+            latin=CVP_QUICK_ORDER_TEXT,
+            type=OrderType.MEDICATION,
+            status=OrderStatus.ACTIVE,
+            dose_value=0.0,
+            dose_unit="",
+            frequency=1,
+            duration_min=0,
+            is_committed=0,
+            created_at=created_at,
+            last_modified_by="doctor",
+        )
+        self._insert_local_order_after_add(order)
+        return order, True
+
+    def _build_order_edit_dialog(self, order: OrderDTO):
+        from .administration_dialog import (
+            DrugCharacteristicsDialog,
+            ManualEntryDialog,
+            MultiCompCharacteristicsDialog,
+        )
+        from rem_card.services.prescription_engine import engine
+
+        engine.reload_if_changed(force_check=True)
+        drug_key = str(getattr(order, "drug_key", "") or "").strip()
+        drug_data = engine.drugs.get(drug_key, {}) if drug_key else {}
+        if drug_data.get("is_multicomp"):
+            dialog = MultiCompCharacteristicsDialog(drug_key, parent=self, initial_order=order)
+            dialog.title_bar.title_label.setText("Редактирование назначения")
+            return dialog
+        if drug_data and drug_key.lower() not in ("ruchnoivvod", "ruki"):
+            return DrugCharacteristicsDialog(
+                drug_key,
+                initial_dose=getattr(order, "dose_value", None),
+                parent=self,
+                initial_order=order,
+            )
+
+        dialog = ManualEntryDialog(self, title="Редактирование назначения", initial_order=order)
+        if drug_key:
+            dialog.drug_key = drug_key
+        return dialog
+
+    def _open_order_edit_dialog(self, index):
+        if self._is_read_only() or not index.isValid() or index.column() != 0 or not self.model:
+            return
+        row = index.row()
+        if row < 0 or row >= len(self.model.orders):
+            return
+        order = self.model.orders[row]
+        if not order or getattr(order, "_pending_delete", False):
+            return
+        order_id = getattr(order, "id", None)
+        if order_id is None:
+            self._show_warning("Назначение еще не сохранено. Обновите список и повторите редактирование.")
+            return
+        if int(order_id) > 0 and self._order_has_committed_execution(order_id):
+            self._show_warning(
+                "Назначение уже имеет выполненные введения. Чтобы не изменить медицинский факт, "
+                "создайте новое назначение и скорректируйте только будущие ячейки."
+            )
+            return
+
+        dialog = self._build_order_edit_dialog(order)
+        if not dialog.exec():
+            return
+
+        from .components.order_input_handler import OrderInputHandler
+
+        edited_order = OrderInputHandler.parse_input_to_dto(dialog.result_text, self.admission_id)
+        edited_order.id = int(order_id)
+        edited_order.is_committed = 0
+        edited_order.status = OrderStatus.ACTIVE
+        edited_order.sort_order = getattr(order, "sort_order", 0) or 0
+        edited_order.draft_sort_order = getattr(order, "draft_sort_order", None)
+        edited_order.created_at = getattr(order, "created_at", None) or datetime.now()
+        edited_order.revision = int(getattr(order, "revision", 0) or 0)
+        edited_order.last_modified_by = "doctor"
+        self._replace_local_order_after_edit(row, int(order_id), edited_order)
+        
+    def update_now_marker(self):
+        if hasattr(self, 'table_view'): self.table_view.viewport().update()
+
+    def poll_external_updates(self, force: bool = False):
+        self._request_snapshot(
+            force=force,
+            source="refresh",
+            priority="MEDIUM",
+            invalidate_reason="poll_external_updates" if force else None,
+        )
+
+    def on_cell_clicked(self, index):
+        self._handle_cell_action(index, "orders_left_click", self.service.apply_order_left_click)
+
+    def _format_drag_order_text(self, order: OrderDTO) -> str:
+        latin = (getattr(order, "latin", "") or "Назначение").strip()
+        dose_value = getattr(order, "dose_value", 0) or 0
+        dose_unit = (getattr(order, "dose_unit", "") or "").strip()
+        dose = f"{dose_value:g} {dose_unit}".strip()
+        if dose == "0":
+            dose = ""
+        return f"{latin} {dose}".strip()
+
+    def _drag_target_row(self, pos: QPoint) -> int:
+        if not self.model or not self.model.orders:
+            return 0
+        index = self.table_view.indexAt(pos)
+        if not index.isValid():
+            return 0 if pos.y() < 0 else len(self.model.orders)
+        row = index.row()
+        rect = self.table_view.visualRect(self.model.index(row, 0))
+        if pos.y() < rect.center().y():
+            return row
+        return row + 1
+
+    def _ensure_drag_indicator(self):
+        if self._row_drag_indicator is not None:
+            return self._row_drag_indicator
+        indicator = QFrame(self.table_view.viewport())
+        indicator.setObjectName("orders_row_drag_indicator")
+        indicator.setFixedHeight(3)
+        indicator.setStyleSheet("background-color: #2f80ed; border-radius: 1px;")
+        indicator.hide()
+        self._row_drag_indicator = indicator
+        return indicator
+
+    def _begin_order_row_drag(self, event):
+        state = self._row_drag_state or {}
+        source_row = state.get("source_row")
+        if source_row is None or not self.model or source_row >= len(self.model.orders):
+            return
+
+        order = self.model.orders[source_row]
+        rect = self.table_view.visualRect(self.model.index(source_row, 0))
+        ghost = QLabel(self._format_drag_order_text(order), self.table_view.viewport())
+        ghost.setObjectName("orders_row_drag_ghost")
+        ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        ghost.setFixedSize(max(120, rect.width() - 8), max(28, rect.height() - 8))
+        ghost.setStyleSheet(
+            "QLabel#orders_row_drag_ghost {"
+            "background-color: rgba(255, 255, 255, 235);"
+            "border: 1.5px solid #2f80ed;"
+            "border-radius: 6px;"
+            "padding-left: 8px;"
+            "font-size: 9pt;"
+            "color: #1f2d3d;"
+            "}"
+        )
+        self._row_drag_ghost = ghost
+        state["active"] = True
+        self._row_drag_state = state
+        ghost.show()
+        ghost.raise_()
+        self._update_order_row_drag(event.pos())
+
+    def _update_order_row_drag(self, pos: QPoint):
+        state = self._row_drag_state
+        if not state or not self.model:
+            return
+
+        offset = state.get("offset", QPoint(0, 0))
+        if self._row_drag_ghost is not None:
+            self._row_drag_ghost.move(pos - offset)
+            self._row_drag_ghost.raise_()
+
+        target_row = self._drag_target_row(pos)
+        state["target_row"] = target_row
+        indicator = self._ensure_drag_indicator()
+        if target_row <= 0:
+            y = 0
+        elif target_row >= len(self.model.orders):
+            last_rect = self.table_view.visualRect(self.model.index(len(self.model.orders) - 1, 0))
+            y = last_rect.bottom()
+        else:
+            y = self.table_view.visualRect(self.model.index(target_row, 0)).top()
+        indicator.setGeometry(0, max(0, y), self.table_view.viewport().width(), 3)
+        indicator.show()
+        indicator.raise_()
+
+    def _finish_order_row_drag(self, pos: QPoint):
+        state = self._row_drag_state or {}
+        was_active = bool(state.get("active"))
+        source_row = state.get("source_row")
+        target_row = state.get("target_row", self._drag_target_row(pos))
+        self._cleanup_order_row_drag()
+
+        if not was_active or source_row is None or not self.model:
+            return True
+        if source_row < 0 or source_row >= len(self.model.orders):
+            return True
+
+        final_row = max(0, min(int(target_row), len(self.model.orders)))
+        if final_row > source_row:
+            final_row -= 1
+        final_row = max(0, min(final_row, len(self.model.orders) - 1))
+        if self.model.move_order_row(source_row, final_row, mark_draft=True):
+            self._mark_local_reorder_draft()
+            self._persist_reorder_draft()
+        return True
+
+    def _cleanup_order_row_drag(self):
+        if self._row_drag_ghost is not None:
+            self._row_drag_ghost.hide()
+            self._row_drag_ghost.deleteLater()
+            self._row_drag_ghost = None
+        if self._row_drag_indicator is not None:
+            self._row_drag_indicator.hide()
+        self._row_drag_state = None
+
+    def eventFilter(self, obj, event):
+        if obj is self.table_view.viewport() and event.type() == QEvent.Paint:
+            self._perf_mark_first_unpainted()
+        if obj is self.table_view.viewport() and event.type() == QEvent.MouseButtonPress:
+            # Если карта заблокирована - игнорируем любые клики
+            if self._is_read_only():
+                return True 
+
+            index = self.table_view.indexAt(event.pos())
+            if index.isValid():
+                if index.column() == 0 and event.button() == Qt.LeftButton:
+                    rect = self.table_view.visualRect(index)
+                    self._row_drag_state = {
+                        "source_row": index.row(),
+                        "press_pos": event.pos(),
+                        "offset": event.pos() - rect.topLeft(),
+                        "active": False,
+                        "target_row": index.row(),
+                    }
+                    return True
+                if index.column() == 0 and event.button() == Qt.RightButton:
+                    self._open_order_edit_dialog(index)
+                    return True
+                if index.column() == 0 and event.button() == Qt.MiddleButton:
+                    row = index.row()
+                    if row < 0 or row >= len(self.model.orders):
+                        return True
+                    order = self.model.orders[row]
+                    was_committed = self._is_committed_value(getattr(order, "is_committed", 0))
+                    order_id = order.id
+                    if int(order_id) > 0 and self._order_has_committed_execution(order_id):
+                        self._show_warning(
+                            "Назначение уже имеет выполненные введения и не может быть удалено целиком. "
+                            "Скорректируйте только будущие ячейки."
+                        )
+                        return True
+                    self._mark_local_order_row_deleted(row, order, was_committed=was_committed)
+                    return True
+                if index.column() > 0:
+                    if event.button() == Qt.LeftButton and event.modifiers() == Qt.NoModifier:
+                        self.on_cell_clicked(index)
+                        return True
+                    if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and event.modifiers() == Qt.AltModifier):
+                        self.on_cell_middle_clicked(index)
+                        return True
+                    if event.button() == Qt.RightButton:
+                        self.on_cell_right_clicked(index)
+                        return True
+        if obj is self.table_view.viewport() and event.type() == QEvent.MouseMove:
+            if self._row_drag_state:
+                press_pos = self._row_drag_state.get("press_pos", event.pos())
+                if not self._row_drag_state.get("active"):
+                    if (event.pos() - press_pos).manhattanLength() >= QApplication.startDragDistance():
+                        self._begin_order_row_drag(event)
+                else:
+                    self._update_order_row_drag(event.pos())
+                return True
+        if obj is self.table_view.viewport() and event.type() == QEvent.MouseButtonRelease:
+            if self._row_drag_state and event.button() == Qt.LeftButton:
+                return self._finish_order_row_drag(event.pos())
+        if obj is self.table_view.viewport() and event.type() in (QEvent.Leave, QEvent.Hide):
+            if self._row_drag_state and not self._row_drag_state.get("active"):
+                self._cleanup_order_row_drag()
+        return super().eventFilter(obj, event)
+
+    def on_cell_middle_clicked(self, index):
+        self._handle_cell_action(index, "orders_middle_click", self.service.apply_order_middle_click)
+
+    def on_cell_right_clicked(self, index):
+        self._handle_doctor_order_mark(index)
+
+    @staticmethod
+    def _admin_mark_requires_committed_row(admin) -> bool:
+        try:
+            return int(getattr(admin, "is_committed", 0) or 0) != 1
+        except Exception:
+            return True
+
+    def _handle_doctor_order_mark(self, index):
+        if self._is_read_only():
+            return
+        if not index.isValid() or index.column() == 0 or not self.model:
+            return
+
+        admin = self.model.data(index, Qt.UserRole)
+        if not admin:
+            return
+
+        status = str(getattr(admin, "status", "") or "")
+        role = str(getattr(admin, "cell_role", "") or "")
+        if status != "planned" or role not in ("start", "single", "body", "end"):
+            return
+
+        admin_id = getattr(admin, "id", None)
+        try:
+            admin_id = int(admin_id)
+        except Exception:
+            admin_id = None
+        if not admin_id or admin_id < 0:
+            self._show_warning("Сначала сохраните карту назначений, затем поставьте отметку выполнения.")
+            return
+        if self._admin_mark_requires_committed_row(admin):
+            logger.info(
+                "[OrdersClick] click_skip role=doctor_mark reason=admin_not_committed admission_id=%s row=%s col=%s "
+                "admin_id=%s version=%s is_committed=%s",
+                self.admission_id,
+                index.row(),
+                index.column(),
+                admin_id,
+                getattr(admin, "version", None),
+                getattr(admin, "is_committed", None),
+            )
+            record_metric(
+                "order_action_pending_blocked",
+                1,
+                role="doctor",
+                source="ui_guard",
+                reason="admin_not_committed",
+                admission_id=self.admission_id,
+                admin_id=admin_id,
+                version=getattr(admin, "version", None),
+                is_committed=getattr(admin, "is_committed", None),
+            )
+            self._show_warning("Назначение еще сохраняется. Дождитесь подтверждения.")
+            self.request_refresh(force=True, source="doctor_order_mark_uncommitted", priority="HIGH")
+            return
+
+        mark = str(getattr(admin, "comment", "") or "")
+        set_mark = getattr(self.service, "set_doctor_order_mark", None) or getattr(self.service, "set_nurse_order_mark", None)
+        cancel_mark = getattr(self.service, "cancel_doctor_order_mark", None) or getattr(self.service, "cancel_nurse_order_mark", None)
+        if not callable(set_mark) or not callable(cancel_mark):
+            self._show_warning("Сервис отметок назначений недоступен.")
+            return
+        if mark == NURSE_MARK_EXECUTED:
+            next_mark = NURSE_MARK_NOT_EXECUTED
+            operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_NOT_EXECUTED)
+        elif mark == NURSE_MARK_NOT_EXECUTED:
+            next_mark = ""
+            operation = lambda aid=admin_id: cancel_mark(aid)
+        else:
+            next_mark = NURSE_MARK_EXECUTED
+            operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_EXECUTED)
+
+        click_seq = self._next_orders_click_seq()
+        logger.info(
+            "[OrdersClick] click_accept role=doctor_mark seq=%s admission_id=%s row=%s col=%s admin_id=%s old_mark=%s next_mark=%s",
+            click_seq,
+            self.admission_id,
+            index.row(),
+            index.column(),
+            admin_id,
+            mark,
+            next_mark,
+        )
+
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
+        self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
+        self._begin_admin_write()
+        previous_by_key = self._apply_pending_order_mark(index, admin, next_mark)
+
+        def on_success():
+            self._finish_admin_write()
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            self._apply_committed_order_mark(index, admin, next_mark)
+            self._schedule_fast_sync()
+            self._schedule_state_sync()
+
+        def on_error(exc):
+            self._finish_admin_write()
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            self._restore_admin_cells(previous_by_key)
+            self.request_refresh(force=True)
+
+        self._enqueue_write(
+            f"doctor_order_mark:{admin_id}:seq={click_seq}",
+            operation=operation,
+            on_success=on_success,
+            on_error=on_error,
+            block_ui=False,
+        )
+
+    def _next_orders_click_seq(self) -> int:
+        self._orders_click_seq += 1
+        return self._orders_click_seq
+
+    def _handle_cell_action(self, index, op_prefix: str, service_action):
+        if self._is_read_only():
+            return
+        if not index.isValid() or index.column() == 0 or not self.model:
+            return
+        if op_prefix == "orders_right_click":
+            return
+        row = index.row()
+        col = index.column()
+        if row < 0 or row >= len(self.model.orders):
+            return
+        time_slot_idx = col - 1
+        if time_slot_idx < 0 or time_slot_idx >= len(self.model.time_slots):
+            return
+        if hasattr(self, "table_view") and self.table_view.selectionModel():
+            self.table_view.selectionModel().clearSelection()
+        order = self.model.orders[row]
+        admin = self.model.data(index, Qt.UserRole)
+        planned_time = self.model.time_slots[time_slot_idx]
+        if (
+            admin is not None
+            and self._is_committed_value(getattr(admin, "is_committed", 0))
+            and str(getattr(admin, "comment", "") or "") in {NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED}
+        ):
+            self._show_warning(
+                "Ячейка уже содержит отметку выполнения и сохранена как медицинский факт."
+            )
+            return
+        cell_key = self._admin_cell_write_key(getattr(order, "id", None), planned_time)
+        skip_reason = self._skip_reason_for_admin_cell_click(cell_key)
+        if skip_reason:
+            logger.info(
+                "[OrdersClick] click_skip role=doctor reason=%s op=%s admission_id=%s row=%s col=%s order_id=%s planned_time=%s",
+                skip_reason,
+                op_prefix,
+                self.admission_id,
+                row,
+                col,
+                getattr(order, "id", None),
+                planned_time.isoformat(),
+            )
+            return
+        self._mark_admin_cell_click_accepted(cell_key)
+        click_seq = self._next_orders_click_seq()
+        logger.info(
+            "[OrdersClick] click_accept role=doctor seq=%s op=%s admission_id=%s row=%s col=%s order_id=%s planned_time=%s admin_id=%s admin_status=%s admin_role=%s admin_mark=%s",
+            click_seq,
+            op_prefix,
+            self.admission_id,
+            row,
+            col,
+            getattr(order, "id", None),
+            planned_time.isoformat(),
+            getattr(admin, "id", None),
+            getattr(admin, "status", None),
+            getattr(admin, "cell_role", None),
+            getattr(admin, "comment", None),
+        )
+        perf_click_id = self._perf_start_click(index, op_prefix)
+        self._apply_optimistic_cell(
+            index,
+            order,
+            admin,
+            planned_time,
+            op_prefix,
+            perf_click_id=perf_click_id,
+        )
+        self._perf_mark_click(perf_click_id, "write_ok", extra="local_draft")
+            
+    def stop_timer(self):
+        if hasattr(self, 'timer') and self.timer.isActive():
+            self.timer.stop()
+
+    def start_timer(self):
+        if hasattr(self, 'timer') and not self.timer.isActive():
+            self.timer.start(60000)
+
+    def _refresh_model(self, *, source: str = "refresh"):
+        if self.admission_id:
+            logger.debug(f"[OrdersWidget] Scheduling async refresh for ID {self.admission_id}")
+        self.request_refresh(force=True, source=source, priority="HIGH")
+        
+    def clear_all_times(self):
+        if not self.admission_id or self._is_read_only(): return
+        self._clear_local_times()
+
+    def clear_all_orders(self):
+        if not self.admission_id or self._is_read_only(): return
+        self._clear_local_orders()
+
+    def open_template_dialog(self):
+        if self._is_read_only(): return
+        dlg = TemplateSelectionDialog(self)
+        if dlg.exec():
+            t_key = dlg.selected_template_key
+            if not t_key: return
+            
+            from rem_card.services.prescription_engine import engine
+            template = engine.templates.get(t_key)
+            if not template: return
+            template_type = str(template.get("template_type", "simple")).strip().lower()
+            legacy_complex_mode = template_type not in ("", "simple")
+            if legacy_complex_mode:
+                logger.info(
+                    f"[OrdersWidget] Loading legacy template '{t_key}' type='{template_type}' as simple draft list"
+                )
+
+            now = datetime.now()
+            start, end = self.service.get_day_period(self.shift_date)
+            base_time = now if start <= now < end else start
+            orders_to_add = build_orders_from_template(
+                template=template,
+                engine=engine,
+                admission_id=self.admission_id,
+                base_time=base_time,
+            )
+            if not orders_to_add:
+                self._show_warning("В выбранном шаблоне нет назначений для добавления.")
+                return
+
+            replace_existing = False
+            if self.has_orders() or self.has_drafts():
+                reply = self._show_question("Лист назначений не пуст. Вы уверены, что хотите заменить текущий лист назначения?\nВсе текущие назначения будут переведены в черновики на удаление.")
+                if reply != CustomMessageBox.Yes: return
+                replace_existing = True
+
+            if not self._insert_local_orders_batch(orders_to_add, replace_existing=replace_existing):
+                return
+            if legacy_complex_mode:
+                self._show_info(
+                    f"Шаблон '{template.get('name', t_key)}' загружен в простом режиме "
+                    f"(без автозаполнения временных ячеек)."
+                )
+                return
+            self._show_info(f"Шаблон '{template.get('name', t_key)}' успешно загружен как черновик.")
+
+    def load_yesterday_orders(self):
+        if self._is_closing or not self.admission_id or not self.service or self._is_read_only(): return
+        
+        reply = self._show_question("Вы уверены, что хотите загрузить вчерашние назначения?")
+        if reply != CustomMessageBox.Yes: return
+
+        if self.has_drafts():
+            if self._show_question("На листе есть несохраненные изменения. Они будут потеряны. Продолжить?") == CustomMessageBox.No: return
+
+        if self._load_yesterday_worker and self._load_yesterday_worker.isRunning():
+            return
+
+        admission_id = self.admission_id
+        shift_date = self.shift_date
+
+        def job():
+            orders, found_date = self.service.find_recent_orders_source(
+                admission_id,
+                shift_date,
+                max_days_back=3,
+            )
+            admin_rows = []
+            if orders and found_date:
+                source_start, source_end = self.service.get_day_period(found_date)
+                admin_rows = self.service.get_latest_administrations_for_order_ids(
+                    [int(order.id) for order in orders if getattr(order, "id", None) is not None],
+                    source_start,
+                    source_end,
+                    only_committed=True,
+                    include_deleted=False,
+                    include_cancelled=False,
+                    include_deleted_orders=False,
+                )
+            return {
+                "admission_id": admission_id,
+                "shift_date": shift_date,
+                "orders": orders,
+                "admin_rows": [dict(row) for row in admin_rows],
+                "found_date": found_date,
+            }
+
+        self._load_yesterday_worker = AsyncCallThread(job)
+        self._load_yesterday_worker.succeeded.connect(self._on_load_yesterday_ready)
+        self._load_yesterday_worker.failed.connect(self._on_load_yesterday_failed)
+        self._load_yesterday_worker.finished.connect(self._on_load_yesterday_finished)
+        self._load_yesterday_worker.start()
+
+    def _on_load_yesterday_ready(self, payload):
+        if self._is_closing:
+            return
+        if not isinstance(payload, dict):
+            return
+        if payload.get("admission_id") != self.admission_id or payload.get("shift_date") != self.shift_date:
+            return
+
+        yesterday_orders = payload.get("orders") or []
+        found_date = payload.get("found_date")
+        if not yesterday_orders or not found_date:
+            self._show_info("За последние 3 дня назначений не найдено.")
+            return
+
+        if found_date.date() < (self.shift_date - timedelta(days=1)).date():
+            if self._show_question(f"Найдены назначения за {found_date.strftime('%d.%m.%Y')}. Загрузить?") == CustomMessageBox.No:
+                return
+
+        if self._has_local_draft_changes():
+            self._restore_local_draft_baseline()
+        self._insert_local_orders_batch(
+            yesterday_orders,
+            replace_existing=True,
+            source_admin_rows=payload.get("admin_rows") or [],
+            source_shift_date=found_date,
+        )
+
+    def _on_load_yesterday_failed(self, exc):
+        if self._is_closing:
+            return
+        self._show_warning(f"Не удалось найти назначения за предыдущие дни: {exc}")
+
+    def _on_load_yesterday_finished(self):
+        if self._is_closing:
+            return
+        self._load_yesterday_worker = None
+
+    def _show_question(self, text):
+        return CustomMessageBox.question(self, "Подтверждение", text)
+
+    def _show_info(self, text):
+        CustomMessageBox.information(self, "Информация", text)
+
+    def _show_warning(self, text):
+        CustomMessageBox.warning(self, "Предупреждение", text)

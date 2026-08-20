@@ -1,0 +1,10 @@
+{
+  "tablet": { "name_ru": "Таблетки", "can_dilute": false },
+  "capsule": { "name_ru": "Капсулы", "can_dilute": false },
+  "solution_iv": { "name_ru": "Раствор в/в", "can_dilute": true },
+  "solution_im": { "name_ru": "Раствор в/м", "can_dilute": false },
+  "lyophilisate": { "name_ru": "Порошок (лиофилизат)", "can_dilute": true },
+  "suppository": { "name_ru": "Свечи", "can_dilute": false },
+  "drops": { "name_ru": "Капли", "can_dilute": false },
+  "ointment": { "name_ru": "Мазь", "can_dilute": false }
+}

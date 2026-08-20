@@ -1,0 +1,264 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "preset_id": "bolus:ketamine",
+      "source_drug_id": "ketamine",
+      "label": "S. Ketamini 5%",
+      "display_name": "S. Ketamini 5%",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "doses": [
+        "0,25 мл",
+        "0,5 мл",
+        "1 мл",
+        "2 мл"
+      ],
+      "enabled": true,
+      "sort_order": 10
+    },
+    {
+      "preset_id": "bolus:fentanyl",
+      "source_drug_id": "fentanyl",
+      "label": "S. Fentanyli",
+      "display_name": "S. Fentanyli",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "enabled": true,
+      "sort_order": 20
+    },
+    {
+      "preset_id": "bolus:propofol",
+      "source_drug_id": "propofol",
+      "label": "Propofoli",
+      "display_name": "Propofoli",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "enabled": true,
+      "sort_order": 30
+    },
+    {
+      "preset_id": "bolus:diazepam",
+      "source_drug_id": "diazepam",
+      "label": "Diazepami",
+      "display_name": "Diazepami",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "enabled": true,
+      "sort_order": 40
+    },
+    {
+      "preset_id": "bolus:rocuronium",
+      "source_drug_id": "rocuronium",
+      "label": "Rocuronii",
+      "display_name": "Rocuronii",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "enabled": true,
+      "sort_order": 50
+    },
+    {
+      "preset_id": "bolus:prozerin",
+      "label": "S. Prozerini",
+      "display_name": "S. Prozerini",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "enabled": true,
+      "sort_order": 60
+    },
+    {
+      "preset_id": "bolus:atropine",
+      "source_drug_id": "atropine",
+      "label": "S. Atropini",
+      "display_name": "S. Atropini",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "enabled": true,
+      "sort_order": 70
+    },
+    {
+      "preset_id": "bolus:furosemide",
+      "source_drug_id": "furosemide",
+      "label": "Furosemidi",
+      "display_name": "Furosemidi",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "enabled": true,
+      "sort_order": 80
+    },
+    {
+      "preset_id": "bolus:dexamethasone",
+      "source_drug_id": "dexamethasone",
+      "label": "Dexamethasoni",
+      "display_name": "Dexamethasoni",
+      "kind": "bolus",
+      "group": "Болюсы",
+      "enabled": true,
+      "sort_order": 90
+    },
+    {
+      "preset_id": "continuous:norepinephrine",
+      "source_drug_id": "norepinephrine",
+      "label": "Noradrenalini",
+      "display_name": "Noradrenalini",
+      "kind": "continuous_infusion",
+      "group": "Инфузии / перфузор",
+      "rates": [
+        "1 мл/час",
+        "2 мл/час",
+        "5 мл/час",
+        "10 мл/час"
+      ],
+      "concentration": "4 мг / 50 мл",
+      "enabled": true,
+      "sort_order": 110
+    },
+    {
+      "preset_id": "continuous:adrenaline",
+      "source_drug_id": "adrenaline",
+      "label": "Adrenalini",
+      "display_name": "Adrenalini",
+      "kind": "continuous_infusion",
+      "group": "Инфузии / перфузор",
+      "enabled": true,
+      "sort_order": 120
+    },
+    {
+      "preset_id": "continuous:dopamine",
+      "source_drug_id": "dopamine",
+      "label": "Dopamini",
+      "display_name": "Dopamini",
+      "kind": "continuous_infusion",
+      "group": "Инфузии / перфузор",
+      "enabled": true,
+      "sort_order": 130
+    },
+    {
+      "preset_id": "continuous:dobutamine",
+      "source_drug_id": "dobutamine",
+      "label": "Dobutamini",
+      "display_name": "Dobutamini",
+      "kind": "continuous_infusion",
+      "group": "Инфузии / перфузор",
+      "enabled": true,
+      "sort_order": 140
+    },
+    {
+      "preset_id": "continuous:propofol",
+      "source_drug_id": "propofol",
+      "label": "Propofoli",
+      "display_name": "Propofoli",
+      "kind": "continuous_infusion",
+      "group": "Инфузии / перфузор",
+      "enabled": true,
+      "sort_order": 150
+    },
+    {
+      "preset_id": "continuous:insulin",
+      "source_drug_id": "insulin",
+      "label": "Insulini",
+      "display_name": "Insulini",
+      "kind": "continuous_infusion",
+      "group": "Инфузии / перфузор",
+      "enabled": true,
+      "sort_order": 160
+    },
+    {
+      "preset_id": "continuous:nitroglycerin",
+      "source_drug_id": "nitroglycerin",
+      "label": "Nitroglycerini",
+      "display_name": "Nitroglycerini",
+      "kind": "continuous_infusion",
+      "group": "Инфузии / перфузор",
+      "enabled": true,
+      "sort_order": 170
+    },
+    {
+      "preset_id": "timed:cefazolin",
+      "source_drug_id": "cefazolin",
+      "label": "Cefazolini",
+      "display_name": "Cefazolini",
+      "kind": "timed_infusion",
+      "group": "Капельницы",
+      "enabled": true,
+      "sort_order": 210
+    },
+    {
+      "preset_id": "timed:ceftriaxone",
+      "source_drug_id": "ceftriaxone",
+      "label": "Ceftriaxoni",
+      "display_name": "Ceftriaxoni",
+      "kind": "timed_infusion",
+      "group": "Капельницы",
+      "enabled": true,
+      "sort_order": 220
+    },
+    {
+      "preset_id": "timed:paracetamol_iv",
+      "source_drug_id": "paracetamol_iv",
+      "label": "Paracetamoli",
+      "display_name": "Paracetamoli",
+      "kind": "timed_infusion",
+      "group": "Капельницы",
+      "enabled": true,
+      "sort_order": 230
+    },
+    {
+      "preset_id": "timed:omeprazole",
+      "source_drug_id": "omeprazole",
+      "label": "Omeprazoli",
+      "display_name": "Omeprazoli",
+      "kind": "timed_infusion",
+      "group": "Капельницы",
+      "enabled": true,
+      "sort_order": 240
+    },
+    {
+      "preset_id": "timed:pantoprazole",
+      "source_drug_id": "pantoprazole",
+      "label": "Pantoprazoli",
+      "display_name": "Pantoprazoli",
+      "kind": "timed_infusion",
+      "group": "Капельницы",
+      "enabled": true,
+      "sort_order": 250
+    },
+    {
+      "preset_id": "timed:metronidazole",
+      "source_drug_id": "metronidazole",
+      "label": "Metronidazoli",
+      "display_name": "Metronidazoli",
+      "kind": "timed_infusion",
+      "group": "Капельницы",
+      "enabled": true,
+      "sort_order": 260
+    },
+    {
+      "preset_id": "solvent:nacl_09",
+      "label": "NaCl 0.9%",
+      "display_name": "NaCl 0.9%",
+      "kind": "solvent",
+      "group": "Растворы",
+      "enabled": true,
+      "sort_order": 310
+    },
+    {
+      "preset_id": "solvent:glucose_5",
+      "label": "Glucose 5%",
+      "display_name": "Glucose 5%",
+      "kind": "solvent",
+      "group": "Растворы",
+      "enabled": true,
+      "sort_order": 320
+    },
+    {
+      "preset_id": "solvent:ringer",
+      "label": "Sol. Ringeri",
+      "display_name": "Sol. Ringeri",
+      "kind": "solvent",
+      "group": "Растворы",
+      "enabled": true,
+      "sort_order": 330
+    }
+  ]
+}

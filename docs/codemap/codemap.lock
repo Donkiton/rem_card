@@ -1,0 +1,127 @@
+{
+  "current_commit": "edf53f65f90d7d66a195e922b7a8de70348ae2d5",
+  "working_tree_dirty": true,
+  "source_working_tree_dirty_before_generation": false,
+  "generated_at": "2026-08-06T09:18:11Z",
+  "scanned_scope": [
+    ".githooks/",
+    ".github/",
+    "app/",
+    "data/",
+    "docs/ (excluding docs/codemap/)",
+    "icon/",
+    "procedure_templates/",
+    "rem_card/",
+    "scripts/",
+    "services/",
+    "settings/",
+    "tests/",
+    "ui/",
+    "tracked root files"
+  ],
+  "excluded_directories": [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".remcard",
+    "build",
+    "dist",
+    "cache",
+    "tmp",
+    "logs",
+    "node_modules",
+    "docs/codemap"
+  ],
+  "fingerprint_algorithm": {
+    "name": "sha256-tracked-path-length-content-v1",
+    "description": "For each module, sort included git-tracked paths by repository-relative UTF-8 path; append path, NUL, decimal byte length, NUL, current raw file bytes, NUL; SHA-256 the resulting byte stream. docs/codemap is excluded to avoid self-reference."
+  },
+  "modules": {
+    ".githooks": {
+      "path": ".githooks",
+      "status": "new",
+      "file_count": 1,
+      "fingerprint": "0922b09f0a2e8ac8ce784c6cd7c7d6b41e5b976bfd1ee8cf489b9edc52cdac20"
+    },
+    ".github": {
+      "path": ".github",
+      "status": "new",
+      "file_count": 3,
+      "fingerprint": "5e8797d577f658059cf6170376f954170760b8ef9736b2590aa3cad204582f88"
+    },
+    "app": {
+      "path": "app",
+      "status": "new",
+      "file_count": 62,
+      "fingerprint": "f2de2a048ab777babfb0f4946633cfa756d336beb60f07e0ce53c7ecc34a03c1"
+    },
+    "data": {
+      "path": "data",
+      "status": "new",
+      "file_count": 40,
+      "fingerprint": "e828fd476b412fe310bc9c23d39bf9a25d2910b8e859f38f745d2ffd39f19f65"
+    },
+    "docs": {
+      "path": "docs",
+      "status": "new",
+      "file_count": 59,
+      "fingerprint": "b7938c74d311dcd8aedec784412f1498029aab6e8ec447d2edd2a07d0ecaa3c8"
+    },
+    "icon": {
+      "path": "icon",
+      "status": "new",
+      "file_count": 119,
+      "fingerprint": "c6f43f11edd372ac5454e4eb2a3cdcffa6c88a4c6d3f7865d76de578fddb1fac"
+    },
+    "procedure_templates": {
+      "path": "procedure_templates",
+      "status": "new",
+      "file_count": 2,
+      "fingerprint": "8a4c484d1d40be4b6757e6a671ccbc51d41feaf3d49dfbbcff15f073a6cb1e25"
+    },
+    "rem_card": {
+      "path": "rem_card",
+      "status": "new",
+      "file_count": 1,
+      "fingerprint": "d18fbb421e0a13bf43b354d5fd8e624a78f73f2d650a213a3cd589bcd35b5958"
+    },
+    "root_files": {
+      "path": ".",
+      "status": "new",
+      "file_count": 18,
+      "fingerprint": "792db3802ddaf32074e82939f8dfa4cb4fa847c101d71ebe3780c9d413a502f3"
+    },
+    "scripts": {
+      "path": "scripts",
+      "status": "new",
+      "file_count": 24,
+      "fingerprint": "900f455ef64ebd8a7dd3b90323ef9435d397588eb0f147e8877d61d8f6cfecb6"
+    },
+    "services": {
+      "path": "services",
+      "status": "new",
+      "file_count": 67,
+      "fingerprint": "d6d72fbcfbb8a8316a6fbd7b723519a152749fc9bba7eb37ee0c0fdddc83adc4"
+    },
+    "settings": {
+      "path": "settings",
+      "status": "new",
+      "file_count": 4,
+      "fingerprint": "ff8d02935ec36168a735bf1559f887606c54cdbd5ad09ec5c54d78c9bcc7de15"
+    },
+    "tests": {
+      "path": "tests",
+      "status": "new",
+      "file_count": 89,
+      "fingerprint": "8266a55028a2e2ab996a5d139b3c135c6497a9a18705eb65b1795f7f0a918b88"
+    },
+    "ui": {
+      "path": "ui",
+      "status": "new",
+      "file_count": 222,
+      "fingerprint": "c399d42553dfd17d32e906e49a5d55e1a50ac817e98681bea947f44ace77ec02"
+    }
+  }
+}

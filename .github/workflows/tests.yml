@@ -1,0 +1,59 @@
+name: Tests
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Получить исходный код
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Настроить Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Установить зависимости
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+
+      - name: Настроить часовой пояс
+        run: tzutil /s "Vladivostok Standard Time"
+
+      - name: Запустить тесты
+        run: python -m pytest -q
+
+      - name: Проверить качество исходного кода
+        run: python scripts/code_quality_checks.py
+
+      - name: Проверить архитектурные ограничения
+        run: python scripts/architecture_safety_check.py
+
+      - name: Запустить расширенные safety-проверки
+        run: >-
+          python scripts/regression_safety_checks.py
+          --profile fast
+          --jobs 4
+          --timeout-s 900
+          --quiet-progress
+          --json-detail summary

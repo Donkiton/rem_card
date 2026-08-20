@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-labelledby="title desc">
+  <title id="title">Рем Карта — единая карта пациента и смены</title>
+  <desc id="desc">Спокойная титульная иллюстрация проекта с крупным названием, ролями и суточной клинической шкалой.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1220"/>
+      <stop offset="1" stop-color="#101B2D"/>
+    </linearGradient>
+    <linearGradient id="trace" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F45B69"/>
+      <stop offset="1" stop-color="#D7263D"/>
+    </linearGradient>
+    <clipPath id="timeline-clip">
+      <rect x="742" y="76" width="394" height="228" rx="24"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1200" height="380" rx="28" fill="url(#background)"/>
+  <circle cx="1120" cy="28" r="176" fill="#14243B" opacity="0.55"/>
+  <circle cx="1048" cy="344" r="132" fill="#162338" opacity="0.72"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <g transform="translate(62 52)">
+      <circle cx="18" cy="18" r="18" fill="#D7263D"/>
+      <path d="M8 18h6l4-8 5 17 4-9h4" fill="none" stroke="#FFFFFF" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="52" y="25" fill="#AFC0D6" font-size="19" font-weight="700" letter-spacing="2.5">WINDOWS · ОРИТ</text>
+    </g>
+
+    <text x="62" y="166" fill="#F8FAFC" font-size="82" font-weight="760" letter-spacing="-2.5">Рем Карта</text>
+    <text x="64" y="215" fill="#D9E2EF" font-size="28" font-weight="520">Единая карта пациента и смены</text>
+    <text x="64" y="252" fill="#D9E2EF" font-size="28" font-weight="520">для реанимации и оперблока</text>
+
+    <g transform="translate(64 304)" font-size="21" font-weight="700">
+      <circle cx="8" cy="8" r="8" fill="#35C975"/>
+      <text x="28" y="15" fill="#B8EFCB">Врач</text>
+      <circle cx="142" cy="8" r="8" fill="#4CA4FF"/>
+      <text x="162" y="15" fill="#B9DDFF">Медсестра</text>
+      <circle cx="342" cy="8" r="8" fill="#F45B69"/>
+      <text x="362" y="15" fill="#FFC2C8">Оперблок</text>
+    </g>
+
+    <g clip-path="url(#timeline-clip)">
+      <rect x="742" y="76" width="394" height="228" rx="24" fill="#0C1626" stroke="#34445D" stroke-width="2"/>
+      <path d="M742 132h394M742 190h394M742 248h394" stroke="#213047" stroke-width="1"/>
+      <path d="M808 76v228M874 76v228M940 76v228M1006 76v228M1072 76v228" stroke="#1D2B40" stroke-width="1"/>
+      <path d="M742 220c34-4 52-11 78-9 23 2 39 10 61 8 26-2 43-18 71-14 24 3 40 15 66 12 31-4 50-20 79-15 16 2 28 7 39 10" fill="none" stroke="#4CA4FF" stroke-width="4" stroke-linecap="round"/>
+      <path d="M742 240h72l14-15 15 44 20-96 22 67h62l15-14 14 37 19-77 19 54h122" fill="none" stroke="url(#trace)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <rect x="742" y="76" width="394" height="228" rx="24" fill="none" stroke="#34445D" stroke-width="2"/>
+
+    <text x="778" y="116" fill="#AFC0D6" font-size="18" font-weight="700" letter-spacing="2.5">КАРТА СМЕНЫ</text>
+    <text x="778" y="168" fill="#F8FAFC" font-size="42" font-weight="750">24 часа</text>
+    <circle cx="1100" cy="108" r="7" fill="#35C975"/>
+    <text x="1100" y="278" text-anchor="end" fill="#91A7C3" font-size="18" font-weight="650">ОДНА ХРОНОЛОГИЯ</text>
+  </g>
+</svg>

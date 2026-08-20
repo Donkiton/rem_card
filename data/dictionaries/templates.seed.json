@@ -1,0 +1,53 @@
+{
+  "stroke_ischemic": {
+    "name": "ОНМК ишемический",
+    "drugs": [
+      {
+        "drug": "ceftriaxone",
+        "dose": 1.0,
+        "freq": 2,
+        "diluent": {
+          "base": "nacl_09",
+          "volume": 250
+        }
+      },
+      {
+        "drug": "heparin",
+        "dose": 5000.0,
+        "freq": 4
+      },
+      {
+        "drug": "omeprazole",
+        "dose": 40.0,
+        "freq": 2
+      }
+    ]
+  },
+  "sepsis_severe": {
+    "name": "Тяжелый сепсис",
+    "drugs": [
+      {
+        "drug": "meropenem",
+        "dose": 1.0,
+        "freq": 3,
+        "diluent": {
+          "base": "nacl_09",
+          "volume": 100
+        }
+      },
+      {
+        "drug": "norepinephrine",
+        "dose": 2.0,
+        "diluent": {
+          "base": "glucose_5",
+          "volume": 50
+        }
+      },
+      {
+        "drug": "heparin",
+        "dose": 5000.0,
+        "freq": 4
+      }
+    ]
+  }
+}

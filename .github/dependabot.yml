@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "dependabot-automerge"
+    groups:
+      pyinstaller-stack:
+        patterns:
+          - "pyinstaller"
+          - "pyinstaller-hooks-contrib"
+      routine-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # NumPy 2.5+ requires Python 3.12, while the application and CI use 3.11.
+      - dependency-name: "numpy"
+        versions:
+          - ">=2.5.0"
+    commit-message:
+      prefix: "Обновить зависимость "

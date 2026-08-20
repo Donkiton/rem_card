@@ -1,0 +1,9 @@
+{
+  "infusion": { "name_ru": "В/в капельно" },
+  "bolus": { "name_ru": "В/в струйно" },
+  "im": { "name_ru": "В/мышечно" },
+  "sc": { "name_ru": "П/кожно" },
+  "id": { "name_ru": "В/кожно" },
+  "per_os": { "name_ru": "Per os (внутрь)" },
+  "per_rectum": { "name_ru": "Per rectum (в кишку)" }
+}

@@ -1,0 +1,903 @@
+import os
+import pyqtgraph as pg
+import warnings
+from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtCore import Qt, Signal, QEvent, QPointF, QRect, QTimeLine
+from PySide6.QtGui import QPainter, QFont, QColor, QPainterPath
+from datetime import datetime, timedelta
+from .chart_data_processor import ChartDataProcessor
+from ..styles.theme import (BG_MAIN, BG_LIGHT, BORDER_COLOR, COLOR_VITAL_AD_LINE,
+                            COLOR_VITAL_AD_BG, COLOR_VITAL_PULSE, COLOR_VITAL_SPO2,
+                            COLOR_VITAL_TEMP, COLOR_VITAL_RESP, COLOR_VITAL_CVP)
+
+pg.setConfigOption("background", "transparent")
+pg.setConfigOption("foreground", "k")
+pg.setConfigOption("antialias", True)
+
+CHART_ACTIVE_INTERVAL_LOOKBACK_DAYS = max(0, int(os.environ.get("REMCARD_CHART_ACTIVE_LOOKBACK_DAYS", os.environ.get("REMCARD_CHART_LOOKBACK_DAYS", "2"))))
+CHART_ACTIVE_INTERVAL_LOOKAHEAD_DAYS = max(0, int(os.environ.get("REMCARD_CHART_ACTIVE_LOOKAHEAD_DAYS", os.environ.get("REMCARD_CHART_LOOKAHEAD_DAYS", "1"))))
+
+
+def _qt_object_alive(obj) -> bool:
+    if obj is None:
+        return False
+    try:
+        import shiboken6  # type: ignore
+
+        return bool(shiboken6.isValid(obj))
+    except Exception:
+        return True
+
+
+def _ignore_pyqtgraph_hover_events(*_args, **_kwargs):
+    return None
+
+
+class TimeHeader(QWidget):
+    hour_selected = Signal(int)
+
+    def __init__(self, chart):
+        super().__init__()
+        self.chart = chart
+        self.setFixedHeight(30)
+        self.setObjectName("chart_header")
+        self.setAttribute(Qt.WA_StyledBackground, True) # Р’Р°Р¶РЅРѕ: РїСЂРёРјРµРЅСЏРµРј QSS РґР»СЏ QWidget
+        self.highlighted_hour = None
+
+    def set_highlight(self, hour_idx):
+        self.highlighted_hour = hour_idx
+        self.update()
+
+    def mousePressEvent(self, event):
+        if getattr(self.chart, "_tearing_down", False) or not self.chart.is_plot_alive():
+            return
+        if event.button() == Qt.LeftButton:
+            vb = self.chart.plot_widget.getViewBox()
+            view = self.chart.plot_widget
+            
+            # РЈС‡РёС‚С‹РІР°РµРј СЃРјРµС‰РµРЅРёРµ РєРѕРЅС‚РµР№РЅРµСЂР° РіСЂР°С„РёРєР° (7px) РґР»СЏ РїРѕРїР°РґР°РЅРёСЏ РїРѕ С‡Р°СЃР°Рј
+            local_x = event.pos().x() - 7
+            
+            scene_pos = view.mapToScene(local_x, 0)
+            view_pos = vb.mapSceneToView(scene_pos)
+            
+            hour_idx = int(view_pos.x())
+            if 0 <= hour_idx < max(1, int(getattr(self.chart, "visible_hours", 24))):
+                if self.highlighted_hour == hour_idx:
+                    self.hour_selected.emit(-1)
+                else:
+                    self.hour_selected.emit(hour_idx)
+
+    def paintEvent(self, event):
+        # РћС‚СЂРёСЃРѕРІРєР° QSS-С„РѕРЅР° Рё СЂР°РјРѕРє
+        from PySide6.QtWidgets import QStyleOption, QStyle
+        opt = QStyleOption()
+        opt.initFrom(self)
+        self.style().drawPrimitive(QStyle.PE_Widget, opt, QPainter(self), self)
+
+        painter = QPainter(self)
+        if getattr(self.chart, "_tearing_down", False) or not self.chart.is_plot_alive():
+            painter.end()
+            return
+        
+        # 1. РћС‚СЂРёСЃРѕРІРєР° РїРѕРґСЃРІРµС‚РєРё РІС‹РґРµР»РµРЅРЅРѕРіРѕ С‡Р°СЃР° (РЎРњР•Р©Р•РќРђ РЅР° 7px РґР»СЏ СЃРѕРІРїР°РґРµРЅРёСЏ СЃ РіСЂР°С„РёРєРѕРј)
+        if self.highlighted_hour is not None:
+            vb = self.chart.plot_widget.getViewBox()
+            view = self.chart.plot_widget
+            p1 = view.mapFromScene(vb.mapViewToScene(pg.Point(self.highlighted_hour, 0)))
+            p2 = view.mapFromScene(vb.mapViewToScene(pg.Point(self.highlighted_hour + 1, 0)))
+            
+            highlight_rect = QRect(p1.x() + 7, 0, p2.x() - p1.x(), self.height())
+            painter.fillRect(highlight_rect, QColor(100, 150, 255, 60))
+
+        # 2. РћС‚СЂРёСЃРѕРІРєР° С‚РµРєСЃС‚Р° РІСЂРµРјРµРЅРё (Р‘Р•Р— РЎРњР•Р©Р•РќРРЇ, РєР°Рє Р±С‹Р»Рѕ РґРѕ РїСЂР°РІРѕРє)
+        if not self.chart.start_time:
+            painter.end()
+            return
+
+        painter.setPen(Qt.black)
+        vb = self.chart.plot_widget.getViewBox()
+        view = self.chart.plot_widget
+
+        step_minutes = max(1, int(getattr(self.chart, "time_grid_step_minutes", 60)))
+        step_hours = step_minutes / 60.0
+        visible_hours = max(step_hours, float(getattr(self.chart, "visible_hours", 24)))
+        column_count = max(1, int((visible_hours / step_hours) + 0.999999))
+        compact_grid = step_minutes < 60
+        previous_hour = None
+
+        if compact_grid:
+            compact_font = QFont("Segoe UI", 8)
+            compact_font.setBold(False)
+            bold_compact_font = QFont("Segoe UI", 8, QFont.Bold)
+
+        for i in range(column_count):
+            # РСЃРїРѕР»СЊР·СѓРµРј С‚Рµ Р¶Рµ РєРѕРѕСЂРґРёРЅР°С‚С‹ РіСЂР°РЅРёС† С‡Р°СЃР°, С‡С‚Рѕ Рё РґР»СЏ РїРѕРґСЃРІРµС‚РєРё (p1, p2)
+            x_start = i * step_hours
+            x_end = min((i + 1) * step_hours, visible_hours)
+            p_start = view.mapFromScene(vb.mapViewToScene(pg.Point(x_start, 0)))
+            p_end = view.mapFromScene(vb.mapViewToScene(pg.Point(x_end, 0)))
+            
+            # Р’С‹С‡РёСЃР»СЏРµРј С†РµРЅС‚СЂ С‡Р°СЃР° СЃ СѓС‡РµС‚РѕРј СЃРјРµС‰РµРЅРёСЏ РіСЂР°С„РёРєР° 7px
+            x_center = (p_start.x() + p_end.x()) / 2 + 7
+
+            header_mapper = getattr(self.chart, "header_datetime_for_x", None)
+            tick_time = header_mapper(x_start) if callable(header_mapper) else None
+            if not isinstance(tick_time, datetime):
+                tick_time = self.chart.start_time + timedelta(minutes=i * step_minutes)
+            if compact_grid:
+                hour_changed = previous_hour is None or tick_time.hour != previous_hour
+                text = tick_time.strftime("%H:%M") if hour_changed else tick_time.strftime("%M")
+                painter.setFont(bold_compact_font if hour_changed else compact_font)
+                text_width = 36 if hour_changed else 18
+                previous_hour = tick_time.hour
+            else:
+                text = tick_time.strftime('%H:%M')
+                text_width = 50
+                if i == self.highlighted_hour:
+                    painter.setFont(self.chart.value_font)
+                else:
+                    f = painter.font()
+                    f.setBold(False)
+                    painter.setFont(f)
+
+            # РћС‚СЂРёСЃРѕРІС‹РІР°РµРј С‚РµРєСЃС‚ РІ Р±Р»РѕРєРµ С€РёСЂРёРЅРѕР№ 50px, С†РµРЅС‚СЂРёСЂСѓСЏ РµРіРѕ РїРѕ x_center
+            painter.drawText(
+                int(x_center - (text_width / 2)),
+                5,
+                text_width,
+                20,
+                Qt.AlignCenter,
+                text
+            )
+
+        painter.end()
+
+
+class TooltipItem(pg.TextItem):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setOpacity(1.0)
+        
+    def paint(self, p, *args):
+        # РћС‚СЂРёСЃРѕРІС‹РІР°РµРј РєР°СЃС‚РѕРјРЅС‹Р№ С„РѕРЅ СЃ Р·Р°РєСЂСѓРіР»РµРЅРЅС‹РјРё РєСЂР°СЏРјРё
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(pg.mkPen('#544d4d', width=1))
+        # Р“Р°СЂР°РЅС‚РёСЂРѕРІР°РЅРЅРѕ РЅРµРїСЂРѕР·СЂР°С‡РЅС‹Р№ С„РѕРЅ #ebecef
+        p.setBrush(pg.mkBrush(QColor('#ebecef')))
+        
+        rect = self.boundingRect()
+        p.drawRoundedRect(rect, 5, 5)
+        
+        # Р’С‹Р·С‹РІР°РµРј РѕСЂРёРіРёРЅР°Р»СЊРЅСѓСЋ РѕС‚СЂРёСЃРѕРІРєСѓ С‚РµРєСЃС‚Р°
+        super().paint(p, *args)
+
+
+class ChartWidget(QWidget):
+    column_clicked = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._tearing_down = False
+        self._grid_lines = []
+        self._range_changed_handler = self._on_view_range_changed
+        self._original_send_hover_events = None
+        
+        # Р“Р»РѕР±Р°Р»СЊРЅРѕРµ РїРѕРґР°РІР»РµРЅРёРµ РІРѕСЂРЅРёРЅРіРѕРІ numpy РґР»СЏ СЌС‚РѕРіРѕ РІРёРґР¶РµС‚Р° (СЂРµС€Р°РµС‚ РїСЂРѕР±Р»РµРјСѓ All-NaN slice РІ pyqtgraph)
+        # РџРѕРґР°РІР»СЏРµРј РІСЃРµ RuntimeWarning, С‚Р°Рє РєР°Рє pyqtgraph С‡Р°СЃС‚Рѕ РіРµРЅРµСЂРёСЂСѓРµС‚ РёС… РїСЂРё СЂР°Р±РѕС‚Рµ СЃ NaN
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+        self.layout = QVBoxLayout(self)
+        # РЎРґРІРёРіР°РµРј СЂР°РјРєСѓ (СЃР»РѕР№ 2): СЃРІРµСЂС…Сѓ 3px, СЃРЅРёР·Сѓ 3px, СЃРїСЂР°РІР° 0px (СѓРјРµРЅСЊС€РµРЅ РґР»СЏ СЃРґРІРёРіР° РІРїСЂР°РІРѕ)
+        self.layout.setContentsMargins(0, 3, 0, 5)
+        self.layout.setSpacing(0)
+
+        self.value_font = QFont("Segoe UI", 10, QFont.Bold)
+
+        self.header_spacer = TimeHeader(self)
+        self.header_spacer.setFixedHeight(30)
+        self.header_spacer.hour_selected.connect(self.on_hour_selected)
+        self.layout.addWidget(self.header_spacer)
+
+        self.chart_container = QWidget()
+        self.chart_container.setObjectName("chart_body")
+        self.chart_layout = QVBoxLayout(self.chart_container)
+        self.chart_layout.setContentsMargins(7, 0, 7, 7) 
+
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.setBackground('transparent') # РџСЂРѕР·СЂР°С‡РЅС‹Р№ С„РѕРЅ РІСЃРµРіРѕ РІРёРґР¶РµС‚Р°
+        
+        # Р—Р°РєСЂР°С€РёРІР°РµРј Р±РµР»С‹Рј С‚РѕР»СЊРєРѕ СЃР°РјСѓ РѕР±Р»Р°СЃС‚СЊ РіСЂР°С„РёРєР° (ViewBox)
+        vb = self.plot_widget.getViewBox()
+        vb.setBackgroundColor('w')
+        
+        # РџРѕРґРєР»СЋС‡Р°РµРј СЃРёРіРЅР°Р» РёР·РјРµРЅРµРЅРёСЏ РґРёР°РїР°Р·РѕРЅР° Рє РѕР±РЅРѕРІР»РµРЅРёСЋ Р·Р°РіРѕР»РѕРІРєР°, 
+        # С‡С‚РѕР±С‹ РІСЂРµРјСЏ РІСЃРµРіРґР° "СЃР°РјРѕ" РІС‹СЂР°РІРЅРёРІР°Р»РѕСЃСЊ РїРѕ СЃРµС‚РєРµ РїРѕСЃР»Рµ СЂР°СЃС‡РµС‚РѕРІ РґРІРёР¶РєР°
+        vb.sigRangeChanged.connect(self._range_changed_handler)
+
+        self.plot_widget.showGrid(x=False, y=True, alpha=0.5)
+        self.plot_widget.setMouseEnabled(x=False, y=False)
+        self.plot_widget.setMenuEnabled(False)
+        self.plot_widget.hideButtons()
+        self.plot_widget.setMouseTracking(False)
+        self.plot_widget.viewport().setMouseTracking(False)
+        self.plot_widget.viewport().installEventFilter(self)
+        self._disable_pyqtgraph_hover_events()
+
+        self.plot_widget.hideAxis('bottom')
+        self.plot_widget.hideAxis('top')
+
+        ax_left = self.plot_widget.getAxis('left')
+        ax_left.setTicks([[(v, str(v)) for v in range(0, 261, 10)]])
+
+        self.plot_widget.setXRange(0, 24, padding=0)
+        self.plot_widget.setYRange(0, 260, padding=0)
+        self.plot_widget.getViewBox().setLimits(xMin=0, xMax=24, yMin=0, yMax=260)
+
+        self.vitals_data = []
+        self.start_time = None
+        self.visible_hours = 24
+        self.time_grid_step_minutes = 60
+        self.status_service = None
+        self.admission_id = None
+        
+        self.colors = {
+            'ad': COLOR_VITAL_AD_LINE,
+            'ad_fill': COLOR_VITAL_AD_BG,
+            'pulse': COLOR_VITAL_PULSE,
+            'spo2': COLOR_VITAL_SPO2,
+            'temp': COLOR_VITAL_TEMP,
+            'rr': COLOR_VITAL_RESP,
+            'cvp': COLOR_VITAL_CVP
+        }
+
+        pg.setConfigOptions(antialias=True)
+        
+        self.curve_items = []
+        self.fill_items = []
+        self._curve_by_key = {}
+        self._scatter_items = {}
+
+        self._init_reusable_plot_items()
+
+        self.current_vitals = []
+        self._last_render_key = None
+        
+        self.slice_line = pg.InfiniteLine(angle=90, movable=False, 
+                                          pen=pg.mkPen(color='#888', style=Qt.DashLine, width=2))
+        self.slice_line.setZValue(100)
+        self.slice_line.setAcceptHoverEvents(False)
+        self.slice_line.setOpacity(0) # РР·РЅР°С‡Р°Р»СЊРЅРѕ РїСЂРѕР·СЂР°С‡РЅРѕ
+        self.slice_line.hide()
+        self.plot_widget.addItem(self.slice_line)
+        
+        # РСЃРїРѕР»СЊР·СѓРµРј РЅР°С€ РєР°СЃС‚РѕРјРЅС‹Р№ РєР»Р°СЃСЃ Рё РїСЂРёРІСЏР·С‹РІР°РµРј РµРіРѕ Рє PlotItem (РІС‹С€Рµ РѕСЃРµР№)
+        self.tooltip = TooltipItem(html="", anchor=(0, 1))
+        self.tooltip.setParentItem(self.plot_widget.getPlotItem())
+        self.tooltip.setZValue(1000) # РЈР»СЊС‚РёРјР°С‚РёРІРЅС‹Р№ Z-index РїРѕРІРµСЂС… СЃРµС‚РєРё (РѕСЃРµР№)
+        self.tooltip.setAcceptHoverEvents(False)
+        self.tooltip.setOpacity(0)
+        self.tooltip.hide()
+        
+        # Р“СЂСѓРїРїР° Р°РЅРёРјР°С†РёР№ РґР»СЏ РїР»Р°РІРЅС‹С… РїРµСЂРµС…РѕРґРѕРІ
+        self.fade_timeline = QTimeLine(100, self)
+        self.fade_timeline.setFrameRange(0, 100)
+        self.fade_timeline.valueChanged.connect(self._on_fade_step)
+        self.fade_timeline.finished.connect(self._on_fade_finished)
+        self._fade_action = None
+        self._fade_target_state = None
+
+        # РќР°РґРµР¶РЅС‹Р№ РіР»РѕР±Р°Р»СЊРЅС‹Р№ РїРµСЂРµС…РІР°С‚ РєР»РёРєР°
+        # РЈРІРµР»РёС‡РёРІР°РµРј СЂР°РґРёСѓСЃ РєР»РёРєР°, С‡С‚РѕР±С‹ РёРіРЅРѕСЂРёСЂРѕРІР°С‚СЊ РјРёРєСЂРѕРґРІРёР¶РµРЅРёСЏ РјС‹С€Рё (СЃ 3 РґРѕ 10 РїРёРєСЃРµР»РµР№)
+        self.plot_widget.scene().setClickRadius(10)
+        self.plot_widget.scene().sigMouseClicked.connect(self.on_scene_clicked)
+
+        self._ensure_vertical_grid_lines(self.visible_hours)
+
+        self.chart_layout.addWidget(self.plot_widget)
+        self.layout.addWidget(self.chart_container)
+        
+        # Р’С‹РІРѕРґРёРј С€Р°РїРєСѓ РЅР° РІРµСЂС…РЅРёР№ СЃР»РѕР№ (СЃР»РѕР№ 3)
+        self.header_spacer.show()
+        self.header_spacer.raise_()
+
+        self.setStyleSheet(f"""
+            QWidget#chart_header {{
+                background-color: {BG_LIGHT} !important;
+                border-top: 1.5px solid {BORDER_COLOR} !important;
+                border-right: 1.5px solid {BORDER_COLOR} !important;
+                border-bottom: 0.5px solid {BORDER_COLOR} !important;
+                border-top-right-radius: 5px !important;
+                border-top-left-radius: 0px !important;
+                border-left: none !important;
+            }}
+            QWidget#chart_body {{
+                background-color: {BG_MAIN} !important;
+                border-right: 1.5px solid {BORDER_COLOR} !important;
+                border-bottom: 1.5px solid {BORDER_COLOR} !important;
+                border-bottom-right-radius: 5px !important;
+                border-left: none !important;
+                border-top: none !important;
+            }}
+        """)
+
+    def is_plot_alive(self) -> bool:
+        try:
+            return (
+                not self._tearing_down
+                and _qt_object_alive(self.plot_widget)
+                and _qt_object_alive(self.plot_widget.viewport())
+                and _qt_object_alive(self.plot_widget.scene())
+            )
+        except RuntimeError:
+            return False
+
+    def _on_view_range_changed(self, *_args):
+        if self._tearing_down or not _qt_object_alive(self.header_spacer):
+            return
+        self.header_spacer.update()
+
+    def _disable_pyqtgraph_hover_events(self):
+        try:
+            scene = self.plot_widget.scene()
+        except RuntimeError:
+            return
+        if scene is None:
+            return
+        # Срезы графика работают по клику; hover-hit-testing pyqtgraph здесь не нужен
+        # и в аварийных логах падал внутри GraphicsScene.sendHoverEvents().
+        self._original_send_hover_events = getattr(scene, "sendHoverEvents", None)
+        scene.sendHoverEvents = _ignore_pyqtgraph_hover_events
+
+    def _grid_step_hours(self) -> float:
+        return max(1, int(getattr(self, "time_grid_step_minutes", 60))) / 60.0
+
+    def _ensure_vertical_grid_lines(self, visible_hours: int | float):
+        step_hours = self._grid_step_hours()
+        target_count = max(2, int((float(visible_hours) / step_hours) + 0.999999) + 1)
+        while len(self._grid_lines) < target_count:
+            line = pg.InfiniteLine(
+                pos=len(self._grid_lines) * step_hours,
+                angle=90,
+                pen=pg.mkPen(color=(0, 0, 0, 50)),
+            )
+            line.setAcceptHoverEvents(False)
+            self._grid_lines.append(line)
+            self.plot_widget.addItem(line)
+        for index, line in enumerate(self._grid_lines):
+            line.setPos(index * step_hours)
+            line.setVisible(index < target_count)
+
+    def set_visible_hours(self, visible_hours: int | float):
+        hours = max(1, int(visible_hours or 24))
+        if self.visible_hours == hours:
+            return
+        self.visible_hours = hours
+        self._ensure_vertical_grid_lines(hours)
+        self.plot_widget.getViewBox().setLimits(xMin=0, xMax=hours, yMin=0, yMax=260)
+        self.plot_widget.setXRange(0, hours, padding=0)
+        self._last_render_key = None
+        self.header_spacer.update()
+
+    def set_time_grid_step_minutes(self, step_minutes: int):
+        step = max(1, int(step_minutes or 60))
+        if self.time_grid_step_minutes == step:
+            return
+        self.time_grid_step_minutes = step
+        self._ensure_vertical_grid_lines(self.visible_hours)
+        self._last_render_key = None
+        self.header_spacer.update()
+
+    def _init_reusable_plot_items(self):
+        curve_specs = (
+            ("sys", "ad", 2),
+            ("dia", "ad", 2),
+            ("pulse", "pulse", 3),
+            ("spo2", "spo2", 2),
+            ("temp", "temp", 2),
+            ("rr", "rr", 2),
+            ("cvp", "cvp", 2),
+        )
+        for key, color_key, width in curve_specs:
+            curve = pg.PlotDataItem(pen=pg.mkPen(self.colors[color_key], width=width))
+            curve.setZValue(10)
+            curve.setAcceptHoverEvents(False)
+            self.plot_widget.addItem(curve)
+            self._curve_by_key[key] = curve
+            self.curve_items.append(curve)
+
+        fill = pg.FillBetweenItem(
+            self._curve_by_key["sys"],
+            self._curve_by_key["dia"],
+            brush=pg.mkBrush(self.colors["ad_fill"]),
+        )
+        fill.setZValue(-10)
+        fill.setAcceptHoverEvents(False)
+        self.plot_widget.addItem(fill)
+        self.fill_items.append(fill)
+
+        self.scatter_vitals = pg.ScatterPlotItem(size=3, pen=None, brush=self.colors["ad"])
+        self.scatter_vitals.setZValue(20)
+        self.scatter_vitals.setAcceptHoverEvents(False)
+        self.plot_widget.addItem(self.scatter_vitals)
+        self._scatter_items["ad"] = self.scatter_vitals
+
+        for key in ("pulse", "spo2", "temp", "rr", "cvp"):
+            scatter = pg.ScatterPlotItem(size=3, pen=None, brush=self.colors[key])
+            scatter.setZValue(20)
+            scatter.setAcceptHoverEvents(False)
+            self.plot_widget.addItem(scatter)
+            self._scatter_items[key] = scatter
+
+    def eventFilter(self, source, event):
+        if event.type() in (QEvent.Wheel, QEvent.MouseMove):
+            return True
+        return super().eventFilter(source, event)
+
+    def resizeEvent(self, event):
+        if self._tearing_down:
+            return
+        super().resizeEvent(event)
+        # РџСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ РѕР±РЅРѕРІР»СЏРµРј Р·Р°РіРѕР»РѕРІРѕРє РїСЂРё РёР·РјРµРЅРµРЅРёРё СЂР°Р·РјРµСЂРѕРІ, 
+        # С‡С‚РѕР±С‹ РІСЂРµРјСЏ РІСЃРµРіРґР° Р±С‹Р»Рѕ РІС‹СЂРѕРІРЅРµРЅРѕ РїРѕ СЃРµС‚РєРµ РіСЂР°С„РёРєР°
+        self.header_spacer.update()
+        self._hide_slice_instant()
+
+    def showEvent(self, event):
+        if self._tearing_down:
+            return
+        super().showEvent(event)
+        # РџСЂРё РїРµСЂРІРѕРј РїРѕРєР°Р·Рµ РёР»Рё РїРµСЂРµРєР»СЋС‡РµРЅРёРё РІРєР»Р°РґРѕРє РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ 
+        # РїРµСЂРµСЃС‡РёС‚С‹РІР°РµРј РєРѕРѕСЂРґРёРЅР°С‚С‹ С‡РµСЂРµР· РЅРµР±РѕР»СЊС€СѓСЋ РїР°СѓР·Сѓ, С‡С‚РѕР±С‹ 
+        # РіСЂР°С„РёС‡РµСЃРєРёР№ РґРІРёР¶РѕРє СѓСЃРїРµР» РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°С‚СЊ ViewBox
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(50, self.header_spacer.update)
+        QTimer.singleShot(200, self.header_spacer.update)
+
+    def on_hour_selected(self, hour_idx):
+        # РЎС‚Р°СЂС‹Р№ РјРµС…Р°РЅРёР·Рј РІС‹РґРµР»РµРЅРёСЏ С‡Р°СЃР° РѕС‚РєР»СЋС‡РµРЅ РІ РїРѕР»СЊР·Сѓ СЃРёСЃС‚РµРјС‹ СЃР»Р°Р№СЃРѕРІ
+        pass
+
+    def _hide_slice_instant(self):
+        if self._tearing_down:
+            return
+        if hasattr(self, 'fade_timeline'):
+            self.fade_timeline.stop()
+        self.slice_line.hide()
+        self.tooltip.hide()
+        self.slice_line.setOpacity(0)
+        self.tooltip.setOpacity(0)
+
+    def _on_fade_step(self, value):
+        if self._tearing_down:
+            return
+        op = value / 100.0
+        if self._fade_action == "out":
+            op = 1.0 - op
+            
+        self.slice_line.setOpacity(op)
+        self.tooltip.setOpacity(op)
+
+    def _on_fade_finished(self):
+        if self._tearing_down:
+            return
+        if self._fade_action == "out":
+            self.slice_line.hide()
+            self.tooltip.hide()
+        else:
+            self.slice_line.setOpacity(1.0)
+            self.tooltip.setOpacity(1.0)
+
+    def _fade_out(self, duration=100):
+        if self._tearing_down:
+            return
+        self.fade_timeline.stop()
+        self._fade_action = "out"
+        self.fade_timeline.start()
+
+    def _apply_slice_state(self, exact_hour, tooltip_pos, anchor, html):
+        if self._tearing_down:
+            return
+        self.slice_line.setPos(exact_hour)
+        self.tooltip.setHtml(html)
+        self.tooltip.setAnchor(anchor)
+        self.tooltip.setPos(tooltip_pos)
+
+    def _fade_in_to(self, exact_hour, tooltip_pos, anchor, html, is_update=False):
+        if self._tearing_down:
+            return
+        self.fade_timeline.stop()
+        
+        self._apply_slice_state(exact_hour, tooltip_pos, anchor, html)
+        
+        self.slice_line.show()
+        self.tooltip.show()
+        
+        if is_update:
+            # РџСЂРё РѕР±РЅРѕРІР»РµРЅРёРё РїСЂРѕСЃС‚Рѕ РїРµСЂРµРєР»СЋС‡Р°РµРј РјРіРЅРѕРІРµРЅРЅРѕ, РЅРѕ СЃ РЅРµР±РѕР»СЊС€РёРј С„РµР№РґРѕРј РґР»СЏ РєСЂР°СЃРѕС‚С‹
+            self.slice_line.setOpacity(1.0)
+            self.tooltip.setOpacity(1.0)
+        else:
+            self._fade_action = "in"
+            self.fade_timeline.start()
+
+    def _slice_tooltip_position(self, plot_item_p, html):
+        self.tooltip.setHtml(html)
+        tooltip_rect = self.tooltip.boundingRect()
+        tooltip_width = max(1.0, float(tooltip_rect.width()))
+        tooltip_height = max(1.0, float(tooltip_rect.height()))
+        margin = 6.0
+        plot_item = self.plot_widget.getPlotItem()
+        scene_point = plot_item.mapToScene(plot_item_p)
+        scene_x = scene_point.x()
+        scene_y = scene_point.y()
+        view_rect = self.plot_widget.getViewBox().sceneBoundingRect()
+        view_left = view_rect.left()
+
+        anchor_y = 0.5
+        adjusted_scene_y = scene_y
+        if scene_y + tooltip_height / 2.0 > view_rect.bottom() - margin:
+            anchor_y = 1.0
+            adjusted_scene_y = min(scene_y, view_rect.bottom() - margin)
+        elif scene_y - tooltip_height / 2.0 < view_rect.top() + margin:
+            anchor_y = 0.0
+            adjusted_scene_y = max(scene_y, view_rect.top() + margin)
+        adjusted_p = plot_item.mapFromScene(QPointF(scene_x, adjusted_scene_y))
+
+        if scene_x - margin - tooltip_width >= view_left:
+            return QPointF(adjusted_p.x() - margin, adjusted_p.y()), (1.0, anchor_y)
+        return QPointF(adjusted_p.x() + margin, adjusted_p.y()), (0.0, anchor_y)
+
+    def on_scene_clicked(self, event):
+        if self._tearing_down or not self.is_plot_alive():
+            return
+        if event.button() == Qt.LeftButton:
+            pos = event.scenePos()
+            vb = self.plot_widget.getViewBox()
+            
+            # 1. Р–РµСЃС‚РєР°СЏ РїСЂРѕРІРµСЂРєР°: РєР»РёРє РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ СЃС‚СЂРѕРіРѕ РІ РѕР±Р»Р°СЃС‚Рё РіСЂР°С„РёРєРѕРІ (ViewBox)
+            # Р”РѕР±Р°РІР»СЏРµРј 1 РїРёРєСЃРµР»СЊ РґРѕРїСѓСЃРєР° РґР»СЏ РіСЂР°РЅРёС†
+            vb_rect = vb.sceneBoundingRect()
+            vb_rect.adjust(-1, 0, 1, 0)
+            
+            if not vb_rect.contains(pos):
+                self._fade_out()
+                return
+                
+            mouse_point = vb.mapSceneToView(pos)
+            x_click = mouse_point.x()
+            
+            visible_hours = max(1, float(getattr(self, "visible_hours", 24)))
+            if x_click < -0.001 or x_click > visible_hours + 0.001:
+                self._fade_out()
+                return
+            
+            if not self.start_time or not self.current_vitals:
+                return
+                
+            # РС‰РµРј Р±Р»РёР¶Р°Р№С€РёР№ РѕСЂРёРіРёРЅР°Р»СЊРЅС‹Р№ РѕР±СЉРµРєС‚ Vital РїРѕ РѕСЃРё X
+            closest_dist = float('inf')
+            closest_vital = None
+            closest_exact_hour = None
+            
+            s_time = self.start_time.replace(microsecond=0)
+            
+            for v in self.current_vitals:
+                # РРіРЅРѕСЂРёСЂСѓРµРј Р°Р±СЃРѕР»СЋС‚РЅРѕ РїСѓСЃС‚С‹Рµ Р·Р°РїРёСЃРё РїСЂРё РїРѕРёСЃРєРµ
+                v_fields = [v.sys, v.dia, v.pulse, v.temp, v.spo2]
+                if all(val is None for val in v_fields):
+                    continue
+
+                delta_sec = int((v.timestamp.replace(microsecond=0) - s_time).total_seconds())
+                exact_hour = delta_sec / 3600.0
+                dist = abs(exact_hour - x_click)
+                
+                # Р”РѕРїСѓСЃРє 0.6 (36 РјРёРЅСѓС‚)
+                if dist < 0.6 and dist < closest_dist:
+                    closest_dist = dist
+                    closest_vital = v
+                    closest_exact_hour = exact_hour
+            
+            if closest_vital is not None:
+                time_str = closest_vital.timestamp.strftime('%H:%M')
+                
+                html = "<div style='font-family: Segoe UI; font-size: 13px; padding: 5px; background-color: #ebecef;'>"
+                html += f"<b>Время: {time_str}</b><br>"
+                
+                def f_val(val):
+                    if val is None: return "-"
+                    try: 
+                        v = float(val)
+                        if v.is_integer(): return str(int(v))
+                        return f"{v:.1f}"
+                    except: return "-"
+                
+                if closest_vital.temp is not None:
+                    temp_v = f_val(closest_vital.temp)
+                    html += f"<span style='color: {self.colors['temp']};'>Temp: {temp_v}</span><br>"
+
+                if closest_vital.sys is not None or closest_vital.dia is not None:
+                    sys_v = f_val(closest_vital.sys)
+                    dia_v = f_val(closest_vital.dia)
+                    html += f"<span style='color: {self.colors['ad']};'>АД: {sys_v}/{dia_v}</span><br>"
+                
+                if closest_vital.pulse is not None:
+                    pulse_v = f_val(closest_vital.pulse)
+                    html += f"<span style='color: {self.colors['pulse']};'>ЧСС: {pulse_v}</span><br>"
+                
+                rr_v = getattr(closest_vital, 'rr', None)
+                if rr_v is not None:
+                    html += f"<span style='color: {self.colors['rr']};'>ЧДД: {f_val(rr_v)}</span><br>"
+                
+                cvp_v = getattr(closest_vital, 'cvp', None)
+                if cvp_v is not None:
+                    cvp_str = "Ниже нуля" if cvp_v == -1 else f_val(cvp_v)
+                    html += f"<span style='color: {self.colors['cvp']};'>ЦВД: {cvp_str}</span><br>"
+
+                if closest_vital.spo2 is not None:
+                    spo2_v = f_val(closest_vital.spo2)
+                    html += f"<span style='color: {self.colors['spo2']};'>SpO2: {spo2_v}</span>"
+                
+                html += "</div>"
+                
+                # РџРѕР·РёС†РёРѕРЅРёСЂСѓРµРј Tooltip (РјР°РїРїРёРЅРі РІ РєРѕРѕСЂРґРёРЅР°С‚С‹ PlotItem)
+                scene_p = self.plot_widget.getViewBox().mapViewToScene(pg.Point(closest_exact_hour, mouse_point.y()))
+                plot_item_p = self.plot_widget.getPlotItem().mapFromScene(scene_p)
+                
+                plot_item_p, anchor = self._slice_tooltip_position(plot_item_p, html)
+                    
+                is_update = self.slice_line.isVisible() and self.tooltip.isVisible()
+                self._fade_in_to(closest_exact_hour, plot_item_p, anchor, html, is_update)
+            else:
+                self._fade_out()
+
+    def highlight_hour(self, hour_idx):
+        # РЎС‚Р°СЂС‹Р№ РјРµС…Р°РЅРёР·Рј РІС‹РґРµР»РµРЅРёСЏ С‡Р°СЃР° РѕС‚РєР»СЋС‡РµРЅ
+        pass
+
+    def clear_for_context(self, *, admission_id=None, start_time: datetime = None):
+        """Immediately remove previous patient curves while a new snapshot is loading."""
+        if self._tearing_down or not self.is_plot_alive():
+            return
+        self.admission_id = admission_id
+        self.vitals_data = []
+        self.current_vitals = []
+        self.start_time = start_time
+        self._last_render_key = None
+
+        if self.fade_timeline.state() == QTimeLine.Running:
+            self.fade_timeline.stop()
+        self._fade_action = None
+        self._fade_target_state = None
+
+        for item in getattr(self, "_curve_by_key", {}).values():
+            item.setData([], [])
+        self._clear_fill_paths()
+        self.scatter_vitals.setData([])
+        for key, item in getattr(self, "_scatter_items", {}).items():
+            if key != "ad":
+                item.setData([])
+        self.slice_line.hide()
+        self.slice_line.setOpacity(0)
+        self.tooltip.hide()
+        self.tooltip.setOpacity(0)
+        self.header_spacer.update()
+        self.plot_widget.viewport().update()
+
+    def _clear_fill_paths(self):
+        for item in getattr(self, "fill_items", []):
+            if not _qt_object_alive(item):
+                continue
+            item.setPath(QPainterPath())
+            item.update()
+
+    @staticmethod
+    def _normalize_key_dt(value):
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.replace(microsecond=0).isoformat()
+        return str(value)
+
+    @classmethod
+    def _build_intervals_key(cls, active_intervals):
+        if not active_intervals:
+            return ()
+        return tuple(
+            (cls._normalize_key_dt(start), cls._normalize_key_dt(end))
+            for start, end in active_intervals
+        )
+
+    @classmethod
+    def _build_vitals_key(cls, vitals):
+        if not vitals:
+            return (0, None, None, None)
+
+        first = vitals[0]
+        last = vitals[-1]
+        first_key = (
+            int(getattr(first, "id", 0) or 0),
+            cls._normalize_key_dt(getattr(first, "timestamp", None)),
+            cls._normalize_key_dt(getattr(first, "updated_at", None)),
+        )
+        last_key = (
+            int(getattr(last, "id", 0) or 0),
+            cls._normalize_key_dt(getattr(last, "timestamp", None)),
+            cls._normalize_key_dt(getattr(last, "updated_at", None)),
+        )
+
+        max_sync = ("", 0)
+        for vital in vitals:
+            candidate = (
+                cls._normalize_key_dt(getattr(vital, "updated_at", None)),
+                int(getattr(vital, "id", 0) or 0),
+            )
+            if candidate > max_sync:
+                max_sync = candidate
+
+        return (len(vitals), first_key, last_key, max_sync)
+
+    def update_data(self, vitals, start_time: datetime, active_intervals=None):
+        if self._tearing_down or not self.is_plot_alive():
+            return
+        if start_time is None:
+            return
+
+        self.vitals_data = vitals
+        self.start_time = start_time
+        
+        # РњС‹ Р‘РћР›Р¬РЁР• РќР• СЃРєСЂС‹РІР°РµРј СЃСЂРµР· РїСЂРё РѕР±РЅРѕРІР»РµРЅРёРё РґР°РЅРЅС‹С….
+        # РўР°РєРёРј РѕР±СЂР°Р·РѕРј, РµСЃР»Рё СЃСЂР°Р±Р°С‚С‹РІР°РµС‚ 4-СЃРµРєСѓРЅРґРЅС‹Р№ С‚Р°Р№РјРµСЂ С„РѕРЅРѕРІРѕРіРѕ РѕР±РЅРѕРІР»РµРЅРёСЏ,
+        # РѕС‚РєСЂС‹С‚С‹Р№ С‚СѓР»С‚РёРї РѕСЃС‚Р°РЅРµС‚СЃСЏ РЅР° СЌРєСЂР°РЅРµ.
+        
+        # РџРѕР»СѓС‡Р°РµРј ACTIVE РёРЅС‚РµСЂРІР°Р»С‹ РґР»СЏ С„РёР»СЊС‚СЂР°С†РёРё Рё СЂР°Р·СЂС‹РІРѕРІ
+        if active_intervals is None:
+            resolved_active_intervals = []
+            if self.status_service and self.admission_id:
+                end_time = start_time + timedelta(hours=max(1, float(getattr(self, "visible_hours", 24))))
+                resolved_active_intervals = self.status_service.get_active_intervals(
+                    self.admission_id,
+                    start_time - timedelta(days=CHART_ACTIVE_INTERVAL_LOOKBACK_DAYS),
+                    end_time + timedelta(days=CHART_ACTIVE_INTERVAL_LOOKAHEAD_DAYS),
+                )
+        else:
+            resolved_active_intervals = active_intervals
+
+        render_key = (
+            self._normalize_key_dt(start_time),
+            int(getattr(self, "visible_hours", 24)),
+            self._build_vitals_key(vitals),
+            self._build_intervals_key(resolved_active_intervals),
+        )
+        if render_key == self._last_render_key:
+            return
+        self._last_render_key = render_key
+
+        # РћР±СЂР°Р±РѕС‚РєР° РґР°РЅРЅС‹С… С‡РµСЂРµР· РїСЂРѕС†РµСЃСЃРѕСЂ СЃ СѓС‡РµС‚РѕРј Р°РєС‚РёРІРЅС‹С… РёРЅС‚РµСЂРІР°Р»РѕРІ (СЂР°Р·СЂС‹РІС‹ Рё С„РёР»СЊС‚СЂР°С†РёСЏ)
+        processed = ChartDataProcessor.process_vitals(
+            vitals,
+            start_time,
+            resolved_active_intervals,
+            visible_hours=getattr(self, "visible_hours", 24),
+        )
+        
+        if 'densified_data' in processed:
+            d = processed['densified_data']
+            self.current_vitals = processed['original_vitals']
+        else:
+            d = processed
+            self.current_vitals = vitals
+
+        for key, curve in self._curve_by_key.items():
+            curve.setData(d[f'{key}_x'], d[f'{key}_y'])
+        if not len(d.get("sys_x", ())) or not len(d.get("dia_x", ())):
+            self._clear_fill_paths()
+
+        scatter_data = {
+            "ad": {"x": [], "y": []},
+            "pulse": {"x": [], "y": []},
+            "spo2": {"x": [], "y": []},
+            "temp": {"x": [], "y": []},
+            "rr": {"x": [], "y": []},
+            "cvp": {"x": [], "y": []},
+        }
+        for v in self.current_vitals:
+            ex_x = (v.timestamp - self.start_time).total_seconds() / 3600.0
+            def add_spot(val, key, is_cvp=False):
+                try:
+                    if val is not None:
+                        v_float = float(val)
+                        if is_cvp and v_float == -1.0:
+                            v_float = 0.0
+                        scatter_data[key]["x"].append(ex_x)
+                        scatter_data[key]["y"].append(v_float)
+                except: pass
+            
+            add_spot(v.sys, "ad")
+            add_spot(v.dia, "ad")
+            add_spot(v.pulse, "pulse")
+            add_spot(v.spo2, "spo2")
+            add_spot(v.temp, "temp")
+            add_spot(getattr(v, 'rr', None), "rr")
+            add_spot(getattr(v, 'cvp', None), "cvp", is_cvp=True)
+            
+        for key, item in self._scatter_items.items():
+            item.setData(x=scatter_data[key]["x"], y=scatter_data[key]["y"])
+
+        self.header_spacer.update()
+
+    def shutdown(self):
+        if self._tearing_down:
+            return
+        self._tearing_down = True
+        try:
+            self.setUpdatesEnabled(False)
+        except RuntimeError:
+            pass
+        try:
+            self.fade_timeline.stop()
+        except RuntimeError:
+            pass
+
+        plot_widget = getattr(self, "plot_widget", None)
+        if _qt_object_alive(plot_widget):
+            try:
+                plot_widget.viewport().removeEventFilter(self)
+            except RuntimeError:
+                pass
+            try:
+                scene = plot_widget.scene()
+                scene.sigMouseClicked.disconnect(self.on_scene_clicked)
+            except Exception:
+                pass
+            try:
+                scene = plot_widget.scene()
+                if self._original_send_hover_events is not None:
+                    scene.sendHoverEvents = self._original_send_hover_events
+            except RuntimeError:
+                pass
+            try:
+                plot_widget.getViewBox().sigRangeChanged.disconnect(self._range_changed_handler)
+            except Exception:
+                pass
+
+            items = []
+            items.extend(getattr(self, "fill_items", []))
+            items.extend(getattr(self, "curve_items", []))
+            items.extend(getattr(self, "_scatter_items", {}).values())
+            items.extend(getattr(self, "_grid_lines", []))
+            items.extend([
+                getattr(self, "slice_line", None),
+                getattr(self, "tooltip", None),
+            ])
+            seen = set()
+            for item in items:
+                if item is None:
+                    continue
+                item_id = id(item)
+                if item_id in seen:
+                    continue
+                seen.add(item_id)
+                if not _qt_object_alive(item):
+                    continue
+                try:
+                    item.setParentItem(None)
+                except Exception:
+                    pass
+                try:
+                    plot_widget.removeItem(item)
+                except Exception:
+                    pass
+
+        self.curve_items.clear()
+        self.fill_items.clear()
+        self._curve_by_key.clear()
+        self._scatter_items.clear()
+        self._grid_lines.clear()
+        self.current_vitals = []
+        self.vitals_data = []
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+
