@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from typing import Callable, Optional, Sequence
 
@@ -41,6 +42,7 @@ class ArchiveReadOnlyDatabaseManager:
             timeout=5.0,
         )
         configure_connection(self._conn, readonly=True)
+        self._read_lock = threading.RLock()
 
     def _has_table(self, table_name: str) -> bool:
         row = self._conn.execute(
@@ -49,19 +51,73 @@ class ArchiveReadOnlyDatabaseManager:
         ).fetchone()
         return bool(row)
 
-    def fetch_all_remcard(self, query: str, params: Sequence = ()):
-        cursor = self._conn.cursor()
-        cursor.execute(query, tuple(params or ()))
-        return cursor.fetchall()
+    @staticmethod
+    def _cancelled_read_error(cancel_state: dict) -> Exception:
+        error = cancel_state.get("error")
+        if isinstance(error, Exception):
+            return error
+        return RuntimeError("SQLite read cancelled")
+
+    @staticmethod
+    def _cancel_requested(cancel_check, cancel_state: dict) -> bool:
+        if cancel_check is None:
+            return False
+        if cancel_state.get("cancelled"):
+            return True
+        try:
+            cancelled = bool(cancel_check())
+        except Exception as exc:
+            cancel_state["cancelled"] = True
+            cancel_state["error"] = exc
+            return True
+        if cancelled:
+            cancel_state["cancelled"] = True
+        return cancelled
+
+    def fetch_all_remcard(self, query: str, params: Sequence = (), *, cancel_check=None):
+        cancel_state = {"cancelled": False, "error": None}
+
+        def should_cancel() -> bool:
+            return self._cancel_requested(cancel_check, cancel_state)
+
+        def progress_handler() -> int:
+            return 1 if should_cancel() else 0
+
+        with self._read_lock:
+            if cancel_check is not None:
+                self._conn.set_progress_handler(progress_handler, 1000)
+            try:
+                if should_cancel():
+                    raise self._cancelled_read_error(cancel_state)
+                cursor = self._conn.cursor()
+                try:
+                    cursor.execute(query, tuple(params or ()))
+                    rows = cursor.fetchall()
+                finally:
+                    cursor.close()
+                if should_cancel():
+                    raise self._cancelled_read_error(cancel_state)
+                return rows
+            except sqlite3.OperationalError as exc:
+                if cancel_state.get("cancelled") and "interrupted" in str(exc).lower():
+                    raise self._cancelled_read_error(cancel_state) from exc
+                raise
+            finally:
+                if cancel_check is not None:
+                    self._conn.set_progress_handler(None, 0)
 
     def fetch_one_remcard(self, query: str, params: Sequence = ()):
-        cursor = self._conn.cursor()
-        cursor.execute(query, tuple(params or ()))
-        return cursor.fetchone()
+        with self._read_lock:
+            cursor = self._conn.cursor()
+            try:
+                cursor.execute(query, tuple(params or ()))
+                return cursor.fetchone()
+            finally:
+                cursor.close()
 
-    def fetch_all_journal(self, query: str, params: Sequence = ()):
+    def fetch_all_journal(self, query: str, params: Sequence = (), *, cancel_check=None):
         """Compatibility alias for legacy journal callers."""
-        return self.fetch_all_remcard(query, params)
+        return self.fetch_all_remcard(query, params, cancel_check=cancel_check)
 
     def fetch_one_journal(self, query: str, params: Sequence = ()):
         """Compatibility alias for legacy journal callers."""
@@ -132,20 +188,23 @@ class ArchiveReadOnlyDatabaseManager:
     @contextmanager
     def central_read_scope(self, source: str = "archive_readonly_snapshot"):
         _ = source
-        yield self
+        with self._read_lock:
+            yield self
 
     @contextmanager
     def central_read_snapshot_scope(self, source: str = "archive_readonly_snapshot"):
         _ = source
-        yield self
+        with self._read_lock:
+            yield self
 
     def run_read_operation(self, operation: Callable, source: str = "archive_readonly_read"):
         _ = source
-        cursor = self._conn.cursor()
-        try:
-            return operation(cursor)
-        finally:
-            cursor.close()
+        with self._read_lock:
+            cursor = self._conn.cursor()
+            try:
+                return operation(cursor)
+            finally:
+                cursor.close()
 
     @contextmanager
     def remcard_transaction(self, source: str = "archive_readonly_tx"):
@@ -159,8 +218,10 @@ class ArchiveReadOnlyDatabaseManager:
         raise ReadOnlyArchiveDbError("Archive DB is opened in read-only mode")
 
     def close(self):
-        if self._conn:
-            self._conn.close()
+        with self._read_lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
 
 
 def create_archive_readonly_service(db_path: str) -> tuple[RemCardService, ArchiveReadOnlyDatabaseManager]:

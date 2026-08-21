@@ -6956,7 +6956,12 @@ def _check_daily_backup_does_not_catch_up_after_window(temp_root: str) -> tuple[
         if len(reports) != 1:
             return False, f"morning missed backup should create one deduped report, got {len(reports)}"
         report_text = str(reports[0].get("text") or "")
-        if "не был создан" not in report_text or "ночное окно" not in report_text:
+        expected_missing_dates = "Пропущенные даты: 2026-07-06, 2026-07-07, 2026-07-08"
+        if (
+            "не создавался минимум 3 суток подряд" not in report_text
+            or "ночное окно" not in report_text
+            or expected_missing_dates not in report_text
+        ):
             return False, f"morning missed backup report has unexpected text: {report_text[:300]}"
         if list(paths["valid_dir"].glob("*.db")):
             return False, "morning missed backup created a DB file"
@@ -7003,7 +7008,12 @@ def _check_daily_backup_skips_when_primary_db_unavailable(temp_root: str) -> tup
         if len(reports) != 1:
             return False, f"unavailable primary DB should create one report, got {len(reports)}"
         report_text = str(reports[0].get("text") or "")
-        if "основная база" not in report_text.lower() or "не был создан" not in report_text:
+        expected_missing_dates = "Пропущенные даты: 2026-07-06, 2026-07-07, 2026-07-08"
+        if (
+            "основная база" not in report_text.lower()
+            or "не создавался минимум 3 суток подряд" not in report_text
+            or expected_missing_dates not in report_text
+        ):
             return False, f"unavailable primary DB report has unexpected text: {report_text[:300]}"
         return True, "ok"
     finally:
