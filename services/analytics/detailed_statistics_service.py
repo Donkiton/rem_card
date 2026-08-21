@@ -234,6 +234,43 @@ class DetailedStatisticsReportBuilder:
         return f"{float(value):.{digits}f}"
 
     @staticmethod
+    def _plural_ru(value: float, forms: tuple[str, str, str]) -> str:
+        number = abs(float(value))
+        if not number.is_integer():
+            return forms[1]
+        integer = int(number)
+        if 11 <= integer % 100 <= 14:
+            return forms[2]
+        remainder = integer % 10
+        if remainder == 1:
+            return forms[0]
+        if 2 <= remainder <= 4:
+            return forms[1]
+        return forms[2]
+
+    @classmethod
+    def _fmt_value_with_unit(cls, value, forms: tuple[str, str, str], *, digits=2):
+        if value is None:
+            return "н/д"
+        number = float(value)
+        return f"{cls._fmt_num(number, digits)} {cls._plural_ru(number, forms)}"
+
+    @classmethod
+    def _fmt_los_duration(cls, days):
+        if days is None:
+            return "н/д"
+        days_value = max(0.0, float(days))
+        if days_value < 1.0:
+            return cls._fmt_value_with_unit(
+                days_value * 24.0,
+                ("час", "часа", "часов"),
+            )
+        return cls._fmt_value_with_unit(
+            days_value,
+            ("сутки", "суток", "суток"),
+        )
+
+    @staticmethod
     def _fmt_pct(num: float, den: float, digits=1):
         return f"{DetailedStatisticsReportBuilder._pct(num, den):.{digits}f}%"
 
@@ -880,7 +917,6 @@ class DetailedStatisticsReportBuilder:
     def _population_stats(self, admissions):
         return {
             "total_n": len(admissions),
-            "unique_patients": len({a["patient_id"] for a in admissions if a["patient_id"] is not None}),
             "death_ids": {a["admission_id"] for a in admissions if a["is_death"] and a["admission_id"]},
         }
 
@@ -1281,7 +1317,6 @@ class DetailedStatisticsReportBuilder:
 
         return {
             "N": total_n,
-            "N_unique": population["unique_patients"],
             "bed_days": los["bed_days"],
             "alos": los["alos"],
             "los_median": los["los_median"],
@@ -1421,13 +1456,39 @@ class DetailedStatisticsReportBuilder:
 
         if section_key == "s1":
             return [
-                ("1.1 Уникальные пациенты", "Число уникальных пациентов", self._fmt_num(s["N_unique"], 0)),
-                ("1.2 Госпитализации", "Число госпитализаций", self._fmt_num(total_n, 0)),
-                ("1.3 Койко-дни", "Сумма дней пребывания всех госпитализаций", self._fmt_num(s["bed_days"])),
-                ("1.4 Средняя длительность лечения", "Средняя длительность = Койко-дни / Госпитализации", self._fmt_num(s["alos"])),
-                ("1.5 Медиана длительности лечения", "Медиана длительности лечения", self._fmt_num(s["los_median"])),
-                ("1.6 Минимальная длительность лечения", "Минимальная длительность лечения", self._fmt_num(s["los_min"])),
-                ("1.7 Максимальная длительность лечения", "Максимальная длительность лечения", self._fmt_num(s["los_max"])),
+                (
+                    "1.1 Госпитализации",
+                    "Число госпитализаций",
+                    self._fmt_value_with_unit(total_n, ("случай", "случая", "случаев"), digits=0),
+                ),
+                (
+                    "1.2 Койко-дни",
+                    "Сумма дней пребывания всех госпитализаций",
+                    self._fmt_value_with_unit(
+                        s["bed_days"],
+                        ("койко-день", "койко-дня", "койко-дней"),
+                    ),
+                ),
+                (
+                    "1.3 Средняя длительность лечения",
+                    "Средняя длительность = Койко-дни / Госпитализации",
+                    self._fmt_los_duration(s["alos"]),
+                ),
+                (
+                    "1.4 Медиана длительности лечения",
+                    "Медиана длительности лечения",
+                    self._fmt_los_duration(s["los_median"]),
+                ),
+                (
+                    "1.5 Минимальная длительность лечения",
+                    "Минимальная длительность лечения",
+                    self._fmt_los_duration(s["los_min"]),
+                ),
+                (
+                    "1.6 Максимальная длительность лечения",
+                    "Максимальная длительность лечения",
+                    self._fmt_los_duration(s["los_max"]),
+                ),
             ]
 
         if section_key == "s2":
