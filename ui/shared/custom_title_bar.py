@@ -77,7 +77,11 @@ class CustomTitleBar(QFrame):
             is_custom_maximized = getattr(self.window_ptr, '_is_custom_maximized', False)
             if self.window_ptr.isMaximized() or is_custom_maximized:
                 if is_custom_maximized:
-                    self.window_ptr.setGeometry(self.window_ptr.property("normalGeometry"))
+                    normal_geometry = getattr(
+                        self.window_ptr, "_custom_normal_geometry", None
+                    )
+                    if normal_geometry is not None and normal_geometry.isValid():
+                        self.window_ptr.setGeometry(normal_geometry)
                     self.window_ptr._is_custom_maximized = False
                 else:
                     self.window_ptr.showNormal()
@@ -87,7 +91,10 @@ class CustomTitleBar(QFrame):
                     apply_main_frame_window_style(self.window_ptr.main_container, maximized=False)
                     
             else:
-                self.window_ptr.setProperty("normalGeometry", self.window_ptr.geometry())
+                # `normalGeometry` is a read-only Qt window property. Storing
+                # our value under the same name silently fails on PySide6 and
+                # makes restore use the already maximized geometry.
+                self.window_ptr._custom_normal_geometry = self.window_ptr.geometry()
                 screen = QApplication.screenAt(self.window_ptr.geometry().center())
                 if not screen:
                     screen = QApplication.primaryScreen()

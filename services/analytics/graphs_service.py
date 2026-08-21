@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
@@ -9,6 +11,7 @@ from typing import Sequence
 from xml.sax.saxutils import escape as xml_escape
 
 from rem_card.ui.analytics.chart_renderer import configure_chart_style
+from rem_card.app.logger import logger
 from rem_card.services.analytics.period import normalize_analytics_period
 from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
 from rem_card.ui.styles.theme import (
@@ -18,6 +21,7 @@ from rem_card.ui.styles.theme import (
 )
 
 DEFAULT_CHART_COLORS = list(ANALYTICS_CHART_COLORS)
+_GRAPH_BUILD_LOCK = threading.RLock()
 
 
 @dataclass
@@ -53,11 +57,14 @@ def build_graphs_html(
     conn = manager.get_connection()
     params = period.sql_bounds
     img_paths: list[str] = []
+    started_at = time.perf_counter()
+    build_status = "error"
     html_content = (
         "<h2>Графический отчет ОАР №3</h2>"
         f"<p>Период: {selected_start_date_str} - {selected_end_date_str}</p>"
     )
 
+    _GRAPH_BUILD_LOCK.acquire()
     try:
         with recovery_bed_analytics_filter(conn, include_recovery_beds=include_recovery_beds):
             _configure_plot_style(chart_colors)
@@ -141,11 +148,20 @@ def build_graphs_html(
             )
             html_content = generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_content)
             html_content = generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_content)
+            build_status = "ok"
             return GraphsBuildResult(html=html_content, image_paths=img_paths)
     except Exception:
         _cleanup_graph_image_files(img_paths)
         raise
     finally:
+        _GRAPH_BUILD_LOCK.release()
+        logger.info(
+            "Analytics graphs build status=%s selected=%s images=%s elapsed_ms=%.1f",
+            build_status,
+            len(selected),
+            len(img_paths),
+            (time.perf_counter() - started_at) * 1000.0,
+        )
         if cleanup:
             cleanup()
 

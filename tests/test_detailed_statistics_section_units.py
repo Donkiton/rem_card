@@ -62,6 +62,54 @@ def test_treatment_duration_switches_from_hours_at_one_day():
     assert builder._fmt_los_duration(None) == "н/д"
 
 
+def test_report_splits_scalar_value_and_unit_into_stable_columns():
+    builder = _builder()
+    html = builder._render_sections_html(
+        ["s1"],
+        {
+            "N": 9,
+            "deaths": 0,
+            "bed_days": 328.18,
+            "alos": 2.5,
+            "los_median": 1.0,
+            "los_min": 0.25,
+            "los_max": 7.0,
+        },
+    )
+
+    assert '<table width="100%"' in html
+    assert '<th class="value" width="13%">Значение</th>' in html
+    assert '<th class="unit" width="18%">Единица</th>' in html
+    assert '<td class="value" width="13%">9</td><td class="unit" width="18%">случаев</td>' in html
+    assert '<td class="value" width="13%">328.18</td><td class="unit" width="18%">койко-дня</td>' in html
+
+
+def test_diagnoses_are_compact_with_hover_text_and_mkb_rubrics_are_grouped():
+    builder = _builder()
+    long_diagnosis = (
+        "X44 Случайное отравление и воздействие другими и неуточненными "
+        "лекарственными средствами, медикаментами и биологическими веществами"
+    )
+    rows = builder._section_rows(
+        "s5",
+        {
+            "N": 3,
+            "deaths": 0,
+            "diagnoses": {long_diagnosis: 1},
+            "mkb_classes": {"V01–Y98 — Внешние причины": 1},
+            "mkb_rubrics": {"N88": 3},
+        },
+    )
+
+    assert rows[0][2].startswith('<span title="')
+    assert "X44 Случайное отравление и…</span>: 1 (33.3%)" in rows[0][2]
+    assert "<a " not in rows[0][2]
+    assert rows[2][0] == "5.3 По рубрикам МКБ без подрубрик"
+    assert "N88: 3 (100.0%)" in rows[2][2]
+    assert builder._mkb_rubric("N88.4") == "N88"
+    assert builder._mkb_class("N88.4").startswith("N00–N99")
+
+
 def test_maximum_load_counts_exact_concurrency_instead_of_daily_turnover():
     builder = DetailedStatisticsReportBuilder(None, "2026-08-14", "2026-08-14")
     admissions = [

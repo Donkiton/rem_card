@@ -114,10 +114,11 @@ W1_BEDS_REFRESH_SOURCE_PREFIXES = (
 
 class NurseMainWidget(QWidget):
     """Главный виджет медсестры с изолированным UI и исправленной навигацией."""
-    def __init__(self, patient_service, remcard_service, parent=None):
+    def __init__(self, patient_service, remcard_service, parent=None, operblock_service=None):
         super().__init__(parent)
         self.patient_service = patient_service
         self.remcard_service = remcard_service
+        self.operblock_service = operblock_service
         self._current_date = datetime.now()
         self._last_sync_time = "1970-01-01 00:00:00.000"
         self._last_change_id = 0
@@ -131,6 +132,8 @@ class NurseMainWidget(QWidget):
         self._archive_signals_bound = False
         self._bound_archive_widget = None
         self._bound_admin_widget = None
+        self._operblock_archive_viewer = None
+        self._operblock_archive_db_manager = None
         self._orders_balance_signals_bound = False
         self._nurse_orders_balance_signals_bound = False
         self.report_controller = None
@@ -1467,6 +1470,7 @@ class NurseMainWidget(QWidget):
             patient_service=self.patient_service,
             remcard_service=self.remcard_service,
             parent=self.main_stack,
+            operblock_service=self.operblock_service,
         )
         self.layout_manager = self._w1_shell
         
@@ -1513,6 +1517,7 @@ class NurseMainWidget(QWidget):
                 patient_service=self.patient_service,
                 remcard_service=self.remcard_service,
                 parent=self.main_stack,
+                operblock_service=self.operblock_service,
                 w1_handoff=handoff,
             )
         except Exception:
@@ -1650,6 +1655,8 @@ class NurseMainWidget(QWidget):
         if archive_widget and archive_widget is not self._bound_archive_widget:
             archive_widget.back_requested.connect(lambda: self.on_back_clicked())
             archive_widget.patient_selected.connect(self.on_patient_selected_from_archive)
+            if hasattr(archive_widget, "operblock_case_selected"):
+                archive_widget.operblock_case_selected.connect(self.on_operblock_case_selected_from_archive)
             self._bound_archive_widget = archive_widget
             self._archive_signals_bound = True
 
@@ -2339,6 +2346,105 @@ class NurseMainWidget(QWidget):
     def on_patient_selected_from_archive(self, patient):
         self.show_archive(patient)
 
+    def on_operblock_case_selected_from_archive(self, case):
+        """Открывает протокол оперблока только для просмотра у медсестры."""
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        try:
+            case_id = int((case or {}).get("source_operation_case_id") or (case or {}).get("operation_case_id") or 0)
+        except (TypeError, ValueError):
+            case_id = 0
+        if not case_id or self.operblock_service is None:
+            CustomMessageBox.warning(self, "Архив оперблока", "Не удалось открыть протокол оперблока.")
+            return
+
+        source_path = str((case or {}).get("source_db_path") or "").strip() if (case or {}).get("is_external_archive") else ""
+        patient_service = self.patient_service
+        remcard_service = self.remcard_service
+        operblock_service = self.operblock_service
+        db_manager = None
+        if source_path:
+            try:
+                from rem_card.services.archive_readonly_service import create_archive_readonly_service
+                from rem_card.services.operblock_service import OperBlockService
+
+                remcard_service, db_manager = create_archive_readonly_service(source_path)
+                operblock_service = OperBlockService(db_manager)
+                patient_service = getattr(remcard_service, "_patients", patient_service)
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось открыть архивную БД:\n{exc}")
+                return
+
+        viewer = None
+        try:
+            from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+
+            viewer = OperBlockMainWidget(
+                patient_service,
+                remcard_service,
+                operblock_service,
+                parent=self.main_stack,
+                view_only=True,
+            )
+            viewer.view_back_requested.connect(self._return_from_operblock_archive_viewer)
+            self._operblock_archive_viewer = viewer
+            self._operblock_archive_db_manager = db_manager
+            self.main_stack.addWidget(viewer)
+            self.main_stack.setCurrentWidget(viewer)
+            viewer.open_archive_protocol(case_id)
+        except Exception as exc:
+            self._discard_partial_operblock_archive_viewer(viewer, db_manager)
+            CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось открыть протокол:\n{exc}")
+
+    def _discard_partial_operblock_archive_viewer(self, viewer, db_manager):
+        """Очищает неуспешно созданный просмотр без изменения текущего маршрута."""
+        if self._operblock_archive_viewer is viewer:
+            self._operblock_archive_viewer = None
+        if self._operblock_archive_db_manager is db_manager:
+            self._operblock_archive_db_manager = None
+        if viewer is not None:
+            try:
+                if hasattr(viewer, "shutdown"):
+                    viewer.shutdown()
+            except Exception as exc:
+                logger.warning("Nurse partial archive viewer shutdown failed: %s", exc)
+            try:
+                self.main_stack.removeWidget(viewer)
+            except Exception as exc:
+                logger.warning("Nurse partial archive viewer removal failed: %s", exc)
+            try:
+                viewer.deleteLater()
+            except Exception as exc:
+                logger.warning("Nurse partial archive viewer deletion failed: %s", exc)
+        if db_manager is not None:
+            try:
+                db_manager.close()
+            except Exception as exc:
+                logger.warning("Nurse partial archive readonly DB close failed: %s", exc)
+
+    def _return_from_operblock_archive_viewer(self):
+        viewer = self._operblock_archive_viewer
+        if viewer is not None:
+            try:
+                if hasattr(viewer, "shutdown"):
+                    viewer.shutdown()
+                self.main_stack.removeWidget(viewer)
+                viewer.deleteLater()
+            except Exception as exc:
+                logger.warning("Nurse archive operblock viewer cleanup failed: %s", exc)
+        self._operblock_archive_viewer = None
+        if self._operblock_archive_db_manager is not None:
+            try:
+                self._operblock_archive_db_manager.close()
+            except Exception as exc:
+                logger.warning("Nurse archive readonly DB close failed: %s", exc)
+        self._operblock_archive_db_manager = None
+        if self._is_closing:
+            return
+        self.main_stack.setCurrentWidget(self.layout_manager)
+        self.layout_manager.set_patient_selection_mode("archive")
+        self._wire_dynamic_views()
+
     def on_yest_card_clicked(self):
         yest_date = self.current_date - timedelta(days=1)
         self.load_patient_card(self.layout_manager.current_admission_id, yest_date)
@@ -2588,6 +2694,8 @@ class NurseMainWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        if self._operblock_archive_viewer is not None:
+            self._return_from_operblock_archive_viewer()
         self._shutdown_snapshot_worker()
         if hasattr(self, "_balance_update_timer"):
             self._balance_update_timer.stop()

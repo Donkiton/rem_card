@@ -1708,6 +1708,26 @@ class OperBlockStatisticsReportBuilder:
         return escape(text)
 
     @staticmethod
+    def _split_value_and_unit(value: Any) -> tuple[str, str | None]:
+        if value is None:
+            return "—", ""
+        text = str(value).strip()
+        if not text:
+            return "—", ""
+        if "<br/>" in text:
+            return text, None
+        percent = re.match(r"^([-+−]?\d+(?:[.,]\d+)?)(%.*)$", text)
+        if percent:
+            return escape(percent.group(1)), escape(percent.group(2))
+        scalar = re.match(
+            r"^([-+−]?\d+(?:[.,]\d+)?(?:\s*/\s*[-+−]?\d+(?:[.,]\d+)?)?)(?:\s+(.+))$",
+            text,
+        )
+        if scalar:
+            return escape(scalar.group(1)), escape(scalar.group(2))
+        return escape(text), ""
+
+    @staticmethod
     def _indicator_key(row_name: str) -> str:
         match = re.match(r"\s*(\d+)\.", str(row_name or ""))
         if not match:
@@ -1737,23 +1757,34 @@ class OperBlockStatisticsReportBuilder:
         for title, rows in sections:
             rows_html = []
             for name, formula, value in rows:
+                value_html, unit_html = self._split_value_and_unit(value)
+                if unit_html is None:
+                    result_cells = (
+                        f'<td class="distribution" colspan="2" width="31%">{value_html}</td>'
+                    )
+                else:
+                    result_cells = (
+                        f'<td class="value" width="13%">{value_html}</td>'
+                        f'<td class="unit" width="18%">{unit_html or "—"}</td>'
+                    )
                 rows_html.append(
                     f"""
                     <tr>
-                        <td>{escape(str(name))}</td>
-                        <td>{escape(str(formula))}</td>
-                        <td class="value">{self._format_value_cell(value)}</td>
+                        <td width="26%">{escape(str(name))}</td>
+                        <td class="formula" width="43%">{escape(str(formula))}</td>
+                        {result_cells}
                     </tr>
                     """
                 )
             blocks.append(
                 f"""
                 <h2>{escape(title)}</h2>
-                <table>
+                <table width="100%" cellspacing="0" cellpadding="0">
                     <tr>
-                        <th>Показатель</th>
-                        <th>Расчет</th>
-                        <th class="value">Значение</th>
+                        <th width="26%">Показатель</th>
+                        <th class="formula" width="43%">Расчёт</th>
+                        <th class="value" width="13%">Значение</th>
+                        <th class="unit" width="18%">Единица</th>
                     </tr>
                     {''.join(rows_html)}
                 </table>
@@ -1803,6 +1834,7 @@ class OperBlockStatisticsReportBuilder:
                 }}
                 table {{
                     width: 100%;
+                    table-layout: fixed;
                     border-collapse: collapse;
                     margin-bottom: 12px;
                 }}
@@ -1820,7 +1852,19 @@ class OperBlockStatisticsReportBuilder:
                 }}
                 td.value, th.value {{
                     text-align: right;
-                    width: 32%;
+                    width: 13%;
+                }}
+                td.unit, th.unit {{
+                    width: 18%;
+                }}
+                td.formula, th.formula {{
+                    width: 43%;
+                }}
+                th:first-child, td:first-child {{
+                    width: 26%;
+                }}
+                td.formula, td.distribution {{
+                    overflow-wrap: anywhere;
                 }}
                 .footnote {{
                     margin-top: 12px;

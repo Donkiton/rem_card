@@ -305,6 +305,37 @@ QWidget[settingsContext="true"] QFrame#DialogTitleBar {{
     border-bottom: 1px solid {t("border.subtle")};
 }}
 
+QWidget[settingsContext="true"] QLabel#DialogTitleText {{
+    background-color: transparent;
+    color: {t("dialog.header_text")};
+    font-size: 13px;
+    font-weight: 700;
+}}
+
+QWidget[settingsContext="true"] QPushButton#TitleControlBtn,
+QWidget[settingsContext="true"] QPushButton#TitleCloseBtn {{
+    min-width: 40px;
+    max-width: 40px;
+    min-height: 28px;
+    max-height: 28px;
+    padding: 0;
+    background-color: transparent;
+    color: {t("dialog.header_text")};
+    border: none;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 600;
+}}
+
+QWidget[settingsContext="true"] QPushButton#TitleControlBtn:hover {{
+    background-color: {t("button.neutral.hover")};
+}}
+
+QWidget[settingsContext="true"] QPushButton#TitleCloseBtn:hover {{
+    background-color: {t("titlebar.close_hover")};
+    color: {t("text.inverse")};
+}}
+
 QWidget[settingsContext="true"] QFrame[settingsSurfacePanel="true"] {{
     background-color: {t("surface.card")};
     border: 1px solid {t("border.subtle")};

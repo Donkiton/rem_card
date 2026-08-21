@@ -153,6 +153,11 @@ def _get_base_db_manager(*, remcard_service=None, db_manager=None):
     raise ValueError("Не найден менеджер базы данных для аналитики.")
 
 
+def get_analytics_base_manager(*, remcard_service=None, db_manager=None):
+    """Публичный вход к существующему поиску менеджера БД аналитики."""
+    return _get_base_db_manager(remcard_service=remcard_service, db_manager=db_manager)
+
+
 def _resolve_analytics_manager(
     base_db_manager,
     *,
@@ -229,6 +234,26 @@ def _normalize_db_paths(db_paths: list[str]) -> list[str]:
         seen.add(key)
         normalized.append(abs_path)
     return normalized
+
+
+def resolve_readonly_analytics_manager(
+    base_db_manager,
+    *,
+    start_dt: str | None = None,
+    end_dt: str | None = None,
+    db_paths: list[str] | None = None,
+) -> tuple[object, Callable[[], None] | None]:
+    """Подготавливает существующий read-only менеджер для встроенной аналитики.
+
+    Вызывающий код обязан вызвать второе значение кортежа после формирования
+    отчёта. Здесь сохраняется единая логика архивных и многобазовых отчётов.
+    """
+    return _resolve_analytics_manager(
+        base_db_manager,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        db_paths=db_paths,
+    )
 
 
 def _get_db_path(db_manager) -> str:

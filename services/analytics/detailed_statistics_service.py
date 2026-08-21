@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 from html import escape
 from statistics import median
@@ -333,11 +334,52 @@ class DetailedStatisticsReportBuilder:
         return names[value.weekday()]
 
     @staticmethod
-    def _mkb_class(code: str):
+    def _mkb_rubric(code: str):
         text = str(code or "").strip()
         if not text:
             return "Не указан"
         return text[:3].upper()
+
+    @staticmethod
+    def _mkb_class(code: str):
+        """Возвращает настоящий укрупнённый класс МКБ-10, а не подрубрику с точкой."""
+        text = str(code or "").strip().upper()
+        match = re.match(r"^([A-ZА-Я])(\d{2})", text)
+        if not match:
+            return "Не указан"
+        letter, number = match.group(1), int(match.group(2))
+        if letter in {"A", "B"}:
+            return "A00–B99 — Инфекционные и паразитарные болезни"
+        if letter == "C" or (letter == "D" and number <= 48):
+            return "C00–D48 — Новообразования"
+        if letter == "D":
+            return "D50–D89 — Болезни крови и иммунной системы"
+        labels = {
+            "E": "E00–E90 — Эндокринные заболевания",
+            "F": "F00–F99 — Психические расстройства",
+            "G": "G00–G99 — Болезни нервной системы",
+            "I": "I00–I99 — Болезни системы кровообращения",
+            "J": "J00–J99 — Болезни органов дыхания",
+            "K": "K00–K93 — Болезни органов пищеварения",
+            "L": "L00–L99 — Болезни кожи",
+            "M": "M00–M99 — Болезни костно-мышечной системы",
+            "N": "N00–N99 — Болезни мочеполовой системы",
+            "O": "O00–O99 — Беременность, роды и послеродовой период",
+            "P": "P00–P96 — Состояния перинатального периода",
+            "Q": "Q00–Q99 — Врождённые аномалии",
+            "R": "R00–R99 — Симптомы и отклонения",
+            "S": "S00–T98 — Травмы и отравления",
+            "T": "S00–T98 — Травмы и отравления",
+            "V": "V01–Y98 — Внешние причины",
+            "W": "V01–Y98 — Внешние причины",
+            "X": "V01–Y98 — Внешние причины",
+            "Y": "V01–Y98 — Внешние причины",
+            "Z": "Z00–Z99 — Факторы, влияющие на здоровье",
+            "U": "U00–U99 — Коды специального назначения",
+        }
+        if letter == "H":
+            return "H00–H59 — Болезни глаза" if number <= 59 else "H60–H95 — Болезни уха"
+        return labels.get(letter, f"{letter}00–{letter}99 — Прочие заболевания")
 
     @staticmethod
     def _diagnosis_key(code: str, diagnosis_text: str):
@@ -346,7 +388,14 @@ class DetailedStatisticsReportBuilder:
         return f"{clean_code} {clean_text}"
 
     @staticmethod
-    def _distribution_lines(counter: dict[str, int], total: int, *, limit=12, forced_order=None):
+    def _distribution_lines(
+        counter: dict[str, int],
+        total: int,
+        *,
+        limit=12,
+        forced_order=None,
+        compact_labels: bool = False,
+    ):
         if not counter:
             return "н/д"
         if forced_order:
@@ -357,10 +406,22 @@ class DetailedStatisticsReportBuilder:
         else:
             items = sorted(counter.items(), key=lambda x: (-x[1], x[0]))
         visible = items[:limit]
-        lines = [
-            f"{escape(str(name))}: {count} ({DetailedStatisticsReportBuilder._fmt_pct(count, total)})"
-            for name, count in visible
-        ]
+        lines = []
+        for name, count in visible:
+            full_name = str(name)
+            visible_name = full_name
+            if compact_labels:
+                parts = full_name.split()
+                if len(parts) > 4 and re.match(r"^[A-ZА-Я]\d{2}(?:\.\d+)?$", parts[0], re.IGNORECASE):
+                    visible_name = " ".join((parts[0], *parts[1:4])) + "…"
+                elif len(parts) > 3:
+                    visible_name = " ".join(parts[:3]) + "…"
+            label = escape(visible_name)
+            if compact_labels and visible_name != full_name:
+                label = f'<span title="{escape(full_name, quote=True)}">{label}</span>'
+            lines.append(
+                f"{label}: {count} ({DetailedStatisticsReportBuilder._fmt_pct(count, total)})"
+            )
         hidden_count = len(items) - len(visible)
         if hidden_count > 0:
             lines.append(f"... еще {hidden_count}")
@@ -623,6 +684,7 @@ class DetailedStatisticsReportBuilder:
                             "diagnosis_text": diagnosis_text,
                             "diagnosis_key": self._diagnosis_key(diagnosis_code, diagnosis_text),
                             "mkb_class": self._mkb_class(diagnosis_code),
+                            "mkb_rubric": self._mkb_rubric(diagnosis_code),
                             "weekday_name": self._weekday_name(adm_dt),
                             "month_label": adm_dt.strftime("%Y-%m"),
                             "is_death": is_death,
@@ -996,6 +1058,7 @@ class DetailedStatisticsReportBuilder:
         weekdays = {}
         diagnoses = {}
         mkb_classes = {}
+        mkb_rubrics = {}
         outcomes = {}
         death_doctors = {}
 
@@ -1007,6 +1070,7 @@ class DetailedStatisticsReportBuilder:
             self._inc_counter(weekdays, admission["weekday_name"])
             self._inc_counter(diagnoses, admission["diagnosis_key"])
             self._inc_counter(mkb_classes, admission["mkb_class"])
+            self._inc_counter(mkb_rubrics, admission["mkb_rubric"])
             outcome_label = admission["outcome"].capitalize()
             self._inc_counter(outcomes, outcome_label)
             if admission["is_death"]:
@@ -1022,6 +1086,7 @@ class DetailedStatisticsReportBuilder:
             "weekdays": weekdays,
             "diagnoses": diagnoses,
             "mkb_classes": mkb_classes,
+            "mkb_rubrics": mkb_rubrics,
             "outcomes": outcomes,
             "death_doctors": death_doctors,
         }
@@ -1388,6 +1453,7 @@ class DetailedStatisticsReportBuilder:
             "sources": distributions["sources"],
             "diagnoses": distributions["diagnoses"],
             "mkb_classes": distributions["mkb_classes"],
+            "mkb_rubrics": distributions["mkb_rubrics"],
             "deaths": deaths,
             "mortality_pct": self._pct(deaths, total_n),
             "mortality_per_1000_bed_days": self._safe_div(deaths, los["bed_days"]) * 1000.0,
@@ -1583,8 +1649,21 @@ class DetailedStatisticsReportBuilder:
 
         if section_key == "s5":
             return [
-                ("5.1 Частота диагнозов", "Частота = Число диагнозов в группе / Госпитализации × 100%", self._distribution_lines(s["diagnoses"], total_n)),
-                ("5.2 По классам МКБ", "Частота = Число диагнозов в группе / Госпитализации × 100%", self._distribution_lines(s["mkb_classes"], total_n)),
+                (
+                    "5.1 Частота диагнозов",
+                    "Диагнозы / госпитализации × 100%",
+                    self._distribution_lines(s["diagnoses"], total_n, compact_labels=True),
+                ),
+                (
+                    "5.2 По классам МКБ-10",
+                    "Диагнозы класса / госпитализации × 100%",
+                    self._distribution_lines(s["mkb_classes"], total_n),
+                ),
+                (
+                    "5.3 По рубрикам МКБ без подрубрик",
+                    "Все подрубрики, например N88.2–N88.4, объединяются в N88",
+                    self._distribution_lines(s["mkb_rubrics"], total_n),
+                ),
             ]
 
         if section_key == "s6":
@@ -1743,19 +1822,28 @@ class DetailedStatisticsReportBuilder:
                 return items[section_key]
         return section_key
 
+    @staticmethod
+    def _split_value_and_unit(value):
+        if value is None:
+            return "—", ""
+        text = str(value).strip()
+        if not text:
+            return "—", ""
+        if "<br/>" in text:
+            return text, None
+        percent = re.match(r"^([-+−]?\d+(?:[.,]\d+)?)(%.*)$", text)
+        if percent:
+            return escape(percent.group(1)), escape(percent.group(2))
+        scalar = re.match(
+            r"^([-+−]?\d+(?:[.,]\d+)?(?:\s*/\s*[-+−]?\d+(?:[.,]\d+)?)?)(?:\s+(.+))$",
+            text,
+        )
+        if scalar:
+            return escape(scalar.group(1)), escape(scalar.group(2))
+        return escape(text), ""
+
     def _render_sections_html(self, selected_sections: list[str], s: dict):
         sections_html = []
-
-        def _format_value_cell(value):
-            if value is None:
-                return "—"
-            text = str(value).strip()
-            if not text:
-                return "—"
-            # Для распределений оставляем переносы строк в HTML.
-            if "<br/>" in text:
-                return text
-            return escape(text)
 
         for section_key in selected_sections:
             rows = self._section_rows(section_key, s)
@@ -1764,23 +1852,34 @@ class DetailedStatisticsReportBuilder:
 
             rows_html = []
             for name, formula, value in rows:
+                value_html, unit_html = self._split_value_and_unit(value)
+                if unit_html is None:
+                    result_cells = (
+                        f'<td class="distribution" colspan="2" width="31%">{value_html}</td>'
+                    )
+                else:
+                    result_cells = (
+                        f'<td class="value" width="13%">{value_html}</td>'
+                        f'<td class="unit" width="18%">{unit_html or "—"}</td>'
+                    )
                 rows_html.append(
                     f"""
                     <tr>
-                        <td>{escape(str(name))}</td>
-                        <td>{escape(str(formula))}</td>
-                        <td class="value">{_format_value_cell(value)}</td>
+                        <td width="26%">{escape(str(name))}</td>
+                        <td class="formula" width="43%">{escape(str(formula))}</td>
+                        {result_cells}
                     </tr>
                     """
                 )
 
             section_html = f"""
                 <h2>{escape(self._section_title(section_key))}</h2>
-                <table>
+                <table width="100%" cellspacing="0" cellpadding="0">
                     <tr>
-                        <th>Показатель</th>
-                        <th>Формула</th>
-                        <th class="value">Значение</th>
+                        <th width="26%">Показатель</th>
+                        <th class="formula" width="43%">Формула</th>
+                        <th class="value" width="13%">Значение</th>
+                        <th class="unit" width="18%">Единица</th>
                     </tr>
                     {''.join(rows_html)}
                 </table>
@@ -1834,6 +1933,7 @@ class DetailedStatisticsReportBuilder:
                     }}
                     table {{
                         width: 100%;
+                        table-layout: fixed;
                         border-collapse: collapse;
                         margin-bottom: 12px;
                     }}
@@ -1851,7 +1951,19 @@ class DetailedStatisticsReportBuilder:
                     }}
                     td.value, th.value {{
                         text-align: right;
-                        width: 32%;
+                        width: 13%;
+                    }}
+                    td.unit, th.unit {{
+                        width: 18%;
+                    }}
+                    td.formula, th.formula {{
+                        width: 43%;
+                    }}
+                    th:first-child, td:first-child {{
+                        width: 26%;
+                    }}
+                    td.formula, td.distribution {{
+                        overflow-wrap: anywhere;
                     }}
                     .footnote {{
                         margin-top: 12px;

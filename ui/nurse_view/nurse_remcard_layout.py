@@ -43,6 +43,7 @@ class NurseRemCardLayoutManager(QWidget):
         patient_service=None,
         remcard_service=None,
         parent=None,
+        operblock_service=None,
         w1_handoff: W1LayoutHandoff | None = None,
     ):
         super().__init__(parent)
@@ -51,6 +52,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.role = "Медсестра"
         self.patient_service = patient_service
         self.remcard_service = remcard_service
+        self.operblock_service = operblock_service
         self._w1_handoff = w1_handoff
         self.current_admission_id = None
         self.current_mode = "normal"
@@ -740,9 +742,15 @@ class NurseRemCardLayoutManager(QWidget):
             )
             try:
                 if self.archive_widget is None and self.patient_service:
-                    from ..doctor_view.archive_widget import ArchiveWidget
+                    from ..archive_center.archive_main_widget import ArchiveMainWidget
 
-                    self.archive_widget = ArchiveWidget(self.patient_service, remcard_service=self.remcard_service)
+                    self.archive_widget = ArchiveMainWidget(
+                        self.patient_service,
+                        remcard_service=self.remcard_service,
+                        role="nurse",
+                        allow_edit=False,
+                        operblock_service=self.operblock_service,
+                    )
                     self._archive_layout.addWidget(self.archive_widget)
                 self.selection_stack.setCurrentIndex(2)
                 self._refresh_archive_if_needed(force=True, reset_page=True)
