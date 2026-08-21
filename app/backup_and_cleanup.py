@@ -79,6 +79,7 @@ DAILY_BACKUP_RESERVATION_STALE_HOURS = max(
     1.0,
     float(os.environ.get("REMCARD_DAILY_BACKUP_RESERVATION_STALE_HOURS", "6")),
 )
+DAILY_BACKUP_REPORT_MISSING_DAYS = 3
 BACKUP_TIMEZONE_OFFSET_HOURS = float(os.environ.get("REMCARD_BACKUP_TZ_OFFSET_HOURS", "10"))
 BACKUP_TIMEZONE = timezone(timedelta(hours=BACKUP_TIMEZONE_OFFSET_HOURS))
 
@@ -291,6 +292,24 @@ def _should_report_daily_backup_not_created(result: dict) -> bool:
     return False
 
 
+def _consecutive_missing_daily_backup_dates(result: dict) -> list[str]:
+    backup_date_raw = str(result.get("backup_date") or "").strip()
+    try:
+        backup_date = datetime.strptime(backup_date_raw, "%Y-%m-%d").date()
+    except ValueError:
+        return []
+
+    missing_dates: list[str] = []
+    for days_ago in range(DAILY_BACKUP_REPORT_MISSING_DAYS - 1, -1, -1):
+        candidate = backup_date - timedelta(days=days_ago)
+        candidate_str = candidate.strftime("%Y-%m-%d")
+        paths = _daily_backup_paths(candidate_str)
+        if os.path.exists(paths["backup"]) or os.path.exists(paths["done"]):
+            return []
+        missing_dates.append(candidate_str)
+    return missing_dates
+
+
 def _daily_backup_reason_text(result: dict) -> str:
     status = str(result.get("status") or "").strip()
     reason = str(result.get("reason") or "").strip()
@@ -335,10 +354,14 @@ def _submit_daily_backup_not_created_report(result: dict) -> None:
         reason_text = _daily_backup_reason_text(result)
         text = "\n".join(
             [
-                "Автоматический ночной бекап основной базы не был создан.",
+                (
+                    "Автоматический ночной бекап основной базы не создавался "
+                    f"минимум {DAILY_BACKUP_REPORT_MISSING_DAYS} суток подряд."
+                ),
                 "",
                 f"Причина: {reason_text}",
                 f"Дата бекапа: {result.get('backup_date') or ''}",
+                f"Пропущенные даты: {', '.join(result.get('missing_backup_dates') or [])}",
                 f"Статус: {result.get('status') or ''}",
                 f"Роль: {result.get('role') or ''}",
                 f"Компьютер: {socket.gethostname()}",
@@ -383,7 +406,19 @@ def _maybe_submit_daily_backup_not_created_report(result: dict) -> None:
     if not _should_report_daily_backup_not_created(result):
         return
     try:
-        _submit_daily_backup_not_created_report(dict(result))
+        missing_dates = _consecutive_missing_daily_backup_dates(result)
+        if len(missing_dates) < DAILY_BACKUP_REPORT_MISSING_DAYS:
+            logger.info(
+                "Daily backup missing report deferred: fewer than %s consecutive backup days are missing.",
+                DAILY_BACKUP_REPORT_MISSING_DAYS,
+            )
+            return
+        report_result = {
+            **result,
+            "consecutive_missing_days": DAILY_BACKUP_REPORT_MISSING_DAYS,
+            "missing_backup_dates": missing_dates,
+        }
+        _submit_daily_backup_not_created_report(report_result)
     except Exception as exc:
         logger.warning("Daily backup missing report skipped: %s", exc, exc_info=True)
 
