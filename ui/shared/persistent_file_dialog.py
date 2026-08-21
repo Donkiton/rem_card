@@ -3,20 +3,31 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QIdentityProxyModel, QLocale, QSettings, QTimer, Qt
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QHeaderView,
     QSizePolicy,
     QSplitter,
     QTreeView,
+    QVBoxLayout,
 )
 
 from rem_card.app.paths import get_icon_dir
-from rem_card.ui.shared.custom_title_bar import CustomTitleBar
+from rem_card.ui.shared.custom_title_bar import CustomTitleBar, FRAMELESS_DIALOG_SHELL_STYLE
 from rem_card.ui.styles.settings_surface import prepare_settings_file_dialog
+
+
+_SAVE_DIALOG_SHELL_STYLE = FRAMELESS_DIALOG_SHELL_STYLE + """
+QFrame#RemCardFileDialogContent {
+    background-color: #f8f9fa;
+    border-bottom-left-radius: 5px;
+    border-bottom-right-radius: 5px;
+}
+"""
 
 
 class _RussianFileHeaderProxy(QIdentityProxyModel):
@@ -49,6 +60,7 @@ class PersistentSaveFileDialog(QFileDialog):
         self._state_saved_for_close = False
         self.setObjectName("RemCardSaveFileDialog")
         self.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowMinMaxButtonsHint)
         self.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
         self.setFileMode(QFileDialog.FileMode.AnyFile)
@@ -68,6 +80,10 @@ class PersistentSaveFileDialog(QFileDialog):
         self.setMinimumSize(760, 500)
         self.resize(1040, 680)
         prepare_settings_file_dialog(self)
+        self.setStyleSheet(
+            f"{self.styleSheet()}\n"
+            "QFileDialog#RemCardSaveFileDialog { background: transparent; }"
+        )
         self._configure_file_view()
 
     def _install_custom_title_bar(self, title: str) -> None:
@@ -80,14 +96,12 @@ class PersistentSaveFileDialog(QFileDialog):
             self.setWindowIcon(QIcon(icon_path))
 
         root_layout = self.layout()
-        self.title_bar = CustomTitleBar(self)
-        self.title_bar.setObjectName("DialogTitleBar")
-        self.title_bar.title_label.setObjectName("DialogTitleText")
-        self.title_bar.title_label.setText(title)
 
         if not isinstance(root_layout, QGridLayout):
             # Qt currently builds the non-native QFileDialog on QGridLayout.
             # Keep a safe fallback in case a future Qt version changes it.
+            self.title_bar = CustomTitleBar(self)
+            self.title_bar.title_label.setText(title)
             self.title_bar.setParent(self)
             self.title_bar.setGeometry(0, 0, self.width(), self.title_bar.height())
             self.title_bar.raise_()
@@ -111,7 +125,25 @@ class PersistentSaveFileDialog(QFileDialog):
             item = root_layout.takeAt(0)
             items.append((item, row, column, row_span, column_span, item.alignment()))
 
-        self._file_dialog_content = QFrame(self)
+        self.main_frame = QFrame(self)
+        self.main_frame.setObjectName("ProcedureDialogMainFrame")
+        self.main_frame.setStyleSheet(_SAVE_DIALOG_SHELL_STYLE)
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(30)
+        shadow.setColor(QColor(0, 0, 0, 55))
+        shadow.setOffset(0, 6)
+        self.main_frame.setGraphicsEffect(shadow)
+
+        shell_layout = QVBoxLayout(self.main_frame)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(8)
+
+        self.title_bar = CustomTitleBar(self)
+        self.title_bar.title_label.setText(title)
+        shell_layout.addWidget(self.title_bar)
+
+        self._file_dialog_content = QFrame(self.main_frame)
         self._file_dialog_content.setObjectName("RemCardFileDialogContent")
         content_layout = QGridLayout(self._file_dialog_content)
         content_layout.setContentsMargins(margins)
@@ -137,13 +169,20 @@ class PersistentSaveFileDialog(QFileDialog):
             content_layout.setColumnStretch(column, stretch)
             content_layout.setColumnMinimumWidth(column, column_minimums[column])
 
-        root_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.addWidget(self._file_dialog_content, 1)
+
+        for row in range(root_layout.rowCount()):
+            root_layout.setRowStretch(row, 0)
+            root_layout.setRowMinimumHeight(row, 0)
+        for column in range(root_layout.columnCount()):
+            root_layout.setColumnStretch(column, 0)
+            root_layout.setColumnMinimumWidth(column, 0)
+
+        root_layout.setContentsMargins(10, 10, 10, 10)
         root_layout.setHorizontalSpacing(0)
         root_layout.setVerticalSpacing(0)
-        root_layout.addWidget(self.title_bar, 0, 0)
-        root_layout.addWidget(self._file_dialog_content, 1, 0)
-        root_layout.setRowStretch(0, 0)
-        root_layout.setRowStretch(1, 1)
+        root_layout.addWidget(self.main_frame, 0, 0)
+        root_layout.setRowStretch(0, 1)
         root_layout.setColumnStretch(0, 1)
 
     def _settings(self) -> QSettings:

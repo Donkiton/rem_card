@@ -166,8 +166,11 @@ def test_persistent_save_dialog_is_russian_full_width_and_restores_state(tmp_pat
     assert dialog.testOption(QFileDialog.Option.DontUseNativeDialog)
     assert dialog.windowFlags() & Qt.FramelessWindowHint
     assert not dialog.windowIcon().isNull()
-    assert dialog.title_bar.objectName() == "DialogTitleBar"
-    assert dialog.title_bar.title_label.objectName() == "DialogTitleText"
+    assert dialog.main_frame.objectName() == "ProcedureDialogMainFrame"
+    assert dialog.main_frame.graphicsEffect() is not None
+    assert dialog.layout().contentsMargins().left() == 10
+    assert dialog.title_bar.objectName() == "MainTitleBar"
+    assert dialog.title_bar.title_label.objectName() == "MainTitleText"
     assert dialog.title_bar.title_label.text() == "Сохранить отчёт"
     assert dialog.title_bar.btn_minimize.isVisibleTo(dialog)
     assert dialog.title_bar.btn_maximize.isVisibleTo(dialog)

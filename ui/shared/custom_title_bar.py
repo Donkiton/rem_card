@@ -5,6 +5,51 @@ from PySide6.QtGui import QFont, QPixmap
 from rem_card.app.version import APP_DISPLAY_TITLE
 from rem_card.ui.styles.shared_styles import apply_main_frame_window_style
 
+
+FRAMELESS_DIALOG_SHELL_STYLE = """
+QFrame#ProcedureDialogMainFrame {
+    background-color: #f8f9fa;
+    border: 1px solid #b9c5d3;
+    border-radius: 5px;
+}
+QFrame#MainTitleBar,
+QFrame#DialogTitleBar {
+    background-color: #eef3f8;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+    border-bottom: 1px solid #cdd7e3;
+}
+QLabel#MainTitleText,
+QLabel#DialogTitleText {
+    color: #172033;
+    font-size: 14px;
+    font-weight: bold;
+    background: transparent;
+}
+QPushButton#TitleControlBtn {
+    background: transparent;
+    color: #435060;
+    border: none;
+    border-radius: 5px;
+    padding: 0;
+}
+QPushButton#TitleControlBtn:hover {
+    background: #dbe4ee;
+}
+QPushButton#TitleCloseBtn {
+    background: transparent;
+    color: #435060;
+    border: none;
+    border-radius: 5px;
+    padding: 0;
+}
+QPushButton#TitleCloseBtn:hover {
+    background: #d64545;
+    color: #ffffff;
+}
+"""
+
+
 class CustomTitleBar(QFrame):
     """
     Кастомный заголовок окна в стиле программы.

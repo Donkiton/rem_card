@@ -6,6 +6,7 @@ from PySide6.QtCore import QEvent, QObject
 from PySide6.QtWidgets import QComboBox, QDateTimeEdit, QScrollArea, QWidget
 
 from rem_card.app.paths import get_icon_dir
+from rem_card.ui.shared.custom_title_bar import FRAMELESS_DIALOG_SHELL_STYLE
 
 
 def _procedure_combo_arrow_image() -> str:
@@ -147,14 +148,9 @@ QScrollBar::sub-line:vertical {
 }
 """
 
-PROCEDURE_DIALOG_STYLE = """
+PROCEDURE_DIALOG_STYLE = FRAMELESS_DIALOG_SHELL_STYLE + """
 QDialog {
     background: transparent;
-}
-QFrame#ProcedureDialogMainFrame {
-    background-color: #f8f9fa;
-    border: 1px solid #b9c5d3;
-    border-radius: 5px;
 }
 QWidget#ProcedureDialogBody,
 QWidget#ProcedureTabPage,
@@ -180,45 +176,6 @@ QScrollArea#ProcedureScrollArea QScrollBar:vertical {
 QScrollArea#ProcedureScrollArea QScrollBar:horizontal {
     height: 0;
     background: transparent;
-}
-QFrame#ProcedureDialogTitleBar {
-    background-color: #eef3f8;
-    border-top-left-radius: 5px;
-    border-top-right-radius: 5px;
-    border-bottom: 1px solid #cdd7e3;
-}
-QFrame#MainTitleBar {
-    background-color: #eef3f8;
-    border-top-left-radius: 5px;
-    border-top-right-radius: 5px;
-    border-bottom: 1px solid #cdd7e3;
-}
-QLabel#MainTitleText {
-    color: #172033;
-    font-size: 14px;
-    font-weight: bold;
-    background: transparent;
-}
-QPushButton#TitleControlBtn {
-    background: transparent;
-    color: #435060;
-    border: none;
-    border-radius: 5px;
-    padding: 0;
-}
-QPushButton#TitleControlBtn:hover {
-    background: #dbe4ee;
-}
-QPushButton#TitleCloseBtn {
-    background: transparent;
-    color: #435060;
-    border: none;
-    border-radius: 5px;
-    padding: 0;
-}
-QPushButton#TitleCloseBtn:hover {
-    background: #d64545;
-    color: #ffffff;
 }
 QLabel#ProcedureDialogTitleText {
     color: #172033;
