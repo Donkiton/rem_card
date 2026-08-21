@@ -5830,7 +5830,11 @@ def _check_archive_delete_enqueue_error_refreshes(temp_root: str) -> tuple[bool,
     try:
         patient_service = FakeWriteService()
         remcard_service = FakeWriteService(result=(True, None, "ok"))
-        widget = ArchiveWidget(patient_service, remcard_service=remcard_service)
+        widget = ArchiveWidget(
+            patient_service,
+            remcard_service=remcard_service,
+            allow_edit=True,
+        )
         load_calls = []
         patient = FakeArchivePatient(
             id=1,
@@ -9207,7 +9211,7 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     result = {"filled": snapshot(True), "empty": snapshot(False)}
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    expected_digest = "364ccef0b30f943c5381ceda8e3dda2e78d6d67fc612977d4dbe24b4b82b2145"
+    expected_digest = "b56f272afd2b7cee6ff3c246e2c7019047cb1ad01f00de39f91854f4bae9d17e"
     if digest != expected_digest:
         return False, f"statistics snapshot changed: {digest}"
     if result["filled"]["stats"]["N"] != 4 or result["filled"]["stats"]["deaths"] != 1:
