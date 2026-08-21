@@ -281,14 +281,15 @@ class LightweightW1Shell(QWidget):
             return self.archive_widget
         if self.patient_service is None:
             return None
-        from rem_card.ui.doctor_view.archive_widget import ArchiveWidget
+        from rem_card.ui.archive_center.archive_main_widget import ArchiveMainWidget
 
         allow_archive_edit = self.role == "doctor"
-        self.archive_widget = ArchiveWidget(
+        self.archive_widget = ArchiveMainWidget(
             self.patient_service,
             remcard_service=self.remcard_service,
+            role=self.role,
             allow_edit=allow_archive_edit,
-            operblock_service=self.operblock_service if allow_archive_edit else None,
+            operblock_service=self.operblock_service,
         )
         self._archive_layout.addWidget(self.archive_widget)
         return self.archive_widget

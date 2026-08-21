@@ -842,15 +842,16 @@ class RemCardLayoutManager(QWidget):
             )
             try:
                 if self.archive_widget is None and self.patient_service:
-                    from ..doctor_view.archive_widget import ArchiveWidget
+                    from ..archive_center.archive_main_widget import ArchiveMainWidget
 
                     role_text = str(getattr(self, "role", "") or "").lower()
                     allow_archive_edit = "врач" in role_text or "doctor" in role_text
-                    self.archive_widget = ArchiveWidget(
+                    self.archive_widget = ArchiveMainWidget(
                         self.patient_service,
                         remcard_service=self.remcard_service,
+                        role="doctor" if allow_archive_edit else "nurse",
                         allow_edit=allow_archive_edit,
-                        operblock_service=self.operblock_service if allow_archive_edit else None,
+                        operblock_service=self.operblock_service,
                     )
                     self._archive_layout.addWidget(self.archive_widget)
                 self.selection_stack.setCurrentIndex(2)

@@ -69,10 +69,20 @@ class AdminMainWidget(QWidget):
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        # Совпадает с внешней геометрией архива и соседнего сектора W1a.
+        main_layout.setContentsMargins(0, 5, 5, 4)
+        main_layout.setSpacing(0)
 
-        self.stack = QStackedWidget()
-        main_layout.addWidget(self.stack)
+        self.surface_frame = QFrame(self)
+        self.surface_frame.setObjectName("SettingsCenterFrame")
+        main_layout.addWidget(self.surface_frame)
+
+        surface_layout = QVBoxLayout(self.surface_frame)
+        surface_layout.setContentsMargins(2, 2, 2, 2)
+        surface_layout.setSpacing(0)
+
+        self.stack = QStackedWidget(self.surface_frame)
+        surface_layout.addWidget(self.stack)
 
         self.menu_widget = QWidget()
         self.menu_widget.setObjectName("AdminSettingsMenu")
@@ -322,7 +332,7 @@ class AdminMainWidget(QWidget):
         if self.settings_categories:
             self._select_settings_category(0)
 
-        self.menu_widget.setStyleSheet(
+        self.setStyleSheet(
             build_admin_settings_style(get_theme_manager().current_tokens())
         )
 

@@ -2,11 +2,12 @@ import os
 from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
-                             QPushButton, QLabel, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit,
-                             QButtonGroup)
+                             QPushButton, QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit,
+                             QButtonGroup, QComboBox)
 from rem_card.app.logger import logger
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.archive_date_edit import ArchiveDateEdit
 from rem_card.ui.styles.theme import (
     STYLE_ARCHIVE_FRAME,
     STYLE_ARCHIVE_PAGE_INFO,
@@ -46,14 +47,24 @@ class ArchiveWidget(QWidget):
         *,
         allow_edit: bool = False,
         operblock_service=None,
+        fixed_source_mode: str | None = None,
+        embedded: bool = False,
     ):
         super().__init__(parent)
         self.patient_service = patient_service
         self.remcard_service = remcard_service
         self.operblock_service = operblock_service
         self.allow_edit = bool(allow_edit)
-        self.archive_source_mode = ARCHIVE_MODE_RAO
-        self.show_operblock_toggle = bool(self.allow_edit and self.operblock_service is not None)
+        self.fixed_source_mode = (
+            ARCHIVE_MODE_OPERBLOCK
+            if fixed_source_mode == ARCHIVE_MODE_OPERBLOCK
+            else (ARCHIVE_MODE_RAO if fixed_source_mode == ARCHIVE_MODE_RAO else None)
+        )
+        self.embedded = bool(embedded)
+        self.archive_source_mode = self.fixed_source_mode or ARCHIVE_MODE_RAO
+        self.show_operblock_toggle = bool(
+            self.fixed_source_mode is None and self.allow_edit and self.operblock_service is not None
+        )
         self.all_archived_patients = []
         self.filtered_patients = []
         self.page_size = 50
@@ -72,12 +83,20 @@ class ArchiveWidget(QWidget):
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(3, 3, 3, 3)
+        if self.embedded:
+            main_layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            main_layout.setContentsMargins(3, 3, 3, 3)
 
-        self.frame = QFrame()
-        self.frame.setObjectName("archiveMainFrame")
-        self.frame.setStyleSheet(STYLE_ARCHIVE_FRAME)
+        self.frame = QFrame(self)
+        self.frame.setObjectName("ArchiveDataPanel" if self.embedded else "archiveMainFrame")
+        self.frame.setStyleSheet("" if self.embedded else STYLE_ARCHIVE_FRAME)
         layout = QVBoxLayout(self.frame)
+        if self.embedded:
+            layout.setContentsMargins(0, 0, 0, 0)
+        else:
+            layout.setContentsMargins(9, 9, 9, 9)
+        layout.setSpacing(10)
         
         header_layout = QHBoxLayout()
         self.archive_title = QLabel("Архив пациентов РАО")
@@ -85,57 +104,76 @@ class ArchiveWidget(QWidget):
         self.archive_title.setStyleSheet(STYLE_ARCHIVE_TITLE)
         
         header_layout.addWidget(self.archive_title, alignment=Qt.AlignCenter)
-        layout.addLayout(header_layout)
+        if not self.embedded:
+            layout.addLayout(header_layout)
         
-        # Фильтры
-        filter_layout = QGridLayout()
-        
-        self.date_from = QDateEdit()
-        self.date_from.setCalendarPopup(True)
-        self.date_from.setDate(QDate(2020, 1, 1))
+        # Компактные фильтры в том же порядке, что и основные колонки таблицы.
+        self.filters_frame = QFrame(self.frame)
+        self.filters_frame.setObjectName("ArchiveFiltersFrame")
+        filter_layout = QGridLayout(self.filters_frame)
+        filter_layout.setContentsMargins(12, 10, 12, 10)
+        filter_layout.setHorizontalSpacing(8)
+        filter_layout.setVerticalSpacing(8)
+
+        self.date_from = ArchiveDateEdit(QDate(2000, 1, 1), self.filters_frame)
         self.date_from.dateChanged.connect(self._schedule_filter_reload)
-        
-        self.date_to = QDateEdit()
-        self.date_to.setCalendarPopup(True)
-        self.date_to.setDate(QDate.currentDate())
+
+        self.date_to = ArchiveDateEdit(QDate.currentDate(), self.filters_frame)
         self.date_to.dateChanged.connect(self._schedule_filter_reload)
-        
-        self.search_ib = QLineEdit()
-        self.search_ib.setPlaceholderText("Номер ИБ")
-        self.search_ib.setMinimumWidth(100)
-        self.search_ib.setMaximumWidth(120)
-        self.search_ib.textChanged.connect(self._schedule_filter_reload)
-        
-        self.search_name = QLineEdit()
+
+        self.search_name = QLineEdit(self.filters_frame)
+        self.search_name.setObjectName("ArchiveFilterField")
         self.search_name.setPlaceholderText("ФИО")
+        self.search_name.setMinimumWidth(190)
         self.search_name.textChanged.connect(self._schedule_filter_reload)
-        
-        self.search_diag = QLineEdit()
+
+        self.search_ib = QLineEdit(self.filters_frame)
+        self.search_ib.setObjectName("ArchiveFilterField")
+        self.search_ib.setPlaceholderText("История болезни")
+        self.search_ib.setFixedWidth(150)
+        self.search_ib.textChanged.connect(self._schedule_filter_reload)
+
+        self.search_diag = QLineEdit(self.filters_frame)
+        self.search_diag.setObjectName("ArchiveFilterField")
         self.search_diag.setPlaceholderText("Диагноз")
+        self.search_diag.setMinimumWidth(170)
         self.search_diag.textChanged.connect(self._schedule_filter_reload)
-        
-        lbl_from = QLabel("С:")
+
+        self.table_filter = QComboBox(self.filters_frame)
+        self.table_filter.setObjectName("ArchiveTableFilter")
+        self.table_filter.setFixedWidth(190)
+        self.table_filter.addItem("Все операционные", None)
+        self.table_filter.addItem("Экстренная операционная", "emergency")
+        self.table_filter.addItem("Плановая операционная", "planned")
+        self.table_filter.currentIndexChanged.connect(self._schedule_filter_reload)
+
+        lbl_from = QLabel("С", self.filters_frame)
         lbl_from.setStyleSheet(STYLE_TRANSPARENT_LABEL)
-        filter_layout.addWidget(lbl_from, 0, 0)
-        filter_layout.addWidget(self.date_from, 0, 1)
-        lbl_to = QLabel("По:")
+        lbl_from.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lbl_to = QLabel("По", self.filters_frame)
         lbl_to.setStyleSheet(STYLE_TRANSPARENT_LABEL)
-        filter_layout.addWidget(lbl_to, 0, 2)
-        filter_layout.addWidget(self.date_to, 0, 3)
-        
-        filter_layout.addWidget(self.search_ib, 1, 0, 1, 1)
-        filter_layout.addWidget(self.search_name, 1, 1, 1, 2)
-        filter_layout.addWidget(self.search_diag, 1, 3)
-        
-        # Настраиваем растяжение колонок: колонка ФИО (1) будет в 3 раза шире колонки Диагноза (3)
-        filter_layout.setColumnStretch(1, 3)
-        filter_layout.setColumnStretch(3, 1)
-        
-        layout.addLayout(filter_layout)
+        lbl_to.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        filter_layout.addWidget(self.search_name, 0, 0, 1, 3)
+        filter_layout.addWidget(self.search_ib, 0, 3)
+        filter_layout.addWidget(self.search_diag, 0, 4, 1, 3)
+        filter_layout.addWidget(self.table_filter, 0, 7)
+        filter_layout.addWidget(lbl_from, 1, 0)
+        filter_layout.addWidget(self.date_from, 1, 1)
+        filter_layout.addWidget(lbl_to, 1, 2)
+        filter_layout.addWidget(self.date_to, 1, 3)
+        filter_layout.setColumnStretch(4, 1)
+        filter_layout.setColumnStretch(5, 1)
+        filter_layout.setColumnStretch(6, 1)
+
+        layout.addWidget(self.filters_frame)
         
         # Таблица архива
-        self.table = QTableWidget()
-        self.table.setStyleSheet(STYLE_ARCHIVE_TABLE)
+        self.table = QTableWidget(self.frame)
+        self.table.setObjectName("ArchiveDataTable")
+        self.table.setStyleSheet("" if self.embedded else STYLE_ARCHIVE_TABLE)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
         self._apply_table_headers()
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
@@ -149,12 +187,15 @@ class ArchiveWidget(QWidget):
         layout.addWidget(self.table)
 
         # Пагинация архива
-        self.pagination_bar = QHBoxLayout()
-        self.pagination_bar.setContentsMargins(0, 0, 0, 0)
+        self.pagination_frame = QFrame(self.frame)
+        self.pagination_frame.setObjectName("ArchivePaginationBar")
+        self.pagination_bar = QHBoxLayout(self.pagination_frame)
+        self.pagination_bar.setContentsMargins(9, 7, 9, 7)
         self.pagination_bar.setSpacing(6)
 
-        self.btn_prev_page = QPushButton("◀")
-        self.btn_prev_page.setStyleSheet(STYLE_SMALL_NEUTRAL_BUTTON)
+        self.btn_prev_page = QPushButton("◀", self.pagination_frame)
+        self.btn_prev_page.setObjectName("ArchivePageButton")
+        self.btn_prev_page.setStyleSheet("" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_prev_page.clicked.connect(lambda: self._set_page(self.current_page - 1))
         self.pagination_bar.addWidget(self.btn_prev_page)
 
@@ -163,32 +204,40 @@ class ArchiveWidget(QWidget):
         self.page_buttons_layout.setSpacing(4)
         self.pagination_bar.addLayout(self.page_buttons_layout)
 
-        self.btn_next_page = QPushButton("▶")
-        self.btn_next_page.setStyleSheet(STYLE_SMALL_NEUTRAL_BUTTON)
+        self.btn_next_page = QPushButton("▶", self.pagination_frame)
+        self.btn_next_page.setObjectName("ArchivePageButton")
+        self.btn_next_page.setStyleSheet("" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_next_page.clicked.connect(lambda: self._set_page(self.current_page + 1))
         self.pagination_bar.addWidget(self.btn_next_page)
 
         self.page_info = QLabel("Страница 1 из 1")
-        self.page_info.setStyleSheet(STYLE_ARCHIVE_PAGE_INFO)
+        self.page_info.setObjectName("ArchivePageInfo")
+        self.page_info.setStyleSheet("" if self.embedded else STYLE_ARCHIVE_PAGE_INFO)
         self.pagination_bar.addWidget(self.page_info)
 
         self.pagination_bar.addStretch()
 
-        self.page_jump_input = QLineEdit()
+        self.page_jump_input = QLineEdit(self.pagination_frame)
+        self.page_jump_input.setObjectName("ArchivePageJump")
         self.page_jump_input.setPlaceholderText("№")
         self.page_jump_input.setMaximumWidth(52)
         self.page_jump_input.returnPressed.connect(self._jump_to_page_from_input)
         self.pagination_bar.addWidget(self.page_jump_input)
 
-        self.btn_page_jump = QPushButton("Перейти")
-        self.btn_page_jump.setStyleSheet(STYLE_SMALL_NEUTRAL_BUTTON)
+        self.btn_page_jump = QPushButton("Перейти", self.pagination_frame)
+        self.btn_page_jump.setObjectName("ArchivePageButton")
+        self.btn_page_jump.setStyleSheet("" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_page_jump.clicked.connect(self._jump_to_page_from_input)
         self.pagination_bar.addWidget(self.btn_page_jump)
 
-        layout.addLayout(self.pagination_bar)
+        layout.addWidget(self.pagination_frame)
         
         # Кнопки управления
-        buttons_layout = QHBoxLayout()
+        self.actions_frame = QFrame(self.frame)
+        self.actions_frame.setObjectName("ArchiveActionsBar")
+        buttons_layout = QHBoxLayout(self.actions_frame)
+        buttons_layout.setContentsMargins(9, 7, 9, 7)
+        buttons_layout.setSpacing(7)
         buttons_layout.addStretch()
 
         if self.show_operblock_toggle:
@@ -217,42 +266,55 @@ class ArchiveWidget(QWidget):
             buttons_layout.addWidget(self.btn_mode_operblock)
             buttons_layout.addWidget(self.btn_mode_rao)
 
-        self.btn_open = QPushButton(" Открыть карту")
-        self.btn_open.setStyleSheet(STYLE_NEUTRAL_BUTTON)
+        self.btn_open = QPushButton(" Открыть карту", self.frame)
+        self.btn_open.setObjectName("ArchiveSecondaryAction")
+        self.btn_open.setStyleSheet("" if self.embedded else STYLE_NEUTRAL_BUTTON)
         self.btn_open.setFixedHeight(35)
         self.btn_open.setEnabled(False)
         self.btn_open.clicked.connect(self.on_open_clicked)
 
-        self.btn_edit = QPushButton(" Редактировать")
-        self.btn_edit.setStyleSheet(STYLE_NEUTRAL_BUTTON)
+        self.btn_edit = QPushButton(" Редактировать", self.frame)
+        self.btn_edit.setObjectName("ArchiveSecondaryAction")
+        self.btn_edit.setStyleSheet("" if self.embedded else STYLE_NEUTRAL_BUTTON)
         self.btn_edit.setFixedHeight(35)
         self.btn_edit.setEnabled(False)
-        self.btn_edit.setVisible(self.allow_edit)
+        if not self.allow_edit:
+            self.btn_edit.hide()
         self.btn_edit.clicked.connect(self.on_edit_clicked)
 
-        self.btn_report_stats = QPushButton(" Статистика")
+        self.btn_report_stats = QPushButton(" Статистика", self.frame)
         self.btn_report_stats.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_report_stats.setFixedHeight(35)
         self.btn_report_stats.setEnabled(False)
         self.btn_report_stats.clicked.connect(self.on_report_stats_clicked)
+        if self.embedded:
+            self.btn_report_stats.hide()
 
-        self.btn_graphs = QPushButton(" Сформировать графики")
+        self.btn_graphs = QPushButton(" Сформировать графики", self.frame)
         self.btn_graphs.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_graphs.setFixedHeight(35)
         self.btn_graphs.setEnabled(True)
         self.btn_graphs.clicked.connect(self.on_graphs_clicked)
+        if self.embedded:
+            self.btn_graphs.hide()
 
-        self.btn_delete_last = QPushButton(" Удалить последнюю карту")
-        self.btn_delete_last.setStyleSheet(STYLE_NEUTRAL_BUTTON)
+        self.btn_delete_last = QPushButton(" Удалить последнюю карту", self.frame)
+        self.btn_delete_last.setObjectName("ArchiveDangerAction")
+        self.btn_delete_last.setStyleSheet("" if self.embedded else STYLE_NEUTRAL_BUTTON)
         self.btn_delete_last.setFixedHeight(35)
         self.btn_delete_last.setEnabled(False)
         self.btn_delete_last.clicked.connect(self.on_delete_last_clicked)
+        if not self.allow_edit:
+            self.btn_delete_last.hide()
 
-        self.btn_delete = QPushButton(" Удалить все карты")
-        self.btn_delete.setStyleSheet(STYLE_NEUTRAL_BUTTON)
+        self.btn_delete = QPushButton(" Удалить все карты", self.frame)
+        self.btn_delete.setObjectName("ArchiveDangerAction")
+        self.btn_delete.setStyleSheet("" if self.embedded else STYLE_NEUTRAL_BUTTON)
         self.btn_delete.setFixedHeight(35)
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self.on_delete_clicked)
+        if not self.allow_edit:
+            self.btn_delete.hide()
 
         buttons_layout.addWidget(self.btn_report_stats)
         buttons_layout.addWidget(self.btn_graphs)
@@ -261,8 +323,9 @@ class ArchiveWidget(QWidget):
         buttons_layout.addWidget(self.btn_delete_last)
         buttons_layout.addWidget(self.btn_delete)
         
-        layout.addLayout(buttons_layout)
+        layout.addWidget(self.actions_frame)
         main_layout.addWidget(self.frame)
+        self._sync_archive_mode_ui()
 
     def load_data(self, *_, page: int | None = None, reset_page: bool = False):
         if reset_page:
@@ -285,6 +348,7 @@ class ArchiveWidget(QWidget):
         search_name = self.search_name.text()
         search_ib = self.search_ib.text()
         search_diag = self.search_diag.text()
+        table_code = self.table_filter.currentData() if mode == ARCHIVE_MODE_OPERBLOCK else None
         self._load_token += 1
         load_token = self._load_token
         if mode == ARCHIVE_MODE_OPERBLOCK:
@@ -296,6 +360,7 @@ class ArchiveWidget(QWidget):
                 search_name=search_name,
                 search_ib=search_ib,
                 search_diag=search_diag,
+                table_code=table_code,
             )
         else:
             loader = lambda: self._load_rao_archive_page(
@@ -519,6 +584,8 @@ class ArchiveWidget(QWidget):
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось открыть окно графиков:\n{exc}")
 
     def on_delete_last_clicked(self):
+        if not self.allow_edit:
+            return
         if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
             self._delete_selected_operblock_archive_case()
             return
@@ -564,6 +631,8 @@ class ArchiveWidget(QWidget):
                     )
 
     def on_delete_clicked(self):
+        if not self.allow_edit:
+            return
         if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
             self._delete_all_operblock_archive_cases()
             return
@@ -757,7 +826,8 @@ class ArchiveWidget(QWidget):
         start_page = max(1, end_page - max_visible + 1)
 
         for page in range(start_page, end_page + 1):
-            btn = QPushButton(str(page))
+            btn = QPushButton(str(page), self.pagination_frame)
+            btn.setObjectName("ArchivePageButton")
             btn.setCheckable(True)
             btn.setChecked(page == self.current_page)
             btn.setFixedHeight(26)
@@ -845,9 +915,14 @@ class ArchiveWidget(QWidget):
             paths.append(abs_path)
         return paths
 
-    def _collect_db_paths_for_archive_period(self) -> list[str]:
-        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+    def _collect_db_paths_for_archive_period(
+        self,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+    ) -> list[str]:
+        if start_dt is None or end_dt is None:
             start_dt, end_dt = self._get_archive_period_bounds()
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
             try:
                 if self.operblock_service is not None and hasattr(self.operblock_service, "get_archive_db_paths_for_period"):
                     paths = self.operblock_service.get_archive_db_paths_for_period(start_dt, end_dt)
@@ -855,7 +930,6 @@ class ArchiveWidget(QWidget):
             except Exception:
                 pass
             return self._collect_db_paths_for_current_filter()
-        start_dt, end_dt = self._get_archive_period_bounds()
         try:
             if hasattr(self.patient_service, "get_archive_db_paths_for_period"):
                 paths = self.patient_service.get_archive_db_paths_for_period(start_dt, end_dt)
@@ -968,6 +1042,8 @@ class ArchiveWidget(QWidget):
 
     def set_archive_source_mode(self, mode: str):
         mode = ARCHIVE_MODE_OPERBLOCK if mode == ARCHIVE_MODE_OPERBLOCK else ARCHIVE_MODE_RAO
+        if self.fixed_source_mode is not None and mode != self.fixed_source_mode:
+            return
         if mode == ARCHIVE_MODE_OPERBLOCK and not self.show_operblock_toggle:
             return
         if mode == self.archive_source_mode:
@@ -995,7 +1071,20 @@ class ArchiveWidget(QWidget):
             self.btn_mode_operblock.setChecked(self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK)
         if hasattr(self, "btn_mode_rao"):
             self.btn_mode_rao.setChecked(self.archive_source_mode == ARCHIVE_MODE_RAO)
+        if hasattr(self, "table_filter"):
+            self.table_filter.setVisible(self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK)
         self._apply_table_headers()
+
+    def get_analytics_db_paths(
+        self,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+    ) -> list[str]:
+        """Возвращает архивные БД за указанный период для read-only аналитики.
+
+        Параметры необязательны для обратной совместимости с архивной таблицей.
+        """
+        return list(self._collect_db_paths_for_archive_period(start_dt, end_dt))
 
     def _apply_table_headers(self):
         if not hasattr(self, "table"):
@@ -1018,6 +1107,7 @@ class ArchiveWidget(QWidget):
         search_name: str,
         search_ib: str,
         search_diag: str,
+        table_code: str | None,
     ) -> dict:
         if self.operblock_service is None:
             return {"records": [], "total_count": 0, "page": page, "page_size": page_size}
@@ -1030,8 +1120,11 @@ class ArchiveWidget(QWidget):
                 search_name=search_name,
                 search_ib=search_ib,
                 search_diag=search_diag,
+                table_code=table_code,
             )
         cases = self.operblock_service.list_archived_operation_cases(start_dt=start_dt, end_dt=end_dt)
+        if table_code:
+            cases = [case for case in cases if str((case or {}).get("table_code") or "") == table_code]
         return {"records": list(cases or []), "total_count": len(cases or []), "page": 1, "page_size": page_size}
 
     def _render_operblock_case_row(self, row: int, case: dict, selected_key: str = None):

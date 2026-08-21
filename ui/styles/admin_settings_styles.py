@@ -10,6 +10,12 @@ def build_admin_settings_style(tokens: dict[str, str]) -> str:
         return token(tokens, key, default)
 
     return f"""
+QFrame#SettingsCenterFrame {{
+    background-color: {t("surface.window")};
+    border: 1.5px solid {t("sector.border")};
+    border-radius: 5px;
+}}
+
 QWidget#AdminSettingsMenu,
 QWidget#SettingsContent,
 QWidget#SettingsCategoryPage,
@@ -21,6 +27,14 @@ QFrame#SettingsSidebar {{
     background-color: {t("surface.subtle")};
     border: none;
     border-right: 1px solid {t("border.subtle")};
+    border-top-left-radius: 4px;
+    border-bottom-left-radius: 4px;
+}}
+
+QWidget#SettingsContent {{
+    border: none;
+    border-top-right-radius: 4px;
+    border-bottom-right-radius: 4px;
 }}
 
 QFrame#SettingsBrandCard {{
