@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from rem_card.services.shift_service import ShiftService
 from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.shared.patient_diagnosis import format_patient_diagnosis
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget, QPushButton, QFrame)
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
@@ -291,7 +292,7 @@ class Sector4b(BaseSectorWidget):
             self._stop_recovery_elapsed_timer()
             self.lbl_days.setText("Время в отделении: -" if recovery_mode else "Сутки: -")
         
-        diag = patient.diagnosis_text if patient.diagnosis_text else "-"
+        diag = format_patient_diagnosis(patient)
         metrics = self.lbl_diagnosis.fontMetrics()
         elided_diag = metrics.elidedText(f"Диагноз: {diag}", Qt.ElideRight, 600)
         self.lbl_diagnosis.setText(elided_diag)

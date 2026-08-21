@@ -27,12 +27,13 @@ from rem_card.ui.shared.recovery_elapsed_time import (  # noqa: E402
 
 
 class _Patient:
-    def __init__(self, admission_datetime: datetime):
+    def __init__(self, admission_datetime: datetime, *, mkb_code: str | None = None):
         self.id = 1
         self.bed_number = 10
         self.history_number = "123"
         self.admission_datetime = admission_datetime
         self.diagnosis_text = "Тест"
+        self.mkb_code = mkb_code
 
     def get_display_name(self):
         return "Пациент Тест"
@@ -66,6 +67,30 @@ class RecoveryBedElapsedTimerTest(unittest.TestCase):
             Sector4b._format_department_time(admission, admission + timedelta(minutes=40)),
             "0ч 40м",
         )
+
+    def test_w1_diagnosis_includes_saved_mkb_code_for_every_bed_type(self):
+        admission = datetime(2026, 6, 18, 8, 0)
+        widget = Sector4b()
+        try:
+            patient = _Patient(admission, mkb_code="N88.0")
+
+            widget.update_patient_info(patient, admission, is_recovery=False)
+            self.assertEqual(widget.lbl_diagnosis.text(), "Диагноз: N88.0 - Тест")
+
+            widget.update_patient_info(patient, admission, is_recovery=True)
+            self.assertEqual(widget.lbl_diagnosis.text(), "Диагноз: N88.0 - Тест")
+        finally:
+            widget.deleteLater()
+
+    def test_w1_diagnosis_without_mkb_code_keeps_plain_text(self):
+        admission = datetime(2026, 6, 18, 8, 0)
+        widget = Sector4b()
+        try:
+            widget.update_patient_info(_Patient(admission), admission)
+
+            self.assertEqual(widget.lbl_diagnosis.text(), "Диагноз: Тест")
+        finally:
+            widget.deleteLater()
 
     def test_next_tick_is_scheduled_on_next_ten_minute_boundary(self):
         admission = datetime(2026, 6, 18, 8, 0)

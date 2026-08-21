@@ -51,6 +51,7 @@ class VitalsWidget(QWidget):
         self._time_quick_actions = list(time_quick_actions or [])
         self._time_manually_edited = False
         self._programmatic_time_change = False
+        self._time_context_key = self._make_time_context_key(admission_id, self.shift_date)
         self._last_settings = None
         self._cached_settings = None
         self._db_cache_dirty = True
@@ -185,6 +186,21 @@ class VitalsWidget(QWidget):
     def _minute_floor(value: datetime) -> datetime:
         return value.replace(second=0, microsecond=0)
 
+    @staticmethod
+    def _make_time_context_key(admission_id, shift_date):
+        try:
+            normalized_admission_id = int(admission_id) if admission_id is not None else None
+        except (TypeError, ValueError):
+            normalized_admission_id = admission_id
+        if isinstance(shift_date, datetime):
+            normalized_shift_date = shift_date.date()
+        else:
+            normalized_shift_date = shift_date
+        return normalized_admission_id, normalized_shift_date
+
+    def _time_context_changed(self) -> bool:
+        return self._make_time_context_key(self.admission_id, self.shift_date) != self._time_context_key
+
     def _is_status_transition_minute(self, status_event, current_dt: datetime) -> bool:
         event_start = getattr(status_event, "start_time", None)
         if not event_start:
@@ -265,16 +281,19 @@ class VitalsWidget(QWidget):
 
     def set_context(self, admission_id, shift_date):
         """Обновляет контекст виджета (пациент/дата) без его пересоздания."""
+        context_changed = self._make_time_context_key(admission_id, shift_date) != self._time_context_key
         self.admission_id = admission_id
         self.shift_date = shift_date
         self.time_edit.set_context(self.service, self.shift_date)
+        if context_changed:
+            self._time_manually_edited = False
         self.mark_dirty()
         
         if self.service:
             try:
                 self.s_start, self.s_end = self.service.get_day_period(self.shift_date)
                 self.patient = self.service.get_patient(self.admission_id)
-                self.refresh_time_only()
+                self.refresh_time_only(force=context_changed)
                 self.update_undo_button_state()
                 self.build_grid()
             except Exception as e:
@@ -282,6 +301,9 @@ class VitalsWidget(QWidget):
                 logger.error(f"Error updating context in VitalsWidget: {e}")
 
     def apply_context_snapshot(self, *, patient, settings, effective_bounds, has_vitals: bool, vitals=None):
+        context_changed = self._time_context_changed()
+        if context_changed:
+            self._time_manually_edited = False
         self.patient = patient
         self.time_edit.set_context(self.service, self.shift_date)
         self._cached_settings = dict(settings or {})
@@ -292,7 +314,7 @@ class VitalsWidget(QWidget):
         self._last_settings = None
         self.build_grid()
         self.update_undo_button_state()
-        self.refresh_time_only()
+        self.refresh_time_only(force=context_changed)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -415,18 +437,18 @@ class VitalsWidget(QWidget):
         finally:
             self.setUpdatesEnabled(True)
 
-    def refresh_time_only(self):
+    def refresh_time_only(self, *, force: bool = False):
         """Обновляет только предлагаемое время ввода на основе последних данных в БД."""
         if not self.service or not self.admission_id:
             return
 
-        if any(w.hasFocus() for w in [self.time_edit, self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp]):
+        if not force and any(w.hasFocus() for w in [self.time_edit, self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp]):
             return
 
         is_editing = any([self.sys.text().strip(), self.dia.text().strip(), self.pulse.text().strip(), 
                          self.temp.text().strip(), self.spo2.text().strip(), self.rr.text().strip(), self.cvp.text().strip()])
         
-        if is_editing or getattr(self, '_time_manually_edited', False):
+        if not force and (is_editing or getattr(self, '_time_manually_edited', False)):
             return
 
         try:
@@ -454,6 +476,7 @@ class VitalsWidget(QWidget):
                 has_vitals=self._has_vitals,
             )
             self._set_time_from_service(suggested_time)
+            self._time_context_key = self._make_time_context_key(self.admission_id, self.shift_date)
         except Exception as e:
             from ...app.logger import logger
             logger.error(f"Error in refresh_time_only: {e}")

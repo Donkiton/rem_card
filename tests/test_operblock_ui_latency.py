@@ -52,6 +52,11 @@ class _ImmediateVitalService:
         return []
 
     @staticmethod
+    def suggest_vital_time(_shift_date, *, effective_start=None, effective_end=None, has_vitals=False):
+        _ = effective_start, effective_end, has_vitals
+        return "08:00"
+
+    @staticmethod
     def add_vital(dto, _shift_date, force=False, expected_revision=None):
         _ = force, expected_revision
         dto.id = 101
@@ -178,6 +183,72 @@ class OperBlockUiLatencyTest(unittest.TestCase):
         self.assertTrue(widget.undo_btn.isEnabled())
         self.assertEqual(changes[0]["action"], "upsert")
         self.assertEqual(changes[0]["vital"].id, 101)
+        widget.deleteLater()
+
+    def test_vital_time_resets_when_patient_context_changes(self):
+        service = _ImmediateVitalService()
+        shift_date = datetime(2025, 1, 1, 8, 0)
+        widget = VitalsWidget(
+            service,
+            5,
+            shift_date,
+            forced_settings={
+                "ad": 1,
+                "pulse": 1,
+                "temp": 0,
+                "spo2": 1,
+                "rr": 0,
+                "cvp": 0,
+            },
+        )
+        patient = SimpleNamespace(admission_datetime=None)
+
+        widget.time_edit.set_time("09:00")
+        self.assertTrue(widget._time_manually_edited)
+        widget._set_time_from_service("10:00")
+
+        widget.admission_id = 6
+        widget.apply_context_snapshot(
+            patient=patient,
+            settings={},
+            effective_bounds=(shift_date, shift_date + timedelta(days=1)),
+            has_vitals=False,
+            vitals=[],
+        )
+
+        self.assertEqual(widget.time_edit.value_str(), "08:00")
+        self.assertFalse(widget._time_manually_edited)
+        widget.deleteLater()
+
+    def test_vital_time_is_preserved_for_same_patient_context_refresh(self):
+        service = _ImmediateVitalService()
+        shift_date = datetime(2025, 1, 1, 8, 0)
+        widget = VitalsWidget(
+            service,
+            5,
+            shift_date,
+            forced_settings={
+                "ad": 1,
+                "pulse": 1,
+                "temp": 0,
+                "spo2": 1,
+                "rr": 0,
+                "cvp": 0,
+            },
+        )
+        patient = SimpleNamespace(admission_datetime=None)
+        widget.time_edit.set_time("09:30")
+
+        widget.apply_context_snapshot(
+            patient=patient,
+            settings={},
+            effective_bounds=(shift_date, shift_date + timedelta(days=1)),
+            has_vitals=False,
+            vitals=[],
+        )
+
+        self.assertEqual(widget.time_edit.value_str(), "09:30")
+        self.assertTrue(widget._time_manually_edited)
         widget.deleteLater()
 
     def test_parent_vital_callback_does_not_recheck_database(self):
