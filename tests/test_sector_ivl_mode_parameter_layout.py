@@ -15,7 +15,7 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QSizePolicy  # noqa: E402
 
 from rem_card.ui.rem_card_sectors.sector_ivl import SectorIvl  # noqa: E402
 
@@ -92,6 +92,98 @@ class SectorIvlModeParameterLayoutTest(unittest.TestCase):
             self.widget.btn_undo,
         ):
             self.assertGreaterEqual(button.width(), button.sizeHint().width(), button.text())
+
+    def test_extubation_datetime_is_left_of_indications(self):
+        self.assertLess(
+            self.widget.extubation_dt_edit.parentWidget().width(),
+            self.widget.start_dt_edit.parentWidget().width(),
+        )
+
+        self.widget.resize(900, 560)
+        self.app.processEvents()
+
+        self.assertLess(self.widget.extubation_dt_edit.geometry().right(), self.widget.extubation_time_spacer.x())
+        self.assertLess(self.widget.extubation_time_spacer.geometry().right(), self.widget.extubation_reason_edit.x())
+        self.assertGreaterEqual(
+            self.widget.extubation_reason_edit.x() - self.widget.extubation_dt_edit.geometry().right(),
+            20,
+        )
+        self.assertLess(self.widget.extubation_reason_edit.width(), self.widget.extubation_dt_edit.width())
+        self.assertLess(self.widget.extubation_reason_edit.x(), self.widget.extubation_o2_flow_edit.x())
+        self.assertEqual(self.widget.extubation_dt_edit.sizePolicy().horizontalPolicy(), QSizePolicy.Fixed)
+        placeholder = self.widget.extubation_reason_edit.lineEdit().placeholderText()
+        placeholder_width = self.widget.extubation_reason_edit.lineEdit().fontMetrics().horizontalAdvance(placeholder) + 48
+        self.assertGreaterEqual(self.widget.extubation_reason_edit.width(), placeholder_width)
+
+    def test_extubation_datetime_defaults_to_now_and_respects_active_case_start(self):
+        case_start = datetime(2026, 6, 27, 16, 15)
+        active_case = SimpleNamespace(
+            id=7,
+            episode_number=2,
+            revision=1,
+            start_time=case_start,
+        )
+        snapshot = {
+            "summary": {
+                "active_case": active_case,
+                "case_duration_seconds": 60,
+                "tube_duration_seconds": 60,
+                "tube_alert": False,
+                "total_duration_seconds": 60,
+            },
+            "timeline": [],
+            "latest_case": None,
+        }
+        self.widget.admission_id = 42
+
+        before = datetime.now()
+        self.widget._apply_snapshot(snapshot)
+        after = datetime.now()
+        selected = self.widget.extubation_dt_edit.dateTime().toPython()
+
+        self.assertLess(abs((selected - before).total_seconds()), 1)
+        self.assertLessEqual(selected, after)
+        self.assertEqual(self.widget.extubation_dt_edit.minimumDateTime().toPython(), case_start)
+
+        edited = datetime(2026, 6, 28, 9, 30)
+        self.widget.extubation_dt_edit.setDateTime(edited)
+        self.widget._apply_snapshot(snapshot)
+        self.assertEqual(self.widget.extubation_dt_edit.dateTime().toPython(), edited)
+
+        self.widget.extubation_dt_edit.setDateTime(datetime(2026, 6, 27, 15, 0))
+        self.assertEqual(self.widget.extubation_dt_edit.dateTime().toPython(), case_start)
+
+    def test_close_case_uses_selected_extubation_datetime(self):
+        captured = {}
+
+        class Service:
+            @staticmethod
+            def enqueue_write(**kwargs):
+                captured.update(kwargs)
+                return True
+
+            @staticmethod
+            def close_case(case_id, **kwargs):
+                captured["closed_case_id"] = case_id
+                captured["close_kwargs"] = kwargs
+                return None
+
+        selected = datetime(2026, 6, 28, 9, 30)
+        self.widget.remcard_service = Service()
+        self.widget.admission_id = 42
+        self.widget.active_case_id = 7
+        self.widget._active_case_revision = 3
+        self.widget._extubation_min_datetime = datetime(2026, 6, 27, 16, 15)
+        self.widget.extubation_dt_edit.setMinimumDateTime(self.widget.start_dt_edit.minimumDateTime())
+        self.widget.extubation_dt_edit.setDateTime(selected)
+        self.widget.extubation_reason_edit.setEditText("В сознании, стабилен")
+
+        self.widget._on_close_case_clicked()
+        captured["operation"]()
+
+        self.assertEqual(captured["closed_case_id"], 7)
+        self.assertEqual(captured["close_kwargs"]["end_time"], selected)
+        self.assertEqual(captured["close_kwargs"]["expected_case_revision"], 3)
 
     def test_ivl_write_is_single_attempt_and_shows_loading_state(self):
         captured = {}

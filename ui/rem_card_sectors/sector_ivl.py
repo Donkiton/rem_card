@@ -228,6 +228,8 @@ class SectorIvl(BaseSectorWidget):
         self._history_events = []
         self._history_sort_desc = True
         self._restoring_history_header = False
+        self._extubation_context_key: Optional[tuple[int, int]] = None
+        self._extubation_min_datetime: Optional[datetime] = None
         self._save_history_header_timer = QTimer(self)
         self._save_history_header_timer.setSingleShot(True)
         self._save_history_header_timer.timeout.connect(self._save_history_header_state)
@@ -833,37 +835,62 @@ class SectorIvl(BaseSectorWidget):
         start_grid.setColumnStretch(1, 1)
         start_grid.setColumnStretch(2, 1)
         start_layout.addLayout(start_grid)
-        start_extubation_row.addWidget(start_card, 1)
+        start_extubation_row.addWidget(start_card, 11)
 
         extubation_card, extubation_layout = self._make_card("Показания к экстубации", "pokazania_ivl.png")
         extubation_grid = QGridLayout()
         extubation_grid.setContentsMargins(0, 0, 0, 0)
-        extubation_grid.setHorizontalSpacing(8)
+        extubation_grid.setHorizontalSpacing(10)
         extubation_grid.setVerticalSpacing(4)
-        self.lbl_extubation_reason = self._make_field_label("")
+        self.extubation_dt_edit = ClickSectionWheelDateTimeEdit()
+        self.extubation_dt_edit.setCalendarPopup(True)
+        self.extubation_dt_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
+        self.extubation_dt_edit.setDateTime(QDateTime.currentDateTime())
+        self.extubation_dt_edit.setToolTip("Время экстубации не может быть раньше начала текущего случая ИВЛ")
+        self.lbl_extubation_reason = self._make_field_label("Показания")
         self.extubation_reason_edit = QComboBox()
         self.extubation_reason_edit.setEditable(True)
         self.extubation_reason_edit.addItem(self.DEFAULT_EXTUBATION_REASON)
         extubation_reason_line = self.extubation_reason_edit.lineEdit()
         if extubation_reason_line:
-            extubation_reason_line.setPlaceholderText("Показания к экстубации")
+            extubation_reason_line.setPlaceholderText("Текст")
         self._clear_extubation_reason()
         self.lbl_extubation_o2 = self._make_field_label("Поток O<sub>2</sub>, л/мин")
         self.lbl_extubation_o2.setTextFormat(Qt.RichText)
+        self.lbl_extubation_o2.setFixedWidth(98)
+        self.lbl_extubation_o2.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         self.extubation_o2_flow_edit = QLineEdit()
         self.extubation_o2_flow_edit.setPlaceholderText("л/мин")
         self.extubation_o2_flow_edit.setValidator(QDoubleValidator(0.0, 100.0, 2, self))
-        extubation_grid.addWidget(self.lbl_extubation_reason, 0, 0)
-        self._configure_field(self.extubation_reason_edit, min_width=160)
-        extubation_grid.addWidget(self.extubation_reason_edit, 1, 0)
-        extubation_grid.addWidget(self.lbl_extubation_o2, 0, 1)
+        self.lbl_extubation_time = self._add_labeled_field(
+            extubation_grid,
+            0,
+            "Время экстубации",
+            self.extubation_dt_edit,
+            min_width=148,
+        )
+        self.lbl_extubation_time.setFixedWidth(156)
+        self.lbl_extubation_time.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        self.extubation_dt_edit.setFixedWidth(156)
+        self.extubation_dt_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.extubation_time_spacer = QWidget()
+        self.extubation_time_spacer.setFixedWidth(1)
+        self.extubation_time_spacer.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        extubation_grid.addWidget(self.extubation_time_spacer, 0, 1, 2, 1)
+        extubation_grid.addWidget(self.lbl_extubation_reason, 0, 2)
+        self._configure_field(self.extubation_reason_edit, min_width=112)
+        extubation_grid.addWidget(self.extubation_reason_edit, 1, 2)
+        extubation_grid.addWidget(self.lbl_extubation_o2, 0, 3)
         self._configure_field(self.extubation_o2_flow_edit, min_width=80)
         self.extubation_o2_flow_edit.setFixedWidth(98)
-        extubation_grid.addWidget(self.extubation_o2_flow_edit, 1, 1)
-        extubation_grid.setColumnStretch(0, 1)
+        self.extubation_o2_flow_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        extubation_grid.addWidget(self.extubation_o2_flow_edit, 1, 3)
+        extubation_grid.setColumnStretch(0, 0)
         extubation_grid.setColumnStretch(1, 0)
+        extubation_grid.setColumnStretch(2, 1)
+        extubation_grid.setColumnStretch(3, 0)
         extubation_layout.addLayout(extubation_grid)
-        start_extubation_row.addWidget(extubation_card, 1)
+        start_extubation_row.addWidget(extubation_card, 10)
 
         body_layout.addLayout(start_extubation_row)
 
@@ -1187,6 +1214,7 @@ class SectorIvl(BaseSectorWidget):
         else:
             self._sync_start_event_time()
         self._apply_event_time_constraints()
+        self._apply_extubation_time_constraints(active_case, timeline)
 
     def _set_actions_enabled(self, active_case_present: bool, has_case_history: bool = False):
         self.btn_replace_tube.setEnabled(active_case_present)
@@ -1195,6 +1223,7 @@ class SectorIvl(BaseSectorWidget):
         self.btn_create_case.setEnabled(not active_case_present)
         self.btn_undo.setEnabled(has_case_history)
         self.mode_combo.setEnabled(True)
+        self.extubation_dt_edit.setEnabled(active_case_present)
 
         if active_case_present:
             self._populate_event_types(self.ACTIVE_EVENT_CODES)
@@ -1471,6 +1500,31 @@ class SectorIvl(BaseSectorWidget):
                 return active_case.start_time
         return self.start_dt_edit.dateTime().toPython()
 
+    def _apply_extubation_time_constraints(self, active_case, timeline):
+        if not active_case:
+            self._extubation_context_key = None
+            self._extubation_min_datetime = None
+            self.extubation_dt_edit.setDateTime(QDateTime.currentDateTime())
+            return
+
+        min_datetime = active_case.start_time
+        for event in timeline:
+            if getattr(event, "ivl_episode_id", None) != active_case.id:
+                continue
+            event_time = getattr(event, "timestamp", None)
+            if event_time is not None:
+                min_datetime = max(min_datetime, event_time)
+
+        context_key = (int(self.admission_id or 0), int(active_case.id))
+        self.extubation_dt_edit.setMinimumDateTime(QDateTime(min_datetime))
+        if self._extubation_context_key != context_key:
+            self.extubation_dt_edit.setDateTime(QDateTime.currentDateTime())
+            self._extubation_context_key = context_key
+
+        if self.extubation_dt_edit.dateTime().toPython() < min_datetime:
+            self.extubation_dt_edit.setDateTime(QDateTime(min_datetime))
+        self._extubation_min_datetime = min_datetime
+
     def _on_mode_changed(self):
         if self.event_type_combo.currentData() not in ("START_VENT", "MODE_CHANGE"):
             self._apply_mode_fields([])
@@ -1677,7 +1731,14 @@ class SectorIvl(BaseSectorWidget):
         service = self.remcard_service
         active_case_id = int(self.active_case_id)
         expected_case_revision = self._active_case_revision
-        end_time = self.event_time_edit.dateTime().toPython()
+        end_time = self.extubation_dt_edit.dateTime().toPython()
+        if self._extubation_min_datetime and end_time < self._extubation_min_datetime:
+            CustomMessageBox.warning(
+                self,
+                "ИВЛ",
+                "Время экстубации не может быть раньше начала текущего случая ИВЛ или последнего события.",
+            )
+            return
 
         def operation():
             return service.close_case(
