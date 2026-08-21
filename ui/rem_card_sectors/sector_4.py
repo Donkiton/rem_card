@@ -1,6 +1,7 @@
 from rem_card.services.shift_service import ShiftService
 from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.shared.patient_diagnosis import format_patient_diagnosis
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget)
 from PySide6.QtCore import Qt
 from rem_card.ui.styles.theme import COLOR_PRIMARY_DARK
@@ -141,7 +142,7 @@ class Sector4(BaseSectorWidget):
         else:
             self.lbl_days.setText("Время в отделении: -" if recovery_mode else "Сутки: -")
             
-        diag = patient.diagnosis_text if patient.diagnosis_text else "-"
+        diag = format_patient_diagnosis(patient)
         self.lbl_diagnosis.setText(f"Диагноз: {diag}")
 
     def _resolve_recovery_mode(self, patient, explicit_value) -> bool:
