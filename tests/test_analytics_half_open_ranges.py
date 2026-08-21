@@ -45,7 +45,10 @@ def _create_remcard_analytics_schema(conn: sqlite3.Connection) -> None:
             diagnosis_code TEXT,
             diagnosis_text TEXT,
             bed_number INTEGER,
-            recovery_bed_stay INTEGER DEFAULT 0
+            recovery_bed_stay INTEGER DEFAULT 0,
+            unit_scope TEXT,
+            admission_type TEXT,
+            merged_into_admission_id INTEGER
         );
         CREATE INDEX idx_admissions_admission_datetime
             ON admissions(admission_datetime);
@@ -440,6 +443,98 @@ def test_multi_db_snapshot_excludes_soft_merged_admissions(tmp_path: Path):
     )
     try:
         rows = manager.get_connection().execute("SELECT id FROM admissions").fetchall()
+        assert [int(row[0]) for row in rows] == [1]
+    finally:
+        manager.close_connection()
+
+
+def test_rao_analytics_excludes_operblock_admissions_and_related_rows():
+    conn = sqlite3.connect(":memory:")
+    try:
+        _create_remcard_analytics_schema(conn)
+        conn.executemany(
+            """
+            INSERT INTO admissions (
+                id, patient_id, admission_datetime, transfer_datetime, outcome,
+                bed_number, unit_scope, admission_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, 1, "2026-07-12 08:00:00", "2026-07-12 12:00:00", "переведен", 1, None, None),
+                (2, 2, "2026-07-12 09:00:00", None, None, 1, "operblock", "operblock"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO operations (id, admission_id, operation_datetime, description) VALUES (?, ?, ?, 'Операция')",
+            [
+                (1, 1, "2026-07-12 10:00:00"),
+                (2, 2, "2026-07-12 10:30:00"),
+            ],
+        )
+
+        context = DetailedStatisticsReportBuilder(
+            _Manager(conn),
+            "2026-07-12",
+            "2026-07-12",
+            include_recovery_beds=True,
+        )._fetch_context()
+        html = build_statistical_report_html(
+            _Manager(conn),
+            "2026-07-12",
+            "2026-07-12",
+        )
+
+        assert [row["admission_id"] for row in context["admissions"]] == [1]
+        assert context["operations_adm_ids"] == [1]
+        assert len(context["load_admissions"]) == 1
+        assert 'Поступило пациентов</td><td class="num">1</td>' in html
+        assert 'Операций выполнено</td><td class="num">1</td>' in html
+    finally:
+        conn.close()
+
+
+def test_multi_db_snapshot_excludes_operblock_and_keeps_carry_in_admission(tmp_path: Path):
+    db_path = tmp_path / "analytics_scope.sqlite"
+    source = sqlite3.connect(db_path)
+    try:
+        source.execute(
+            """
+            CREATE TABLE admissions (
+                id INTEGER PRIMARY KEY,
+                admission_datetime TEXT,
+                transfer_datetime TEXT,
+                death_datetime TEXT,
+                unit_scope TEXT,
+                admission_type TEXT,
+                merged_into_admission_id INTEGER
+            )
+            """
+        )
+        source.executemany(
+            """
+            INSERT INTO admissions (
+                id, admission_datetime, transfer_datetime, death_datetime,
+                unit_scope, admission_type, merged_into_admission_id
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL)
+            """,
+            [
+                (1, "2026-07-13 20:00:00", "2026-07-14 10:00:00", None, None, None),
+                (2, "2026-07-13 10:00:00", "2026-07-14 00:00:00", None, None, None),
+                (3, "2026-07-10 08:00:00", None, None, "operblock", "operblock"),
+                (4, "2026-07-15 08:00:00", None, None, None, None),
+            ],
+        )
+        source.commit()
+    finally:
+        source.close()
+
+    manager = create_multi_db_analytics_manager(
+        [str(db_path)],
+        start_dt="2026-07-14",
+        end_dt="2026-07-14",
+    )
+    try:
+        rows = manager.get_connection().execute("SELECT id FROM admissions ORDER BY id").fetchall()
         assert [int(row[0]) for row in rows] == [1]
     finally:
         manager.close_connection()

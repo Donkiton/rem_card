@@ -306,10 +306,39 @@ def _copy_table_rows(
     where_parts: list[str] = []
     params_list: list[object] = []
     if start_dt and end_dt and time_col and time_col in source_cols:
-        where_parts.append(f'"{time_col}" >= ? AND "{time_col}" < ?')
-        params_list.extend((start_dt, end_dt))
-    if table_name == "admissions" and "merged_into_admission_id" in source_cols:
-        where_parts.append('"merged_into_admission_id" IS NULL')
+        if table_name == "admissions":
+            # Keep admissions that overlap the report period, including patients
+            # admitted before its first day and still present at the boundary.
+            where_parts.append(f'DATETIME("{time_col}") < DATETIME(?)')
+            params_list.append(end_dt)
+            if "transfer_datetime" in source_cols and "death_datetime" in source_cols:
+                where_parts.append(
+                    """
+                    (
+                        ("transfer_datetime" IS NULL AND "death_datetime" IS NULL)
+                        OR DATETIME(
+                            CASE
+                                WHEN "transfer_datetime" IS NULL THEN "death_datetime"
+                                WHEN "death_datetime" IS NULL THEN "transfer_datetime"
+                                WHEN DATETIME("transfer_datetime") <= DATETIME("death_datetime")
+                                    THEN "transfer_datetime"
+                                ELSE "death_datetime"
+                            END
+                        ) > DATETIME(?)
+                    )
+                    """.strip()
+                )
+                params_list.append(start_dt)
+        else:
+            where_parts.append(f'"{time_col}" >= ? AND "{time_col}" < ?')
+            params_list.extend((start_dt, end_dt))
+    if table_name == "admissions":
+        if "unit_scope" in source_cols:
+            where_parts.append('LOWER(TRIM(COALESCE("unit_scope", \'\'))) <> \'operblock\'')
+        if "admission_type" in source_cols:
+            where_parts.append('LOWER(TRIM(COALESCE("admission_type", \'\'))) <> \'operblock\'')
+        if "merged_into_admission_id" in source_cols:
+            where_parts.append('"merged_into_admission_id" IS NULL')
     if where_parts:
         query += " WHERE " + " AND ".join(where_parts)
 

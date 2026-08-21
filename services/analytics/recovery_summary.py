@@ -299,12 +299,19 @@ def _fetch_admission_rows(conn, start_dt: datetime, end_dt: datetime) -> list[di
         if "merged_into_admission_id" in columns
         else ""
     )
+    scope_filters = []
+    if "unit_scope" in columns:
+        scope_filters.append("LOWER(TRIM(COALESCE(unit_scope, ''))) <> 'operblock'")
+    if "admission_type" in columns:
+        scope_filters.append("LOWER(TRIM(COALESCE(admission_type, ''))) <> 'operblock'")
+    scope_filter = "".join(f" AND {condition}" for condition in scope_filters)
     query = f"""
         SELECT {', '.join(select_parts)}
         FROM main.admissions
         WHERE DATETIME(admission_datetime) >= DATETIME(?)
           AND DATETIME(admission_datetime) < DATETIME(?)
           {merged_filter}
+          {scope_filter}
     """
     cursor = conn.execute(
         query,

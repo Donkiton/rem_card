@@ -564,6 +564,17 @@ class DetailedStatisticsReportBuilder:
                 columns = [column[0] for column in cursor.description]
                 raw_admissions = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+                cursor.execute(
+                    """
+                    SELECT admission_datetime, transfer_datetime, death_datetime
+                    FROM admissions
+                    WHERE DATETIME(admission_datetime) < DATETIME(?)
+                    """,
+                    (self.end_date_str,),
+                )
+                load_columns = [column[0] for column in cursor.description]
+                raw_load_admissions = [dict(zip(load_columns, row)) for row in cursor.fetchall()]
+
                 admissions = []
                 for row in raw_admissions:
                     admission_id = self._safe_int(row.get("id"), default=0)
@@ -617,6 +628,27 @@ class DetailedStatisticsReportBuilder:
                             "is_death": is_death,
                             "death_time_hours": death_time_hours,
                             "death_doctor": death_doctor,
+                        }
+                    )
+
+                load_admissions = []
+                period_end = self._end_dt + timedelta(seconds=1)
+                for row in raw_load_admissions:
+                    admission_dt = self._parse_datetime(row.get("admission_datetime"))
+                    if admission_dt is None or admission_dt >= period_end:
+                        continue
+                    transfer_dt = self._parse_datetime(row.get("transfer_datetime"))
+                    death_dt = self._parse_datetime(row.get("death_datetime"))
+                    end_dt = min(
+                        [dt for dt in (transfer_dt, death_dt, period_end) if dt is not None]
+                    )
+                    if end_dt <= self._start_dt or end_dt <= admission_dt:
+                        continue
+                    load_admissions.append(
+                        {
+                            "admission_dt": admission_dt,
+                            "transfer_dt": transfer_dt,
+                            "death_dt": death_dt,
                         }
                     )
 
@@ -689,6 +721,7 @@ class DetailedStatisticsReportBuilder:
 
                 return {
                     "admissions": admissions,
+                    "load_admissions": load_admissions,
                     "operations_adm_ids": operations_adm_ids,
                     "transfusions": transfusions,
                     "ivl_episodes": ivl_episodes,
@@ -1226,37 +1259,48 @@ class DetailedStatisticsReportBuilder:
     def _statistics_beds(self):
         return STATISTICAL_BED_COUNT
 
-    def _admission_active_on_day(self, admission, day_start, day_end):
-        adm_start = admission["admission_dt"]
-        end_candidates = [self._end_dt]
-        if admission["transfer_dt"] is not None:
-            end_candidates.append(admission["transfer_dt"])
-        if admission["death_dt"] is not None:
-            end_candidates.append(admission["death_dt"])
-        adm_end = min(end_candidates)
-        return adm_start < day_end and adm_end > day_start
-
-    def _daily_load_stats(self, admissions, bed_days, period_days, beds):
+    def _concurrent_load_stats(self, admissions, bed_days, period_days, beds):
         mean_patients = self._safe_div(bed_days, period_days)
-        daily_counts = []
-        for day_idx in range(period_days):
-            day_start = datetime.combine(self._start_dt.date(), datetime.min.time()) + timedelta(days=day_idx)
-            day_end = day_start + timedelta(days=1)
-            count = 0
-            for admission in admissions:
-                if self._admission_active_on_day(admission, day_start, day_end):
-                    count += 1
-            daily_counts.append(count)
-
-        max_patients = max(daily_counts) if daily_counts else 0
         threshold = STATISTICAL_HIGH_LOAD_THRESHOLD
-        high_load_periods = sum(1 for c in daily_counts if c >= threshold)
+        period_start = self._start_dt
+        period_end = self._end_dt + timedelta(seconds=1)
+        event_deltas: dict[datetime, int] = {}
+
+        for admission in admissions:
+            admission_start = admission["admission_dt"]
+            end_candidates = [period_end]
+            if admission.get("transfer_dt") is not None:
+                end_candidates.append(admission["transfer_dt"])
+            if admission.get("death_dt") is not None:
+                end_candidates.append(admission["death_dt"])
+            admission_end = min(end_candidates)
+            interval_start = max(admission_start, period_start)
+            interval_end = min(admission_end, period_end)
+            if interval_end <= interval_start:
+                continue
+            event_deltas[interval_start] = event_deltas.get(interval_start, 0) + 1
+            event_deltas[interval_end] = event_deltas.get(interval_end, 0) - 1
+
+        current_patients = 0
+        max_patients = 0
+        high_load_seconds = 0.0
+        previous_time = period_start
+        for event_time in sorted(event_deltas):
+            if event_time > previous_time and current_patients >= threshold:
+                high_load_seconds += (event_time - previous_time).total_seconds()
+            current_patients += event_deltas[event_time]
+            max_patients = max(max_patients, current_patients)
+            previous_time = event_time
+
+        if previous_time < period_end and current_patients >= threshold:
+            high_load_seconds += (period_end - previous_time).total_seconds()
+        period_seconds = max(0.0, (period_end - period_start).total_seconds())
         return {
             "mean_patients": mean_patients,
             "utilization": self._safe_div(mean_patients, beds),
             "max_patients": max_patients,
             "load_threshold": threshold,
-            "load_time_pct": self._pct(high_load_periods, period_days),
+            "load_time_pct": self._pct(high_load_seconds, period_seconds),
         }
 
     def _intensity_indexes(self, *, n_ivl, n_surg, n_transf, total_n, early_deaths, deaths, n_with_interventions, ivl_days, operations_count, transfusion_units, bed_days, period_days, max_patients, beds):
@@ -1272,6 +1316,7 @@ class DetailedStatisticsReportBuilder:
     def _calculate_statistics(self):
         context = self._fetch_context()
         admissions = context["admissions"]
+        load_admissions = context.get("load_admissions", admissions)
         operations_adm_ids = context["operations_adm_ids"]
         transfusions = context["transfusions"]
         ivl_episodes = context["ivl_episodes"]
@@ -1293,7 +1338,12 @@ class DetailedStatisticsReportBuilder:
         procedures = self._procedure_stats(cvc_procedures, lumbar_punctures, procedure_transfusions)
         ivl = self._ivl_stats(ivl_episodes, death_ids)
         bed_period = self._period_bed_stats(los["bed_days"], total_n)
-        load = self._daily_load_stats(admissions, los["bed_days"], bed_period["period_days"], bed_period["beds"])
+        load = self._concurrent_load_stats(
+            load_admissions,
+            los["bed_days"],
+            bed_period["period_days"],
+            bed_period["beds"],
+        )
 
         n_with_interventions = len(
             ivl["ivl_adm_ids"].union(operations["surg_adm_ids"]).union(transfusion["transf_adm_ids"])
