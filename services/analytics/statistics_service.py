@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from html import escape
 
 from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT
 from rem_card.services.analytics.graphs_service import _thread_local_manager
 from rem_card.services.analytics.period import normalize_analytics_period
+from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
 from rem_card.ui.styles.theme import (
     BG_LIGHT,
     BORDER_LIGHT,
@@ -19,12 +21,17 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
     period = normalize_analytics_period(start_dt, end_dt)
     manager, cleanup = _thread_local_manager(db_manager)
     conn = manager.get_connection()
-    cursor = conn.cursor()
     period_params = period.sql_bounds
     start_bound, end_bound = period_params
     calculation_end = (period.end_exclusive - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    filter_stack = ExitStack()
 
     try:
+        filter_stack.enter_context(
+            recovery_bed_analytics_filter(conn, include_recovery_beds=True)
+        )
+        cursor = conn.cursor()
+
         def _scalar(query: str, params: tuple = period_params):
             cursor.execute(query, params)
             row = cursor.fetchone()
@@ -228,6 +235,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
             diagnosis_rows=diagnosis_rows,
         )
     finally:
+        filter_stack.close()
         if cleanup:
             cleanup()
 

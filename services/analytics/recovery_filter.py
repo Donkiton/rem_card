@@ -15,10 +15,6 @@ def recovery_bed_analytics_filter(conn: sqlite3.Connection, *, include_recovery_
     if not _table_exists(conn, "admissions"):
         yield
         return
-    admission_columns = set(_columns(conn, "admissions"))
-    if include_recovery_beds and "merged_into_admission_id" not in admission_columns:
-        yield
-        return
 
     original_query_only = _query_only(conn)
     created_tables: list[str] = []
@@ -44,6 +40,10 @@ def _create_filtered_admissions(conn: sqlite3.Connection, *, include_recovery_be
     columns = set(_columns(conn, "admissions"))
     recovery_numbers = ", ".join(str(int(number)) for number in sorted(RECOVERY_BED_NUMBERS))
     where_parts = []
+    if "unit_scope" in columns:
+        where_parts.append("LOWER(TRIM(COALESCE(unit_scope, ''))) <> 'operblock'")
+    if "admission_type" in columns:
+        where_parts.append("LOWER(TRIM(COALESCE(admission_type, ''))) <> 'operblock'")
     if "merged_into_admission_id" in columns:
         where_parts.append("merged_into_admission_id IS NULL")
     if not include_recovery_beds and "recovery_bed_stay" in columns and "bed_number" in columns:
