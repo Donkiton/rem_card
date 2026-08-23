@@ -12,19 +12,22 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from PySide6.QtCore import QSettings, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QSettings, Qt  # noqa: E402
+from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QComboBox,
     QDialog,
     QFileDialog,
     QHeaderView,
+    QLabel,
     QLineEdit,
     QPushButton,
     QSizePolicy,
     QSpinBox,
     QTreeView,
     QVBoxLayout,
+    QWidget,
 )
 from rem_card.ui.shared.persistent_file_dialog import PersistentSaveFileDialog  # noqa: E402
 
@@ -35,6 +38,7 @@ from rem_card.ui.styles.settings_surface import (  # noqa: E402
     apply_settings_surface,
     prepare_settings_file_dialog,
 )
+from rem_card.ui.styles.theme_manager import get_theme_manager  # noqa: E402
 
 
 def application() -> QApplication:
@@ -105,6 +109,83 @@ def test_settings_center_uses_the_same_outer_frame_as_archive():
 
     widget.close()
     widget.deleteLater()
+    app.processEvents()
+
+
+def test_settings_center_accepts_operblock_symmetric_outer_margins():
+    app = application()
+    widget = AdminMainWidget(role="doctor", left_outer_margin=5)
+    widget.resize(1280, 720)
+    widget.show()
+    app.processEvents()
+
+    margins = widget.layout().contentsMargins()
+    frame_geometry = widget.surface_frame.geometry()
+
+    assert (margins.left(), margins.right()) == (5, 5)
+    assert frame_geometry.left() == 5
+    assert widget.width() - 1 - frame_geometry.right() == 5
+
+    widget.close()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_settings_card_text_stays_transparent_under_operblock_parent_style():
+    app = application()
+    host = QWidget()
+    host.resize(1280, 720)
+    host.setStyleSheet("QWidget { background-color: #F7F9FC; color: #24364B; }")
+    host_layout = QVBoxLayout(host)
+    host_layout.setContentsMargins(0, 0, 0, 0)
+
+    widget = AdminMainWidget(role="doctor")
+    host_layout.addWidget(widget)
+    system_index = next(
+        index
+        for index, category in enumerate(widget.settings_categories)
+        if category["key"] == "system"
+    )
+    widget._select_settings_category(system_index)
+    host.show()
+    app.processEvents()
+
+    entry = next(
+        item
+        for item in widget.settings_action_cards
+        if item["button"] is widget.btn_emergency_password
+    )
+    card = entry["card"]
+    title = next(
+        label
+        for label in card.findChildren(QLabel, "SettingsActionTitle")
+        if label.text() == "Аварийный пароль"
+    )
+    description = next(
+        label
+        for label in card.findChildren(QLabel, "SettingsActionDescription")
+        if "аварийному режиму" in label.text()
+    )
+
+    image = QImage(host.size(), QImage.Format_ARGB32)
+    image.fill(QColor("magenta"))
+    host.render(image)
+
+    def rendered_color(child: QWidget, x: int, y: int) -> str:
+        point = child.mapTo(host, QPoint(x, y))
+        return image.pixelColor(point).name().lower()
+
+    expected = get_theme_manager().current_tokens()["sector.error_bg"].lower()
+    assert rendered_color(card, 5, card.height() // 2) == expected
+    assert rendered_color(title, title.width() - 3, title.height() // 2) == expected
+    assert rendered_color(
+        description,
+        description.width() - 3,
+        max(1, description.height() // 2),
+    ) == expected
+
+    host.close()
+    host.deleteLater()
     app.processEvents()
 
 

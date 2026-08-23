@@ -43,6 +43,19 @@ QFrame#SettingsBrandCard {{
     border-radius: 12px;
 }}
 
+QLabel#SettingsBrandTitle,
+QLabel#SettingsMutedLabel,
+QLabel#SettingsNavCaption,
+QLabel#SettingsPageTitle,
+QLabel#SettingsPageSubtitle,
+QLabel#SettingsSearchHint,
+QLabel#SettingsSectionTitle,
+QLabel#SettingsSectionDescription,
+QLabel#SettingsActionTitle,
+QLabel#SettingsActionDescription {{
+    background-color: transparent;
+}}
+
 QLabel#SettingsBrandMark {{
     background-color: {t("button.accent.bg")};
     color: {t("button.accent.text")};

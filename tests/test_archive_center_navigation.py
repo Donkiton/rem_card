@@ -14,13 +14,14 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
 from PySide6.QtCore import QEvent, QObject  # noqa: E402
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QStackedWidget, QWidget  # noqa: E402
 
 from rem_card.ui.archive_center.archive_main_widget import ArchiveMainWidget  # noqa: E402
 from rem_card.ui.analytics.graphs_catalog import GRAPH_GROUPS  # noqa: E402
 from rem_card.ui.archive_center.statistics_page import ArchiveStatisticsPage  # noqa: E402
 from rem_card.ui.doctor_view.archive_widget import ARCHIVE_MODE_OPERBLOCK, ARCHIVE_MODE_RAO, ArchiveWidget  # noqa: E402
 from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget  # noqa: E402
+from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget  # noqa: E402
 from rem_card.ui.shared.lightweight_w1_shell import LightweightW1Shell  # noqa: E402
 
 
@@ -133,6 +134,108 @@ def test_lightweight_shell_uses_the_same_center_for_both_roles():
             assert archive.allow_edit is (role == "doctor")
         finally:
             shell.close()
+
+
+def test_both_operating_room_roles_build_the_common_unfiltered_archive_center():
+    application()
+
+    class Host:
+        def __init__(self, table_code):
+            self.patient_service = _PatientService()
+            self.remcard_service = SimpleNamespace(data_service=None)
+            self.operblock_service = _OperblockService()
+            self.stack = QStackedWidget()
+            self._table_filter_code = table_code
+            self._creating_lazy_archive_page = True
+
+        @staticmethod
+        def is_view_only_mode():
+            return False
+
+        @staticmethod
+        def _open_case_from_unified_archive(_case):
+            return None
+
+        @staticmethod
+        def _on_rao_case_selected_in_operblock_archive(_patient):
+            return None
+
+    hosts = []
+    centers = []
+    try:
+        for table_code in ("emergency", "planned"):
+            host = Host(table_code)
+            hosts.append(host)
+            center = OperBlockMainWidget._build_archive_page(host)
+            centers.append(center)
+            assert isinstance(center, ArchiveMainWidget)
+            assert center.role == "operblock"
+            margins = center.layout().contentsMargins()
+            assert (margins.left(), margins.right()) == (5, 5)
+            assert center.content_stack.currentWidget() is center.operblock_archive
+            assert center.navigation_buttons[1].isChecked()
+            assert center.operblock_archive.table_filter.currentData() is None
+            assert not center.rao_archive.allow_edit
+            assert center.operblock_archive.allow_edit
+            badge = center.findChild(QLabel, "ArchiveCenterRoleBadge")
+            assert badge is not None
+            assert badge.text() == "Оперблок"
+    finally:
+        for center in centers:
+            center.close()
+        for host in hosts:
+            host.stack.close()
+
+
+def test_operblock_archive_case_returns_to_the_common_center_on_back():
+    archive_page = QWidget()
+    protocol_page = QWidget()
+    board_page = QWidget()
+    stack = QStackedWidget()
+    for page in (board_page, archive_page, protocol_page):
+        stack.addWidget(page)
+
+    class Host:
+        def __init__(self):
+            self._archive_return_operation_case_id = 44
+            self._protocol_opened_from_archive = False
+            self.archive_page = archive_page
+            self.protocol_page = protocol_page
+            self.board_page = board_page
+            self.settings_page = None
+            self.stack = stack
+            self.opened_case_id = None
+            self.refreshed = False
+
+        @staticmethod
+        def is_view_only_mode():
+            return False
+
+        def _open_protocol(self, case_id):
+            self.opened_case_id = case_id
+            self.stack.setCurrentWidget(self.protocol_page)
+
+        @staticmethod
+        def _set_protocol_chrome(_enabled):
+            return None
+
+        def refresh_operblock_archive(self, **_kwargs):
+            self.refreshed = True
+
+        @staticmethod
+        def _show_board():
+            raise AssertionError("Возврат должен вести в единый архив, а не на доску операционной")
+
+    host = Host()
+    OperBlockMainWidget._open_case_from_unified_archive(host, {"operation_case_id": 17})
+    assert host.opened_case_id == 17
+    assert host._archive_return_operation_case_id is None
+    assert host._protocol_opened_from_archive
+
+    OperBlockMainWidget.on_back_clicked(host)
+    assert stack.currentWidget() is archive_page
+    assert host.refreshed
+    assert not host._protocol_opened_from_archive
 
 
 def test_statistics_period_is_forwarded_to_archive_db_discovery():

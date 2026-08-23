@@ -40,6 +40,9 @@ class ArchiveMainWidget(QWidget):
         role: str = "doctor",
         allow_edit: bool = False,
         operblock_service=None,
+        initial_destination: int = 0,
+        allow_rao_edit: bool | None = None,
+        allow_operblock_edit: bool | None = None,
     ):
         super().__init__(parent)
         self.setObjectName("ArchiveCenter")
@@ -48,6 +51,9 @@ class ArchiveMainWidget(QWidget):
         self.operblock_service = operblock_service
         self.role = str(role or "doctor")
         self.allow_edit = bool(allow_edit)
+        self.allow_rao_edit = self.allow_edit if allow_rao_edit is None else bool(allow_rao_edit)
+        self.allow_operblock_edit = self.allow_edit if allow_operblock_edit is None else bool(allow_operblock_edit)
+        self._initial_destination = int(initial_destination)
         self._active_index = 0
         self._init_ui()
 
@@ -61,12 +67,11 @@ class ArchiveMainWidget(QWidget):
 
     def _init_ui(self):
         page_layout = QVBoxLayout(self)
-        # Верхний зазор совпадает с картой пациента, а лишний левый отступ
-        # убран: при переходе архив больше не смещается относительно секторов.
-        # Геометрия повторяет фактический сектор W1a: верх 5 px, низ 4 px и
-        # правый внешний зазор 5 px. Слева дополнительный отступ не нужен —
-        # его уже даёт соседний сектор.
-        page_layout.setContentsMargins(0, 5, 5, 4)
+        # Врачебная и сестринская оболочки уже дают архиву левый зазор соседним
+        # сектором. В оперблоке центр архива занимает весь stack, поэтому ему
+        # нужен собственный левый отступ, симметричный правому.
+        left_outer_margin = 5 if self.role == "operblock" else 0
+        page_layout.setContentsMargins(left_outer_margin, 5, 5, 4)
         page_layout.setSpacing(0)
 
         self.surface_frame = QFrame(self)
@@ -123,7 +128,7 @@ class ArchiveMainWidget(QWidget):
         self.page_title.setObjectName("SettingsPageTitle")
         text_block.addWidget(self.page_title)
         header.addLayout(text_block, 1)
-        badge = QLabel("Врач" if self.allow_edit else "Медсестра")
+        badge = QLabel(self._role_badge_text())
         badge.setObjectName("ArchiveCenterRoleBadge")
         badge.setAlignment(Qt.AlignCenter)
         header.addWidget(badge, 0, Qt.AlignTop)
@@ -138,7 +143,7 @@ class ArchiveMainWidget(QWidget):
         self.rao_archive = ArchiveWidget(
             self.patient_service,
             remcard_service=self.remcard_service,
-            allow_edit=self.allow_edit,
+            allow_edit=self.allow_rao_edit,
             operblock_service=self.operblock_service,
             fixed_source_mode=ARCHIVE_MODE_RAO,
             embedded=True,
@@ -146,7 +151,7 @@ class ArchiveMainWidget(QWidget):
         self.operblock_archive = ArchiveWidget(
             self.patient_service,
             remcard_service=self.remcard_service,
-            allow_edit=self.allow_edit,
+            allow_edit=self.allow_operblock_edit,
             operblock_service=self.operblock_service,
             fixed_source_mode=ARCHIVE_MODE_OPERBLOCK,
             embedded=True,
@@ -188,8 +193,15 @@ class ArchiveMainWidget(QWidget):
         self.setStyleSheet(build_admin_settings_style(tokens) + build_archive_center_style(tokens))
         # Начальная страница выбирается синхронно. Загрузка архива запускается
         # менеджером компоновки после добавления виджета в рабочий stack.
-        self.content_stack.setCurrentIndex(0)
-        self.navigation_buttons[0].setChecked(True)
+        initial_index = max(0, min(self._initial_destination, self.content_stack.count() - 1))
+        self._apply_destination(initial_index, load=False)
+
+    def _role_badge_text(self) -> str:
+        return {
+            "doctor": "Врач",
+            "nurse": "Медсестра",
+            "operblock": "Оперблок",
+        }.get(self.role, "Врач" if self.allow_edit else "Медсестра")
 
     def _brand_card(self) -> QFrame:
         card = QFrame()
@@ -216,6 +228,9 @@ class ArchiveMainWidget(QWidget):
         return card
 
     def select_destination(self, index: int):
+        self._apply_destination(index, load=True)
+
+    def _apply_destination(self, index: int, *, load: bool):
         index = max(0, min(int(index), self.content_stack.count() - 1))
         self._active_index = index
         self.content_stack.setCurrentIndex(index)
@@ -229,6 +244,8 @@ class ArchiveMainWidget(QWidget):
                 "Статистика оперблока",
             )[index]
         )
+        if not load:
+            return
         if index in (0, 1):
             self._active_archive_page().load_data(reset_page=False)
         else:
