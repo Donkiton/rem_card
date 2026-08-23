@@ -1,14 +1,16 @@
 <p align="center">
-  <img src="docs/assets/readme/remcard-hero.svg" width="100%" alt="Рем Карта — единая карта пациента и смены для реанимации и оперблока">
+  <img src="docs/assets/readme/remcard-hero.svg" width="100%" alt="RemCard ICU — электронная реанимационная карта для ОРИТ и оперблока">
 </p>
 
+<h1 align="center">RemCard ICU — электронная реанимационная карта</h1>
+
 <p align="center">
-  <strong>Windows-приложение для ведения карты пациента и совместной сменной работы в ОРИТ и оперблоке.</strong><br>
+  <strong>RemCard — Windows-приложение для ведения карты пациента и совместной сменной работы в ОРИТ и оперблоке.</strong><br>
   Назначения, витальные показатели, баланс жидкости, ИВЛ, процедуры, анализы, события, отчёты и архив — в одном рабочем контуре.
 </p>
 
 <p align="center">
-  <code>Версия 4.1.6</code> · <code>Windows</code> · <code>Python 3.11</code> · <code>PySide6</code> · <code>SQLite</code> · <code>RemCard Proprietary Source License</code> · <code>Экспериментальный проект</code>
+  <code>Версия 4.2.0</code> · <code>Windows</code> · <code>Python 3.11</code> · <code>PySide6</code> · <code>SQLite</code> · <code>RemCard Proprietary Source License</code> · <code>Экспериментальный проект</code>
 </p>
 
 <p align="center">
