@@ -28,11 +28,19 @@ class AdminMainWidget(QWidget):
     Создаем только меню сразу, а тяжелые словари и печать — по запросу.
     """
 
-    def __init__(self, service=None, role="admin", parent=None):
+    def __init__(
+        self,
+        service=None,
+        role="admin",
+        parent=None,
+        *,
+        left_outer_margin: int = 0,
+    ):
         super().__init__(parent)
         self.setProperty("settingsContext", True)
         self.service = service
         self.role = role
+        self._left_outer_margin = max(0, int(left_outer_margin))
         self._pending_print_context = None
 
         self.drugs_widget = None
@@ -70,7 +78,7 @@ class AdminMainWidget(QWidget):
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
         # Совпадает с внешней геометрией архива и соседнего сектора W1a.
-        main_layout.setContentsMargins(0, 5, 5, 4)
+        main_layout.setContentsMargins(self._left_outer_margin, 5, 5, 4)
         main_layout.setSpacing(0)
 
         self.surface_frame = QFrame(self)

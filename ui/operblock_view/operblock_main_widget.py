@@ -2056,8 +2056,7 @@ class OperBlockSector8Panel(QWidget):
 
     def _apply_back_visibility(self):
         visible_by_settings = bool(self._display_visible.get("back", True))
-        should_show = visible_by_settings and (self._protocol_mode or self._launcher_back)
-        self.btn_back.setVisible(should_show)
+        self.btn_back.setVisible(visible_by_settings)
 
     def set_protocol_mode(self, enabled: bool, *, launcher_back: bool = False):
         self._protocol_mode = bool(enabled)
@@ -9455,6 +9454,7 @@ class OperBlockMainWidget(QWidget):
         self._current_case_active = False
         self._current_operation_has_vitals = False
         self._archive_return_operation_case_id: int | None = None
+        self._protocol_opened_from_archive = False
         self._current_stage_state: dict = {}
         self._current_anesthesia_start: datetime | None = None
         self._current_anesthesia_end: datetime | None = None
@@ -9611,6 +9611,7 @@ class OperBlockMainWidget(QWidget):
 
         self.sector_8 = Sector8()
         self.sector_8.setFixedHeight(38)
+        self.sector_8.set_horizontal_frame_margins(3, 3)
         self.sector_8_panel = OperBlockSector8Panel()
         self.sector_8_panel.btn_archive.clicked.connect(self._show_operblock_archive)
         self.sector_8_panel.btn_refresh.clicked.connect(lambda: self.auto_refresh(force=True))
@@ -9720,7 +9721,12 @@ class OperBlockMainWidget(QWidget):
         try:
             from rem_card.ui.admin_view.admin_main_widget import AdminMainWidget
 
-            self.settings_page = AdminMainWidget(service=self.remcard_service, role="doctor", parent=self.stack)
+            self.settings_page = AdminMainWidget(
+                service=self.remcard_service,
+                role="doctor",
+                parent=self.stack,
+                left_outer_margin=5,
+            )
             self.stack.addWidget(self.settings_page)
             return True
         except Exception as exc:
@@ -9755,6 +9761,33 @@ class OperBlockMainWidget(QWidget):
         return page
 
     def _build_archive_page(self) -> QWidget:
+        """Создаёт общий центр архива, используемый во всех рабочих ролях."""
+        metric_started = operblock_startup_metrics.timer_start()
+        from rem_card.ui.archive_center.archive_main_widget import ArchiveMainWidget
+
+        page = ArchiveMainWidget(
+            self.patient_service,
+            remcard_service=self.remcard_service,
+            parent=self.stack,
+            role="operblock",
+            allow_edit=not self.is_view_only_mode(),
+            allow_rao_edit=False,
+            allow_operblock_edit=not self.is_view_only_mode(),
+            operblock_service=self.operblock_service,
+            initial_destination=1,
+        )
+        page.operblock_case_selected.connect(self._open_case_from_unified_archive)
+        page.patient_selected.connect(self._on_rao_case_selected_in_operblock_archive)
+        operblock_startup_metrics.record_since("build_archive_page_ms", metric_started, source="operblock_widget")
+        if getattr(self, "_creating_lazy_archive_page", False):
+            operblock_startup_metrics.record_since(
+                "archive_page_lazy_build_ms",
+                metric_started,
+                source="operblock_widget",
+            )
+        return page
+
+    def _build_legacy_archive_page(self) -> QWidget:
         metric_started = operblock_startup_metrics.timer_start()
         page = QWidget()
         page.setStyleSheet(f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
@@ -11465,6 +11498,10 @@ class OperBlockMainWidget(QWidget):
     def refresh_operblock_archive(self, *, force: bool = False, loading_message: str | None = None, page: int | None = None):
         if self._is_closing:
             return
+        archive_page = getattr(self, "archive_page", None)
+        if archive_page is not None and archive_page.objectName() == "ArchiveCenter":
+            archive_page.load_data(reset_page=bool(page == 1))
+            return
         if page is not None:
             self._archive_current_page = max(1, int(page or 1))
         loading_key = self._show_operblock_loading(
@@ -11923,6 +11960,26 @@ class OperBlockMainWidget(QWidget):
         finally:
             self._finish_opblock_action_diagnostics(action_info, "success")
             self._hide_operblock_loading(loading_key)
+
+    def _open_case_from_unified_archive(self, case):
+        case = dict(case or {}) if isinstance(case, dict) else {}
+        case_id = _safe_int(case.get("source_operation_case_id") or case.get("operation_case_id"))
+        if not case_id:
+            CustomMessageBox.warning(self, "Архив оперблока", "Не удалось определить запись оперблока.")
+            return
+        self._archive_return_operation_case_id = None
+        if case.get("is_external_archive"):
+            self._open_external_archive_case(case)
+            return
+        self._protocol_opened_from_archive = True
+        self._open_protocol(case_id)
+
+    def _on_rao_case_selected_in_operblock_archive(self, _patient):
+        CustomMessageBox.information(
+            self,
+            "Архив реанимации",
+            "Просмотр карт реанимации доступен в рабочих местах врача и медсестры.",
+        )
 
     def _filtered_archive_cases(self) -> list[dict]:
         query = str(getattr(self, "archive_search_input", None).text() if hasattr(self, "archive_search_input") else "").strip().casefold()
@@ -20796,6 +20853,7 @@ class OperBlockMainWidget(QWidget):
         try:
             self._set_protocol_chrome(False)
             self.stack.setCurrentWidget(self.board_page)
+            self._protocol_opened_from_archive = False
             self._archive_return_operation_case_id = None
             self._current_operation_case_id = None
             self._current_admission_id = None
@@ -20903,6 +20961,12 @@ class OperBlockMainWidget(QWidget):
             self._show_board()
             return
         if current_widget == self.protocol_page:
+            if self._protocol_opened_from_archive and self.archive_page is not None:
+                self._protocol_opened_from_archive = False
+                self._set_protocol_chrome(True)
+                self.stack.setCurrentWidget(self.archive_page)
+                self.refresh_operblock_archive(force=True)
+                return
             self._show_board()
             return
         if current_widget == self.board_page and getattr(self, "_role_launcher_mode", False):
@@ -20913,6 +20977,9 @@ class OperBlockMainWidget(QWidget):
     def shutdown(self):
         self._is_closing = True
         self._close_external_archive_viewer()
+        archive_page = getattr(self, "archive_page", None)
+        if archive_page is not None and hasattr(archive_page, "shutdown"):
+            archive_page.shutdown()
         timer = getattr(self, "_protocol_clock_timer", None)
         if timer is not None:
             timer.stop()

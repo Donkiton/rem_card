@@ -6,19 +6,30 @@ class Sector8(BaseSectorWidget):
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         self.setObjectName("sector_8_frame")
-        
-        # Устанавливаем стиль непосредственно для Sector8
-        self.setStyleSheet("""
-            QFrame#sector_8_frame {
+        self._frame_margin_left = 3
+        self._frame_margin_right = 1
+        self._apply_frame_style()
+
+        self.init_ui()
+
+    def _apply_frame_style(self):
+        # Устанавливаем стиль непосредственно для Sector8.
+        self.setStyleSheet(f"""
+            QFrame#sector_8_frame {{
                 background-color: #e9ecef;
                 border: 1px solid #bdc3c7;
                 border-radius: 5px;
-                margin-left: 3px;
-                margin-right: 1px;
-            }
+                margin-left: {self._frame_margin_left}px;
+                margin-right: {self._frame_margin_right}px;
+            }}
         """)
-        
-        self.init_ui()
+
+    def set_horizontal_frame_margins(self, left: int, right: int):
+        """Задать внешние горизонтальные поля рамки конкретного экземпляра."""
+        self._frame_margin_left = max(0, int(left))
+        self._frame_margin_right = max(0, int(right))
+        self._apply_frame_style()
+        self.updateGeometry()
 
     def init_ui(self):
         # Очищаем содержимое контейнера, если оно было создано в базовом классе
