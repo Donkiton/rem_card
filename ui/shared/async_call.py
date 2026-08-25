@@ -12,11 +12,16 @@ class AsyncCallThread(QObject):
     _keepalive_lock: ClassVar[threading.Lock] = threading.Lock()
     _keepalive_threads: ClassVar[set] = set()
 
-    def __init__(self, fn: Callable[..., Any], /, *args, parent=None, **kwargs):
+    def __init__(self, fn: Callable[..., Any], /, *args, parent=None,
+                 result_disposer: Callable[[Any], None] | None = None, **kwargs):
         super().__init__()
         self._fn = fn
         self._args = args
         self._kwargs = kwargs
+        # A result can own temporary files.  If the receiving QWidget/QObject
+        # has already been destroyed, Qt cannot deliver the signal; cleanup
+        # must therefore live on the keepalive worker rather than the page.
+        self._result_disposer = result_disposer
         self._keepalive_connected = False
         self._state_lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -53,6 +58,10 @@ class AsyncCallThread(QObject):
 
     def quit(self):
         self._cancel_requested.set()
+
+    def requestInterruption(self):
+        """Qt-compatible cancellation alias used by page shutdown hooks."""
+        self.quit()
 
     def is_cancel_requested(self) -> bool:
         return self._cancel_requested.is_set()
@@ -119,9 +128,13 @@ class AsyncCallThread(QObject):
                 pass
         else:
             try:
-                self.succeeded.emit(result)
+                self._emit_success(result)
             except RuntimeError:
-                pass
+                if self._result_disposer is not None:
+                    try:
+                        self._result_disposer(result)
+                    except Exception:
+                        pass
         finally:
             with self._state_lock:
                 self._running = False
@@ -129,3 +142,7 @@ class AsyncCallThread(QObject):
                 self.finished.emit()
             except RuntimeError:
                 self._release_keepalive()
+
+    def _emit_success(self, result):
+        """Small seam used to verify undeliverable-result ownership."""
+        self.succeeded.emit(result)

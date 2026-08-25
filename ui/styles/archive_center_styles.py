@@ -55,7 +55,16 @@ QFrame#ArchiveDataPanel {{
 }}
 QLineEdit#ArchiveFilterField,
 QComboBox#ArchiveTableFilter,
-QDateEdit#ArchiveDateEdit {{
+QDateEdit#ArchiveDateEdit,
+QComboBox#AnalyticsMetricSelector,
+QComboBox#AnalyticsCohortField,
+QComboBox#AnalyticsCohortOperator,
+QComboBox#AnalyticsComparisonMode,
+QComboBox#AnalyticsSavedViews,
+QLineEdit#AnalyticsCohortValue,
+QLineEdit#AnalyticsViewName,
+QDateEdit#AnalyticsPeriodBFrom,
+QDateEdit#AnalyticsPeriodBTo {{
     background-color: {t("field.bg")};
     color: {t("field.text")};
     border: 1px solid {t("field.border")};
@@ -65,11 +74,24 @@ QDateEdit#ArchiveDateEdit {{
 }}
 QLineEdit#ArchiveFilterField:focus,
 QComboBox#ArchiveTableFilter:focus,
-QDateEdit#ArchiveDateEdit:focus {{
+QDateEdit#ArchiveDateEdit:focus,
+QComboBox#AnalyticsMetricSelector:focus,
+QComboBox#AnalyticsCohortField:focus,
+QComboBox#AnalyticsCohortOperator:focus,
+QComboBox#AnalyticsComparisonMode:focus,
+QLineEdit#AnalyticsCohortValue:focus,
+QLineEdit#AnalyticsViewName:focus {{
     border: 2px solid {t("field.focus_border")};
 }}
 QComboBox#ArchiveTableFilter::drop-down,
-QDateEdit#ArchiveDateEdit::drop-down {{
+QDateEdit#ArchiveDateEdit::drop-down,
+QComboBox#AnalyticsMetricSelector::drop-down,
+QComboBox#AnalyticsCohortField::drop-down,
+QComboBox#AnalyticsCohortOperator::drop-down,
+QComboBox#AnalyticsComparisonMode::drop-down,
+QComboBox#AnalyticsSavedViews::drop-down,
+QDateEdit#AnalyticsPeriodBFrom::drop-down,
+QDateEdit#AnalyticsPeriodBTo::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: top right;
     width: 28px;
@@ -80,10 +102,31 @@ QDateEdit#ArchiveDateEdit::drop-down {{
     border-bottom-right-radius: {t("radius.md")};
 }}
 QComboBox#ArchiveTableFilter::down-arrow,
-QDateEdit#ArchiveDateEdit::down-arrow {{
+QDateEdit#ArchiveDateEdit::down-arrow,
+QComboBox#AnalyticsMetricSelector::down-arrow,
+QComboBox#AnalyticsCohortField::down-arrow,
+QComboBox#AnalyticsCohortOperator::down-arrow,
+QComboBox#AnalyticsComparisonMode::down-arrow,
+QComboBox#AnalyticsSavedViews::down-arrow,
+QDateEdit#AnalyticsPeriodBFrom::down-arrow,
+QDateEdit#AnalyticsPeriodBTo::down-arrow {{
     image: {FORM_DROPDOWN_ARROW_IMAGE};
     width: 12px;
     height: 12px;
+}}
+QComboBox#AnalyticsMetricSelector QAbstractItemView,
+QComboBox#AnalyticsCohortField QAbstractItemView,
+QComboBox#AnalyticsCohortOperator QAbstractItemView,
+QComboBox#AnalyticsComparisonMode QAbstractItemView,
+QComboBox#AnalyticsSavedViews QAbstractItemView {{
+    background-color: {t("surface.card")};
+    color: {t("text.primary")};
+    border: 1px solid {t("field.border")};
+    border-radius: {t("radius.md")};
+    padding: 4px;
+    outline: none;
+    selection-background-color: {t("button.accent.bg")};
+    selection-color: {t("button.accent.text")};
 }}
 QCalendarWidget#ArchiveCalendar QWidget {{
     background-color: {t("surface.card")};
@@ -169,6 +212,8 @@ QPushButton#ArchiveStatisticsSecondary:disabled {{
     color: {t("text.muted")};
 }}
 QScrollArea#ArchiveStatisticsOptionsScroll,
+QScrollArea#ArchiveAnalysisScroll,
+QWidget#ArchiveAnalysisBody,
 QWidget#ArchiveStatisticsOptions {{
     background-color: transparent;
     border: none;
@@ -194,6 +239,52 @@ QTextBrowser#ArchiveStatisticsReport {{
     border: 1px solid {t("border.subtle")};
     border-radius: 12px;
     padding: 8px;
+}}
+QFrame#AnalyticsWorkspace {{
+    background-color: transparent;
+    color: {t("text.primary")};
+    border: none;
+}}
+QFrame#AnalyticsSection,
+QFrame#AnalyticsKpiCard {{
+    background-color: {t("surface.card")};
+    color: {t("text.primary")};
+    border: 1px solid {t("border.subtle")};
+    border-radius: {t("radius.md")};
+}}
+QLabel#AnalyticsStepTitle {{
+    color: {t("text.primary")};
+    font-size: 14px;
+    font-weight: 750;
+    padding: 2px 1px;
+}}
+QLabel#AnalyticsSectionTitle {{
+    color: {t("text.primary")};
+    font-size: 12px;
+    font-weight: 700;
+}}
+QLabel#AnalyticsFieldLabel,
+QLabel#AnalyticsComparisonPeriodLabel,
+QLabel#AnalyticsKpiTitle {{
+    color: {t("text.secondary")};
+    font-size: 11px;
+}}
+QLabel#AnalyticsKpiValue {{
+    color: {t("text.primary")};
+    font-size: 18px;
+    font-weight: 750;
+}}
+QTextBrowser#AnalyticsSelectedResult {{
+    background-color: {t("surface.subtle")};
+    color: {t("text.primary")};
+    border: 1px solid {t("border.subtle")};
+    border-radius: {t("radius.md")};
+    padding: 14px;
+}}
+QLabel#AnalyticsWorkspaceText {{
+    color: {t("text.secondary")};
+    font-size: 12px;
+    padding: 3px 2px;
 }}
 QTableWidget#ArchiveDataTable {{
     background-color: {t("table.bg")};

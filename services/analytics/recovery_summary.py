@@ -70,7 +70,7 @@ def build_recovery_bed_summary(conn, start_date_str: str, end_date_str: str) -> 
             durations_hours.append(hours)
             _add_duration_bucket(duration_buckets, hours)
 
-        outcome_kind = _outcome_kind(row)
+        outcome_kind = _outcome_kind(row, end_dt)
         if outcome_kind == "deceased":
             deceased += 1
         elif outcome_kind == "transferred":
@@ -353,11 +353,15 @@ def _effective_end_datetime(row: dict[str, Any], admission_dt: datetime, period_
     return effective_end if effective_end >= admission_dt else admission_dt
 
 
-def _outcome_kind(row: dict[str, Any]) -> str:
-    outcome = str(row.get("outcome") or "").strip().lower()
-    if _parse_datetime(row.get("death_datetime")) is not None or "умер" in outcome:
+def _outcome_kind(row: dict[str, Any], period_end: datetime) -> str:
+    transfer = _parse_datetime(row.get("transfer_datetime"))
+    death = _parse_datetime(row.get("death_datetime"))
+    terminal = min((value for value in (transfer, death) if value is not None), default=None)
+    if terminal is None or terminal >= period_end:
+        return "active"
+    if death is not None and death == terminal:
         return "deceased"
-    if _parse_datetime(row.get("transfer_datetime")) is not None or "перев" in outcome:
+    if transfer is not None and transfer == terminal:
         return "transferred"
     return "active"
 

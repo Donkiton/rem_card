@@ -148,6 +148,24 @@ def build_detailed_statistics_report_html(
     return builder.generate_report_html(list(selected_sections or []))
 
 
+def build_detailed_statistics_snapshot(
+    db_manager,
+    start_date_str: str,
+    end_date_str: str,
+    selected_sections: Iterable[str] | None = None,
+    *,
+    include_recovery_beds: bool = False,
+):
+    """Структурированная версия тех же выбранных разделов для KPI/методики.
+
+    HTML остаётся совместимым публичным результатом; снимок использует тот же
+    read-only менеджер и не создаёт параллельный клинический расчёт в БД.
+    """
+    return DetailedStatisticsReportBuilder(
+        db_manager, start_date_str, end_date_str, include_recovery_beds=include_recovery_beds
+    ).build_structured_snapshot(selected_sections)
+
+
 class DetailedStatisticsReportBuilder:
     def __init__(
         self,
@@ -174,6 +192,32 @@ class DetailedStatisticsReportBuilder:
         self._selected_end_date_str = period.end_date.isoformat()
         self.section_groups = SECTION_GROUPS
         self.include_recovery_beds = bool(include_recovery_beds)
+
+    def build_structured_snapshot(self, selected_sections: Iterable[str] | None = None):
+        from rem_card.services.analytics.platform import (
+            AnalyticsEngine, AnalyticsPeriod, CohortDefinition, MetricScope, StatisticsRepository,
+        )
+        period = AnalyticsPeriod(self._start_dt, datetime.strptime(self.end_date_str, "%Y-%m-%d %H:%M:%S"))
+        selected = tuple(selected_sections or (key for group in self.section_groups.values() for key in group))
+        return AnalyticsEngine(StatisticsRepository(self.db_manager)).snapshot(
+            MetricScope.RAO,
+            period,
+            CohortDefinition(scope=MetricScope.RAO, include_recovery_beds=self.include_recovery_beds),
+            selected,
+        )
+
+    def calculate_payload(self) -> dict:
+        """Публичный payload, общий для HTML и структурированных строк."""
+        return self._calculate_statistics()
+
+    def structured_section_rows(self, section_key: str, payload: dict | None = None) -> list[dict]:
+        """Точные строки выбранного legacy-раздела без разбора HTML."""
+        payload = payload if payload is not None else self.calculate_payload()
+        result = []
+        for name, formula, display_value in self._section_rows(section_key, payload):
+            value, unit = self._split_value_and_unit(display_value)
+            result.append({"name": str(name), "formula": str(formula), "value": value, "unit": unit or "", "display_value": str(display_value)})
+        return result
 
     @staticmethod
     def _parse_datetime(value):
@@ -283,9 +327,14 @@ class DetailedStatisticsReportBuilder:
     @staticmethod
     def _normalize_outcome(raw_outcome: str, transfer_dt, death_dt) -> str:
         text = str(raw_outcome or "").strip().lower()
-        if death_dt is not None or text == "умер":
+        if death_dt is not None and (transfer_dt is None or death_dt <= transfer_dt):
             return "умер"
-        if transfer_dt is not None or text == "переведен":
+        if transfer_dt is not None:
+            return "переведен"
+        if text == "умер":
+            # Без death_datetime нельзя формировать terminal death metric.
+            return "в отделении"
+        if text == "переведен":
             return "переведен"
         if not text or text == "в отделении":
             return "в отделении"
@@ -586,9 +635,172 @@ class DetailedStatisticsReportBuilder:
             lines.append(
                 f"{escape(str(doctor))}: {count} "
                 f"({cls._fmt_pct(count, total_deaths)} от смертей; "
-                f"{cls._fmt_pct(count, total_admissions)} от госпитализаций)"
+                f"{cls._fmt_pct(count, total_admissions)} от пребываний периода)"
             )
         return "<br/>".join(lines) if lines else "н/д"
+
+    def _fetch_admission_rows(self, cursor):
+        admission_columns = self._table_columns(cursor, "admissions")
+        cardiac_measures_expr = self._select_expr(admission_columns, "cardiac_arrest_measures_json")
+        cursor.execute(
+            f"""
+            SELECT
+                id, patient_id, admission_datetime, transfer_datetime,
+                death_datetime, outcome, patient_age, patient_age_unit,
+                patient_gender, source_department, diagnosis_code,
+                diagnosis_text, {cardiac_measures_expr}
+            FROM admissions
+            WHERE DATETIME(admission_datetime) < DATETIME(?)
+            """,
+            (self.end_date_str,),
+        )
+        return self._cursor_dict_rows(cursor)
+
+    def _admission_record(self, row, period_end):
+        admission_id = self._safe_int(row.get("id"), default=0)
+        adm_dt = self._parse_datetime(row.get("admission_datetime"))
+        if adm_dt is None:
+            return None
+        transfer_dt = self._parse_datetime(row.get("transfer_datetime"))
+        death_dt = self._parse_datetime(row.get("death_datetime"))
+        terminal_dt = min((dt for dt in (death_dt, transfer_dt) if dt is not None), default=None)
+        if terminal_dt is not None and terminal_dt <= self._start_dt:
+            return None
+        los_start_dt = max(adm_dt, self._start_dt)
+        los_end_dt = min(terminal_dt or period_end, period_end)
+        if los_end_dt < los_start_dt:
+            return None
+
+        is_death = bool(
+            death_dt is not None
+            and self._start_dt <= death_dt < period_end
+            and (transfer_dt is None or death_dt <= transfer_dt)
+        )
+        outcome = "умер" if is_death else self._normalize_outcome(row.get("outcome"), transfer_dt, death_dt)
+        death_time_hours = (
+            max(0.0, (death_dt - adm_dt).total_seconds() / 3600.0)
+            if is_death and death_dt is not None
+            else None
+        )
+        age_years = self._age_to_years(row.get("patient_age"), row.get("patient_age_unit"))
+        diagnosis_code = str(row.get("diagnosis_code") or "").strip()
+        diagnosis_text = str(row.get("diagnosis_text") or "").strip()
+        return {
+            "admission_id": admission_id,
+            "patient_id": row.get("patient_id"),
+            "admission_dt": adm_dt,
+            "transfer_dt": transfer_dt,
+            "death_dt": death_dt,
+            "outcome": outcome,
+            "los_days": max(0.0, (los_end_dt - los_start_dt).total_seconds() / 86400.0),
+            "age_years": age_years,
+            "age_group": self._age_group(age_years),
+            "gender": self._normalize_text(row.get("patient_gender")),
+            "source": self._normalize_text(row.get("source_department")),
+            "diagnosis_code": diagnosis_code,
+            "diagnosis_text": diagnosis_text,
+            "diagnosis_key": self._diagnosis_key(diagnosis_code, diagnosis_text),
+            "mkb_class": self._mkb_class(diagnosis_code),
+            "mkb_rubric": self._mkb_rubric(diagnosis_code),
+            "weekday_name": self._weekday_name(adm_dt),
+            "month_label": adm_dt.strftime("%Y-%m"),
+            "is_death": is_death,
+            "death_time_hours": death_time_hours,
+            "death_doctor": (
+                self._death_doctor_from_payload(row.get("cardiac_arrest_measures_json")) if is_death else ""
+            ),
+        }
+
+    def _admission_populations(self, cursor, period_end):
+        admissions, interval_admissions, terminal_admissions = [], [], []
+        for row in self._fetch_admission_rows(cursor):
+            record = self._admission_record(row, period_end)
+            if record is None:
+                continue
+            interval_admissions.append(record)
+            if record["is_death"]:
+                terminal_admissions.append(record)
+            if self._start_dt <= record["admission_dt"] < period_end:
+                admissions.append(record)
+        return admissions, interval_admissions, terminal_admissions
+
+    def _fetch_load_admissions(self, cursor, period_end):
+        cursor.execute(
+            """
+            SELECT admission_datetime, transfer_datetime, death_datetime
+            FROM admissions
+            WHERE DATETIME(admission_datetime) < DATETIME(?)
+            """,
+            (self.end_date_str,),
+        )
+        result = []
+        for row in self._cursor_dict_rows(cursor):
+            admission_dt = self._parse_datetime(row.get("admission_datetime"))
+            if admission_dt is None or admission_dt >= period_end:
+                continue
+            transfer_dt = self._parse_datetime(row.get("transfer_datetime"))
+            death_dt = self._parse_datetime(row.get("death_datetime"))
+            end_dt = min(dt for dt in (transfer_dt, death_dt, period_end) if dt is not None)
+            if end_dt <= self._start_dt or end_dt <= admission_dt:
+                continue
+            result.append({"admission_dt": admission_dt, "transfer_dt": transfer_dt, "death_dt": death_dt})
+        return result
+
+    def _fetch_operations(self, cursor, admission_ids, period_params):
+        cursor.execute(
+            """
+            SELECT admission_id FROM operations
+            WHERE DATETIME(operation_datetime) >= DATETIME(?)
+              AND DATETIME(operation_datetime) < DATETIME(?)
+            """,
+            period_params,
+        )
+        raw_ids = (self._safe_int(row[0], default=0) for row in cursor.fetchall())
+        return [admission_id for admission_id in raw_ids if admission_id and admission_id in admission_ids]
+
+    def _fetch_transfusions(self, cursor, admission_ids, period_params):
+        cursor.execute(
+            """
+            SELECT admission_id, type, volume_ml FROM transfusions
+            WHERE DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
+            """,
+            period_params,
+        )
+        result = []
+        for admission_id, transfusion_type, volume_ml in cursor.fetchall():
+            normalized_id = self._safe_int(admission_id, default=0)
+            if normalized_id and normalized_id in admission_ids:
+                result.append({
+                    "admission_id": normalized_id,
+                    "type": self._transfusion_type_label(transfusion_type),
+                    "volume_ml": self._safe_float(volume_ml, default=0.0),
+                })
+        return result
+
+    def _fetch_ivl_episodes(self, cursor, admission_ids, period_end):
+        cursor.execute(
+            """
+            SELECT admission_id, start_time, end_time FROM ivl_episodes
+            WHERE DATETIME(start_time) < DATETIME(?)
+              AND (end_time IS NULL OR DATETIME(end_time) > DATETIME(?))
+            """,
+            (self.end_date_str, self.start_date_str),
+        )
+        result = []
+        for admission_id, start_time, end_time in cursor.fetchall():
+            normalized_id = self._safe_int(admission_id, default=0)
+            start_dt = self._parse_datetime(start_time)
+            if not normalized_id or normalized_id not in admission_ids or start_dt is None:
+                continue
+            clipped_start_dt = max(start_dt, self._start_dt)
+            end_dt = self._parse_datetime(end_time) or period_end
+            end_dt = max(end_dt, start_dt)
+            end_dt = min(end_dt, period_end)
+            result.append({
+                "admission_id": normalized_id,
+                "duration_hours": max(0.0, (end_dt - clipped_start_dt).total_seconds() / 3600.0),
+            })
+        return result
 
     def _fetch_context(self):
         manager, cleanup = _thread_local_manager(self.db_manager)
@@ -597,185 +809,27 @@ class DetailedStatisticsReportBuilder:
         try:
             with recovery_bed_analytics_filter(conn, include_recovery_beds=self.include_recovery_beds):
                 period_params = (self.start_date_str, self.end_date_str)
-                admission_columns = self._table_columns(cursor, "admissions")
-                cardiac_measures_expr = self._select_expr(admission_columns, "cardiac_arrest_measures_json")
-
-                cursor.execute(
-                    f"""
-                    SELECT
-                        id,
-                        patient_id,
-                        admission_datetime,
-                        transfer_datetime,
-                        death_datetime,
-                        outcome,
-                        patient_age,
-                        patient_age_unit,
-                        patient_gender,
-                        source_department,
-                        diagnosis_code,
-                        diagnosis_text,
-                        {cardiac_measures_expr}
-                    FROM admissions
-                    WHERE DATETIME(admission_datetime) >= DATETIME(?)
-                      AND DATETIME(admission_datetime) < DATETIME(?)
-                    """,
-                    period_params,
-                )
-                columns = [column[0] for column in cursor.description]
-                raw_admissions = [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-                cursor.execute(
-                    """
-                    SELECT admission_datetime, transfer_datetime, death_datetime
-                    FROM admissions
-                    WHERE DATETIME(admission_datetime) < DATETIME(?)
-                    """,
-                    (self.end_date_str,),
-                )
-                load_columns = [column[0] for column in cursor.description]
-                raw_load_admissions = [dict(zip(load_columns, row)) for row in cursor.fetchall()]
-
-                admissions = []
-                for row in raw_admissions:
-                    admission_id = self._safe_int(row.get("id"), default=0)
-                    patient_id = row.get("patient_id")
-                    adm_dt = self._parse_datetime(row.get("admission_datetime"))
-                    if adm_dt is None:
-                        continue
-
-                    transfer_dt = self._parse_datetime(row.get("transfer_datetime"))
-                    death_dt = self._parse_datetime(row.get("death_datetime"))
-
-                    raw_end_candidates = [dt for dt in (death_dt, transfer_dt, self._end_dt) if dt is not None]
-                    los_end_dt = min(raw_end_candidates) if raw_end_candidates else self._end_dt
-                    if los_end_dt < adm_dt:
-                        los_end_dt = adm_dt
-
-                    los_days = max(0.0, (los_end_dt - adm_dt).total_seconds() / 86400.0)
-
-                    outcome = self._normalize_outcome(row.get("outcome"), transfer_dt, death_dt)
-                    is_death = outcome == "умер"
-                    death_time_hours = None
-                    if is_death and death_dt is not None:
-                        death_time_hours = max(0.0, (death_dt - adm_dt).total_seconds() / 3600.0)
-                    death_doctor = self._death_doctor_from_payload(row.get("cardiac_arrest_measures_json")) if is_death else ""
-
-                    age_years = self._age_to_years(row.get("patient_age"), row.get("patient_age_unit"))
-                    gender = self._normalize_text(row.get("patient_gender"))
-                    source = self._normalize_text(row.get("source_department"))
-                    diagnosis_code = str(row.get("diagnosis_code") or "").strip()
-                    diagnosis_text = str(row.get("diagnosis_text") or "").strip()
-
-                    admissions.append(
-                        {
-                            "admission_id": admission_id,
-                            "patient_id": patient_id,
-                            "admission_dt": adm_dt,
-                            "transfer_dt": transfer_dt,
-                            "death_dt": death_dt,
-                            "outcome": outcome,
-                            "los_days": los_days,
-                            "age_years": age_years,
-                            "age_group": self._age_group(age_years),
-                            "gender": gender,
-                            "source": source,
-                            "diagnosis_code": diagnosis_code,
-                            "diagnosis_text": diagnosis_text,
-                            "diagnosis_key": self._diagnosis_key(diagnosis_code, diagnosis_text),
-                            "mkb_class": self._mkb_class(diagnosis_code),
-                            "mkb_rubric": self._mkb_rubric(diagnosis_code),
-                            "weekday_name": self._weekday_name(adm_dt),
-                            "month_label": adm_dt.strftime("%Y-%m"),
-                            "is_death": is_death,
-                            "death_time_hours": death_time_hours,
-                            "death_doctor": death_doctor,
-                        }
-                    )
-
-                load_admissions = []
+                # Разделяем flow и interval populations.  Carry-in больной
+                # не является поступлением периода, но обязан участвовать в
+                # койко-днях, LOS, занятости и census.
                 period_end = self._end_dt + timedelta(seconds=1)
-                for row in raw_load_admissions:
-                    admission_dt = self._parse_datetime(row.get("admission_datetime"))
-                    if admission_dt is None or admission_dt >= period_end:
-                        continue
-                    transfer_dt = self._parse_datetime(row.get("transfer_datetime"))
-                    death_dt = self._parse_datetime(row.get("death_datetime"))
-                    end_dt = min(
-                        [dt for dt in (transfer_dt, death_dt, period_end) if dt is not None]
-                    )
-                    if end_dt <= self._start_dt or end_dt <= admission_dt:
-                        continue
-                    load_admissions.append(
-                        {
-                            "admission_dt": admission_dt,
-                            "transfer_dt": transfer_dt,
-                            "death_dt": death_dt,
-                        }
-                    )
-
-                admission_ids = {row["admission_id"] for row in admissions if row["admission_id"]}
-
-                cursor.execute(
-                    """
-                    SELECT admission_id
-                    FROM operations
-                    WHERE DATETIME(operation_datetime) >= DATETIME(?)
-                      AND DATETIME(operation_datetime) < DATETIME(?)
-                    """,
-                    period_params,
+                admissions, interval_admissions, terminal_admissions = self._admission_populations(
+                    cursor, period_end
                 )
-                raw_ops = [self._safe_int(r[0], default=0) for r in cursor.fetchall()]
-                operations_adm_ids = [aid for aid in raw_ops if aid and aid in admission_ids]
+                load_admissions = self._fetch_load_admissions(cursor, period_end)
 
-                cursor.execute(
-                    """
-                    SELECT admission_id, type, volume_ml
-                    FROM transfusions
-                    WHERE DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
-                    """,
-                    period_params,
-                )
-                transfusions = []
-                for admission_id, transf_type, volume_ml in cursor.fetchall():
-                    aid = self._safe_int(admission_id, default=0)
-                    if not aid or aid not in admission_ids:
-                        continue
-                    transfusions.append(
-                        {
-                            "admission_id": aid,
-                            "type": self._transfusion_type_label(transf_type),
-                            "volume_ml": self._safe_float(volume_ml, default=0.0),
-                        }
-                    )
+                # Procedures are events of the selected hospital period.  A
+                # patient admitted before its first day can still undergo an
+                # operation, transfusion or ventilation during it, therefore
+                # procedure linkage uses the interval population rather than
+                # only new admissions.
+                admission_ids = {
+                    row["admission_id"] for row in interval_admissions if row["admission_id"]
+                }
 
-                cursor.execute(
-                    """
-                    SELECT admission_id, start_time, end_time
-                    FROM ivl_episodes
-                    WHERE DATETIME(start_time) >= DATETIME(?) AND DATETIME(start_time) < DATETIME(?)
-                    """,
-                    period_params,
-                )
-                ivl_episodes = []
-                for admission_id, start_time, end_time in cursor.fetchall():
-                    aid = self._safe_int(admission_id, default=0)
-                    if not aid or aid not in admission_ids:
-                        continue
-                    start_dt = self._parse_datetime(start_time)
-                    if start_dt is None:
-                        continue
-                    end_dt = self._parse_datetime(end_time) or self._end_dt
-                    if end_dt < start_dt:
-                        end_dt = start_dt
-                    end_dt = min(end_dt, self._end_dt)
-                    duration_hours = max(0.0, (end_dt - start_dt).total_seconds() / 3600.0)
-                    ivl_episodes.append(
-                        {
-                            "admission_id": aid,
-                            "duration_hours": duration_hours,
-                        }
-                    )
+                operations_adm_ids = self._fetch_operations(cursor, admission_ids, period_params)
+                transfusions = self._fetch_transfusions(cursor, admission_ids, period_params)
+                ivl_episodes = self._fetch_ivl_episodes(cursor, admission_ids, period_end)
 
                 cvc_procedures = self._fetch_cvc_procedures(cursor, admission_ids)
                 lumbar_punctures = self._fetch_lumbar_punctures(cursor, admission_ids)
@@ -783,6 +837,8 @@ class DetailedStatisticsReportBuilder:
 
                 return {
                     "admissions": admissions,
+                    "interval_admissions": interval_admissions,
+                    "terminal_admissions": terminal_admissions,
                     "load_admissions": load_admissions,
                     "operations_adm_ids": operations_adm_ids,
                     "transfusions": transfusions,
@@ -1049,8 +1105,9 @@ class DetailedStatisticsReportBuilder:
     def _inc_counter(counter, key):
         counter[key] = counter.get(key, 0) + 1
 
-    def _distribution_stats(self, admissions):
+    def _distribution_stats(self, admissions, terminal_admissions=(), interval_admissions=()):
         age_groups = {}
+        mortality_age_groups = {}
         age_groups_deaths = {}
         genders = {}
         sources = {}
@@ -1073,12 +1130,15 @@ class DetailedStatisticsReportBuilder:
             self._inc_counter(mkb_rubrics, admission["mkb_rubric"])
             outcome_label = admission["outcome"].capitalize()
             self._inc_counter(outcomes, outcome_label)
-            if admission["is_death"]:
-                self._inc_counter(age_groups_deaths, admission["age_group"])
-                self._inc_counter(death_doctors, admission.get("death_doctor") or "Не указан")
+        for admission in terminal_admissions:
+            self._inc_counter(age_groups_deaths, admission["age_group"])
+            self._inc_counter(death_doctors, admission.get("death_doctor") or "Не указан")
+        for admission in interval_admissions:
+            self._inc_counter(mortality_age_groups, admission["age_group"])
 
         return {
             "age_groups": age_groups,
+            "mortality_age_groups": mortality_age_groups,
             "age_groups_deaths": age_groups_deaths,
             "genders": genders,
             "sources": sources,
@@ -1368,19 +1428,21 @@ class DetailedStatisticsReportBuilder:
             "load_time_pct": self._pct(high_load_seconds, period_seconds),
         }
 
-    def _intensity_indexes(self, *, n_ivl, n_surg, n_transf, total_n, early_deaths, deaths, n_with_interventions, ivl_days, operations_count, transfusion_units, bed_days, period_days, max_patients, beds):
+    def _intensity_indexes(self, *, n_ivl, n_surg, n_transf, intervention_population_n, flow_n, early_deaths, deaths, n_with_interventions, ivl_days, operations_count, transfusion_units, bed_days, period_days, max_patients, beds):
         return {
-            "intensity_index": self._safe_div((n_ivl + n_surg + n_transf), total_n),
+            "intensity_index": self._safe_div((n_ivl + n_surg + n_transf), intervention_population_n),
             "severity_index": self._safe_div(early_deaths, deaths),
-            "technology_index": self._pct(n_with_interventions, total_n),
+            "technology_index": self._pct(n_with_interventions, intervention_population_n),
             "resource_use_index": self._safe_div((ivl_days + operations_count + transfusion_units), bed_days),
-            "throughput": self._safe_div(total_n, period_days),
+            "throughput": self._safe_div(flow_n, period_days),
             "load_coefficient": self._safe_div(max_patients, beds),
         }
 
     def _calculate_statistics(self):
         context = self._fetch_context()
         admissions = context["admissions"]
+        interval_admissions = context.get("interval_admissions", admissions)
+        terminal_admissions = context.get("terminal_admissions", ())
         load_admissions = context.get("load_admissions", admissions)
         operations_adm_ids = context["operations_adm_ids"]
         transfusions = context["transfusions"]
@@ -1391,18 +1453,21 @@ class DetailedStatisticsReportBuilder:
 
         population = self._population_stats(admissions)
         total_n = population["total_n"]
-        death_ids = population["death_ids"]
+        interval_n = len(interval_admissions)
+        death_ids = {a["admission_id"] for a in terminal_admissions if a["admission_id"]}
         deaths = len(death_ids)
 
-        los = self._los_stats(admissions, total_n)
+        los = self._los_stats(interval_admissions, interval_n)
         age = self._age_stats(admissions)
-        death_timing = self._death_timing_stats(admissions)
-        distributions = self._distribution_stats(admissions)
+        death_timing = self._death_timing_stats(terminal_admissions)
+        distributions = self._distribution_stats(
+            admissions, terminal_admissions, interval_admissions,
+        )
         operations = self._operation_stats(operations_adm_ids, death_ids)
         transfusion = self._transfusion_stats(transfusions, death_ids)
         procedures = self._procedure_stats(cvc_procedures, lumbar_punctures, procedure_transfusions)
         ivl = self._ivl_stats(ivl_episodes, death_ids)
-        bed_period = self._period_bed_stats(los["bed_days"], total_n)
+        bed_period = self._period_bed_stats(los["bed_days"], interval_n)
         load = self._concurrent_load_stats(
             load_admissions,
             los["bed_days"],
@@ -1417,7 +1482,8 @@ class DetailedStatisticsReportBuilder:
             n_ivl=ivl["n_ivl"],
             n_surg=operations["n_surg"],
             n_transf=transfusion["n_transf"],
-            total_n=total_n,
+            intervention_population_n=interval_n,
+            flow_n=total_n,
             early_deaths=death_timing["early_deaths"],
             deaths=deaths,
             n_with_interventions=n_with_interventions,
@@ -1432,6 +1498,7 @@ class DetailedStatisticsReportBuilder:
 
         return {
             "N": total_n,
+            "N_interval": interval_n,
             "bed_days": los["bed_days"],
             "alos": los["alos"],
             "los_median": los["los_median"],
@@ -1447,6 +1514,7 @@ class DetailedStatisticsReportBuilder:
             "mean_age": age["mean_age"],
             "median_age": age["median_age"],
             "age_groups": distributions["age_groups"],
+            "mortality_age_groups": distributions["mortality_age_groups"],
             "genders": distributions["genders"],
             "months": distributions["months"],
             "weekdays": distributions["weekdays"],
@@ -1455,7 +1523,9 @@ class DetailedStatisticsReportBuilder:
             "mkb_classes": distributions["mkb_classes"],
             "mkb_rubrics": distributions["mkb_rubrics"],
             "deaths": deaths,
-            "mortality_pct": self._pct(deaths, total_n),
+            # Terminal deaths are drawn from the interval population, so the
+            # denominator must be the same population (including carry-in).
+            "mortality_pct": self._pct(deaths, interval_n),
             "mortality_per_1000_bed_days": self._safe_div(deaths, los["bed_days"]) * 1000.0,
             "outcomes": distributions["outcomes"],
             "mean_time_to_death_days": death_timing["mean_time_to_death_days"],
@@ -1533,9 +1603,9 @@ class DetailedStatisticsReportBuilder:
             "procedure_transfusion_reactions": procedures["procedure_transfusion_reactions"],
             "procedure_transfusion_no_reactions": procedures["procedure_transfusion_no_reactions"],
             "procedure_transfusion_reactions_by_doctor": procedures["procedure_transfusion_reactions_by_doctor"],
-            "IVL_index": self._safe_div(ivl["n_ivl"], total_n),
-            "Surgery_index": self._safe_div(operations["n_surg"], total_n),
-            "Transfusion_index": self._safe_div(transfusion["n_transf"], total_n),
+            "IVL_index": self._safe_div(ivl["n_ivl"], interval_n),
+            "Surgery_index": self._safe_div(operations["n_surg"], interval_n),
+            "Transfusion_index": self._safe_div(transfusion["n_transf"], interval_n),
             "mean_patients": load["mean_patients"],
             "utilization": load["utilization"],
             "max_patients": load["max_patients"],
@@ -1543,7 +1613,7 @@ class DetailedStatisticsReportBuilder:
             "load_time_pct": load["load_time_pct"],
             "intensity_index": indexes["intensity_index"],
             "severity_index": indexes["severity_index"],
-            "long_stay_pct": self._pct(los["long_stay_count"], total_n),
+            "long_stay_pct": self._pct(los["long_stay_count"], interval_n),
             "technology_index": indexes["technology_index"],
             "resource_use_index": indexes["resource_use_index"],
             "throughput": indexes["throughput"],
@@ -1565,6 +1635,7 @@ class DetailedStatisticsReportBuilder:
 
     def _section_rows(self, section_key: str, s: dict):
         total_n = s["N"]
+        interval_n = s.get("N_interval", total_n)
         deaths = s["deaths"]
 
         if section_key == RECOVERY_SECTION_KEY:
@@ -1579,7 +1650,7 @@ class DetailedStatisticsReportBuilder:
                 ),
                 (
                     "1.2 Койко-дни",
-                    "Сумма дней пребывания всех госпитализаций",
+                    "Сумма пересечения пребывания госпитализаций с выбранным периодом",
                     self._fmt_value_with_unit(
                         s["bed_days"],
                         ("койко-день", "койко-дня", "койко-дней"),
@@ -1587,7 +1658,7 @@ class DetailedStatisticsReportBuilder:
                 ),
                 (
                     "1.3 Средняя длительность лечения",
-                    "Средняя длительность = Койко-дни / Госпитализации",
+                    "Средняя длительность = Койко-дни / Госпитализации, пересекающие выбранный период",
                     self._fmt_los_duration(s["alos"]),
                 ),
                 (
@@ -1669,10 +1740,10 @@ class DetailedStatisticsReportBuilder:
         if section_key == "s6":
             return [
                 ("6.1 Абсолютная летальность", "Умершие", self._fmt_num(deaths, 0)),
-                ("6.2 Летальность (%)", "Летальность = Умершие / Госпитализации × 100%", f"{self._fmt_num(s['mortality_pct'])}%"),
+                ("6.2 Летальность (%)", "Летальность = Терминальные смерти периода / Госпитализации, пересекающие период × 100%", f"{self._fmt_num(s['mortality_pct'])}%"),
                 ("6.3 На 1000 койко-дней", "Летальность = Умершие / Койко-дни × 1000", self._fmt_num(s["mortality_per_1000_bed_days"])),
                 ("6.4 Исходы", "Доля = Число исходов в группе / Госпитализации × 100%", self._distribution_lines(s["outcomes"], total_n)),
-                ("6.5 Смерти по врачу", "Врач из протокола установления смерти: смерти врача / все смерти; смерти врача / госпитализации", self._death_doctor_lines(s["death_doctors"], deaths, total_n)),
+                ("6.5 Смерти по врачу", "Врач из протокола установления смерти: смерти врача / все смерти; смерти врача / пребывания, пересекающие период", self._death_doctor_lines(s["death_doctors"], deaths, interval_n)),
             ]
 
         if section_key == "s7":
@@ -1686,16 +1757,18 @@ class DetailedStatisticsReportBuilder:
             ]
 
         if section_key == "s8":
-            lines = self._distribution_mortality_lines(s["age_groups"], s["age_groups_deaths"])
+            lines = self._distribution_mortality_lines(
+                s["mortality_age_groups"], s["age_groups_deaths"],
+            )
             return [
                 ("8.1 Летальность по группам", "Летальность группы = Умершие в группе / Пациенты в группе × 100%", lines),
-                ("8.2 Смертность по врачу протокола", "Врач из протокола установления смерти: смерти врача / все смерти; смерти врача / госпитализации", self._death_doctor_lines(s["death_doctors"], deaths, total_n)),
+                ("8.2 Смертность по врачу протокола", "Врач из протокола установления смерти: смерти врача / все смерти; смерти врача / пребывания, пересекающие период", self._death_doctor_lines(s["death_doctors"], deaths, interval_n)),
             ]
 
         if section_key == "s9":
             return [
                 ("10.1 Пациенты на ИВЛ", "Пациенты с ИВЛ", self._fmt_num(s["N_IVL"], 0)),
-                ("10.2 Доля пациентов на ИВЛ", "Доля ИВЛ = Пациенты с ИВЛ / Госпитализации × 100%", self._fmt_pct(s["N_IVL"], total_n)),
+                ("10.2 Доля пациентов на ИВЛ", "Доля ИВЛ = Пациенты с ИВЛ / Госпитализации, пересекающие период × 100%", self._fmt_pct(s["N_IVL"], interval_n)),
                 ("10.3 Эпизоды ИВЛ", "Эпизоды", self._fmt_num(s["ivl_episodes_count"], 0)),
                 ("10.4 Средняя длительность ИВЛ", "Средняя ИВЛ = ИВЛ-дни / Пациенты с ИВЛ", self._fmt_num(self._safe_div(s["ivl_days"], s["N_IVL"]))),
                 ("10.5 ИВЛ-дни", "ИВЛ-дни", self._fmt_num(s["ivl_days"])),
@@ -1706,7 +1779,7 @@ class DetailedStatisticsReportBuilder:
             return [
                 ("11.1 Пациенты с операциями", "Пациенты с операциями", self._fmt_num(s["N_surg"], 0)),
                 ("11.2 Операции", "Операции", self._fmt_num(s["operations_count"], 0)),
-                ("11.3 Частота операций", "Частота = Пациенты с операциями / Госпитализации", self._fmt_num(self._safe_div(s["N_surg"], total_n))),
+                ("11.3 Частота операций", "Частота = Пациенты с операциями / Госпитализации, пересекающие период", self._fmt_num(self._safe_div(s["N_surg"], interval_n))),
                 ("11.4 Летальность у оперированных", "Летальность = Умершие после операций / Пациенты с операциями × 100%", self._fmt_pct(s["deaths_surg"], s["N_surg"])),
             ]
 
@@ -1788,10 +1861,10 @@ class DetailedStatisticsReportBuilder:
         if section_key == "s18":
             return [
                 ("19.1 Доля ранней летальности", "Ранняя летальность = Смерти <24ч / Умершие × 100%", self._fmt_pct(s["early_deaths"], deaths)),
-                ("19.2 Индекс интенсивности лечения", "Индекс интенсивности = (Пациенты с ИВЛ + Пациенты с операциями + Пациенты с переливаниями) / Госпитализации", self._fmt_num(s["intensity_index"])),
+                ("19.2 Индекс интенсивности лечения", "Индекс интенсивности = (Пациенты с ИВЛ + Пациенты с операциями + Пациенты с переливаниями) / Пребывания, пересекающие период", self._fmt_num(s["intensity_index"])),
                 ("19.3 Индекс тяжести потока", "Индекс тяжести = Ранние смерти / Умершие", self._fmt_num(s["severity_index"])),
                 ("19.4 Длительное пребывание", "Длительное пребывание = Госпитализации дольше 7 суток / Госпитализации × 100%", f"{self._fmt_num(s['long_stay_pct'])}%"),
-                ("19.5 Индекс технологичности", "Индекс технологичности = Госпитализации с вмешательствами / Госпитализации × 100%", f"{self._fmt_num(s['technology_index'])}%"),
+                ("19.5 Индекс технологичности", "Индекс технологичности = Пребывания с вмешательствами / Пребывания, пересекающие период × 100%", f"{self._fmt_num(s['technology_index'])}%"),
             ]
 
         if section_key == "s19":
@@ -1893,7 +1966,7 @@ class DetailedStatisticsReportBuilder:
             raise ValueError("Выберите хотя бы один раздел статистики.")
 
         try:
-            stats = self._calculate_statistics()
+            stats = self.calculate_payload()
 
             html_body = self._render_sections_html(selected, stats)
             generated_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
