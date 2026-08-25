@@ -181,6 +181,19 @@ def build_operblock_statistics_report_html(
     ).generate_report_html(selected)
 
 
+def build_operblock_statistics_snapshot(
+    db_manager,
+    start_date_str: str,
+    end_date_str: str,
+    selected_indicators: Iterable[str] | None = None,
+    db_paths: Iterable[str] | None = None,
+):
+    """Публичный структурированный снимок для тех же ключей ob1–ob79."""
+    return OperBlockStatisticsReportBuilder(
+        db_manager, start_date_str, end_date_str, db_paths=db_paths
+    ).build_structured_snapshot(selected_indicators)
+
+
 class OperBlockStatisticsReportBuilder:
     def __init__(
         self,
@@ -205,6 +218,32 @@ class OperBlockStatisticsReportBuilder:
         self.start_date_str = period.start_sql
         self.end_date_str = period.end_exclusive_sql
         self.db_paths = self._normalize_db_paths(db_paths or [])
+
+    def build_structured_snapshot(self, selected_indicators: Iterable[str] | None = None):
+        from rem_card.services.analytics.platform import (
+            AnalyticsEngine, AnalyticsPeriod, CohortDefinition, MetricScope, StatisticsRepository,
+        )
+        period = AnalyticsPeriod(self._start_dt, datetime.strptime(self.end_date_str, "%Y-%m-%d %H:%M:%S"))
+        selected = tuple(selected_indicators or (key for group in OPERBLOCK_SECTION_GROUPS.values() for key in group))
+        return AnalyticsEngine(StatisticsRepository(self.db_manager, db_paths=self.db_paths)).snapshot(
+            MetricScope.OPERBLOCK, period, CohortDefinition(scope=MetricScope.OPERBLOCK), selected
+        )
+
+    def calculate_payload(self) -> dict[str, Any]:
+        """Публичный payload, используемый HTML и API структурированных строк."""
+        return self._calculate_statistics()
+
+    def structured_indicator_rows(self, selected_indicators: Iterable[str] | None = None, payload: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+        """Возвращает точную строку каждого ob-ключа, не извлекая данные из HTML."""
+        payload = payload if payload is not None else self.calculate_payload()
+        sections = self._filter_sections(self._section_rows(payload), selected_indicators)
+        result: dict[str, dict[str, Any]] = {}
+        for _title, rows in sections:
+            for name, formula, display_value in rows:
+                key = self._indicator_key(name)
+                value, unit = self._split_value_and_unit(display_value)
+                result[key] = {"name": str(name), "formula": str(formula), "value": value, "unit": unit or "", "display_value": str(display_value)}
+        return result
 
     @staticmethod
     def _normalize_db_paths(db_paths: Iterable[str]) -> list[str]:
@@ -1793,7 +1832,7 @@ class OperBlockStatisticsReportBuilder:
         return "\n".join(blocks)
 
     def generate_report_html(self, selected_indicators: Iterable[str] | None = None) -> str:
-        stats = self._calculate_statistics()
+        stats = self.calculate_payload()
         sections = self._filter_sections(self._section_rows(stats), selected_indicators)
         indicators_count = sum(len(rows) for _title, rows in sections)
         generated_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")

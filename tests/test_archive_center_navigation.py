@@ -66,6 +66,7 @@ def test_archive_center_has_separate_fixed_destinations_and_shell():
             "Архив реанимации",
             "Архив оперблока",
             "Статистика РАО",
+            "Аналитика",
             "Графики реанимации",
             "Статистика оперблока",
         ]
@@ -91,6 +92,8 @@ def test_archive_center_has_separate_fixed_destinations_and_shell():
         assert widget.rao_archive.actions_frame.objectName() == "ArchiveActionsBar"
         assert widget.rao_archive is not widget.operblock_archive
         assert widget.rao_statistics is not widget.operblock_statistics
+        assert widget.rao_analysis.analytics_workspace is widget.rao_statistics.analytics_workspace
+        assert widget.operblock_analysis.analytics_workspace is widget.operblock_statistics.analytics_workspace
         assert widget.width() >= 1280
     finally:
         widget.close()
@@ -106,7 +109,7 @@ def test_nurse_center_keeps_archive_read_only_but_statistics_available():
             assert page.btn_delete.isHidden()
         loaded = []
         widget.operblock_statistics.ensure_loaded = lambda: loaded.append(True)
-        widget.select_destination(4)
+        widget.select_destination(5)
         assert widget.content_stack.currentWidget() is widget.operblock_statistics
         assert widget.page_title.text() == "Статистика оперблока"
         assert loaded == [True]
@@ -236,6 +239,9 @@ def test_operblock_archive_case_returns_to_the_common_center_on_back():
     assert stack.currentWidget() is archive_page
     assert host.refreshed
     assert not host._protocol_opened_from_archive
+    stack.close()
+    stack.deleteLater()
+    application().processEvents()
 
 
 def test_statistics_period_is_forwarded_to_archive_db_discovery():
@@ -380,7 +386,7 @@ def test_statistics_first_open_builds_full_report_automatically(monkeypatch):
 def test_graphs_are_a_separate_page_with_the_full_existing_catalog():
     widget = _center("doctor")
     try:
-        widget.select_destination(3)
+        widget.select_destination(4)
         assert widget.content_stack.currentWidget() is widget.rao_graphs
         assert widget.page_title.text() == "Графики реанимации"
         assert len(widget.rao_graphs.checkboxes) == sum(len(items) for items in GRAPH_GROUPS.values())
@@ -388,6 +394,40 @@ def test_graphs_are_a_separate_page_with_the_full_existing_catalog():
         assert widget.rao_graphs.btn_preview.text() == "Показать графики"
         assert not hasattr(widget.rao_statistics, "btn_graphs")
     finally:
+        widget.close()
+
+
+def test_analysis_has_separate_full_height_pages_and_does_not_squeeze_statistics():
+    app = application()
+    widget = _center("doctor")
+    try:
+        widget.select_destination(2)
+        app.processEvents()
+        assert widget.content_stack.currentWidget() is widget.rao_statistics
+        assert not widget.rao_statistics.analytics_workspace.isVisible()
+        assert widget.rao_statistics.report.height() > 350
+
+        widget.select_destination(3)
+        app.processEvents()
+        assert widget.content_stack.currentWidget() is widget.analytics
+        assert widget.page_title.text() == "Аналитика"
+        assert widget.analytics.stack.currentWidget() is widget.rao_analysis
+        assert widget.rao_analysis.include_recovery.isVisible()
+        widget.rao_analysis.include_recovery.setChecked(True)
+        assert widget.rao_statistics.chk_include_recovery.isChecked()
+        assert widget.rao_analysis.analytics_workspace.isVisible()
+        assert widget.rao_analysis.analytics_workspace.height() > 350
+
+        widget.analytics.select_scope(1)
+        app.processEvents()
+        assert widget.content_stack.currentWidget() is widget.analytics
+        assert widget.analytics.stack.currentWidget() is widget.operblock_analysis
+        assert widget.analytics.btn_operblock.isChecked()
+        assert not widget.operblock_analysis.include_recovery.isVisible()
+        assert widget.operblock_analysis.analytics_workspace.isVisible()
+        assert widget.operblock_analysis.analytics_workspace.height() > 350
+    finally:
+        widget.shutdown()
         widget.close()
 
 

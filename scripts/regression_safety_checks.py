@@ -9211,13 +9211,22 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     result = {"filled": snapshot(True), "empty": snapshot(False)}
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    expected_digest = "b56f272afd2b7cee6ff3c246e2c7019047cb1ad01f00de39f91854f4bae9d17e"
-    if digest != expected_digest:
-        return False, f"statistics snapshot changed: {digest}"
     if result["filled"]["stats"]["N"] != 4 or result["filled"]["stats"]["deaths"] != 1:
         return False, f"unexpected filled core stats: {result['filled']['stats']}"
+    if result["filled"]["stats"]["N_interval"] != 5:
+        return False, f"carry-in admission missing from interval population: {result['filled']['stats']}"
+    filled_stats = result["filled"]["stats"]
+    if sum(filled_stats["mortality_age_groups"].values()) != 5:
+        return False, f"mortality strata lost interval population: {filled_stats}"
+    if abs(float(filled_stats["intensity_index"]) - 1.2) > 1e-9:
+        return False, f"intervention intensity does not use interval denominator: {filled_stats}"
+    if abs(float(filled_stats["technology_index"]) - 60.0) > 1e-9:
+        return False, f"technology index does not use interval denominator: {filled_stats}"
     if result["empty"]["stats"]["N"] != 0 or result["empty"]["stats"]["bed_days"] != 0:
         return False, f"unexpected empty stats: {result['empty']['stats']}"
+    expected_digest = "03b43ded9435dc726fba26f38e2c38453ae6cbc7b38710985df7f44d60a13602"
+    if digest != expected_digest:
+        return False, f"statistics snapshot changed: {digest}"
     recovery_off = recovery_filter_snapshot(False)
     recovery_on = recovery_filter_snapshot(True)
     expected_off = {
@@ -9286,8 +9295,8 @@ def _check_graph_outcome_labels_hide_nan(temp_root: str) -> tuple[bool, str]:
 
     generators.save_plot = inspect_save_plot
     try:
-        generators.generate_g31_g35(
-            {"g33"},
+        generators.generate_g23_g30(
+            {"g28"},
             conn,
             (base.isoformat(), (base + timedelta(days=31)).isoformat()),
             colors,
@@ -9299,11 +9308,11 @@ def _check_graph_outcome_labels_hide_nan(temp_root: str) -> tuple[bool, str]:
         conn.close()
 
     if not captured_labels:
-        return False, "g33 labels were not captured"
+        return False, "g28 labels were not captured"
     if any("nan" in str(label).lower() for label in captured_labels):
-        return False, f"g33 outcome labels leaked nan: {captured_labels}"
+        return False, f"g28 outcome labels leaked nan: {captured_labels}"
     if not any("Не указано" in str(label) for label in captured_labels):
-        return False, f"g33 missing normalized empty outcome label: {captured_labels}"
+        return False, f"g28 missing normalized empty outcome label: {captured_labels}"
 
     plt.figure(figsize=(8, 4))
     try:

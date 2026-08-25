@@ -1,539 +1,246 @@
+"""Канонический dispatch графиков g23–g45.
+
+Номера являются частью клинического аналитического контракта. Kaplan–Meier и
+все доли — только описательные артефакты исходных строк выбранного периода.
 """
-Модуль генерации графиков 23-45:
-- Диагностика (g23-g30)
-- Исходы (g31-g35)
-- Длительность пребывания (g36-g40)
-- Смертность (g41-g45)
-"""
+from __future__ import annotations
 
 from datetime import datetime
 
 try:
     import pandas as pd
     import matplotlib.pyplot as plt
-except ImportError:
+except ImportError:  # pragma: no cover
     pd = None
     plt = None
 
-# Импортируем функцию save_plot из первого файла
-from rem_card.ui.analytics.graphs_generators_1 import save_plot
-from rem_card.ui.analytics.chart_renderer import plot_pie_with_legend
 from rem_card.services.analytics.period import parse_analytics_datetime
+from rem_card.ui.analytics.chart_renderer import plot_pie_with_legend
+from rem_card.ui.analytics.graphs_generators_1 import save_plot
+
+
+CANONICAL_GRAPH_KEYS = frozenset(f"g{number}" for number in range(23, 46))
+_ADMISSION_FIELDS = (
+    "id", "admission_datetime", "transfer_datetime", "death_datetime", "outcome",
+    "patient_age", "patient_age_unit", "patient_gender", "source_department",
+    "diagnosis_code", "diagnosis_text",
+)
+
+
+def _note(html, number, title, text="Нет данных для выбранной популяции."):
+    return html + f"<div style='text-align:center'><h3>{number}. {title}</h3><p>{text}</p></div><br>"
+
+
+def _admission_select_list(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(admissions)")}
+    return ", ".join(
+        name if name in columns else f"NULL AS {name}"
+        for name in _ADMISSION_FIELDS
+    )
+
+
+def _admissions(conn, params):
+    return pd.read_sql_query(
+        f"""SELECT {_admission_select_list(conn)}
+            FROM admissions WHERE DATETIME(admission_datetime) >= DATETIME(?)
+              AND DATETIME(admission_datetime) < DATETIME(?)""",
+        conn,
+        params=params,
+    )
+
+
+def _overlapping_admissions(conn, params):
+    """Census population for LOS: [admission, terminal) intersects period."""
+    return pd.read_sql_query(
+        f"""SELECT {_admission_select_list(conn)}
+            FROM admissions
+            WHERE DATETIME(admission_datetime) < DATETIME(?)
+              AND (transfer_datetime IS NULL OR DATETIME(transfer_datetime) > DATETIME(?))
+              AND (death_datetime IS NULL OR DATETIME(death_datetime) > DATETIME(?))""",
+        conn,
+        params=(params[1], params[0], params[0]),
+    )
+
+
+def _death_mask(frame, period_end=None):
+    declared = frame["outcome"].fillna("").astype(str).str.casefold().isin({"умер", "death", "deceased"})
+    if period_end is None:
+        return frame["death_datetime"].notna() | declared
+    death_times = frame["death_datetime"].map(parse_analytics_datetime)
+    return death_times.map(lambda value: value is not None and value < period_end) & (declared | frame["death_datetime"].notna())
+
+
+def _duration_days(row, reference=None, period_start=None, period_end=None):
+    start = parse_analytics_datetime(row.get("admission_datetime"))
+    end = parse_analytics_datetime(row.get("death_datetime")) or parse_analytics_datetime(row.get("transfer_datetime")) or reference
+    if start is None or end is None: return None
+    start = max(start, period_start) if period_start else start
+    end = min(end, period_end) if period_end else end
+    return max(0.0, (end - start).total_seconds() / 86400.0)
+
+
+def _age_group(value):
+    try: age = float(value)
+    except (TypeError, ValueError): return "Не указан"
+    if age < 1: return "до 1 г"
+    if age < 18: return "1–17"
+    if age <= 44: return "18–44"
+    if age <= 60: return "45–60"
+    if age <= 75: return "61–75"
+    return "76+"
+
+
+def _bar(number, title, labels, values, color, img_paths, html):
+    if not len(labels) or not len(values):
+        return _note(html, number, title)
+    plt.figure(figsize=(9, 4.5)); plt.bar(range(len(labels)), values, color=color)
+    plt.xticks(range(len(labels)), labels, rotation=45, ha="right"); plt.title(f"{number}. {title}"); plt.tight_layout()
+    return html + save_plot(f"{number}. {title}", img_paths)
+
+
+def _percentage_bar(number, title, frame, group_col, color, img_paths, html):
+    values = []
+    for label, group in frame.groupby(group_col, dropna=False):
+        if len(group): values.append((str(label or "Не указан"), _death_mask(group).sum() * 100.0 / len(group)))
+    return _bar(number, title, [item[0] for item in values], [item[1] for item in values], color, img_paths, html)
 
 
 def generate_g23_g30(selected, conn, params, chart_colors, img_paths, html_content):
-    """Диагностика"""
-
-    # 23. Основные диагнозы (топ-5)
+    """g23–27 diagnostics; g28–30 outcomes and mortality."""
+    frame = _admissions(conn, params)
+    diagnoses = frame.assign(diagnosis=frame["diagnosis_code"].fillna(frame["diagnosis_text"]).fillna("Не указан").astype(str))
     if "g23" in selected:
-        df = pd.read_sql_query(
-            "SELECT diagnosis_code, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_code IS NOT NULL AND diagnosis_code != '' "
-            "GROUP BY diagnosis_code ORDER BY count DESC LIMIT 5", conn, params=params)
-        if not df.empty:
-            df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-            plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['count'], color=chart_colors[0])
-            plt.xticks(range(len(df)), df['diagnosis_code'], rotation=45, ha='right')
-            plt.title("23. Топ-5 диагнозов (по коду)")
-            html_content += save_plot("23. Топ-5 диагнозов", img_paths)
-
-    # 24. Количество пациентов по МКБ-10 кодам (топ-5)
+        counts = diagnoses[diagnoses.diagnosis != "Не указан"].diagnosis.value_counts().head(10)
+        html_content = _bar(23, "Топ-10 диагнозов", list(counts.index), list(counts.values), chart_colors[0], img_paths, html_content)
     if "g24" in selected:
-        df = pd.read_sql_query(
-            "SELECT diagnosis_code as mkb_code, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_code IS NOT NULL AND diagnosis_code != '' "
-            "GROUP BY diagnosis_code ORDER BY count DESC LIMIT 5", conn, params=params)
-        if not df.empty:
-            df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-            plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['count'], color=chart_colors[1])
-            plt.xticks(range(len(df)), df['mkb_code'], rotation=45, ha='right')
-            plt.title("24. Топ-5 кодов МКБ-10")
-            html_content += save_plot("24. Топ-5 кодов МКБ-10", img_paths)
-
-    # 25. Количество пациентов по МКБ-10 кодам (с группировкой по первой букве)
+        counts = diagnoses[diagnoses.diagnosis != "Не указан"].assign(mkb=lambda x: x.diagnosis.str[:3]).mkb.value_counts().head(10)
+        html_content = _bar(24, "Структура диагнозов по классам МКБ-10", list(counts.index), list(counts.values), chart_colors[1], img_paths, html_content)
     if "g25" in selected:
-        df = pd.read_sql_query(
-            "SELECT SUBSTR(diagnosis_code, 1, 3) as mkb_group, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_code IS NOT NULL AND diagnosis_code != '' "
-            "GROUP BY mkb_group ORDER BY mkb_group", conn, params=params)
-        if not df.empty:
-            df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-            if df['count'].sum() > 0:
-                plt.figure(figsize=(10, 6))
-                plot_pie_with_legend(df['count'], df['mkb_group'], chart_colors, legend_title="Группа МКБ")
-                plt.title("25. Распределение по группам МКБ-10 (первые 3 символа)")
-                html_content += save_plot("25. Группы МКБ-10", img_paths)
-
-    # 26. Диагнозы, связанные с COVID-19 (ищем в diagnosis_text, если есть)
+        counts = diagnoses[diagnoses.diagnosis != "Не указан"].diagnosis.value_counts().head(15)
+        html_content = _bar(25, "Частота отдельных диагнозов", list(counts.index), list(counts.values), chart_colors[2], img_paths, html_content)
     if "g26" in selected:
-        df = pd.read_sql_query(
-            "SELECT diagnosis_code, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_text LIKE '%COVID%' "
-            "GROUP BY diagnosis_code ORDER BY count DESC", conn, params=params)
-        if not df.empty:
-            df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-            plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['count'], color=chart_colors[2])
-            plt.xticks(range(len(df)), df['diagnosis_code'].fillna('N/A'), rotation=45, ha='right')
-            plt.title("26. Диагнозы, связанные с COVID-19")
-            html_content += save_plot("26. Диагнозы, связанные с COVID-19", img_paths)
-
-    # 27. Распределение диагнозов по полу
+        counts = diagnoses[_death_mask(diagnoses) & (diagnoses.diagnosis != "Не указан")].diagnosis.value_counts().head(10)
+        html_content = _bar(26, "Диагнозы у умерших пациентов", list(counts.index), list(counts.values), chart_colors[3], img_paths, html_content)
     if "g27" in selected:
-        df = pd.read_sql_query("""
-            SELECT patient_gender, diagnosis_code, COUNT(id) as count
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_code IS NOT NULL AND diagnosis_code != ''
-            GROUP BY patient_gender, diagnosis_code ORDER BY patient_gender, count DESC
-        """, conn, params=params)
-
-        if not df.empty:
-            df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-            # Удобнее представить как топ-3 для каждого пола
-            male_df = df[df['patient_gender'] == 'Мужской'].head(3).copy()
-            female_df = df[df['patient_gender'] == 'Женский'].head(3).copy()
-
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-            if not male_df.empty:
-                axes[0].bar(male_df['diagnosis_code'], male_df['count'], color=chart_colors[3])
-                axes[0].set_title("27. Диагнозы у мужчин (Топ-3)")
-                axes[0].tick_params(axis='x', rotation=45)
-            else:
-                axes[0].text(0.5, 0.5, "Нет данных", ha='center', va='center')
-
-            if not female_df.empty:
-                axes[1].bar(female_df['diagnosis_code'], female_df['count'], color=chart_colors[4])
-                axes[1].set_title("27. Диагнозы у женщин (Топ-3)")
-                axes[1].tick_params(axis='x', rotation=45)
-            else:
-                axes[1].text(0.5, 0.5, "Нет данных", ha='center', va='center')
-
-            html_content += save_plot("27. Диагнозы по полу (Топ-3)", img_paths)
-
-    # 28. Распределение диагнозов по возрасту (группы)
+        html_content = _percentage_bar(27, "Летальность по диагнозам", diagnoses[diagnoses.diagnosis != "Не указан"], "diagnosis", chart_colors[4], img_paths, html_content)
     if "g28" in selected:
-        df = pd.read_sql_query("""
-            SELECT
-                CASE
-                    WHEN patient_age < 1 THEN 'до 1г'
-                    WHEN patient_age < 18 THEN '1-17'
-                    WHEN patient_age <= 44 THEN '18-44'
-                    WHEN patient_age <= 60 THEN '45-60'
-                    WHEN patient_age <= 75 THEN '60-75'
-                    ELSE '75+'
-                END as age_group,
-                CASE WHEN patient_age_unit = 'месяцы' THEN patient_age / 12.0 ELSE patient_age END as age,
-                diagnosis_code
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_code IS NOT NULL AND diagnosis_code != ''
-        """, conn, params=params)
-
-        if not df.empty:
-            grouped_data = df.groupby(['age_group', 'diagnosis_code']).size().reset_index(name='count')
-            grouped_data['count'] = pd.to_numeric(grouped_data['count'], errors='coerce').fillna(0)
-            # Для простоты, показываем топ-3 диагноза в каждой возрастной группе
-            top_diag_per_group = grouped_data.sort_values(by=['age_group', 'count'], ascending=[True, False]) \
-                                            .groupby('age_group').head(3)
-
-            # Создаем график
-            plt.figure(figsize=(12, 7))
-            for i, age_group in enumerate(top_diag_per_group['age_group'].unique()):
-                subset = top_diag_per_group[top_diag_per_group['age_group'] == age_group].copy()
-                plt.subplot(2, 3, i + 1)
-                plt.bar(range(len(subset)), subset['count'], color=chart_colors[5])
-                plt.xticks(range(len(subset)), subset['diagnosis_code'], rotation=45, ha='right')
-                plt.title(f"28. {age_group}")
-                plt.ylabel("Количество")
-
-            html_content += save_plot("28. Диагнозы по возрастным группам (Топ-3)", img_paths)
-
-    # 29. Частота повторных госпитализаций с тем же диагнозом
+        outcomes = frame.outcome.fillna("Не указано").replace("", "Не указано").value_counts()
+        if outcomes.empty: html_content = _note(html_content, 28, "Распределение исходов лечения")
+        else:
+            plt.figure(figsize=(8, 6)); plot_pie_with_legend(outcomes.values, outcomes.index, chart_colors, legend_title="Исход")
+            plt.title("28. Распределение исходов лечения"); html_content += save_plot("28. Распределение исходов лечения", img_paths)
     if "g29" in selected:
-        # Для простоты, если нет previous_admission_diagnosis, мы пропустим этот сложный SQL
-        pass
-        #html_content += "<div style='text-align:center'><h3>29. Частота повторных госпитализаций</h3><p>Для этого расчета нужны данные о предыдущих госпитализациях</p></div><br>"
-
-    # 30. Средняя длительность лечения по диагнозам
+        monthly = frame.assign(month=frame.admission_datetime.astype(str).str[:7]).groupby("month").apply(lambda x: _death_mask(x).sum() * 100.0 / len(x) if len(x) else 0)
+        html_content = _bar(29, "Летальность по месяцам", list(monthly.index), list(monthly.values), chart_colors[2], img_paths, html_content)
     if "g30" in selected:
-        df = pd.read_sql_query("""
-            SELECT diagnosis_code, AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_code IS NOT NULL AND diagnosis_code != ''
-            GROUP BY diagnosis_code ORDER BY avg_duration DESC
-        """, conn, params=params)
-        if not df.empty:
-            df['avg_duration'] = pd.to_numeric(df['avg_duration'], errors='coerce').fillna(0)
-            df = df.head(5) # Топ-5 по длительности
-            plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['avg_duration'], color=chart_colors[7])
-            plt.xticks(range(len(df)), df['diagnosis_code'], rotation=45, ha='right')
-            plt.title("30. Топ-5 диагнозов по средней длительности лечения (дни)")
-            plt.ylabel("Дни")
-            html_content += save_plot("30. Средняя длительность лечения по диагнозам", img_paths)
-
+        html_content = _percentage_bar(30, "Летальность по полу", frame.assign(sex=frame.patient_gender.fillna("Не указан")), "sex", chart_colors[0], img_paths, html_content)
     return html_content
 
 
 def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_content):
-    """Исходы"""
-
-    # 31. Исход лечения (общая статистика)
+    """g31–32 mortality strata; g33–35 LOS."""
+    frame = _admissions(conn, params)
     if "g31" in selected:
-        df = pd.read_sql_query(
-            "SELECT COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') as outcome, COUNT(id) as count "
-            "FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? "
-            "GROUP BY COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано')",
-            conn, params=params)
-        if not df.empty:
-            df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-            if df['count'].sum() > 0:
-                plt.figure(figsize=(8, 8))
-                plot_pie_with_legend(df['count'], df['outcome'], chart_colors[:4], legend_title="Исход")
-                plt.title("31. Исход лечения пациентов")
-                html_content += save_plot("31. Исход лечения пациентов", img_paths)
-
-    # 32. Исход лечения по месяцам
+        html_content = _percentage_bar(31, "Летальность по возрастным группам", frame.assign(age_group=frame.patient_age.map(_age_group)), "age_group", chart_colors[1], img_paths, html_content)
     if "g32" in selected:
-        df = pd.read_sql_query("""
-            SELECT
-                strftime('%Y-%m', admission_datetime) as month,
-                COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') as outcome,
-                COUNT(id) as count
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY month, COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') ORDER BY month
-        """, conn, params=params)
-        if not df.empty:
-            df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
-            df['month_dt'] = pd.to_datetime(df['month']) # для сортировки
-            df = df.sort_values('month_dt')
-
-            # Создаем сводную таблицу
-            pivot_df = df.pivot_table(index='month', columns='outcome', values='count', fill_value=0)
-
-            if not pivot_df.empty:
-                plt.figure(figsize=(12, 6))
-
-                # Задаем цвета динамически в зависимости от колонок (исходов)
-                available_colors = chart_colors
-                plot_colors = available_colors[:len(pivot_df.columns)]
-
-                pivot_df.plot(kind='bar', stacked=True, ax=plt.gca(), color=plot_colors)
-                plt.title("32. Исход лечения по месяцам")
-                plt.xlabel("Месяц")
-                plt.ylabel("Количество пациентов")
-                plt.xticks(rotation=45, ha='right')
-                plt.legend(title="Исход")
-                html_content += save_plot("32. Исход лечения по месяцам", img_paths)
-
-    # 33. Соотношение койко-дней и исходов
+        html_content = _percentage_bar(32, "Летальность по источнику поступления", frame.assign(source=frame.source_department.fillna("Не указан")), "source", chart_colors[2], img_paths, html_content)
+    period_start, period_end = parse_analytics_datetime(params[0]), parse_analytics_datetime(params[1])
+    reference = period_end or datetime.now()
+    duration_frame = _overlapping_admissions(conn, params)
+    durations = [value for _, row in duration_frame.iterrows() if (value := _duration_days(row, reference, period_start, period_end)) is not None]
     if "g33" in selected:
-        df = pd.read_sql_query("""
-            SELECT
-                COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') as outcome,
-                SUM(MAX(0, julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime))) as bed_days
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') ORDER BY bed_days DESC
-        """, conn, params=params)
-        if not df.empty:
-            df['bed_days'] = pd.to_numeric(df['bed_days'], errors='coerce').fillna(0)
-            # Убеждаемся, что нет отрицательных значений для круговой диаграммы
-            df = df[df['bed_days'] >= 0]
-            if not df.empty and df['bed_days'].sum() > 0:
-                plt.figure(figsize=(8, 8))
-                plot_pie_with_legend(
-                    df['bed_days'],
-                    df['outcome'],
-                    chart_colors[:4],
-                    legend_title="Исход",
-                    value_formatter=lambda value: f"{value:.1f} к-дн.",
-                )
-            plt.title("33. Соотношение койко-дней по исходам")
-            html_content += save_plot("33. Соотношение койко-дней по исходам", img_paths)
-
-    # 34. Средняя длительность пребывания по исходам
+        if durations:
+            plt.figure(figsize=(9, 4.5)); plt.hist(durations, bins=min(30, max(1, len(durations))), color=chart_colors[3], edgecolor="white")
+            plt.title("33. Распределение длительности пребывания"); plt.xlabel("Сутки"); plt.ylabel("Госпитализации")
+            html_content += save_plot("33. Распределение длительности пребывания", img_paths)
+        else: html_content = _note(html_content, 33, "Распределение длительности пребывания")
     if "g34" in selected:
-        df = pd.read_sql_query("""
-            SELECT
-                COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') as outcome,
-                AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') ORDER BY avg_duration DESC
-        """, conn, params=params)
-        if not df.empty:
-            df['avg_duration'] = pd.to_numeric(df['avg_duration'], errors='coerce').fillna(0)
-            plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['avg_duration'], color=chart_colors[:4])
-            plt.xticks(range(len(df)), df['outcome'])
-            plt.title("34. Средняя длительность пребывания по исходам (дни)")
-            plt.ylabel("Дни")
-            html_content += save_plot("34. Средняя длительность пребывания по исходам", img_paths)
-
-    # 35. Соотношение смертей к общему числу пациентов
+        values = {}
+        for _, row in duration_frame.iterrows():
+            duration = _duration_days(row, reference, period_start, period_end)
+            if duration is not None: values.setdefault(str(row.get("admission_datetime") or "")[:7], []).append(duration)
+        html_content = _bar(34, "Длительность пребывания по месяцам", list(values), [sum(x) / len(x) for x in values.values()], chart_colors[4], img_paths, html_content)
     if "g35" in selected:
-        df = pd.read_sql_query("""
-            SELECT COUNT(id) as total_patients, SUM(CASE WHEN outcome = 'умер' THEN 1 ELSE 0 END) as deaths
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-        """, conn, params=params)
-        if not df.empty and df['total_patients'].iloc[0] > 0:
-            total_patients = df['total_patients'].iloc[0]
-            deaths = df['deaths'].iloc[0]
-            death_rate = (deaths / total_patients) * 100 if total_patients > 0 else 0
-            html_content += (
-                "<div style='text-align: center;'><h3>35. Смертность</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[2]};'>{death_rate:.1f}%</div>"
-                f"<p>Умерло: {deaths} из {total_patients} пациентов</p></div><br>"
-            )
-        else:
-            html_content += "<div style='text-align:center'><h3>35. Смертность</h3><p>Нет данных для расчета</p></div><br>"
-
+        total = len(durations); count = sum(value > 7 for value in durations)
+        html_content = _bar(35, "Доля пациентов с пребыванием более 7 суток", ["> 7 суток", "≤ 7 суток"], [count * 100.0 / total if total else 0, (total - count) * 100.0 / total if total else 0], chart_colors[5], img_paths, html_content)
     return html_content
 
 
 def generate_g36_g40(selected, conn, params, chart_colors, img_paths, adms, html_content):
-    """Длительность пребывания"""
-
-    # 36. Распределение длительности пребывания (гистограмма)
+    """g36 LOS >14d; g37–40 descriptive mortality timing."""
+    frame = pd.DataFrame(adms) if adms is not None else _admissions(conn, params)
+    if frame.empty: frame = _admissions(conn, params)
+    duration_frame = _overlapping_admissions(conn, params)
+    period_start, period_end = parse_analytics_datetime(params[0]), parse_analytics_datetime(params[1])
+    reference = period_end or datetime.now()
+    observations = [(row, value) for _, row in duration_frame.iterrows() if (value := _duration_days(row, reference, period_start, period_end)) is not None]
     if "g36" in selected:
-        durations = []
-        for row in adms:
-            try:
-                start = parse_analytics_datetime(row['admission_datetime'])
-                if start is None:
-                    continue
-                end_str = row['death_datetime'] if row['outcome'] == 'умер' else row['transfer_datetime']
-                if end_str:
-                    end = parse_analytics_datetime(end_str)
-                    if end is None:
-                        continue
-                    duration = (end - start).days
-                    if duration >= 0: # Исключаем некорректные значения
-                        durations.append(duration)
-                else: # Если пациент еще находится на лечении
-                    duration = (datetime.now() - start).days
-                    if duration >= 0:
-                        durations.append(duration)
-            except Exception:
-                pass # Пропускаем записи с ошибками
-
-        if durations:
-            plt.figure(figsize=(10, 5))
-            plt.hist(durations, bins=30, color=chart_colors[4], edgecolor='white')
-            plt.title("36. Распределение длительности пребывания пациентов (дни)")
-            plt.xlabel("Длительность (дни)")
-            plt.ylabel("Количество пациентов")
-            html_content += save_plot("36. Распределение длительности пребывания", img_paths)
-        else:
-            html_content += "<div style='text-align:center'><h3>36. Распределение длительности пребывания</h3><p>Нет данных для расчета</p></div><br>"
-
-    # 37. Средняя длительность пребывания по месяцам
-    if "g37" in selected:
-        df = pd.read_sql_query("""
-            SELECT strftime('%Y-%m', admission_datetime) as month,
-            AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY month ORDER BY month
-        """, conn, params=params)
-        if not df.empty:
-            df['avg_duration'] = pd.to_numeric(df['avg_duration'], errors='coerce').fillna(0)
-            plt.figure(figsize=(10, 4))
-            plt.plot(df['month'], df['avg_duration'], marker='o', color=chart_colors[5])
-            plt.title("37. Средняя длительность пребывания по месяцам (дни)")
-            plt.xticks(rotation=45, ha='right')
-            plt.ylabel("Дни")
-            html_content += save_plot("37. Средняя длительность пребывания по месяцам", img_paths)
-
-    # 38. Медианная длительность пребывания
+        total = len(observations); count = sum(value > 14 for _, value in observations)
+        html_content = _bar(36, "Доля пациентов с пребыванием более 14 суток", ["> 14 суток", "≤ 14 суток"], [count * 100.0 / total if total else 0, (total - count) * 100.0 / total if total else 0], chart_colors[0], img_paths, html_content)
+    death_hours = [value * 24.0 for _, row in frame.iterrows() if (value := _duration_days(row, reference, period_start, period_end)) is not None and bool(_death_mask(pd.DataFrame([row]), period_end).iloc[0])]
+    if "g37" in selected: html_content = _bar(37, "Время до смерти пациентов", [f"случай {i + 1}" for i in range(len(death_hours))], death_hours, chart_colors[2], img_paths, html_content)
     if "g38" in selected:
-        durations = []
-        for row in adms:
-            try:
-                start = parse_analytics_datetime(row['admission_datetime'])
-                if start is None:
-                    continue
-                end_str = row['death_datetime'] if row['outcome'] == 'умер' else row['transfer_datetime']
-                if end_str:
-                    end = parse_analytics_datetime(end_str)
-                    if end is None:
-                        continue
-                    duration = (end - start).days
-                    if duration >= 0:
-                        durations.append(duration)
-                else:
-                    duration = (datetime.now() - start).days
-                    if duration >= 0:
-                        durations.append(duration)
-            except Exception:
-                pass
-        if durations:
-            median_duration = sorted(durations)[len(durations) // 2]
-            html_content += (
-                f"<div style='text-align: center;'><h3>38. Медианная длительность пребывания</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[1]};'>{median_duration} дней</div>"
-                f"<p>Используются продолжительности всех пациентов.</p></div><br>"
-            )
-        else:
-             html_content += "<div style='text-align:center'><h3>38. Медианная длительность пребывания</h3><p>Нет данных для расчета</p></div><br>"
-
-    # 39. Длительность пребывания для умерших vs выписанных
+        html_content = _bar(38, "Структура летальности по срокам", ["<24 ч", "1–3 суток", "4–7 суток", ">7 суток"], [sum(x < 24 for x in death_hours), sum(24 <= x < 72 for x in death_hours), sum(72 <= x < 168 for x in death_hours), sum(x >= 168 for x in death_hours)], chart_colors[3], img_paths, html_content)
     if "g39" in selected:
-        df = pd.read_sql_query("""
-            SELECT outcome, AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND outcome IN ('умер', 'выписан')
-            GROUP BY outcome ORDER BY avg_duration DESC
-        """, conn, params=params)
-        if not df.empty:
-            df['avg_duration'] = pd.to_numeric(df['avg_duration'], errors='coerce').fillna(0)
-            plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['avg_duration'], color=[chart_colors[2], chart_colors[1]])
-            plt.xticks(range(len(df)), df['outcome'])
-            plt.title("39. Средняя длительность пребывания (Умершие vs Выписанные)")
-            plt.ylabel("Дни")
-            html_content += save_plot("39. Средняя длительность пребывания (Умершие vs Выписанные)", img_paths)
-
-    # 40. Распределение длительности пребывания для умерших (гистограмма)
+        total = len(death_hours); early = sum(x < 24 for x in death_hours)
+        html_content = _bar(39, "Доля ранней летальности", ["<24 ч", "≥24 ч"], [early * 100.0 / total if total else 0, (total - early) * 100.0 / total if total else 0], chart_colors[4], img_paths, html_content)
     if "g40" in selected:
-        durations_d = []
-        for row in adms:
-            if row['outcome'] == 'умер':
-                try:
-                    start = parse_analytics_datetime(row['admission_datetime'])
-                    if start is None:
-                        continue
-                    end_str = row['death_datetime']
-                    if end_str:
-                        end = parse_analytics_datetime(end_str)
-                        if end is None:
-                            continue
-                        duration = (end - start).days
-                        if duration >= 0:
-                            durations_d.append(duration)
-                except Exception:
-                    pass
-        if durations_d:
-            plt.figure(figsize=(10, 5))
-            plt.hist(durations_d, bins=20, color=chart_colors[2], edgecolor='white')
-            plt.title("40. Распределение длительности пребывания умерших (дни)")
-            plt.xlabel("Длительность (дни)")
-            plt.ylabel("Количество пациентов")
-            html_content += save_plot("40. Распределение длительности пребывания умерших", img_paths)
-        else:
-             html_content += "<div style='text-align:center'><h3>40. Распределение длительности пребывания умерших</h3><p>Нет данных об умерших для расчета</p></div><br>"
-
+        total = len(death_hours); early = sum(x < 24 for x in death_hours)
+        html_content = _bar(40, "Индекс тяжести поступающего потока", ["Ранние смерти / все смерти"], [early * 100.0 / total if total else 0], chart_colors[5], img_paths, html_content)
     return html_content
 
 
+def _table_exists(conn, name):
+    return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
+
+
 def generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_content):
-    """Смертность"""
-
-    # 41. Коэффициент летальности (общий)
+    """g41 Kaplan–Meier; g42–45 IVL episodes of selected admissions."""
+    frame = _admissions(conn, params); period_start, period_end = parse_analytics_datetime(params[0]), parse_analytics_datetime(params[1]); reference = period_end or datetime.now()
     if "g41" in selected:
-        df = pd.read_sql_query("""
-            SELECT SUM(CASE WHEN outcome = 'умер' THEN 1 ELSE 0 END) as deaths, COUNT(id) as total
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-        """, conn, params=params)
-        if not df.empty and df['total'].iloc[0] > 0:
-            total_patients = df['total'].iloc[0]
-            deaths = df['deaths'].iloc[0]
-            lethality_rate = (deaths / total_patients) * 100
-            html_content += (
-                f"<div style='text-align: center;'><h3>41. Общий коэффициент летальности</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[2]};'>{lethality_rate:.1f}%</div>"
-                f"<p>Умерло: {deaths} из {total_patients} пациентов</p></div><br>"
-            )
-        else:
-            html_content += "<div style='text-align:center'><h3>41. Общий коэффициент летальности</h3><p>Нет данных для расчета</p></div><br>"
-
-    # 42. Коэффициент летальности по месяцам
+        observations = [(value, bool(_death_mask(pd.DataFrame([row]), period_end).iloc[0])) for _, row in frame.iterrows() if (value := _duration_days(row, reference, period_start, period_end)) is not None]
+        if observations:
+            at_risk = len(observations); survival = 1.0; xs, ys = [0.0], [1.0]
+            for point in sorted({item[0] for item in observations}):
+                events = sum(item[0] == point and item[1] for item in observations); censored = sum(item[0] == point and not item[1] for item in observations)
+                if at_risk and events: survival *= 1.0 - events / at_risk
+                xs.extend([point, point]); ys.extend([ys[-1], survival]); at_risk -= events + censored
+            plt.figure(figsize=(9, 4.5)); plt.step(xs, ys, where="post", color=chart_colors[0]); plt.ylim(0, 1.05)
+            plt.title("41. Кривая выживаемости Kaplan–Meier (описательно)"); plt.xlabel("Сутки от госпитализации"); plt.ylabel("Оценка выживаемости")
+            html_content += save_plot("41. Кривая выживаемости Kaplan–Meier", img_paths)
+        else: html_content = _note(html_content, 41, "Кривая выживаемости Kaplan–Meier")
+    keys = ((42, "Доля пациентов на ИВЛ"), (43, "Число эпизодов ИВЛ"), (44, "Длительность ИВЛ"), (45, "ИВЛ-дни по месяцам"))
+    if not any(f"g{number}" in selected for number, _ in keys): return html_content
+    if not _table_exists(conn, "ivl_episodes"):
+        for number, title in keys:
+            if f"g{number}" in selected: html_content = _note(html_content, number, title, "В снимке отсутствует таблица эпизодов ИВЛ.")
+        return html_content
+    episodes = pd.read_sql_query(
+        """SELECT e.admission_id, e.start_time, e.end_time FROM ivl_episodes e
+           JOIN admissions a ON a.id=e.admission_id
+           WHERE DATETIME(a.admission_datetime) >= DATETIME(?) AND DATETIME(a.admission_datetime) < DATETIME(?)
+             AND DATETIME(e.start_time) < DATETIME(?)
+             AND (e.end_time IS NULL OR DATETIME(e.end_time) > DATETIME(?))""",
+        conn, params=(params[0], params[1], params[1], params[0]),
+    )
+    admitted = set(episodes.admission_id.dropna())
     if "g42" in selected:
-        df = pd.read_sql_query("""
-            SELECT strftime('%Y-%m', admission_datetime) as month,
-            SUM(CASE WHEN outcome = 'умер' THEN 1 ELSE 0 END) as deaths, COUNT(id) as total
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY month ORDER BY month
-        """, conn, params=params)
-        if not df.empty:
-            df['lethality'] = (df['deaths'] / df['total']) * 100
-            plt.figure(figsize=(10, 4))
-            plt.plot(df['month'], df['lethality'], marker='s', color=chart_colors[2])
-            plt.title("42. Коэффициент летальности по месяцам (%)")
-            plt.xlabel("Месяц")
-            plt.ylabel("Летальность (%)")
-            plt.ylim(0, 60) # Ограничим для лучшей визуализации
-            plt.xticks(rotation=45, ha='right')
-            html_content += save_plot("42. Коэффициент летальности по месяцам", img_paths)
-
-    # 43. Коэффициент летальности по возрасту (группы)
-    if "g43" in selected:
-        df = pd.read_sql_query("""
-            SELECT
-                CASE
-                    WHEN patient_age < 1 THEN 'до 1г'
-                    WHEN patient_age < 18 THEN '1-17'
-                    WHEN patient_age <= 44 THEN '18-44'
-                    WHEN patient_age <= 60 THEN '45-60'
-                    WHEN patient_age <= 75 THEN '60-75'
-                    ELSE '75+'
-                END as age_group,
-                CASE
-                    WHEN patient_age < 1 THEN 1
-                    WHEN patient_age < 18 THEN 2
-                    WHEN patient_age <= 44 THEN 3
-                    WHEN patient_age <= 60 THEN 4
-                    WHEN patient_age <= 75 THEN 5
-                    ELSE 6
-                END as age_order,
-                SUM(CASE WHEN outcome = 'умер' THEN 1 ELSE 0 END) as deaths,
-                COUNT(id) as total
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY age_group ORDER BY age_order
-        """, conn, params=params)
-        if not df.empty:
-            df['lethality'] = (df['deaths'] / df['total']) * 100
-            plt.figure(figsize=(10, 5))
-            plt.bar(range(len(df)), df['lethality'], color=chart_colors[2])
-            plt.xticks(range(len(df)), df['age_group'])
-            plt.title("43. Коэффициент летальности по возрастным группам (%)")
-            plt.ylabel("Летальность (%)")
-            plt.ylim(0, 100)
-            html_content += save_plot("43. Коэффициент летальности по возрастным группам", img_paths)
-
-    # 44. Коэффициент летальности по полу
-    if "g44" in selected:
-        df = pd.read_sql_query("""
-            SELECT patient_gender,
-            SUM(CASE WHEN outcome = 'умер' THEN 1 ELSE 0 END) as deaths,
-            COUNT(id) as total
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY patient_gender
-        """, conn, params=params)
-        if not df.empty:
-            df['lethality'] = (df['deaths'] / df['total']) * 100
-            if df['lethality'].sum() > 0:
-                plt.figure(figsize=(6, 6))
-                plt.bar(range(len(df)), df['lethality'], color=[chart_colors[0], chart_colors[3]][: len(df)])
-                plt.xticks(range(len(df)), df['patient_gender'].fillna('Не указано'))
-                plt.ylabel("Летальность (%)")
-                plt.ylim(0, 100)
-                plt.title("44. Коэффициент летальности по полу (%)")
-                html_content += save_plot("44. Коэффициент летальности по полу", img_paths)
-
-    # 45. Коэффициент летальности по диагнозам (топ-5)
-    if "g45" in selected:
-        df = pd.read_sql_query("""
-            SELECT diagnosis_code,
-            SUM(CASE WHEN outcome = 'умер' THEN 1 ELSE 0 END) as deaths,
-            COUNT(id) as total
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_code IS NOT NULL AND diagnosis_code != ''
-            GROUP BY diagnosis_code ORDER BY total DESC LIMIT 5
-        """, conn, params=params)
-        if not df.empty:
-            df['lethality'] = (df['deaths'] / df['total']) * 100
-            plt.figure(figsize=(10, 5))
-            plt.bar(range(len(df)), df['lethality'], color=chart_colors[2])
-            plt.xticks(range(len(df)), df['diagnosis_code'], rotation=45, ha='right')
-            plt.title("45. Коэффициент летальности по топ-5 диагнозам (%)")
-            plt.ylabel("Летальность (%)")
-            plt.ylim(0, 100)
-            html_content += save_plot("45. Коэффициент летальности по топ-5 диагнозам", img_paths)
-
+        html_content = _bar(42, "Доля пациентов на ИВЛ", ["ИВЛ", "Без ИВЛ"], [len(admitted) * 100.0 / len(frame) if len(frame) else 0, (len(frame) - len(admitted)) * 100.0 / len(frame) if len(frame) else 0], chart_colors[1], img_paths, html_content)
+    if "g43" in selected: html_content = _bar(43, "Число эпизодов ИВЛ", ["Эпизоды ИВЛ"], [len(episodes)], chart_colors[2], img_paths, html_content)
+    values, by_month = [], {}
+    for _, row in episodes.iterrows():
+        start = parse_analytics_datetime(row.get("start_time")); end = parse_analytics_datetime(row.get("end_time")) or reference
+        if start and end:
+            start, end = max(start, period_start), min(end, period_end)
+            if end <= start: continue
+            days = (end - start).total_seconds() / 86400.0; values.append(days)
+            cursor = start
+            while cursor < end:
+                next_month = datetime(cursor.year + (cursor.month == 12), 1 if cursor.month == 12 else cursor.month + 1, 1)
+                piece_end = min(end, next_month)
+                key = cursor.strftime("%Y-%m")
+                by_month[key] = by_month.get(key, 0.0) + (piece_end - cursor).total_seconds() / 86400.0
+                cursor = piece_end
+    if "g44" in selected: html_content = _bar(44, "Длительность ИВЛ", [f"эпизод {i + 1}" for i in range(len(values))], values, chart_colors[3], img_paths, html_content)
+    if "g45" in selected: html_content = _bar(45, "ИВЛ-дни по месяцам", list(by_month), list(by_month.values()), chart_colors[4], img_paths, html_content)
     return html_content

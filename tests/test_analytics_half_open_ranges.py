@@ -221,23 +221,7 @@ def test_graphs_service_uses_half_open_bounds_end_to_end(monkeypatch):
     try:
         _create_remcard_analytics_schema(conn)
         _seed_remcard_boundaries(conn)
-        captured = {}
-
-        def passthrough(*args, **_kwargs):
-            return args[-1]
-
-        def capture_admissions(*args, **_kwargs):
-            captured["params"] = args[2]
-            captured["admission_ids"] = [int(row["id"]) for row in args[5]]
-            captured["selected_dates"] = (args[6], args[7])
-            return args[-1]
-
-        generators = [passthrough] * 12
-        generators[1] = capture_admissions
-        monkeypatch.setattr(graphs_service, "_load_generators", lambda: tuple(generators))
-        monkeypatch.setattr(graphs_service, "_configure_plot_style", lambda _colors: None)
-
-        graphs_service.build_graphs_html(
+        result = graphs_service.build_graphs_html(
             _Manager(conn),
             "2026-07-12 00:00:00",
             "2026-07-12 23:59:59",
@@ -245,11 +229,11 @@ def test_graphs_service_uses_half_open_bounds_end_to_end(monkeypatch):
             include_recovery_beds=True,
         )
 
-        assert captured == {
-            "params": ("2026-07-12 00:00:00", "2026-07-13 00:00:00"),
-            "admission_ids": [2, 3],
-            "selected_dates": ("2026-07-12", "2026-07-12"),
-        }
+        artifact = result.artifacts["g6"]
+        assert artifact["period"] == ("2026-07-12 00:00:00", "2026-07-13 00:00:00")
+        # g6 is a census graph: carry-in admission remains, while id 4 at the
+        # exclusive end boundary does not enter the half-open population.
+        assert {identifier.rsplit(":", 1)[-1] for identifier in artifact["source_case_ids"]} == {"1", "2", "3"}
     finally:
         conn.close()
 

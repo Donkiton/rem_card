@@ -20,6 +20,7 @@ from rem_card.ui.styles.theme_manager import get_theme_manager
 
 from .statistics_page import ArchiveStatisticsPage
 from .graphs_page import ArchiveGraphsPage
+from .analysis_page import UnifiedArchiveAnalysisPage
 
 
 class ArchiveMainWidget(QWidget):
@@ -100,6 +101,7 @@ class ArchiveMainWidget(QWidget):
                 "Архив реанимации",
                 "Архив оперблока",
                 "Статистика РАО",
+                "Аналитика",
                 "Графики реанимации",
                 "Статистика оперблока",
             )
@@ -161,21 +163,33 @@ class ArchiveMainWidget(QWidget):
             remcard_service=self.remcard_service,
             operblock_service=self.operblock_service,
             archive_page=self.rao_archive,
+            show_analytics_workspace=False,
         )
         self.rao_graphs = ArchiveGraphsPage(
             remcard_service=self.remcard_service,
             archive_page=self.rao_archive,
         )
+        self.rao_statistics.analytics_workspace.refresh_requested.connect(self._sync_rao_graph_context)
         self.operblock_statistics = ArchiveStatisticsPage(
             source_mode=ARCHIVE_MODE_OPERBLOCK,
             remcard_service=self.remcard_service,
             operblock_service=self.operblock_service,
             archive_page=self.operblock_archive,
+            show_analytics_workspace=False,
         )
+        self.analytics = UnifiedArchiveAnalysisPage(
+            self.rao_statistics,
+            self.operblock_statistics,
+        )
+        # Compatibility aliases for code that previously addressed the two
+        # analysis hosts directly; navigation now exposes only one destination.
+        self.rao_analysis = self.analytics.rao_page
+        self.operblock_analysis = self.analytics.operblock_page
         for page in (
             self.rao_archive,
             self.operblock_archive,
             self.rao_statistics,
+            self.analytics,
             self.rao_graphs,
             self.operblock_statistics,
         ):
@@ -240,6 +254,7 @@ class ArchiveMainWidget(QWidget):
                 "Архив пациентов реанимации",
                 "Архив пациентов оперблока",
                 "Статистика реанимации",
+                "Аналитика",
                 "Графики реанимации",
                 "Статистика оперблока",
             )[index]
@@ -251,8 +266,18 @@ class ArchiveMainWidget(QWidget):
         else:
             self.content_stack.currentWidget().ensure_loaded()
 
+    def _sync_rao_graph_context(self):
+        cohort, start_date, end_date, include_recovery = self.rao_statistics.graph_context()
+        if start_date and end_date:
+            comparison_mode, comparison_period = self.rao_statistics.analytics_pdf_context()
+            self.rao_graphs.set_analytics_context(
+                cohort, start_date, end_date, include_recovery,
+                comparison_mode=comparison_mode,
+                comparison_period=comparison_period,
+            )
+
     def _active_archive_page(self):
-        return self.operblock_archive if self._active_index in (1, 4) else self.rao_archive
+        return self.operblock_archive if self._active_index in (1, 5) else self.rao_archive
 
     def load_data(self, reset_page: bool = False):
         """Совместимый вход для существующих менеджеров компоновки."""

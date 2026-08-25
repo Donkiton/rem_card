@@ -260,37 +260,28 @@ def _append_no_data_message(html_content, title, message):
 
 def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content):
     """Использование коечного фонда"""
+    if any(key in selected for key in ("g6", "g7", "g8", "g10", "g11", "g12", "g13")):
+        adms = _overlapping_admissions(conn, params)
 
     # 6. Койко-дни по месяцам
     if "g6" in selected:
-        df = pd.read_sql_query("""
-            SELECT strftime('%Y-%m', admission_datetime) as month,
-            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY month ORDER BY month
-        """, conn, params=params)
-        if not df.empty:
-            df['bed_days'] = pd.to_numeric(df['bed_days'], errors='coerce').fillna(0)
+        monthly = _bed_days_by_month(adms, start_date_str, end_date_str)
+        if monthly:
             plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['bed_days'], color=chart_colors[4])
-            plt.xticks(range(len(df)), df['month'], rotation=45)
+            plt.bar(range(len(monthly)), monthly.values(), color=chart_colors[4])
+            plt.xticks(range(len(monthly)), monthly.keys(), rotation=45)
             plt.title("6. Койко-дни по месяцам")
             html_content += save_plot("6. Койко-дни по месяцам", img_paths)
 
     # 7. Загрузка коек по месяцам (%)
     if "g7" in selected:
-        df = pd.read_sql_query("""
-            SELECT strftime('%Y-%m', admission_datetime) as month,
-            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY month ORDER BY month
-        """, conn, params=params)
-        if not df.empty:
-            df['bed_days'] = pd.to_numeric(df['bed_days'], errors='coerce').fillna(0)
-            df['load_pct'] = df['bed_days'] / (STATISTICAL_BED_COUNT * 30.0) * 100
+        monthly = _bed_days_by_month(adms, start_date_str, end_date_str)
+        if monthly:
+            days = _calendar_days_by_month(start_date_str, end_date_str)
+            load_pct = [value / (STATISTICAL_BED_COUNT * days.get(month, 1)) * 100 for month, value in monthly.items()]
             plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['load_pct'], color=chart_colors[1])
-            plt.xticks(range(len(df)), df['month'], rotation=45)
+            plt.bar(range(len(monthly)), load_pct, color=chart_colors[1])
+            plt.xticks(range(len(monthly)), monthly.keys(), rotation=45)
             plt.title("7. Загрузка коек по месяцам (%)")
             plt.ylim(0, 110)
             html_content += save_plot("7. Загрузка коек по месяцам (%)", img_paths)
@@ -351,11 +342,8 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
 
     # 12. Индекс интенсивности использования к.ф. (общий за период)
     if "g12" in selected:
-        df = pd.read_sql_query("""
-            SELECT SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as total_bed_days
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-        """, conn, params=params)
-        if not df.empty and df['total_bed_days'].iloc[0] is not None:
+        total_bd = sum(_calc_daily_counts(adms, start_date_str, end_date_str)[0])
+        if total_bd >= 0:
             # Период в днях
             try:
                 start_dt = datetime.strptime(start_date_str.split(' ')[0], "%Y-%m-%d")
@@ -363,7 +351,6 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
                 period_days = max((end_dt - start_dt).days + 1, 1)
             except Exception:
                 period_days = 365
-            total_bd = float(df['total_bed_days'].iloc[0])
             bed_fund = STATISTICAL_BED_COUNT * period_days
             intensity = total_bd / bed_fund * 100 if bed_fund else 0
             html_content += (
@@ -374,18 +361,12 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
 
     # 13. Индекс интенсивности по месяцам
     if "g13" in selected:
-        df = pd.read_sql_query("""
-            SELECT strftime('%Y-%m', admission_datetime) as month,
-            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
-            GROUP BY month ORDER BY month
-        """, conn, params=params)
-        if not df.empty:
-            df['bed_days'] = pd.to_numeric(df['bed_days'], errors='coerce').fillna(0)
-            df['intensity'] = df['bed_days'] / (STATISTICAL_BED_COUNT * 30.0) * 100
-            df['intensity'] = pd.to_numeric(df['intensity'], errors='coerce').fillna(0)
+        monthly = _bed_days_by_month(adms, start_date_str, end_date_str)
+        if monthly:
+            days = _calendar_days_by_month(start_date_str, end_date_str)
+            intensity = [value / (STATISTICAL_BED_COUNT * days.get(month, 1)) * 100 for month, value in monthly.items()]
             plt.figure(figsize=(8, 4))
-            plt.plot(df['month'], df['intensity'], marker='o', color=chart_colors[2])
+            plt.plot(list(monthly), intensity, marker='o', color=chart_colors[2])
             plt.title("13. Индекс интенсивности использования к.ф. по месяцам (%)")
             plt.ylim(0, 110)
             plt.xticks(rotation=45)
@@ -400,6 +381,7 @@ def generate_g14_g18(selected, conn, params, chart_colors, img_paths, adms, star
     needs_calc = any(k in selected for k in ["g14", "g15", "g16", "g17", "g18"])
     if not needs_calc:
         return html_content
+    adms = _overlapping_admissions(conn, params)
 
     daily_counts, date_range = _calc_daily_counts(adms, start_date_str, end_date_str)
     high_load = [1 if c >= STATISTICAL_HIGH_LOAD_THRESHOLD else 0 for c in daily_counts]
@@ -442,39 +424,12 @@ def generate_g14_g18(selected, conn, params, chart_colors, img_paths, adms, star
 
     # 16. Макс. число пациентов одновременно
     if "g16" in selected:
-        events = []
-        for row in adms:
-            if row['admission_datetime']:
-                try:
-                    event_dt = parse_analytics_datetime(row['admission_datetime'])
-                    if event_dt is not None:
-                        events.append((event_dt, 1))
-                except Exception:
-                    pass
-            end_dt_str = row['death_datetime'] if row['outcome'] == 'умер' else row['transfer_datetime']
-            if end_dt_str:
-                try:
-                    event_dt = parse_analytics_datetime(end_dt_str)
-                    if event_dt is not None:
-                        events.append((event_dt, -1))
-                except Exception:
-                    pass
-        events.sort()
-        curr = 0
-        max_p = 0
-        times = []
-        counts_ev = []
-        for t, c in events:
-            curr += c
-            times.append(t)
-            counts_ev.append(curr)
-            if curr > max_p:
-                max_p = curr
-        if times:
+        if len(date_range):
+            max_p = max(daily_counts, default=0)
             plt.figure(figsize=(10, 4))
-            plt.step(times, counts_ev, where='post', color=chart_colors[1])
+            plt.step(date_range, daily_counts, where='post', color=chart_colors[1])
             plt.title(f"16. Динамика числа пациентов (Максимум: {max_p})")
-            plt.ylim(0, _patient_count_axis_limit(counts_ev))
+            plt.ylim(0, _patient_count_axis_limit(daily_counts))
             html_content += save_plot("16. Максимальное число пациентов одновременно", img_paths)
 
     # 17. Доля времени повышенной загрузки
@@ -581,7 +536,12 @@ def generate_g19_g22(selected, conn, params, chart_colors, img_paths, adms, html
 
 
 def _calc_daily_counts(adms, start_date_str, end_date_str):
-    """Вспомогательная функция — подсчёт числа пациентов по дням."""
+    """Daily census with exact half-open intersections.
+
+    `adms` may include carry-in rows.  A transfer/death exactly at midnight of
+    a day is excluded from that day, which prevents a false census at the
+    selected period boundary.
+    """
     import pandas as pd
     from datetime import datetime
 
@@ -596,20 +556,55 @@ def _calc_daily_counts(adms, start_date_str, end_date_str):
                 a_start = parse_analytics_datetime(a['admission_datetime'])
                 if a_start is None:
                     continue
-                a_end_str = a['death_datetime'] if a['outcome'] == 'умер' else a['transfer_datetime']
-                if a_end_str:
-                    a_end = parse_analytics_datetime(a_end_str)
-                    if a_end is None:
-                        continue
-                    if a_start.date() <= d.date() <= a_end.date():
-                        count += 1
-                else:
-                    if a_start.date() <= d.date():
-                        count += 1
+                transfer = parse_analytics_datetime(a.get('transfer_datetime'))
+                death = parse_analytics_datetime(a.get('death_datetime'))
+                terminals = [item for item in (transfer, death) if item is not None]
+                a_end = min(terminals) if terminals else None
+                day_start = d.to_pydatetime()
+                day_end = day_start + pd.Timedelta(days=1)
+                if a_start < day_end and (a_end is None or a_end > day_start):
+                    count += 1
             except Exception:
                 pass
         daily_counts.append(count)
     return daily_counts, date_range
+
+
+def _bed_days_by_month(adms, start_date_str, end_date_str):
+    counts, dates = _calc_daily_counts(adms, start_date_str, end_date_str)
+    result = {}
+    for day, count in zip(dates, counts):
+        key = day.strftime('%Y-%m')
+        result[key] = result.get(key, 0) + count
+    return result
+
+
+def _calendar_days_by_month(start_date_str, end_date_str):
+    import pandas as pd
+    start, end = parse_analytics_datetime(start_date_str), parse_analytics_datetime(end_date_str)
+    if start is None or end is None:
+        return {}
+    result = {}
+    for day in pd.date_range(start.date(), end.date()):
+        key = day.strftime('%Y-%m'); result[key] = result.get(key, 0) + 1
+    return result
+
+
+def _overlapping_admissions(conn, params):
+    """Read the census population, unlike flow graphs which use starts only."""
+    cursor = conn.execute(
+        """SELECT id, patient_id, admission_datetime, transfer_datetime, death_datetime,
+                  outcome, patient_age, patient_age_unit, patient_gender, source_department,
+                  diagnosis_code, diagnosis_text, bed_number
+           FROM admissions WHERE DATETIME(admission_datetime) < DATETIME(?)
+             AND ((transfer_datetime IS NULL AND death_datetime IS NULL) OR DATETIME(
+                    CASE WHEN transfer_datetime IS NULL THEN death_datetime
+                         WHEN death_datetime IS NULL THEN transfer_datetime
+                         WHEN DATETIME(transfer_datetime) <= DATETIME(death_datetime) THEN transfer_datetime
+                         ELSE death_datetime END) > DATETIME(?))""",
+        (params[1], params[0]),
+    )
+    return [dict(zip([column[0] for column in cursor.description], row)) for row in cursor.fetchall()]
 
 
 def _patient_count_axis_limit(counts):

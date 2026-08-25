@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.app.paths import REPORT_DIR
-from rem_card.services.analytics.graphs_service import build_graphs_html, build_graphs_pdf
+from rem_card.services.analytics.graphs_service import build_graphs_html, build_graphs_pdf, build_graphs_snapshot
 from rem_card.ui.analytics.chart_renderer import fit_chart_images_to_width
 from rem_card.ui.analytics.graphs_catalog import GRAPH_GROUPS, TOP_GRAPHS
 from rem_card.ui.shared.analytics_integration import (
@@ -31,6 +31,7 @@ from rem_card.ui.shared.archive_date_edit import ArchiveDateEdit
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.persistent_file_dialog import PersistentSaveFileDialog
 from rem_card.ui.styles.theme import ANALYTICS_CHART_COLORS
+from rem_card.services.analytics.platform import AnalyticsPeriod, CohortDefinition, MetricScope, StatisticsRepository, analytics_context_html, materialize_cohort_snapshot
 
 
 class _GraphOption(QWidget):
@@ -71,7 +72,27 @@ class ArchiveGraphsPage(QWidget):
         self._pending_pdf_path = ""
         self._temp_graph_paths: set[str] = set()
         self._closing = False
+        self.analytics_cohort = CohortDefinition(scope=MetricScope.RAO)
+        self.analytics_context_period: tuple[str, str] | None = None
+        self.analytics_context_recovery = False
+        self.analytics_comparison_mode = "previous_year"
+        self.analytics_comparison_period: tuple[str, str] | None = None
         self._init_ui()
+
+    def set_cohort_definition(self, cohort: CohortDefinition):
+        """Принимает сериализуемую когорту той же аналитической области."""
+        self.analytics_cohort = cohort
+
+    def set_analytics_context(self, cohort: CohortDefinition, start_date: str, end_date: str, include_recovery: bool,
+                              *, comparison_mode: str = "previous_year", comparison_period: tuple[str, str] | None = None):
+        self.analytics_cohort = cohort
+        self.analytics_context_period = (start_date, end_date)
+        self.analytics_context_recovery = bool(include_recovery)
+        self.analytics_comparison_mode = comparison_mode
+        self.analytics_comparison_period = comparison_period
+        self.date_from.setDate(self.date_from.date().fromString(start_date, "yyyy-MM-dd"))
+        self.date_to.setDate(self.date_to.date().fromString(end_date, "yyyy-MM-dd"))
+        self.chk_include_recovery.setChecked(bool(include_recovery))
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -196,7 +217,9 @@ class ArchiveGraphsPage(QWidget):
         period = self._period()
         if period is None:
             return None
-        return period[0], period[1], tuple(self._selected_keys()), self.chk_include_recovery.isChecked()
+        return (period[0], period[1], tuple(self._selected_keys()), self.chk_include_recovery.isChecked(),
+                tuple((item.field, item.operator, str(item.value)) for item in self.analytics_cohort.filters),
+                self.analytics_comparison_mode, self.analytics_comparison_period)
 
     def build_preview(self):
         self._start_graph_build(save_after=False)
@@ -215,6 +238,19 @@ class ArchiveGraphsPage(QWidget):
         include_recovery = self.chk_include_recovery.isChecked()
         self._request_token += 1
         token = self._request_token
+        request_signature = self._signature()
+        request_cohort = CohortDefinition(
+            self.analytics_cohort.name,
+            MetricScope.RAO,
+            tuple(self.analytics_cohort.filters),
+            bool(include_recovery),
+        )
+        request_comparison_mode = str(self.analytics_comparison_mode)
+        request_comparison_period = (
+            tuple(self.analytics_comparison_period)
+            if self.analytics_comparison_period is not None else None
+        )
+        archive_paths = tuple(self._archive_db_paths(start_date, end_date))
         preview_width = self._preview_width()
         busy_text = (
             f"Формирование {len(selected)} графиков (это может занять до минуты)…"
@@ -229,11 +265,21 @@ class ArchiveGraphsPage(QWidget):
                 selected,
                 include_recovery,
                 preview_width,
+                cohort=request_cohort,
+                comparison_mode=request_comparison_mode,
+                comparison_period=request_comparison_period,
+                archive_paths=archive_paths,
             ),
             parent=self,
+            result_disposer=lambda result: ArchiveGraphsPage._discard_result_image_paths(
+                getattr(result, "image_paths", ())
+            ),
         )
         self._worker = worker
-        worker.succeeded.connect(lambda result, request=token: self._graphs_ready(request, result, save_after))
+        worker.succeeded.connect(
+            lambda result, request=token, signature=request_signature:
+            self._graphs_ready(request, result, save_after, signature)
+        )
         worker.failed.connect(lambda error, request=token: self._request_failed(request, error))
         worker.finished.connect(lambda: self._worker_finished(worker))
         worker.start()
@@ -245,22 +291,66 @@ class ArchiveGraphsPage(QWidget):
         selected: list[str],
         include_recovery: bool,
         preview_width: int = 760,
+        *,
+        cohort: CohortDefinition | None = None,
+        comparison_mode: str | None = None,
+        comparison_period: tuple[str, str] | None = None,
+        archive_paths: tuple[str, ...] | None = None,
     ):
         base_manager = get_analytics_base_manager(remcard_service=self.remcard_service)
+        archive_paths = tuple(self._archive_db_paths(start_date, end_date)) if archive_paths is None else tuple(archive_paths)
         manager, cleanup = resolve_readonly_analytics_manager(
             base_manager,
             start_dt=start_date,
             end_dt=end_date,
-            db_paths=self._archive_db_paths(start_date, end_date),
+            db_paths=archive_paths,
         )
         try:
-            result = build_graphs_html(
+            source_fingerprints = StatisticsRepository(manager, db_paths=archive_paths).clinical_fingerprints()
+            # Снимок графиков получает ровно ту же полную CohortDefinition,
+            # что workspace: recovery является частью популяции до renderer-а.
+            if cohort is None:
+                cohort = CohortDefinition(
+                    self.analytics_cohort.name, MetricScope.RAO,
+                    tuple(self.analytics_cohort.filters), bool(include_recovery),
+                )
+            cohort_manager = manager
+            if hasattr(manager, "get_connection"):
+                cohort_manager, _ = materialize_cohort_snapshot(
+                    manager, MetricScope.RAO, AnalyticsPeriod.from_values(start_date, end_date), cohort
+                )
+            # One engine snapshot is the authoritative graph dataset.  The
+            # renderer receives its serialized artifacts alongside the same
+            # materialized cohort manager used for the images.
+            graph_snapshot = build_graphs_snapshot(
                 manager,
+                start_date,
+                end_date,
+                selected,
+                cohort=cohort,
+                db_paths=archive_paths,
+            )
+            analytics_context = analytics_context_html(
+                period=AnalyticsPeriod.from_values(start_date, end_date),
+                cohort=cohort,
+                definitions=(result.definition for result in graph_snapshot.results.values()),
+                comparison_mode=comparison_mode or self.analytics_comparison_mode,
+                comparison_period=(
+                    comparison_period
+                    if comparison_mode is not None
+                    else self.analytics_comparison_period
+                ),
+                source_fingerprints=source_fingerprints,
+            )
+            result = build_graphs_html(
+                cohort_manager,
                 start_date,
                 end_date,
                 selected,
                 list(ANALYTICS_CHART_COLORS),
                 include_recovery_beds=include_recovery,
+                authoritative_artifacts={key: value.artifact or {} for key, value in graph_snapshot.results.items()},
+                analytics_context=analytics_context,
             )
             # Масштабирование PNG заметно тяжелее замены HTML. Выполняем его
             # здесь, в том же фоновом worker, чтобы готовность 20–65 графиков
@@ -274,6 +364,8 @@ class ArchiveGraphsPage(QWidget):
             result.image_paths = list(dict.fromkeys([*result.image_paths, *preview_paths]))
             return result
         finally:
+            if 'cohort_manager' in locals() and cohort_manager is not manager:
+                cohort_manager.close_connection()
             if cleanup:
                 cleanup()
 
@@ -288,19 +380,24 @@ class ArchiveGraphsPage(QWidget):
             or []
         )
 
-    def _graphs_ready(self, token: int, result, save_after: bool):
+    def _graphs_ready(self, token: int, result, save_after: bool, request_signature=None):
         image_paths = list(getattr(result, "image_paths", []) or [])
         if token != self._request_token:
+            self._discard_result_image_paths(image_paths)
             return
         if self._closing:
-            self._remember_temp_graph_paths(image_paths)
-            self._cleanup_temp_graph_files()
+            self._discard_result_image_paths(image_paths)
+            return
+        if request_signature is not None and request_signature != self._signature():
+            self._discard_result_image_paths(image_paths)
+            self._pending_pdf_path = ""
+            self._set_busy(False, "Фильтры изменены — сформируйте графики заново")
             return
         self._cleanup_temp_graph_files()
         self._remember_temp_graph_paths(image_paths)
         html = str(getattr(result, "html", "") or "")
         self._latest_html = html
-        self._latest_signature = self._signature()
+        self._latest_signature = request_signature or self._signature()
         self.report.setHtml(html)
         self._set_busy(False, "")
         if save_after and self._pending_pdf_path:
@@ -398,6 +495,21 @@ class ArchiveGraphsPage(QWidget):
                         self._temp_graph_paths.add(path)
                 except ValueError:
                     pass
+
+    @staticmethod
+    def _discard_result_image_paths(paths):
+        """Worker result is ours; discard it on stale/shutdown completion.
+
+        The renderer only returns temporary PNGs.  They must not become
+        untracked files when a newer request wins the race.
+        """
+        for raw_path in paths or ():
+            try:
+                os.remove(str(raw_path))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
     def _cleanup_temp_graph_files(self):
         remaining = set()
