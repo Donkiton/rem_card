@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from rem_card.app.local_replica_sync import (
     LocalReplicaSync,
@@ -17,8 +18,12 @@ from rem_card.app.local_replica_sync import (
 )
 from rem_card.app.local_replica_worker import (
     LocalReplicaRotationBusy,
+    LocalReplicaSnapshotBusy,
+    LocalReplicaWriterBusy,
     LocalReplicaWorkerClient,
     LocalReplicaWorkerTimeout,
+    _open_central_readonly,
+    _sync_snapshot,
 )
 from rem_card.app.sqlite_shared import FileWriteLock
 from rem_card.data.dao.db_manager import DatabaseManager
@@ -98,6 +103,17 @@ class _BlockingWorkerClient:
 class _FailingWorkerClient:
     def sync(self, **_kwargs):
         raise LocalReplicaWorkerTimeout(0.3)
+
+    def close(self):
+        pass
+
+
+class _DeferredWorkerClient:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+
+    def sync(self, **_kwargs):
+        raise self.exc
 
     def close(self):
         pass
@@ -210,15 +226,12 @@ class LocalReplicaSyncTest(unittest.TestCase):
             self.assertFalse(Path(f"{temp_path}-wal").exists())
 
             result = client.sync(
-                local_state={
-                    "db_cycle": "cycle-a",
-                    "change_cursor": 2,
-                    "schema_revision": "23",
-                },
+                local_state={},
                 temp_db_path=str(temp_path),
                 timeout_sec=2.0,
             )
-            self.assertEqual(result["status"], "unchanged")
+            self.assertEqual(result["status"], "snapshot_ready")
+            self.assertFalse(Path(client.snapshot_gate_path).exists())
         finally:
             client.close()
 
@@ -336,6 +349,236 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertFalse(rotation_lock_path.exists())
         self.assertFalse(list(lease_dir.glob("*.lock")))
 
+    def test_two_clients_never_copy_the_central_database_in_parallel(self):
+        lease_dir = self.root / "shared-reader-leases"
+        first = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(lease_dir),
+            snapshot_lease_id="nurse",
+            timeout_sec=3.0,
+        )
+        second = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(lease_dir),
+            snapshot_lease_id="doctor",
+            timeout_sec=3.0,
+        )
+        first_result = {}
+
+        def run_first():
+            try:
+                first_result["value"] = first.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / "nurse.sync_tmp.db"),
+                    debug_delay_sec=0.6,
+                )
+            except Exception as exc:
+                first_result["error"] = exc
+
+        thread = threading.Thread(target=run_first, daemon=True)
+        thread.start()
+        gate_path = Path(first.snapshot_gate_path)
+        deadline = time.monotonic() + 2.0
+        while not gate_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        try:
+            self.assertTrue(gate_path.exists())
+            with self.assertRaises(LocalReplicaSnapshotBusy):
+                second.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / "doctor.sync_tmp.db"),
+                )
+            thread.join(timeout=5.0)
+        finally:
+            first.close()
+            second.close()
+
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("error", first_result)
+        self.assertEqual(first_result["value"]["status"], "snapshot_ready")
+        self.assertFalse(gate_path.exists())
+        self.assertFalse(list(lease_dir.glob("*.lock")))
+
+    def test_two_clients_never_take_over_an_expired_foreign_snapshot_gate(self):
+        lease_dir = self.root / "expired-gate-reader-leases"
+        first = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(lease_dir),
+            snapshot_lease_id="nurse",
+            timeout_sec=3.0,
+        )
+        second = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(lease_dir),
+            snapshot_lease_id="doctor",
+            timeout_sec=3.0,
+        )
+        gate_path = Path(first.snapshot_gate_path)
+        gate_path.parent.mkdir(parents=True, exist_ok=True)
+        gate_payload = {
+            "timestamp": time.time() - 120.0,
+            "lease_expires_at": time.time() - 60.0,
+            "pid": 999999,
+            "host": f"foreign-{socket.gethostname()}",
+            "user_id": "expired-owner",
+            "source": "local_replica_snapshot_gate",
+            "thread_id": 1,
+            "lock_token": "expired-gate-token",
+        }
+        gate_path.write_text(json.dumps(gate_payload), encoding="utf-8")
+        outcomes = []
+        outcomes_lock = threading.Lock()
+
+        def run_client(client, temp_name):
+            try:
+                client.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / temp_name),
+                )
+                outcome = "unexpected-success"
+            except Exception as exc:
+                outcome = exc
+            with outcomes_lock:
+                outcomes.append(outcome)
+
+        threads = [
+            threading.Thread(
+                target=run_client,
+                args=(first, "expired-nurse.sync_tmp.db"),
+                daemon=True,
+            ),
+            threading.Thread(
+                target=run_client,
+                args=(second, "expired-doctor.sync_tmp.db"),
+                daemon=True,
+            ),
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5.0)
+        finally:
+            first.close()
+            second.close()
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(len(outcomes), 2)
+        self.assertTrue(
+            all(isinstance(item, LocalReplicaSnapshotBusy) for item in outcomes)
+        )
+        persisted = json.loads(gate_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["lock_token"], "expired-gate-token")
+        self.assertFalse(list(lease_dir.glob("*.lock")))
+        gate_path.unlink()
+
+    def test_clinical_writer_has_priority_over_new_snapshot(self):
+        lease_dir = self.root / "writer-priority-leases"
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(lease_dir),
+            timeout_sec=2.0,
+        )
+        writer_lock = FileWriteLock(client.writer_lock_path)
+        self.assertTrue(writer_lock.acquire("test-nurse", "nurse_order_mark:test"))
+        try:
+            with self.assertRaises(LocalReplicaWriterBusy):
+                client.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / "writer-priority.sync_tmp.db"),
+                )
+        finally:
+            writer_lock.release()
+            client.close()
+
+        self.assertFalse(Path(client.snapshot_gate_path).exists())
+        self.assertFalse(list(lease_dir.glob("*.lock")))
+
+    def test_snapshot_yields_when_writer_arrives_before_backup(self):
+        lease_dir = self.root / "late-writer-leases"
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(lease_dir),
+            timeout_sec=3.0,
+        )
+        result = {}
+
+        def run_sync():
+            try:
+                result["value"] = client.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / "late-writer.sync_tmp.db"),
+                    debug_delay_sec=0.6,
+                )
+            except Exception as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=run_sync, daemon=True)
+        thread.start()
+        gate_path = Path(client.snapshot_gate_path)
+        deadline = time.monotonic() + 2.0
+        while not gate_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        writer_lock = FileWriteLock(client.writer_lock_path)
+        try:
+            self.assertTrue(gate_path.exists())
+            self.assertTrue(
+                writer_lock.acquire("test-doctor", "ivl_status_update:test")
+            )
+            thread.join(timeout=5.0)
+        finally:
+            writer_lock.release()
+            client.close()
+
+        self.assertFalse(thread.is_alive())
+        self.assertIsInstance(result.get("error"), LocalReplicaWriterBusy)
+        self.assertFalse(gate_path.exists())
+        self.assertFalse(list(lease_dir.glob("*.lock")))
+
+    def test_running_backup_checks_for_a_new_writer_between_page_batches(self):
+        writer_lock_path = self.root / "db.lock"
+        temp_path = self.root / "interruptible.sync_tmp.db"
+        backup_calls = []
+
+        class InterruptibleConnection:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def execute(self, *args, **kwargs):
+                return self.conn.execute(*args, **kwargs)
+
+            def close(self):
+                self.conn.close()
+
+            def backup(self, target, *, pages, progress, sleep):
+                backup_calls.append((pages, sleep))
+                writer_lock_path.write_text("writer pending", encoding="utf-8")
+                progress(0, 1, 2)
+
+        def open_interruptible(path):
+            return InterruptibleConnection(_open_central_readonly(path))
+
+        try:
+            with patch(
+                "rem_card.app.local_replica_worker._open_central_readonly",
+                side_effect=open_interruptible,
+            ):
+                with self.assertRaises(LocalReplicaWriterBusy):
+                    _sync_snapshot(
+                        {
+                            "central_db_path": str(self.central_path),
+                            "temp_db_path": str(temp_path),
+                            "local_state": {},
+                            "writer_lock_path": str(writer_lock_path),
+                        },
+                        before_backup=lambda: None,
+                    )
+        finally:
+            writer_lock_path.unlink(missing_ok=True)
+
+        self.assertEqual(backup_calls, [(32, 0.01)])
+        self.assertFalse(temp_path.exists())
+
     def test_rotation_busy_keeps_last_good_replica_available(self):
         rotation_lock_path = self.root / "db_rotation.lock"
         self.replica = LocalReplicaSync(
@@ -358,6 +601,54 @@ class LocalReplicaSyncTest(unittest.TestCase):
             )
         finally:
             lock.release()
+
+    def test_expected_replica_contention_does_not_degrade_health(self):
+        deferred_errors = (
+            LocalReplicaRotationBusy(),
+            LocalReplicaSnapshotBusy(),
+            LocalReplicaWriterBusy(),
+        )
+        for exc in deferred_errors:
+            with self.subTest(error_class=type(exc).__name__):
+                replica = LocalReplicaSync(
+                    central_db_path=str(self.central_path),
+                    local_db_path=str(
+                        self.root / f"{type(exc).__name__}.db"
+                    ),
+                    sync_interval_sec=60.0,
+                    worker_client=_DeferredWorkerClient(exc),
+                )
+                self.assertFalse(replica.sync_once())
+                health = replica.health_snapshot()
+                self.assertFalse(health["degraded"])
+                self.assertEqual(health["consecutive_failures"], 0)
+                self.assertEqual(
+                    health["last_sync_error_class"],
+                    type(exc).__name__,
+                )
+                self.assertEqual(health["retry_backoff_sec"], 60.0)
+
+    def test_deferred_snapshot_does_not_hide_preceding_real_failure(self):
+        worker = _FailingWorkerClient()
+        replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.root / "deferred-after-failure.db"),
+            sync_interval_sec=60.0,
+            worker_client=worker,
+        )
+        self.assertFalse(replica.sync_once())
+        worker.sync = _DeferredWorkerClient(LocalReplicaWriterBusy()).sync
+
+        self.assertFalse(replica.sync_once())
+
+        health = replica.health_snapshot()
+        self.assertTrue(health["degraded"])
+        self.assertEqual(health["consecutive_failures"], 1)
+        self.assertEqual(
+            health["last_sync_error_class"],
+            "LocalReplicaWorkerTimeout",
+        )
+        self.assertEqual(health["retry_backoff_sec"], 60.0)
 
     def test_old_empty_lock_is_quarantined_before_reuse(self):
         lock_path = self.root / "empty.lock"

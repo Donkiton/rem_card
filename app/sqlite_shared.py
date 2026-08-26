@@ -849,6 +849,7 @@ class FileWriteLock:
         "db_rotation",
         "db_rotation_undo",
         "local_replica_snapshot",
+        "local_replica_snapshot_gate",
     }
 
     def __init__(
@@ -2220,6 +2221,109 @@ class SQLiteWriteController:
         )
         self.lock.release()
 
+    def _commit_transaction(
+        self,
+        conn: sqlite3.Connection,
+        state: _WriteTransactionState,
+    ) -> None:
+        if not state.is_interactive_write:
+            conn.execute("COMMIT")
+            return
+
+        commit_started = time.perf_counter()
+        retry_count = 0
+        last_exc: sqlite3.OperationalError | None = None
+        while True:
+            if last_exc is not None:
+                remaining_ms = self._remaining_ms(state.deadline)
+                if remaining_ms <= 0:
+                    record_metric(
+                        "sqlite_write_commit_timeout",
+                        1,
+                        source=state.source,
+                        attempts=retry_count,
+                        total_wait_ms=round(
+                            (time.perf_counter() - commit_started) * 1000.0,
+                            3,
+                        ),
+                        timeout_ms=state.timeout_ms,
+                        sqlite_error_class=type(last_exc).__name__,
+                        sqlite_error_message_sanitized=(
+                            _sanitize_sqlite_error_message(last_exc)
+                        ),
+                        **state.metric_context,
+                    )
+                    raise last_exc
+
+                # The outer transaction restores the original value. Bounding
+                # every retry prevents SQLite's own busy wait from extending a
+                # clinical write past the remaining operation budget.
+                retry_busy_timeout_ms = max(
+                    0,
+                    min(
+                        int(self.retry_delay_sec * 1000.0),
+                        int(remaining_ms),
+                    ),
+                )
+                conn.execute(
+                    f"PRAGMA busy_timeout = {retry_busy_timeout_ms}"
+                )
+                if self._remaining_ms(state.deadline) <= 0:
+                    continue
+            try:
+                conn.execute("COMMIT")
+                if retry_count:
+                    record_metric(
+                        "sqlite_write_commit_wait_ms",
+                        round((time.perf_counter() - commit_started) * 1000.0, 3),
+                        source=state.source,
+                        retries=retry_count,
+                        timeout_ms=state.timeout_ms,
+                        **state.metric_context,
+                    )
+                return
+            except sqlite3.OperationalError as exc:
+                if not self._is_retryable(exc):
+                    raise
+                last_exc = exc
+                retry_count += 1
+                remaining_ms = self._remaining_ms(state.deadline)
+                record_metric(
+                    "sqlite_write_commit_retry",
+                    1,
+                    source=state.source,
+                    attempt=retry_count,
+                    wait_ms=round(
+                        min(self.retry_delay_sec * 1000.0, remaining_ms),
+                        3,
+                    ),
+                    total_wait_ms=round(
+                        (time.perf_counter() - commit_started) * 1000.0,
+                        3,
+                    ),
+                    timeout_ms=state.timeout_ms,
+                    sqlite_error_class=type(exc).__name__,
+                    sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
+                    **state.metric_context,
+                )
+                if remaining_ms <= 0:
+                    record_metric(
+                        "sqlite_write_commit_timeout",
+                        1,
+                        source=state.source,
+                        attempts=retry_count,
+                        total_wait_ms=round(
+                            (time.perf_counter() - commit_started) * 1000.0,
+                            3,
+                        ),
+                        timeout_ms=state.timeout_ms,
+                        sqlite_error_class=type(exc).__name__,
+                        sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
+                        **state.metric_context,
+                    )
+                    raise
+                self._sleep_before_retry(state.deadline)
+
     @contextmanager
     def transaction(
         self,
@@ -2264,7 +2368,7 @@ class SQLiteWriteController:
                     before_begin,
                 )
                 yield cursor
-                conn.execute("COMMIT")
+                self._commit_transaction(conn, state)
                 status = "ok"
                 committed = True
             except Exception:

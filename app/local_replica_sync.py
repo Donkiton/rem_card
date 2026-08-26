@@ -13,6 +13,8 @@ from rem_card.app.local_metrics import record_metric
 from rem_card.app.local_replica_worker import (
     DEFAULT_REPLICA_SYNC_TIMEOUT_SEC,
     LocalReplicaRotationBusy,
+    LocalReplicaSnapshotBusy,
+    LocalReplicaWriterBusy,
     LocalReplicaWorkerClient,
 )
 from rem_card.app.sqlite_shared import configure_connection
@@ -228,10 +230,23 @@ class LocalReplicaSync:
                     recovered_after,
                 )
             return True
-        except LocalReplicaRotationBusy as exc:
+        except (
+            LocalReplicaRotationBusy,
+            LocalReplicaSnapshotBusy,
+            LocalReplicaWriterBusy,
+        ) as exc:
+            reason = {
+                LocalReplicaRotationBusy: "rotation_busy",
+                LocalReplicaSnapshotBusy: "snapshot_busy",
+                LocalReplicaWriterBusy: "writer_busy",
+            }[type(exc)]
             with self._lock:
-                self.last_sync_error = str(exc)
-                self.last_sync_error_class = type(exc).__name__
+                # A competing snapshot or clinical write is expected with two
+                # clients. It must not degrade a healthy replica or erase a
+                # preceding real failure before a successful sync recovers it.
+                if self.consecutive_failures <= 0:
+                    self.last_sync_error = None
+                    self.last_sync_error_class = type(exc).__name__
                 self._current_backoff_sec = self.sync_interval_sec
                 self._next_retry_not_before = (
                     time.monotonic() + self.sync_interval_sec
@@ -239,7 +254,7 @@ class LocalReplicaSync:
             record_metric(
                 "local_replica_sync_deferred",
                 1,
-                reason="rotation_busy",
+                reason=reason,
                 duration_ms=round(
                     (time.perf_counter() - started) * 1000.0,
                     3,
