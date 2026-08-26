@@ -17,6 +17,7 @@ from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
 DEFAULT_REPLICA_SYNC_TIMEOUT_SEC = 6.0
+LOCAL_REPLICA_BACKUP_PAGES = 32
 
 
 class LocalReplicaWorkerError(RuntimeError):
@@ -39,14 +40,38 @@ class LocalReplicaWorkerTimeout(LocalReplicaWorkerError):
 class LocalReplicaRotationBusy(LocalReplicaWorkerError):
     def __init__(self):
         super().__init__(
-            "Обновление локальной реплики отложено: выполняется другая операция "
-            "снимка или ротации базы."
+            "Обновление локальной реплики отложено: выполняется ротация базы."
+        )
+
+
+class LocalReplicaSnapshotBusy(LocalReplicaWorkerError):
+    def __init__(self):
+        super().__init__(
+            "Обновление локальной реплики отложено: другой клиент уже "
+            "копирует центральную базу."
+        )
+
+
+class LocalReplicaWriterBusy(LocalReplicaWorkerError):
+    def __init__(self):
+        super().__init__(
+            "Обновление локальной реплики отложено: клиническая запись "
+            "имеет приоритет."
         )
 
 
 def replica_snapshot_lease_dir(central_db_path: str) -> str:
     baza_dir = os.path.dirname(os.path.dirname(os.path.abspath(central_db_path)))
     return os.path.join(baza_dir, "locks", "replica_snapshots")
+
+
+def replica_snapshot_gate_path(central_db_path: str) -> str:
+    baza_dir = os.path.dirname(os.path.dirname(os.path.abspath(central_db_path)))
+    return os.path.join(baza_dir, "locks", "replica_snapshot_copy.lock")
+
+
+def database_write_lock_path(central_db_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(central_db_path)), "db.lock")
 
 
 def malformed_lock_quarantine_dir(central_db_path: str) -> str:
@@ -135,20 +160,46 @@ def _open_temp_replica(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def _sync_snapshot(message: dict[str, Any]) -> dict[str, Any]:
+def _sync_snapshot(
+    message: dict[str, Any],
+    *,
+    before_backup: Callable[[], None] | None = None,
+) -> dict[str, Any]:
     central_db_path = os.path.abspath(str(message.get("central_db_path") or ""))
     temp_db_path = os.path.abspath(str(message.get("temp_db_path") or ""))
     expected_state = dict(message.get("local_state") or {})
     debug_delay_sec = max(0.0, float(message.get("debug_delay_sec") or 0.0))
+    writer_lock_path = os.path.abspath(
+        str(
+            message.get("writer_lock_path")
+            or database_write_lock_path(central_db_path)
+        )
+    )
     if not os.path.isfile(central_db_path):
         raise FileNotFoundError(f"central DB missing: {central_db_path}")
 
     central_conn: sqlite3.Connection | None = None
     temp_conn: sqlite3.Connection | None = None
+    failed = False
     _remove_with_sidecars(temp_db_path)
     try:
+        central_conn = _open_central_readonly(central_db_path)
+        central_state = _read_database_state(central_conn)
+        if _states_match(central_state, expected_state):
+            return {
+                "status": "unchanged",
+                "state": central_state,
+            }
+
+        central_conn.close()
+        central_conn = None
+        if before_backup is not None:
+            before_backup()
         if debug_delay_sec:
             time.sleep(debug_delay_sec)
+        if writer_lock_path and os.path.exists(writer_lock_path):
+            raise LocalReplicaWriterBusy()
+
         central_conn = _open_central_readonly(central_db_path)
         central_state = _read_database_state(central_conn)
         if _states_match(central_state, expected_state):
@@ -159,7 +210,17 @@ def _sync_snapshot(message: dict[str, Any]) -> dict[str, Any]:
 
         os.makedirs(os.path.dirname(temp_db_path), exist_ok=True)
         temp_conn = _open_temp_replica(temp_db_path)
-        central_conn.backup(temp_conn, pages=512, sleep=0.01)
+
+        def yield_to_writer(_status: int, _remaining: int, _total: int) -> None:
+            if writer_lock_path and os.path.exists(writer_lock_path):
+                raise LocalReplicaWriterBusy()
+
+        central_conn.backup(
+            temp_conn,
+            pages=LOCAL_REPLICA_BACKUP_PAGES,
+            progress=yield_to_writer,
+            sleep=0.01,
+        )
         checkpoint_row = temp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if checkpoint_row and int(checkpoint_row[0] or 0) not in (0,):
             raise sqlite3.OperationalError(
@@ -182,7 +243,7 @@ def _sync_snapshot(message: dict[str, Any]) -> dict[str, Any]:
             "temp_db_path": temp_db_path,
         }
     except Exception:
-        _remove_with_sidecars(temp_db_path)
+        failed = True
         raise
     finally:
         if temp_conn is not None:
@@ -195,6 +256,8 @@ def _sync_snapshot(message: dict[str, Any]) -> dict[str, Any]:
                 central_conn.close()
             except Exception:
                 pass
+        if failed:
+            _remove_with_sidecars(temp_db_path)
 
 
 def _sync_snapshot_with_network_lease(
@@ -208,6 +271,9 @@ def _sync_snapshot_with_network_lease(
     Keeping rotation checks, lease I/O and the database snapshot in this
     process lets the parent enforce one hard deadline for the complete sync.
     """
+    central_db_path = os.path.abspath(
+        str(message.get("central_db_path") or "")
+    )
     raw_rotation_lock_path = str(message.get("rotation_lock_path") or "")
     rotation_lock_path = (
         os.path.abspath(raw_rotation_lock_path)
@@ -216,6 +282,18 @@ def _sync_snapshot_with_network_lease(
     )
     snapshot_lease_path = os.path.abspath(
         str(message.get("snapshot_lease_path") or "")
+    )
+    snapshot_gate_path = os.path.abspath(
+        str(
+            message.get("snapshot_gate_path")
+            or replica_snapshot_gate_path(central_db_path)
+        )
+    )
+    writer_lock_path = os.path.abspath(
+        str(
+            message.get("writer_lock_path")
+            or database_write_lock_path(central_db_path)
+        )
     )
     malformed_quarantine_dir = os.path.abspath(
         str(message.get("malformed_quarantine_dir") or "")
@@ -249,12 +327,29 @@ def _sync_snapshot_with_network_lease(
         allow_malformed_cleanup=True,
         malformed_quarantine_dir=malformed_quarantine_dir,
     )
+    snapshot_gate = FileWriteLock(
+        snapshot_gate_path,
+        stale_timeout_sec=60.0,
+        lease_duration_sec=lease_duration_sec,
+        # This path is shared by different hosts. A check-then-delete takeover
+        # cannot safely distinguish an expired gate from a replacement created
+        # by another SMB client. Only normal owner release or same-host dead-PID
+        # recovery may remove it; a foreign orphan safely disables snapshots
+        # while clinical writes and central-read fallback remain available.
+        allow_expired_lease_cleanup=False,
+        allow_legacy_replica_cleanup=False,
+        allow_malformed_cleanup=False,
+        malformed_quarantine_dir=malformed_quarantine_dir,
+    )
     snapshot_lease_acquired = False
+    snapshot_gate_acquired = False
     try:
         if progress_callback is not None:
             progress_callback("lease_acquire")
         if debug_lease_delay_sec:
             time.sleep(debug_lease_delay_sec)
+        if writer_lock_path and os.path.exists(writer_lock_path):
+            raise LocalReplicaWriterBusy()
         if rotation_gate is not None and os.path.exists(rotation_lock_path):
             rotation_gate.cleanup_abandoned(
                 source="local_replica_rotation_gate",
@@ -276,11 +371,31 @@ def _sync_snapshot_with_network_lease(
         # this client publishes its reader lease.
         if rotation_gate is not None and os.path.exists(rotation_lock_path):
             raise LocalReplicaRotationBusy()
+
+        def acquire_snapshot_gate() -> None:
+            nonlocal snapshot_gate_acquired
+            if writer_lock_path and os.path.exists(writer_lock_path):
+                raise LocalReplicaWriterBusy()
+            if progress_callback is not None:
+                progress_callback("snapshot_gate_acquire")
+            if not snapshot_gate.acquire(
+                owner_id=owner_id,
+                source="local_replica_snapshot_gate",
+            ):
+                raise LocalReplicaSnapshotBusy()
+            snapshot_gate_acquired = True
+            if writer_lock_path and os.path.exists(writer_lock_path):
+                raise LocalReplicaWriterBusy()
+            if rotation_gate is not None and os.path.exists(rotation_lock_path):
+                raise LocalReplicaRotationBusy()
+
         if progress_callback is not None:
             progress_callback("snapshot")
-        result = _sync_snapshot(message)
+        result = _sync_snapshot(message, before_backup=acquire_snapshot_gate)
         return result
     finally:
+        if snapshot_gate_acquired:
+            snapshot_gate.release()
         if snapshot_lease_acquired:
             if progress_callback is not None:
                 progress_callback("lease_release")
@@ -354,6 +469,11 @@ class LocalReplicaWorkerClient:
             self.snapshot_lease_dir,
             f"{_safe_lease_component(lease_id)}.lock",
         )
+        self.snapshot_gate_path = os.path.join(
+            os.path.dirname(self.snapshot_lease_dir),
+            "replica_snapshot_copy.lock",
+        )
+        self.writer_lock_path = database_write_lock_path(self.central_db_path)
         self.malformed_quarantine_dir = malformed_lock_quarantine_dir(
             self.central_db_path
         )
@@ -440,6 +560,8 @@ class LocalReplicaWorkerClient:
                         ),
                         "rotation_lock_path": self.rotation_lock_path,
                         "snapshot_lease_path": self.snapshot_lease_path,
+                        "snapshot_gate_path": self.snapshot_gate_path,
+                        "writer_lock_path": self.writer_lock_path,
                         "malformed_quarantine_dir": self.malformed_quarantine_dir,
                         "lease_duration_sec": max(
                             15.0,
@@ -476,6 +598,10 @@ class LocalReplicaWorkerClient:
                 remote_error_class = str(response.get("error_class") or "")
                 if remote_error_class == LocalReplicaRotationBusy.__name__:
                     raise LocalReplicaRotationBusy()
+                if remote_error_class == LocalReplicaSnapshotBusy.__name__:
+                    raise LocalReplicaSnapshotBusy()
+                if remote_error_class == LocalReplicaWriterBusy.__name__:
+                    raise LocalReplicaWriterBusy()
                 raise LocalReplicaWorkerError(
                     str(response.get("error") or "Ошибка процесса локальной реплики"),
                     remote_error_class=remote_error_class,
