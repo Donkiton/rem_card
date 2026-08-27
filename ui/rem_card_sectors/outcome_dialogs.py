@@ -359,7 +359,10 @@ class _OutcomeDialogBase(BaseStyledDialog):
 
     def _make_time_picker(self) -> HybridShiftTimePicker:
         picker = HybridShiftTimePicker(ShiftService, self.shift_date)
-        picker.set_time(ShiftService.now_time(datetime.now(), self.shift_date))
+        if self._is_late_card_outcome():
+            picker.set_time(datetime.now().strftime("%H:%M"))
+        else:
+            picker.set_time(ShiftService.now_time(datetime.now(), self.shift_date))
         picker.setFixedWidth(TIME_PICKER_WIDTH)
         picker.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
         self._compact_time_picker_buttons(picker)
@@ -428,6 +431,15 @@ class _OutcomeDialogBase(BaseStyledDialog):
                 return value
         return None
 
+    def _is_late_card_outcome(self) -> bool:
+        return bool(self.admission_context.get("late_card_outcome"))
+
+    def _late_outcome_reference(self) -> Optional[datetime]:
+        return self._context_datetime("late_outcome_reference_datetime")
+
+    def _late_outcome_deadline(self) -> Optional[datetime]:
+        return self._context_datetime("late_outcome_deadline")
+
     def _outcome_not_before(self) -> Optional[datetime]:
         values = [
             self._context_datetime("admission_datetime"),
@@ -447,6 +459,23 @@ class _OutcomeDialogBase(BaseStyledDialog):
             if enforce_latest_activity
             else None
         )
+        if self._is_late_card_outcome():
+            reference = self._late_outcome_reference() or datetime.now()
+            lower_bounds = [
+                value
+                for value in (
+                    self._context_datetime("late_card_shift_start"),
+                    self._outcome_not_before(),
+                    latest_activity,
+                )
+                if value is not None
+            ]
+            return ShiftService.resolve_late_card_outcome_datetime(
+                picker.value_str(),
+                self.shift_date,
+                reference_dt=reference,
+                not_before=max(lower_bounds) if lower_bounds else None,
+            ).replace(second=0, microsecond=0)
         return ShiftService.resolve_outcome_datetime(
             picker.value_str(),
             self.shift_date,
@@ -454,6 +483,21 @@ class _OutcomeDialogBase(BaseStyledDialog):
             not_before=self._outcome_not_before(),
             latest_activity_dt=latest_activity,
         ).replace(second=0, microsecond=0)
+
+    def _validate_late_outcome_deadline(self, outcome_dt: datetime) -> bool:
+        if not self._is_late_card_outcome():
+            return True
+        deadline = self._late_outcome_deadline()
+        if deadline is None or outcome_dt <= deadline:
+            return True
+        CustomMessageBox.warning(
+            self,
+            "Проверьте время",
+            "Для завершённой карты время исхода можно указать не позднее "
+            f"{deadline:%d.%m.%Y %H:%M} (не более чем на 2 часа вперёд). "
+            "Для более позднего времени создайте новую карту.",
+        )
+        return False
 
     def _comment_line(self) -> QLineEdit:
         edit = QLineEdit()
@@ -566,6 +610,8 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
             return
 
         event_time = self._resolve_picker_datetime(self.time_picker)
+        if not self._validate_late_outcome_deadline(event_time):
+            return
         destination = department
         if department == "Другое ЛПУ":
             destination = lpu_other or lpu or department
@@ -658,7 +704,12 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
 
         time_row = QHBoxLayout()
         time_row.setSpacing(14)
-        biological_default_time = ShiftService.now_time(datetime.now(), self.shift_date)
+        if self._is_late_card_outcome():
+            biological_default_time = (
+                self._late_outcome_reference() or datetime.now()
+            ).strftime("%H:%M")
+        else:
+            biological_default_time = ShiftService.now_time(datetime.now(), self.shift_date)
         clinical_default_time = ShiftService.apply_offset(biological_default_time, self.shift_date, -30)
 
         clinical_frame, clinical_layout = self._section("Клиническая смерть")
@@ -701,7 +752,8 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
 
         self.outcome_combo = QComboBox()
         self.outcome_combo.addItem("Биологическая смерть", DEATH_OUTCOME_BIOLOGICAL)
-        self.outcome_combo.addItem("Восстановление спонтанной сердечной деятельности", DEATH_OUTCOME_RECOVERY)
+        if not self._is_late_card_outcome():
+            self.outcome_combo.addItem("Восстановление спонтанной сердечной деятельности", DEATH_OUTCOME_RECOVERY)
         self.outcome_combo.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
         self._apply_combo_view_style(self.outcome_combo)
         self.outcome_combo.currentIndexChanged.connect(self._sync_outcome_mode)
@@ -976,15 +1028,20 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
 
     def _resolve_death_datetimes(self) -> Tuple[datetime, datetime]:
         duration_minutes = self._death_duration_minutes()
-        outcome_dt = ShiftService.resolve_outcome_datetime(
-            self.biological_time_picker.value_str(),
-            self.shift_date,
-            reference_dt=datetime.now(),
-        ).replace(second=0, microsecond=0)
+        if self._is_late_card_outcome():
+            outcome_dt = self._resolve_picker_datetime(self.biological_time_picker)
+        else:
+            outcome_dt = ShiftService.resolve_outcome_datetime(
+                self.biological_time_picker.value_str(),
+                self.shift_date,
+                reference_dt=datetime.now(),
+            ).replace(second=0, microsecond=0)
         clinical_dt = outcome_dt - timedelta(minutes=duration_minutes)
         return clinical_dt, outcome_dt
 
     def _validate_death_datetimes(self, clinical_dt: datetime, outcome_dt: datetime) -> bool:
+        if not self._validate_late_outcome_deadline(outcome_dt):
+            return False
         not_before = self._outcome_not_before()
         if not_before is not None and clinical_dt < not_before:
             CustomMessageBox.warning(
