@@ -355,6 +355,42 @@ class RemCardService(QObject):
             result[int(row["admission_id"])] = bool(row["has_card"])
         return result
 
+    def has_any_cards_bulk(self, admission_ids: Sequence[int]) -> Dict[int, bool]:
+        """Возвращает признак наличия хотя бы одной сохраненной карты по госпитализациям."""
+        ids = [int(adm_id) for adm_id in admission_ids if adm_id is not None]
+        if not ids:
+            return {}
+
+        placeholders = ",".join(["(?)"] * len(ids))
+        query = f"""
+            WITH ids(admission_id) AS (VALUES {placeholders})
+            SELECT
+                ids.admission_id AS admission_id,
+                CASE
+                    WHEN EXISTS (SELECT 1 FROM vitals v WHERE v.admission_id = ids.admission_id)
+                    OR EXISTS (SELECT 1 FROM fluids f WHERE f.admission_id = ids.admission_id)
+                    OR EXISTS (
+                        SELECT 1 FROM orders o
+                        WHERE o.admission_id = ids.admission_id
+                          AND COALESCE(o.status, '') != 'deleted'
+                    )
+                    OR EXISTS (SELECT 1 FROM diet_plan dp WHERE dp.admission_id = ids.admission_id)
+                    OR EXISTS (
+                        SELECT 1 FROM oral_intake_events oi
+                        WHERE oi.admission_id = ids.admission_id
+                    )
+                    OR EXISTS (SELECT 1 FROM lab_orders lo WHERE lo.admission_id = ids.admission_id)
+                    THEN 1
+                    ELSE 0
+                END AS has_any_card
+            FROM ids
+        """
+        rows = self.orders_dao.db.fetch_all_remcard(query, tuple(ids))
+        result: Dict[int, bool] = {adm_id: False for adm_id in ids}
+        for row in rows:
+            result[int(row["admission_id"])] = bool(row["has_any_card"])
+        return result
+
     def build_plan_card_state(
         self,
         admission_id: int,
@@ -400,6 +436,7 @@ class RemCardService(QObject):
 
         card_now_map = self.has_cards_bulk(ids, now)
         card_yest_map = self.has_cards_bulk(ids, yesterday)
+        any_card_map = self.has_any_cards_bulk(ids)
         plan_window_active = self._shifts.is_plan_card_window(now)
         plan_target_date = self._shifts.get_next_shift_start(now)
         plan_card_map = self.has_cards_bulk(ids, plan_target_date) if plan_window_active else {}
@@ -422,6 +459,7 @@ class RemCardService(QObject):
             snapshot[adm_id] = {
                 "status": status_map.get(adm_id),
                 "card_exists": bool(card_now_map.get(adm_id, False)),
+                "has_any_card": bool(any_card_map.get(adm_id, False)),
                 "yest_exists": bool(card_yest_map.get(adm_id, False)),
                 "plan_card_available": bool(plan_window_active and card_now_map.get(adm_id, False)),
                 "plan_card_window_active": bool(plan_window_active),
@@ -532,6 +570,7 @@ class RemCardService(QObject):
         )
         yest_date = date - timedelta(days=1)
         card_exists = True if vitals else self.has_card(admission_id, date)
+        has_any_card = bool(card_exists or self.has_any_cards_bulk([admission_id]).get(int(admission_id), False))
         plan_card_state = self.build_plan_card_state(admission_id)
 
         snapshot: Dict[str, Any] = {
@@ -548,6 +587,7 @@ class RemCardService(QObject):
             "effective_bounds": effective_bounds,
             "chart_active_intervals": active_intervals,
             "card_exists": card_exists,
+            "has_any_card": has_any_card,
             "yest_exists": self.has_card(admission_id, yest_date),
             "has_vitals": bool(vitals),
             **plan_card_state,
@@ -569,6 +609,7 @@ class RemCardService(QObject):
         current_status = self.get_current_status(admission_id)
         yest_date = date - timedelta(days=1)
         card_exists = self.has_card(admission_id, date)
+        has_any_card = bool(card_exists or self.has_any_cards_bulk([admission_id]).get(int(admission_id), False))
         plan_card_state = self.build_plan_card_state(admission_id)
         snapshot: Dict[str, Any] = {
             "admission_id": admission_id,
@@ -580,6 +621,7 @@ class RemCardService(QObject):
             "latest_values": self.get_latest_vital_values(admission_id),
             "settings": self.get_vital_settings_cached(admission_id, date),
             "card_exists": card_exists,
+            "has_any_card": has_any_card,
             "yest_exists": self.has_card(admission_id, yest_date),
             **plan_card_state,
         }

@@ -1662,10 +1662,15 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self, "layout_manager") and hasattr(self.layout_manager, "sector_4v"):
             s4v = self.layout_manager.sector_4v
             snapshot = self._card_snapshot_cache or {}
-            card_exists, yest_exists, plan_card_available = self._sector_4v_button_state(snapshot)
+            card_exists, yest_exists, plan_card_available, open_card_available = self._sector_4v_action_state(snapshot)
 
             # Сохраняем бизнес-логику 4в (наличие карт), добавляя только ограничение read-only.
-            s4v.set_buttons_state(card_exists, yest_exists, plan_card_available)
+            s4v.set_buttons_state(
+                card_exists,
+                yest_exists,
+                plan_card_available,
+                open_card_available=open_card_available,
+            )
             if read_only or self._current_status_is_outcome_safe():
                 s4v.btn_new_card.setEnabled(False)
                 if hasattr(s4v, "btn_plan_card"):
@@ -1767,6 +1772,28 @@ class DoctorRemCardWidget(QWidget):
             bool(snapshot.get("yest_exists")),
             bool(snapshot.get("plan_card_available")),
         )
+
+    def _sector_4v_action_state(self, snapshot=None) -> tuple[bool, bool, bool, bool]:
+        snapshot = snapshot if isinstance(snapshot, dict) else (self._card_snapshot_cache or {})
+        selected_card_exists, yest_exists, plan_card_available = self._sector_4v_button_state(snapshot)
+        current_card_exists = selected_card_exists
+        if self.admission_id and not self._is_same_medical_day(self._current_date, datetime.now()):
+            try:
+                current_card_exists = bool(self.service.has_card(int(self.admission_id), datetime.now()))
+            except Exception as exc:
+                logger.warning("Failed to resolve current card state admission_id=%s: %s", self.admission_id, exc)
+                current_card_exists = False
+        open_card_available = bool(snapshot.get("has_any_card", selected_card_exists) or current_card_exists)
+        return current_card_exists, yest_exists, plan_card_available, open_card_available
+
+    def _resolve_current_or_latest_card_date(self, admission_id: int):
+        now = datetime.now()
+        try:
+            if self.service.has_card(int(admission_id), now):
+                return now
+        except Exception as exc:
+            logger.warning("Failed to resolve current card date admission_id=%s: %s", admission_id, exc)
+        return self._latest_created_card_date(int(admission_id))
 
     def _sync_plan_card_ui_state(self):
         layout = getattr(self, "layout_manager", None)
@@ -2342,7 +2369,7 @@ class DoctorRemCardWidget(QWidget):
             s4v = layout.sector_4v
             s4v.archive_requested.connect(self.show_archive)
             s4v.show_card_requested.connect(self.on_show_card_clicked)
-            s4v.create_card_requested.connect(self.on_create_card_clicked)
+            s4v.create_card_requested.connect(self.on_create_current_card_clicked)
             s4v.plan_card_requested.connect(self.on_plan_card_clicked)
             s4v.yest_card_requested.connect(self.on_yest_card_clicked)
             s4v.full_report_requested.connect(self.on_full_report_clicked)
@@ -2780,36 +2807,35 @@ class DoctorRemCardWidget(QWidget):
             self._request_card_snapshot(load_scope="full")
 
     def on_show_card_clicked(self):
-        if self._is_plan_card_open():
-            now = datetime.now()
-            if self.service.has_card(self.admission_id, now):
-                self.safe_load_archived_card(now)
-            else:
-                CustomMessageBox.information(self, "Пусто", "Карта за текущие сутки еще не создана.")
+        target_date = self._resolve_current_or_latest_card_date(self.admission_id)
+        if target_date is None:
+            CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
             return
-
-        now = datetime.now()
-        start, end = self.service.get_day_period(now)
-        if not (start <= self._current_date < end):
-            if self._card_opened_from_global_archive:
-                latest_date = self._latest_created_card_date(self.admission_id)
-                if not latest_date:
-                    CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
-                    return
-                if self._is_same_medical_day(latest_date, self._current_date):
-                    self.refresh_data(show_empty_message=True)
-                    return
-                self.safe_load_archived_card(
-                    latest_date,
-                    balance_patient_period_manual_mode=True,
-                )
-                return
-            if self.service.has_card(self.admission_id, now):
-                self.safe_load_archived_card(now)
-            else:
-                CustomMessageBox.information(self, "Пусто", "Карта за текущие сутки еще не создана.")
-        else:
+        if self._is_same_medical_day(target_date, self._current_date):
             self.refresh_data(show_empty_message=True)
+            return
+        self.safe_load_archived_card(
+            target_date,
+            balance_patient_period_manual_mode=not self._is_same_medical_day(target_date, datetime.now()),
+        )
+
+    def on_create_current_card_clicked(self):
+        if not self.admission_id:
+            return
+        target_date = datetime.now()
+        try:
+            if self.service.has_card(int(self.admission_id), target_date):
+                CustomMessageBox.information(self, "Создание карты", "Карта за текущие сутки уже существует.")
+                return
+        except Exception as exc:
+            logger.warning("Failed to check current card before creation admission_id=%s: %s", self.admission_id, exc)
+
+        if not self._is_same_medical_day(self._current_date, target_date):
+            self.load_patient_card(self.admission_id, target_date, request_snapshot=False)
+            if not self._is_same_medical_day(self._current_date, target_date):
+                return
+            self.layout_manager.set_patient_selection_mode("card")
+        self.on_create_card_clicked(target_date=target_date)
 
     def _admission_status_is_outcome(self, admission_id: int) -> bool:
         if self.admission_id and int(self.admission_id) == int(admission_id) and self._current_status_is_outcome():
@@ -2977,9 +3003,9 @@ class DoctorRemCardWidget(QWidget):
     def _set_create_card_controls_enabled(self, enabled: bool):
         sector = getattr(getattr(self, "layout_manager", None), "sector_4v", None)
         snapshot = getattr(self, "_card_snapshot_cache", None) or {}
-        state_builder = getattr(self, "_sector_4v_button_state", None)
-        if callable(state_builder):
-            card_exists, _yest_exists, plan_card_available = state_builder(snapshot)
+        action_state_builder = getattr(self, "_sector_4v_action_state", None)
+        if callable(action_state_builder):
+            card_exists, _yest_exists, plan_card_available, _open_card_available = action_state_builder(snapshot)
         else:
             card_exists = bool(snapshot.get("card_exists"))
             plan_card_available = bool(snapshot.get("plan_card_available"))
@@ -3983,7 +4009,10 @@ class DoctorRemCardWidget(QWidget):
             action_type,
         )
         if action_type == "show":
-            target_date = datetime.now()
+            target_date = self._resolve_current_or_latest_card_date(patient.id)
+            if target_date is None:
+                CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
+                return
             self.load_patient_card(patient.id, target_date)
             self._prime_patient_header_from_w1(patient, target_date)
             self.layout_manager.set_patient_selection_mode("card")
@@ -4069,11 +4098,12 @@ class DoctorRemCardWidget(QWidget):
             if patient and hasattr(self.layout_manager, 'sector_4b'):
                 self._update_sector_4b_patient_info(patient, self._current_date)
             if hasattr(self.layout_manager, 'sector_4v'):
-                card_exists, yest_exists, plan_card_available = self._sector_4v_button_state(snapshot)
+                card_exists, yest_exists, plan_card_available, open_card_available = self._sector_4v_action_state(snapshot)
                 self.layout_manager.sector_4v.set_buttons_state(
                     card_exists,
                     yest_exists,
                     plan_card_available,
+                    open_card_available=open_card_available,
                 )
                 self.update_latest_indicators()
                 self._apply_archive_read_only_state()

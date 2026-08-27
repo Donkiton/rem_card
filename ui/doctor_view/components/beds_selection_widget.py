@@ -582,6 +582,7 @@ class BedsSelectionWidget(QWidget):
             row.sector_4b.update_outcome_timer(status_dto, outcome_delay_min)
 
         card_exists = bool(runtime_snapshot.get("card_exists", False))
+        has_any_card = bool(runtime_snapshot.get("has_any_card", card_exists or runtime_snapshot.get("yest_exists", False)))
         yest_exists = bool(runtime_snapshot.get("yest_exists", False))
         plan_card_available = bool(runtime_snapshot.get("plan_card_available", False))
         status_value = getattr(status_dto, "status", None)
@@ -595,7 +596,7 @@ class BedsSelectionWidget(QWidget):
             can_transfer=not has_outcome,
             can_cancel_transfer=is_transferred,
         )
-        row.sector_4v.btn_show_card.setEnabled(card_exists)
+        row.sector_4v.btn_show_card.setEnabled(has_any_card)
         row.sector_4v.btn_new_card.setEnabled(not card_exists and not has_outcome)
         row.sector_4v.btn_plan_card.setEnabled(plan_card_available and not has_outcome)
         row.sector_4v.btn_yest_card.setEnabled(yest_exists)
