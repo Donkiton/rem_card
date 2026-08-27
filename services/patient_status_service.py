@@ -66,6 +66,8 @@ class PatientStatusService:
         expected_active_event_id: Optional[int] = None,
         expected_active_revision: Optional[int] = None,
         expected_admission_revision: Optional[int] = None,
+        late_card_shift_start: Optional[datetime] = None,
+        late_outcome_reference_at: Optional[datetime] = None,
     ) -> bool:
         """Смена финального статуса вместе с записью структурированных деталей исхода."""
         ok = self.status_dao.change_status_with_outcome_details(
@@ -79,6 +81,8 @@ class PatientStatusService:
             expected_active_event_id=expected_active_event_id,
             expected_active_revision=expected_active_revision,
             expected_admission_revision=expected_admission_revision,
+            late_card_shift_start=late_card_shift_start,
+            late_outcome_reference_at=late_outcome_reference_at,
         )
         if ok:
             self._sync_ventilation_for_admission(admission_id)
@@ -111,6 +115,19 @@ class PatientStatusService:
 
     def get_admission_outcome_context(self, admission_id: int) -> Dict[str, Any]:
         return self.status_dao.get_admission_outcome_context(admission_id)
+
+    def get_late_outcome_card_state(
+        self,
+        admission_id: int,
+        shift_start: datetime,
+        *,
+        reference_dt: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        return self.status_dao.get_late_outcome_card_state(
+            admission_id,
+            shift_start,
+            reference_dt=reference_dt,
+        )
 
     def rollback_last_status(
         self,
@@ -402,6 +419,8 @@ class PatientStatusService:
         expected_active_event_id: Optional[int] = None,
         expected_active_revision: Optional[int] = None,
         expected_admission_revision: Optional[int] = None,
+        late_card_shift_start: Optional[datetime] = None,
+        late_outcome_reference_at: Optional[datetime] = None,
         on_success: Optional[Callable[[bool], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
     ):
@@ -418,6 +437,8 @@ class PatientStatusService:
                 expected_active_event_id=expected_active_event_id,
                 expected_active_revision=expected_active_revision,
                 expected_admission_revision=expected_admission_revision,
+                late_card_shift_start=late_card_shift_start,
+                late_outcome_reference_at=late_outcome_reference_at,
             ),
             on_success=on_success,
             on_error=on_error,

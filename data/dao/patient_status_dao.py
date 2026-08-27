@@ -11,6 +11,7 @@ CVC_OUTCOME_STATUS_BY_PATIENT_STATUS = {
     PatientStatus.DEAD.value: ("catheter_dead", "dead_with_catheter"),
 }
 CPR_REASON_TYPE = "cpr"
+LATE_CARD_OUTCOME_WINDOW = timedelta(hours=2)
 
 class PatientStatusDAO:
     def __init__(self, db_manager):
@@ -42,6 +43,147 @@ class PatientStatusDAO:
             with read_scope("admission_outcome_context"):
                 return self._build_admission_outcome_context(admission_id)
         return self._build_admission_outcome_context(admission_id)
+
+    def get_late_outcome_card_state(
+        self,
+        admission_id: int,
+        shift_start: datetime,
+        *,
+        reference_dt: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """Проверяет, является ли завершённая карта последней и доступна ли для исхода."""
+        read_scope = getattr(self.db, "central_read_scope", None)
+        if callable(read_scope):
+            with read_scope("late_outcome_card_state"):
+                return self._build_late_outcome_card_state(
+                    None,
+                    admission_id,
+                    shift_start,
+                    reference_dt=reference_dt,
+                )
+        return self._build_late_outcome_card_state(
+            None,
+            admission_id,
+            shift_start,
+            reference_dt=reference_dt,
+        )
+
+    def _build_late_outcome_card_state(
+        self,
+        cursor,
+        admission_id: int,
+        shift_start: datetime,
+        *,
+        reference_dt: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        source_start = shift_start.replace(second=0, microsecond=0)
+        source_end = source_start + timedelta(days=1)
+        reference = (reference_dt or datetime.now()).replace(second=0, microsecond=0)
+        query = """
+            WITH card_records(dt) AS (
+                SELECT datetime FROM vitals WHERE admission_id = ?
+                UNION ALL
+                SELECT datetime FROM fluids WHERE admission_id = ?
+                UNION ALL
+                SELECT datetime FROM orders WHERE admission_id = ?
+                UNION ALL
+                SELECT shift_start FROM diet_plan WHERE admission_id = ?
+                UNION ALL
+                SELECT event_time FROM oral_intake_events WHERE admission_id = ?
+                UNION ALL
+                SELECT COALESCE(card_day_id, scheduled_at, created_at, completed_at)
+                FROM lab_orders
+                WHERE admission_id = ?
+            )
+            SELECT
+                MAX(
+                    CASE
+                        WHEN DATETIME(dt) >= DATETIME(?) AND DATETIME(dt) < DATETIME(?)
+                        THEN 1 ELSE 0
+                    END
+                ) AS source_card_exists,
+                MAX(
+                    CASE WHEN DATETIME(dt) >= DATETIME(?) THEN 1 ELSE 0 END
+                ) AS later_card_exists
+            FROM card_records
+            WHERE dt IS NOT NULL
+        """
+        params = (
+            int(admission_id),
+            int(admission_id),
+            int(admission_id),
+            int(admission_id),
+            int(admission_id),
+            int(admission_id),
+            source_start.isoformat(),
+            source_end.isoformat(),
+            source_end.isoformat(),
+        )
+        if cursor is not None:
+            row = cursor.execute(query, params).fetchone()
+        else:
+            row = self.db.fetch_one_remcard(query, params)
+
+        source_card_exists = bool(row and row["source_card_exists"])
+        later_card_exists = bool(row and row["later_card_exists"])
+        eligible = bool(
+            source_card_exists
+            and not later_card_exists
+            and source_end <= reference
+        )
+        return {
+            "eligible": eligible,
+            "source_card_exists": source_card_exists,
+            "later_card_exists": later_card_exists,
+            "shift_start": source_start,
+            "shift_end": source_end,
+            "reference_datetime": reference,
+            "deadline": reference + LATE_CARD_OUTCOME_WINDOW,
+        }
+
+    def _validate_late_card_outcome(
+        self,
+        cursor,
+        admission_id: int,
+        event_dt: datetime,
+        shift_start: datetime,
+        reference_dt: datetime,
+    ) -> bool:
+        now = datetime.now().replace(second=0, microsecond=0)
+        reference = reference_dt.replace(second=0, microsecond=0)
+        if reference > now + timedelta(minutes=1):
+            logger.warning(
+                "[StatusDAO] Late outcome rejected: reference %s is ahead of server time %s",
+                reference,
+                now,
+            )
+            return False
+
+        state = self._build_late_outcome_card_state(
+            cursor,
+            admission_id,
+            shift_start,
+            reference_dt=reference,
+        )
+        event = event_dt.replace(second=0, microsecond=0)
+        if not state["eligible"]:
+            logger.warning(
+                "[StatusDAO] Late outcome rejected for admission %s: source_exists=%s later_exists=%s",
+                admission_id,
+                state["source_card_exists"],
+                state["later_card_exists"],
+            )
+            return False
+        if event < state["shift_start"] or event > state["deadline"]:
+            logger.warning(
+                "[StatusDAO] Late outcome %s is outside allowed range %s - %s for admission %s",
+                event,
+                state["shift_start"],
+                state["deadline"],
+                admission_id,
+            )
+            return False
+        return True
 
     def _build_admission_outcome_context(self, admission_id: int) -> Dict[str, Any]:
         row = self.db.fetch_one_remcard(
@@ -1061,6 +1203,8 @@ class PatientStatusDAO:
         expected_active_event_id: Optional[int] = None,
         expected_active_revision: Optional[int] = None,
         expected_admission_revision: Optional[int] = None,
+        late_card_shift_start: Optional[datetime] = None,
+        late_outcome_reference_at: Optional[datetime] = None,
     ) -> bool:
         """
         Меняет статус на финальный исход и в той же транзакции записывает
@@ -1083,6 +1227,15 @@ class PatientStatusDAO:
 
         try:
             with self.db.remcard_transaction(source="status_outcome_details") as cursor:
+                if late_card_shift_start is not None:
+                    if late_outcome_reference_at is None or not self._validate_late_card_outcome(
+                        cursor,
+                        admission_id,
+                        outcome["event_dt"],
+                        late_card_shift_start,
+                        late_outcome_reference_at,
+                    ):
+                        return False
                 current_active = self._fetch_active_outcome_status(cursor, admission_id)
                 if not self._close_active_status_for_outcome(
                     cursor,
@@ -1892,7 +2045,8 @@ class PatientStatusDAO:
                     (event_id,),
                 )
                 curr_adm = cursor.fetchone()
-                if not curr_adm: return False
+                if not curr_adm:
+                    return False
                 assert_revision_matches(curr_adm["revision"], expected_revision)
                 admission_id = curr_adm['admission_id']
 
@@ -1981,7 +2135,8 @@ class PatientStatusDAO:
                         curr_idx = i
                         break
                         
-                if curr_idx == -1: return False
+                if curr_idx == -1:
+                    return False
                 
                 # 3. ВАЛИДАЦИЯ ЛИНЕЙНОСТИ ВРЕМЕНИ НАЧАЛА
                 # Начало текущего события не может "схлопнуть" предыдущее
@@ -2070,7 +2225,8 @@ class PatientStatusDAO:
             return False
 
     def _parse_sqlite_dt(self, dt_str: Optional[str]) -> Optional[datetime]:
-        if not dt_str: return None
+        if not dt_str:
+            return None
         try:
             raw = dt_str.replace(' ', 'T')
             if '.' in raw:
