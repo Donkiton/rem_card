@@ -585,9 +585,10 @@ class Sector4v(BaseSectorWidget):
         card_exists: bool,
         yest_card_exists: bool = True,
         plan_card_available: bool = False,
+        open_card_available: bool | None = None,
     ):
         self.btn_new_card.setEnabled(not card_exists)
-        self.btn_show_card.setEnabled(card_exists)
+        self.btn_show_card.setEnabled(card_exists if open_card_available is None else bool(open_card_available))
         self.btn_yest_card.setEnabled(yest_card_exists)
         self.btn_plan_card.setEnabled(bool(plan_card_available))
 

@@ -4,8 +4,9 @@ import os
 import sys
 import unittest
 from datetime import datetime, timedelta
-from types import MethodType, SimpleNamespace
 from pathlib import Path
+from types import MethodType, SimpleNamespace
+from unittest.mock import patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -107,6 +108,9 @@ def _service_with_card_map(card_shift_starts: set[datetime]) -> RemCardService:
         return {int(adm_id): shift_start in card_shift_starts for adm_id in admission_ids}
 
     service.has_cards_bulk = has_cards_bulk
+    service.has_any_cards_bulk = lambda admission_ids: {
+        int(adm_id): bool(card_shift_starts) for adm_id in admission_ids
+    }
     return service
 
 
@@ -120,7 +124,10 @@ def _bind_plan_methods(widget):
         "_daily_report_reference_date",
         "daily_report_reference_date",
         "_current_status_is_outcome_safe",
+        "_is_same_medical_day",
         "_sector_4v_button_state",
+        "_sector_4v_action_state",
+        "_resolve_current_or_latest_card_date",
         "_set_create_card_controls_enabled",
         "on_yest_card_clicked",
     ):
@@ -204,6 +211,20 @@ class PlanCardTest(unittest.TestCase):
         finally:
             widget.deleteLater()
 
+    def test_show_button_opens_existing_history_while_new_card_stays_available(self):
+        widget = Sector4v()
+        try:
+            widget.set_buttons_state(
+                card_exists=False,
+                yest_card_exists=False,
+                open_card_available=True,
+            )
+
+            self.assertTrue(widget.btn_show_card.isEnabled())
+            self.assertTrue(widget.btn_new_card.isEnabled())
+        finally:
+            widget.deleteLater()
+
     def test_nurse_archive_card_list_hides_future_plan_card(self):
         now = datetime(2026, 6, 22, 7, 30)
         current_shift_start, next_shift_start = ShiftService.get_day_period(now)
@@ -256,6 +277,297 @@ class PlanCardTest(unittest.TestCase):
         self.assertFalse(new_button.enabled)
         self.assertTrue(plan_button.enabled)
         self.assertEqual(report_date, now)
+
+    def test_historical_card_actions_use_current_card_state(self):
+        now = datetime(2026, 6, 22, 12, 0)
+        current_shift_start, _ = ShiftService.get_day_period(now)
+        historical_shift_start = current_shift_start - timedelta(days=2)
+        service = _PlanCardServiceStub(now, {historical_shift_start})
+        widget = SimpleNamespace(
+            admission_id=1,
+            service=service,
+            _archive_read_only_mode=False,
+            _current_date=historical_shift_start,
+            _card_snapshot_cache={
+                "card_exists": True,
+                "has_any_card": True,
+                "yest_exists": False,
+                "plan_card_available": False,
+            },
+        )
+        _bind_plan_methods(widget)
+        widget._latest_created_card_date = lambda _admission_id: historical_shift_start
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            current_exists, _yest_exists, _plan_available, open_available = widget._sector_4v_action_state(
+                widget._card_snapshot_cache
+            )
+            target_date = widget._resolve_current_or_latest_card_date(1)
+        finally:
+            doctor_module.datetime = original_datetime
+
+        self.assertFalse(current_exists)
+        self.assertTrue(open_available)
+        self.assertEqual(target_date, historical_shift_start)
+
+    def test_historical_card_disables_creation_when_current_card_check_fails(self):
+        now = datetime(2026, 6, 22, 12, 0)
+        historical_shift_start = ShiftService.get_day_period(now)[0] - timedelta(days=2)
+        service = _PlanCardServiceStub(now, {historical_shift_start})
+
+        def fail_has_card(_admission_id, _date):
+            raise RuntimeError("forced card-state read failure")
+
+        service.has_card = fail_has_card
+        widget = SimpleNamespace(
+            admission_id=1,
+            service=service,
+            _archive_read_only_mode=False,
+            _current_date=historical_shift_start,
+            _card_snapshot_cache={
+                "card_exists": True,
+                "has_any_card": True,
+                "yest_exists": False,
+                "plan_card_available": False,
+            },
+        )
+        _bind_plan_methods(widget)
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            current_exists, _yest_exists, _plan_available, open_available = widget._sector_4v_action_state(
+                widget._card_snapshot_cache
+            )
+        finally:
+            doctor_module.datetime = original_datetime
+
+        self.assertTrue(current_exists)
+        self.assertTrue(open_available)
+
+    def test_show_card_from_patient_card_opens_latest_when_current_is_missing(self):
+        now = datetime(2026, 6, 22, 12, 0)
+        historical_date = ShiftService.get_day_period(now)[0] - timedelta(days=2)
+        opened = []
+        widget = SimpleNamespace(
+            admission_id=1,
+            _current_date=now,
+            _resolve_current_or_latest_card_date=lambda _admission_id: historical_date,
+            _is_same_medical_day=lambda left, right: ShiftService.get_day_period(left)[0]
+            == ShiftService.get_day_period(right)[0],
+            refresh_data=lambda **_kwargs: self.fail("current empty card must not be refreshed"),
+            safe_load_archived_card=lambda target_date, **kwargs: opened.append((target_date, kwargs)),
+        )
+        widget.on_show_card_clicked = MethodType(DoctorRemCardWidget.on_show_card_clicked, widget)
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            widget.on_show_card_clicked()
+        finally:
+            doctor_module.datetime = original_datetime
+
+        self.assertEqual(opened, [(historical_date, {"balance_patient_period_manual_mode": True})])
+
+    def test_show_card_from_w1_opens_latest_when_current_is_missing(self):
+        historical_date = datetime(2026, 6, 20, 8, 0)
+        loaded = []
+        primed = []
+        selection_modes = []
+        patient = SimpleNamespace(id=1)
+        widget = SimpleNamespace(
+            _exit_archive_read_only_mode=lambda: None,
+            _card_return_mode="archive",
+            _card_opened_from_global_archive=True,
+            _resolve_current_or_latest_card_date=lambda _admission_id: historical_date,
+            load_patient_card=lambda admission_id, target_date: loaded.append((admission_id, target_date)),
+            _prime_patient_header_from_w1=lambda selected_patient, target_date: primed.append(
+                (selected_patient, target_date)
+            ),
+            layout_manager=SimpleNamespace(
+                set_patient_selection_mode=lambda mode: selection_modes.append(mode)
+            ),
+        )
+        widget.on_patient_selected_from_list = MethodType(
+            DoctorRemCardWidget.on_patient_selected_from_list,
+            widget,
+        )
+
+        widget.on_patient_selected_from_list(patient, "show")
+
+        self.assertEqual(loaded, [(1, historical_date)])
+        self.assertEqual(primed, [(patient, historical_date)])
+        self.assertEqual(selection_modes, ["card"])
+
+    def test_create_card_from_historical_patient_card_switches_to_current_day(self):
+        now = datetime(2026, 6, 22, 12, 0)
+        historical_date = ShiftService.get_day_period(now)[0] - timedelta(days=2)
+        created = []
+        selection_modes = []
+        widget = SimpleNamespace(
+            admission_id=1,
+            _current_date=historical_date,
+            service=_PlanCardServiceStub(now, {historical_date}),
+            layout_manager=SimpleNamespace(
+                set_patient_selection_mode=lambda mode: selection_modes.append(mode)
+            ),
+            _is_same_medical_day=lambda left, right: ShiftService.get_day_period(left)[0]
+            == ShiftService.get_day_period(right)[0],
+            on_create_card_clicked=lambda **kwargs: created.append(kwargs),
+        )
+
+        def load_patient_card(_admission_id, target_date, **kwargs):
+            widget._current_date = target_date
+            widget.loaded = kwargs
+
+        widget.load_patient_card = load_patient_card
+        widget.on_create_current_card_clicked = MethodType(
+            DoctorRemCardWidget.on_create_current_card_clicked,
+            widget,
+        )
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            widget.on_create_current_card_clicked()
+        finally:
+            doctor_module.datetime = original_datetime
+
+        self.assertEqual(widget.loaded, {"request_snapshot": False})
+        self.assertEqual(selection_modes, ["card"])
+        self.assertEqual(created, [{"target_date": now}])
+
+    def test_create_card_from_historical_patient_card_aborts_when_current_check_fails(self):
+        now = datetime(2026, 6, 22, 12, 0)
+        calls = []
+        service = _PlanCardServiceStub(now, set())
+
+        def fail_has_card(_admission_id, _date):
+            raise RuntimeError("forced card-state read failure")
+
+        service.has_card = fail_has_card
+        widget = SimpleNamespace(
+            admission_id=1,
+            service=service,
+            load_patient_card=lambda *_args, **_kwargs: calls.append("load"),
+            on_create_card_clicked=lambda **_kwargs: calls.append("create"),
+        )
+        widget.on_create_current_card_clicked = MethodType(
+            DoctorRemCardWidget.on_create_current_card_clicked,
+            widget,
+        )
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            with patch.object(doctor_module.CustomMessageBox, "warning") as warning:
+                widget.on_create_current_card_clicked()
+        finally:
+            doctor_module.datetime = original_datetime
+
+        self.assertEqual(calls, [])
+        warning.assert_called_once()
+
+    def test_create_card_from_historical_patient_card_refreshes_new_current_card(self):
+        now = datetime(2026, 6, 22, 12, 0)
+        current_shift_start, _ = ShiftService.get_day_period(now)
+        historical_date = current_shift_start - timedelta(days=2)
+        service = _PlanCardServiceStub(now, {historical_date})
+        writes = []
+        refreshes = []
+        selection_modes = []
+        undo_updates = []
+        sector = Sector4v()
+
+        def add_vital(dto, *, shift_date, force):
+            shift_start, _shift_end = service.get_day_period(shift_date)
+            service.card_shift_starts.add(shift_start)
+            writes.append((dto.admission_id, shift_start, bool(force)))
+
+        def enqueue_write(_label, operation, *, on_success, on_error):
+            try:
+                on_success(operation())
+            except Exception as exc:
+                on_error(exc)
+
+        service.add_vital = add_vital
+        service.enqueue_write = enqueue_write
+        widget = SimpleNamespace(
+            admission_id=1,
+            service=service,
+            _archive_read_only_mode=False,
+            _current_date=historical_date,
+            _card_snapshot_cache={
+                "card_exists": True,
+                "has_any_card": True,
+                "yest_exists": False,
+                "plan_card_available": False,
+            },
+            _create_card_write_pending=False,
+            _snapshot_worker=None,
+            _create_card_after_snapshot=False,
+            _snapshot_pending=None,
+            layout_manager=SimpleNamespace(
+                sector_4v=sector,
+                set_patient_selection_mode=lambda mode: selection_modes.append(mode),
+            ),
+            _should_ensure_initial_status_for_date=lambda _target_date: True,
+        )
+        _bind_plan_methods(widget)
+        for name in (
+            "on_create_current_card_clicked",
+            "on_create_card_clicked",
+            "_begin_create_card_pending",
+            "_finish_create_card_pending",
+        ):
+            setattr(widget, name, MethodType(getattr(DoctorRemCardWidget, name), widget))
+
+        def apply_button_state():
+            card_exists, yest_exists, plan_available, open_available = widget._sector_4v_action_state(
+                widget._card_snapshot_cache
+            )
+            sector.set_buttons_state(
+                card_exists,
+                yest_exists,
+                plan_available,
+                open_card_available=open_available,
+            )
+
+        def refresh_after_create():
+            refreshes.append(widget._current_date)
+            widget._card_snapshot_cache = {
+                "card_exists": True,
+                "has_any_card": True,
+                "yest_exists": True,
+                "plan_card_available": False,
+            }
+            apply_button_state()
+
+        widget.vitals_input = SimpleNamespace(
+            update_undo_button_state=lambda: undo_updates.append(True),
+            data_changed=SimpleNamespace(emit=refresh_after_create),
+        )
+        widget.update_patient_info = apply_button_state
+
+        def load_patient_card(_admission_id, target_date, **kwargs):
+            self.assertEqual(kwargs, {"request_snapshot": False})
+            widget._current_date = target_date
+            widget._card_snapshot_cache = {
+                "card_exists": False,
+                "has_any_card": True,
+                "yest_exists": True,
+                "plan_card_available": False,
+            }
+            apply_button_state()
+
+        widget.load_patient_card = load_patient_card
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            with patch.object(doctor_module.CustomMessageBox, "information") as information:
+                widget.on_create_current_card_clicked()
+        finally:
+            doctor_module.datetime = original_datetime
+            sector.deleteLater()
+
+        self.assertEqual(writes, [(1, current_shift_start, True)])
+        self.assertEqual(refreshes, [now])
+        self.assertEqual(selection_modes, ["card"])
+        self.assertEqual(undo_updates, [True])
+        self.assertTrue(sector.btn_show_card.isEnabled())
+        self.assertFalse(sector.btn_new_card.isEnabled())
+        information.assert_called_once()
 
     def test_plan_card_yesterday_button_uses_current_medical_day(self):
         now = datetime(2026, 6, 22, 7, 30)

@@ -83,6 +83,7 @@ def test_card_queries_accept_space_and_t_datetime_rows_together():
             ),
         )
         assert RemCardService.has_cards_bulk(fake_service, [1], datetime(2026, 1, 2)) == {1: True}
+        assert RemCardService.has_any_cards_bulk(fake_service, [1, 2]) == {1: True, 2: False}
     finally:
         conn.close()
 
