@@ -1782,7 +1782,8 @@ class DoctorRemCardWidget(QWidget):
                 current_card_exists = bool(self.service.has_card(int(self.admission_id), datetime.now()))
             except Exception as exc:
                 logger.warning("Failed to resolve current card state admission_id=%s: %s", self.admission_id, exc)
-                current_card_exists = False
+                # При недоступной БД нельзя безопасно разрешать создание потенциального дубля.
+                current_card_exists = True
         open_card_available = bool(snapshot.get("has_any_card", selected_card_exists) or current_card_exists)
         return current_card_exists, yest_exists, plan_card_available, open_card_available
 
@@ -2829,6 +2830,12 @@ class DoctorRemCardWidget(QWidget):
                 return
         except Exception as exc:
             logger.warning("Failed to check current card before creation admission_id=%s: %s", self.admission_id, exc)
+            CustomMessageBox.warning(
+                self,
+                "Создание карты",
+                "Не удалось проверить наличие карты за текущие сутки. Повторите попытку после обновления данных.",
+            )
+            return
 
         if not self._is_same_medical_day(self._current_date, target_date):
             self.load_patient_card(self.admission_id, target_date, request_snapshot=False)
