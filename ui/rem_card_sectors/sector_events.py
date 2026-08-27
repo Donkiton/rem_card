@@ -1,7 +1,7 @@
 import inspect
 from collections import OrderedDict
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
-from datetime import datetime
+from datetime import datetime, timedelta
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QScrollArea, QFrame, QLineEdit, QDateTimeEdit, QApplication, QDialog)
 from PySide6.QtCore import Qt, Signal, QTimer
@@ -265,9 +265,53 @@ class SectorEvents(BaseSectorWidget):
 
         events = self.status_service.get_events_in_range(self.admission_id, self.shift_start, self.shift_end)
         is_archive = self.shift_end < datetime.now()
+        if is_archive:
+            state = self._late_outcome_card_state()
+            if state.get("eligible"):
+                known_ids = {int(event.id) for event in events if event.id is not None}
+                for event in self.status_service.get_events(self.admission_id):
+                    if event.id is not None and int(event.id) in known_ids:
+                        continue
+                    if self._belongs_to_late_outcome_extension(event):
+                        events.append(event)
+                events.sort(key=lambda event: (event.start_time, int(event.id or 0)))
         from rem_card.app.logger import logger
         logger.debug(f"[SectorEvents] Refreshing for {self.shift_start.strftime('%d.%m %H:%M')}. Found {len(events)} events. Archive: {is_archive}")
         return events, is_archive
+
+    def _late_outcome_card_state(self, reference_dt=None):
+        if not (
+            self.admission_id
+            and self.status_service
+            and self.shift_start
+            and hasattr(self.status_service, "get_late_outcome_card_state")
+        ):
+            return {}
+        try:
+            return self.status_service.get_late_outcome_card_state(
+                self.admission_id,
+                self.shift_start,
+                reference_dt=reference_dt or datetime.now(),
+            ) or {}
+        except Exception as exc:
+            from rem_card.app.logger import logger
+            logger.warning("Failed to resolve late outcome card state: %s", exc)
+            return {}
+
+    def _belongs_to_late_outcome_extension(self, event) -> bool:
+        if not self._is_late_outcome_for_current_card(event):
+            return False
+        return event.start_time >= self.shift_end
+
+    def _is_late_outcome_for_current_card(self, event) -> bool:
+        if event.status not in (PatientStatus.TRANSFERRED, PatientStatus.DEAD):
+            return False
+        if not self.shift_start or not self.shift_end or event.start_time < self.shift_start:
+            return False
+        created_at = getattr(event, "created_at", None)
+        if created_at is None or created_at < self.shift_end:
+            return False
+        return event.start_time <= created_at.replace(second=0, microsecond=0) + timedelta(hours=2)
 
     def _cache_key(self):
         if not self.admission_id:
@@ -629,7 +673,16 @@ class SectorEvents(BaseSectorWidget):
                 total_events = len(events)
 
         self._update_buttons_state(current_status, is_archive)
-        self.btn_rollback.setEnabled(total_events > 1 and not is_archive)
+        can_rollback_late_outcome = bool(
+            is_archive
+            and current_ev is not None
+            and self._late_outcome_card_state().get("eligible")
+            and self._is_late_outcome_for_current_card(current_ev)
+        )
+        self.btn_rollback.setEnabled(
+            total_events > 1
+            and (not is_archive or can_rollback_late_outcome)
+        )
 
     def refresh(self, force=False):
         if self._should_skip_refresh(force):
@@ -683,9 +736,19 @@ class SectorEvents(BaseSectorWidget):
         
         is_final = current_status in (PatientStatus.TRANSFERRED, PatientStatus.DEAD)
         can_edit = not is_final and not is_archive
-        
+        late_outcome_allowed = bool(
+            is_archive
+            and not is_final
+            and self._late_outcome_card_state().get("eligible")
+        )
+
         for btn in self._status_buttons():
             btn.setEnabled(can_edit and not self._status_write_pending)
+        for btn in (self.btn_trans, self.btn_dead):
+            btn.setEnabled(
+                (can_edit or late_outcome_allowed)
+                and not self._status_write_pending
+            )
 
     @staticmethod
     def _status_label(status: PatientStatus) -> str:
@@ -708,7 +771,8 @@ class SectorEvents(BaseSectorWidget):
         )
 
     def on_status_btn_clicked(self, status):
-        if not self.admission_id or not self.status_service: return
+        if not self.admission_id or not self.status_service:
+            return
         if self._status_write_pending:
             self._restore_status_button_state()
             return
@@ -799,6 +863,27 @@ class SectorEvents(BaseSectorWidget):
                 CustomMessageBox.warning(self, "Ошибка", f"Не удалось загрузить данные госпитализации: {exc}")
                 self.refresh(force=True)
                 return
+
+        late_state = {}
+        if self.shift_end and self.shift_end < datetime.now():
+            reference = datetime.now().replace(second=0, microsecond=0)
+            late_state = self._late_outcome_card_state(reference)
+            if not late_state.get("eligible"):
+                CustomMessageBox.information(
+                    self,
+                    "Завершённая карта",
+                    "Исход можно добавить только в последнюю созданную карту, если следующая карта ещё не создана.",
+                )
+                self.refresh(force=True)
+                return
+            context.update(
+                {
+                    "late_card_outcome": True,
+                    "late_card_shift_start": late_state.get("shift_start"),
+                    "late_outcome_reference_datetime": late_state.get("reference_datetime"),
+                    "late_outcome_deadline": late_state.get("deadline"),
+                }
+            )
 
         dialog_parent = self.window() if self.window() else self
         if status == PatientStatus.TRANSFERRED:
@@ -916,6 +1001,8 @@ class SectorEvents(BaseSectorWidget):
                             "expected_active_event_id": expected_active_event_id,
                             "expected_active_revision": expected_active_revision,
                             "expected_admission_revision": expected_admission_revision,
+                            "late_card_shift_start": late_state.get("shift_start"),
+                            "late_outcome_reference_at": late_state.get("reference_datetime"),
                             "on_success": on_success,
                             "on_error": on_error,
                         },
@@ -936,6 +1023,8 @@ class SectorEvents(BaseSectorWidget):
                         expected_active_event_id=expected_active_event_id,
                         expected_active_revision=expected_active_revision,
                         expected_admission_revision=expected_admission_revision,
+                        late_card_shift_start=late_state.get("shift_start"),
+                        late_outcome_reference_at=late_state.get("reference_datetime"),
                     )
                 else:
                     result = self.status_service.change_status(
@@ -1115,7 +1204,8 @@ class SectorEvents(BaseSectorWidget):
             CustomMessageBox.warning(self, "Ошибка линейности времени", "Невозможно изменить время: это приведет к наложению событий.\n\nПроверьте линейность движения и пересечения с другими случаями СЛР или исходом смерти.")
 
     def on_rollback_clicked(self):
-        if not self.admission_id or not self.status_service: return
+        if not self.admission_id or not self.status_service:
+            return
         
         reply = self._show_question(
             "Вы уверены, что хотите отменить последнее изменение статуса и вернуться к предыдущему?"

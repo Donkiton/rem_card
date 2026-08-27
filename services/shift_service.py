@@ -127,6 +127,38 @@ class ShiftService:
         return base_dt
 
     @staticmethod
+    def resolve_late_card_outcome_datetime(
+        time: str,
+        shift_date: datetime,
+        *,
+        reference_dt: datetime,
+        not_before: Optional[datetime] = None,
+    ) -> datetime:
+        """Привязывает HH:mm к последней карте, включая разрешённое время после 08:00."""
+        normalized = ShiftService.normalize_time(time)
+        base_dt = ShiftService.resolve_datetime(normalized, shift_date).replace(second=0, microsecond=0)
+        reference = reference_dt.replace(second=0, microsecond=0)
+        lower = not_before.replace(second=0, microsecond=0) if not_before else None
+        reference_day_offset = (reference.date() - base_dt.date()).days
+        candidate_offsets = {
+            -1,
+            0,
+            1,
+            reference_day_offset - 1,
+            reference_day_offset,
+            reference_day_offset + 1,
+        }
+        candidates = sorted({base_dt + timedelta(days=offset) for offset in candidate_offsets})
+        valid = [
+            candidate
+            for candidate in candidates
+            if (lower is None or candidate >= lower)
+        ]
+        if not valid:
+            return min(candidates, key=lambda candidate: abs(candidate - reference))
+        return min(valid, key=lambda candidate: (abs(candidate - reference), candidate))
+
+    @staticmethod
     def apply_offset(time: str, shift_date: datetime, delta_minutes: int) -> str:
         """Сдвигает время внутри смены по кольцу 08:00-08:00."""
         shift_start = ShiftService._shift_start(shift_date)
