@@ -159,13 +159,17 @@ class CurrentNurseOrdersWidget(QWidget):
             logger.warning("CurrentNurseOrdersWidget cache version check failed: %s", exc)
             return False
 
-    def _store_snapshot_cache(self, data_list):
+    def _store_snapshot_cache(self, data_list, *, version: int | None = None):
         key = self._cache_key()
         if key is None:
             return
         self._snapshot_cache[key] = {
             "cache_format_version": CURRENT_ORDERS_CACHE_FORMAT_VERSION,
-            "version": self._current_change_id(),
+            "version": (
+                self._current_change_id()
+                if version is None
+                else max(0, int(version))
+            ),
             "data": [dict(item) for item in (data_list or [])],
         }
         persistent_snapshot_cache.schedule_store_snapshot(
@@ -210,14 +214,28 @@ class CurrentNurseOrdersWidget(QWidget):
             
         # Запрашиваем свежие данные
         try:
-            all_data = self.service.get_nurse_orders_data(self.admission_id, self.shift_date)
+            snapshot_builder = getattr(
+                self.service,
+                "build_current_nurse_orders_snapshot",
+                None,
+            )
+            if callable(snapshot_builder):
+                snapshot = snapshot_builder(self.admission_id, self.shift_date)
+                all_data = list((snapshot or {}).get("data") or [])
+                snapshot_version = int((snapshot or {}).get("change_id") or 0)
+            else:
+                all_data = self.service.get_nurse_orders_data(
+                    self.admission_id,
+                    self.shift_date,
+                )
+                snapshot_version = self._current_change_id()
         except Exception as exc:
             if self._is_retryable_lock_error(exc):
                 self._log_lock_warning_throttled(exc)
             else:
                 logger.error("CurrentNurseOrdersWidget refresh failed: %s", exc, exc_info=True)
             return
-        self._store_snapshot_cache(all_data)
+        self._store_snapshot_cache(all_data, version=snapshot_version)
         self._all_data = self._apply_pending_marks(all_data)
         self._render_from_cache()
 
