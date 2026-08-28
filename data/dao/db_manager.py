@@ -2105,6 +2105,13 @@ class DatabaseManager:
             )
 
     def _should_read_from_local(self) -> bool:
+        scoped_source = str(
+            getattr(self._thread_state, "snapshot_read_source", "") or ""
+        )
+        if scoped_source == "local_replica":
+            return True
+        if scoped_source:
+            return False
         if bool(getattr(self._thread_state, "force_central_reads", False)):
             return False
         if not self._local_replica:
@@ -2424,6 +2431,80 @@ class DatabaseManager:
                         conn.close()
                 except Exception as exc:
                     logger.debug("Failed to close scoped central read connection: %s", exc)
+
+    @contextmanager
+    def snapshot_read_scope(
+        self,
+        source: str = "snapshot",
+        *,
+        force_central: bool = False,
+    ):
+        """Pin one read source and a conservative cursor for a UI snapshot.
+
+        The cursor is captured before payload rows are read.  Central reads
+        deliberately stay in autocommit mode so a long full-card build cannot
+        hold a shared SQLite read transaction and delay a clinical COMMIT.
+        If central data changes during the build, the older captured cursor
+        makes the result conservatively stale and the normal monitor/cache
+        validation refreshes it.  Local reads additionally hold the replica
+        generation lock so an atomic replica swap cannot split one snapshot.
+        """
+        state = self._thread_state
+        depth = int(getattr(state, "snapshot_read_scope_depth", 0) or 0)
+        if depth > 0:
+            state.snapshot_read_scope_depth = depth + 1
+            try:
+                yield self
+            finally:
+                state.snapshot_read_scope_depth = depth
+            return
+
+        state.snapshot_read_scope_depth = 1
+        selected_source = "central"
+        cursor_value = 0
+        try:
+            if self._in_current_thread_remcard_transaction():
+                selected_source = "central_transaction"
+                state.snapshot_read_source = selected_source
+                row = self._fetch_one_central(
+                    "SELECT COALESCE(MAX(id), 0) FROM change_log",
+                    use_write_connection=True,
+                )
+                cursor_value = int(row[0] or 0) if row else 0
+                state.snapshot_read_cursor = cursor_value
+                yield self
+                return
+
+            if not force_central and self._should_read_from_local():
+                selected_source = "local_replica"
+                state.snapshot_read_source = selected_source
+                with self._local_replica.read_snapshot_scope():
+                    row = self._local_replica.fetch_one(
+                        "SELECT COALESCE(MAX(id), 0) FROM change_log"
+                    )
+                    cursor_value = int(row[0] or 0) if row else 0
+                    state.snapshot_read_cursor = cursor_value
+                    yield self
+                return
+
+            state.snapshot_read_source = selected_source
+            with self.central_read_scope(source):
+                row = self._fetch_one_central(
+                    "SELECT COALESCE(MAX(id), 0) FROM change_log"
+                )
+                cursor_value = int(row[0] or 0) if row else 0
+                state.snapshot_read_cursor = cursor_value
+                yield self
+        finally:
+            state.snapshot_read_scope_depth = 0
+            for attribute in ("snapshot_read_source", "snapshot_read_cursor"):
+                if hasattr(state, attribute):
+                    delattr(state, attribute)
+
+    def current_snapshot_read_source(self) -> str:
+        return str(
+            getattr(self._thread_state, "snapshot_read_source", "") or ""
+        )
 
     @contextmanager
     def central_read_snapshot_scope(self, source: str = "snapshot"):
@@ -3246,6 +3327,18 @@ class DatabaseManager:
         return self.get_latest_change_id()
 
     def get_latest_change_id(self, admission_id: Optional[int] = None, include_global: bool = True) -> int:
+        scoped_cursor = getattr(self._thread_state, "snapshot_read_cursor", None)
+        if scoped_cursor is not None:
+            current = max(0, int(scoped_cursor or 0))
+            record_metric(
+                "latest_change_id",
+                current,
+                admission_id=admission_id,
+                include_global=include_global,
+                source=f"{self.current_snapshot_read_source() or 'central'}_snapshot",
+            )
+            return current
+
         query = "SELECT COALESCE(MAX(id), 0) FROM change_log"
         params = []
         if admission_id is not None:
