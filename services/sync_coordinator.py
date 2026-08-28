@@ -8,6 +8,7 @@ class SyncCoordinator:
         "gap_detected",
         "cursor_moved_backwards",
         "empty_change_rows",
+        "partial_change_rows",
         "recovery",
         "manual_refresh",
     }

@@ -474,7 +474,7 @@ def _create_change_triggers(
 
     when_clause = ""
     if use_updated_at_gate:
-        when_clause = "WHEN OLD.updated_at != NEW.updated_at"
+        when_clause = "WHEN OLD.updated_at IS NOT NEW.updated_at"
 
     conn.execute(
         f"""
@@ -1627,7 +1627,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'system')",
         "COALESCE(OLD.last_modified_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1638,7 +1638,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'system')",
         "COALESCE(OLD.last_modified_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1649,7 +1649,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'system')",
         "COALESCE(OLD.last_modified_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1660,7 +1660,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1671,7 +1671,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "(SELECT admission_id FROM orders WHERE id = OLD.order_id)",
         "COALESCE(NEW.last_modified_by, 'system')",
         "COALESCE(OLD.last_modified_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1682,7 +1682,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, NEW.created_by, 'system')",
         "COALESCE(OLD.last_modified_by, OLD.created_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
 
     _create_change_triggers(
@@ -1694,7 +1694,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "NULL",
         "COALESCE(NEW.last_modified_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1705,7 +1705,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1716,7 +1716,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'nurse')",
         "COALESCE(OLD.last_modified_by, 'nurse')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1727,7 +1727,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.updated_by, NEW.created_by, 'doctor')",
         "COALESCE(OLD.updated_by, OLD.created_by, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1738,7 +1738,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.completed_by_role, NEW.created_by_role, 'doctor')",
         "COALESCE(OLD.completed_by_role, OLD.created_by_role, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
