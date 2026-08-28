@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 23
-SCHEMA_MIN_MIGRATION_VERSION = 23
+SCHEMA_FASTPATH_REV = 24
+SCHEMA_MIN_MIGRATION_VERSION = 24
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -472,15 +472,18 @@ def _create_change_triggers(
         """
     )
 
-    when_clause = ""
+    update_when = ""
     if use_updated_at_gate:
-        when_clause = "WHEN OLD.updated_at IS NOT NEW.updated_at"
+        compared_columns = sorted(_get_columns(conn, table_name) - {"updated_at"})
+        update_when = "WHEN " + " OR ".join(
+            f"OLD.{column} IS NOT NEW.{column}" for column in compared_columns
+        )
 
     conn.execute(
         f"""
         CREATE TRIGGER {trigger_update}
         AFTER UPDATE ON {table_name}
-        {when_clause}
+        {update_when}
         BEGIN
             {version_bump_sql}
             INSERT INTO change_log (
@@ -2035,6 +2038,6 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(
         conn,
         SCHEMA_MIN_MIGRATION_VERSION,
-        "isolated network write receipts and affected row identity",
+        "single change-log event for timestamped row updates",
     )
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

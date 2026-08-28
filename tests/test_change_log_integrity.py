@@ -27,7 +27,7 @@ def _unified_connection() -> sqlite3.Connection:
     return conn
 
 
-def test_updated_at_change_triggers_have_single_event_gate():
+def test_change_trigger_ignores_timestamp_only_nested_update():
     conn = _unified_connection()
     try:
         for table_name in UPDATED_AT_CHANGE_TABLES:
@@ -36,7 +36,13 @@ def test_updated_at_change_triggers_have_single_event_gate():
                 (f"trg_{table_name}_version_upd",),
             ).fetchone()
             assert row is not None, table_name
-            assert "WHEN OLD.updated_at IS NOT NEW.updated_at" in str(row[0]), table_name
+            assert "WHEN " in str(row[0]), table_name
+            assert "OLD.updated_at IS NOT NEW.updated_at" not in str(row[0]), table_name
+            legacy = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+                (f"trg_{table_name}_updated_at",),
+            ).fetchone()
+            assert legacy is not None, table_name
     finally:
         conn.close()
 
@@ -78,8 +84,19 @@ def test_one_vitals_update_creates_one_change_log_row():
         ).fetchall()
         assert rows == [("vitals", 1, 1, "update")]
 
+        unchanged_timestamp = conn.execute(
+            "SELECT updated_at FROM vitals WHERE admission_id = 1"
+        ).fetchone()[0]
         conn.execute("DELETE FROM change_log")
-        conn.execute("UPDATE vitals SET sys = 122 WHERE admission_id = 1")
+        conn.execute(
+            """
+            UPDATE vitals
+            SET sys = 122,
+                updated_at = ?
+            WHERE admission_id = 1
+            """,
+            (unchanged_timestamp,),
+        )
         assert conn.execute(
             "SELECT COUNT(*) FROM change_log WHERE entity_name = 'vitals'"
         ).fetchone()[0] == 1
