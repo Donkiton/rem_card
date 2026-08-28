@@ -98,9 +98,14 @@ def orders_snapshot_caller(
 def read_scoped_snapshot(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
-        if bool(kwargs.get("ensure_initial_status")):
-            return method(self, *args, **kwargs)
         db = getattr(getattr(self, "orders_dao", None), "db", None)
+        scope = getattr(db, "snapshot_read_scope", None)
+        if callable(scope):
+            with scope(
+                method.__name__,
+                force_central=bool(kwargs.get("ensure_initial_status")),
+            ):
+                return method(self, *args, **kwargs)
         scope = getattr(db, "central_read_scope", None)
         if callable(scope):
             with scope(method.__name__):
@@ -2214,6 +2219,48 @@ class RemCardService(QObject):
         ]
         rows.extend(self._lab_order_cards_for_admission(int(admission_id), shift_date))
         return rows
+
+    @read_scoped_snapshot
+    def build_current_nurse_orders_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+    ) -> Dict[str, Any]:
+        return {
+            "admission_id": int(admission_id),
+            "shift_date": shift_date,
+            "data": self.get_nurse_orders_data(admission_id, shift_date),
+            "change_id": self.get_latest_change_id(
+                admission_id=admission_id,
+                include_global=False,
+            ),
+        }
+
+    @read_scoped_snapshot
+    def build_diet_intake_widget_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        include_templates: bool,
+    ) -> Dict[str, Any]:
+        return {
+            "admission_id": int(admission_id),
+            "shift_date": shift_date,
+            "templates": (
+                list(self.list_diet_templates() or [])
+                if include_templates
+                else None
+            ),
+            "plan": self.get_diet_plan(admission_id, shift_date),
+            "events": list(
+                self.get_oral_intake_events(admission_id, shift_date) or []
+            ),
+            "change_id": self.get_latest_change_id(
+                admission_id=admission_id,
+                include_global=True,
+            ),
+        }
 
     @staticmethod
     def _upcoming_orders_content_hash(rows: Sequence[dict]) -> str:

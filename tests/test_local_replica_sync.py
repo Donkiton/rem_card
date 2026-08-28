@@ -811,6 +811,61 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertTrue(DatabaseManager._should_read_from_local(manager))
         self.assertEqual(manager._required_local_replica_cursor, 0)
 
+    def test_snapshot_scope_keeps_replica_rows_and_cursor_on_same_generation(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_interval_sec=60.0,
+        )
+        self.assertTrue(self.replica.sync_once())
+
+        manager = DatabaseManager.__new__(DatabaseManager)
+        manager._thread_state = threading.local()
+        manager._local_replica = self.replica
+        manager._prefer_central_reads_until = 0.0
+        manager._local_replica_visibility_lock = threading.Lock()
+        manager._required_local_replica_cursor = 0
+        manager._local_replica_cycle_seen = "cycle-a"
+
+        with DatabaseManager.snapshot_read_scope(manager):
+            self.assertEqual(
+                DatabaseManager.current_snapshot_read_source(manager),
+                "local_replica",
+            )
+            self.assertEqual(DatabaseManager.get_latest_change_id(manager), 2)
+
+            conn = sqlite3.connect(self.central_path)
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO replica_items(value) VALUES ('central-new')"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO change_log (
+                        entity_name,
+                        entity_id,
+                        admission_id,
+                        action
+                    )
+                    VALUES ('replica_items', ?, 1, 'insert')
+                    """,
+                    (cursor.lastrowid,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            DatabaseManager._mark_local_replica_required_cursor(manager, 3)
+            rows = DatabaseManager.fetch_all_remcard(
+                manager,
+                "SELECT value FROM replica_items ORDER BY id",
+            )
+
+            self.assertEqual([row[0] for row in rows], ["one", "two"])
+            self.assertEqual(DatabaseManager.get_latest_change_id(manager), 2)
+
+        self.assertFalse(DatabaseManager._should_read_from_local(manager))
+
 
 if __name__ == "__main__":
     unittest.main()

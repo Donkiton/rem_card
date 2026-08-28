@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 from rem_card.app.local_metrics import record_metric
@@ -183,6 +184,21 @@ class LocalReplicaSync:
                 return cursor.fetchone()
             finally:
                 cursor.close()
+
+    @contextmanager
+    def read_snapshot_scope(self):
+        """Keep one immutable replica generation selected for related reads.
+
+        Replica replacement closes the current readonly connection before the
+        atomic file swap.  Holding the same lock across a snapshot build keeps
+        every SELECT on one generation instead of allowing a mid-build swap.
+        ``RLock`` keeps the existing ``fetch_*`` helpers usable inside the
+        scope without exposing the sqlite connection to callers.
+        """
+        with self._lock:
+            if not self._local_conn:
+                raise RuntimeError("Local replica connection is not initialized")
+            yield self
 
     def sync_once(self) -> bool:
         if not self._sync_lock.acquire(blocking=False):
