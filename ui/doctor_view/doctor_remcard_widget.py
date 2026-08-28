@@ -1682,8 +1682,16 @@ class DoctorRemCardWidget(QWidget):
     def _latest_created_card_date(self, admission_id: int):
         try:
             card_dates = self.service.get_all_card_dates(admission_id)
-            if card_dates:
-                return max(card_dates)
+            current_shift_start = self._card_shift_start(datetime.now())
+            if current_shift_start is None:
+                return None
+            non_future_dates = []
+            for card_date in card_dates:
+                card_shift_start = self._card_shift_start(card_date)
+                if card_shift_start is not None and card_shift_start <= current_shift_start:
+                    non_future_dates.append(card_date)
+            if non_future_dates:
+                return max(non_future_dates)
         except Exception as exc:
             logger.warning("Failed to resolve latest card date in archive DB: %s", exc)
         return None
