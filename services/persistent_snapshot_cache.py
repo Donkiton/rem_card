@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import atexit
+import errno
 import json
 import os
 import pickle
@@ -55,6 +56,9 @@ _MANIFEST_FILE_NAME = "_snapshot_manifest_v1.json"
 _MANIFEST_VERSION = 1
 _MANIFEST_STATES: dict[str, dict[str, Any]] = {}
 _MANIFEST_EPOCH_SNAPSHOTS: dict[str, tuple[dict[str, int], dict[str, int]]] = {}
+_ATOMIC_REPLACE_ATTEMPTS = 8
+_ATOMIC_REPLACE_RETRY_BASE_SEC = 0.02
+_TRANSIENT_REPLACE_WINERRORS = {5, 32, 33}
 
 
 def _namespace_dir(namespace: str) -> Path:
@@ -93,6 +97,37 @@ def _manifest_file_fingerprint(path: Path) -> tuple[int, int, int] | None:
         int(stat_result.st_mtime_ns),
         int(stat_result.st_ctime_ns),
     )
+
+
+def _is_transient_replace_error(exc: OSError) -> bool:
+    return (
+        isinstance(exc, PermissionError)
+        or getattr(exc, "winerror", None) in _TRANSIENT_REPLACE_WINERRORS
+        or (os.name == "nt" and getattr(exc, "errno", None) == errno.EACCES)
+    )
+
+
+def _replace_with_retry(source: Path | str, target: Path | str) -> None:
+    """Retry only short-lived Windows locks around one atomic replacement."""
+    for attempt in range(_ATOMIC_REPLACE_ATTEMPTS):
+        try:
+            os.replace(str(source), str(target))
+            return
+        except OSError as exc:
+            if (
+                not _is_transient_replace_error(exc)
+                or attempt >= _ATOMIC_REPLACE_ATTEMPTS - 1
+            ):
+                raise
+            delay_sec = _ATOMIC_REPLACE_RETRY_BASE_SEC * (attempt + 1)
+            logger.debug(
+                "[PersistentSnapshotCache] atomic replace deferred source=%s target=%s attempt=%s error=%s",
+                source,
+                target,
+                attempt + 1,
+                exc,
+            )
+            time.sleep(delay_sec)
 
 
 @contextmanager
@@ -290,7 +325,7 @@ def _write_manifest_state_locked(namespace: str, state: dict[str, Any]) -> bool:
                 "key_epochs": dict(state.get("key_epochs") or {}),
             }
             json.dump(payload, fh, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        os.replace(str(tmp_path), str(path))
+        _replace_with_retry(tmp_path, path)
         state["_manifest_fingerprint"] = _manifest_file_fingerprint(path)
         _publish_manifest_epoch_snapshot(namespace, state)
         return True
@@ -484,7 +519,7 @@ def _commit_snapshot_file(
             ):
                 return False
             with _CACHE_LOCK:
-                os.replace(str(tmp_path), str(path))
+                _replace_with_retry(tmp_path, path)
             _manifest_register_in_state(
                 state,
                 cache_key,

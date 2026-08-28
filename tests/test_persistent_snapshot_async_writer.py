@@ -656,13 +656,79 @@ if not cache.store_snapshot("multiprocess_manifest", key, {"id": identifier}):
                 process.kill()
                 process.wait(timeout=5)
 
-    assert all(process.returncode == 0 for process in processes), outputs
+    failures = [
+        f"process={index} returncode={process.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        for index, (process, (stdout, stderr)) in enumerate(zip(processes, outputs), start=1)
+        if process.returncode != 0
+    ]
+    assert not failures, "\n\n".join(failures)
     cache._MANIFEST_STATES.clear()
     manifest = json.loads(cache._manifest_path(namespace).read_text(encoding="utf-8"))
     assert len(manifest["entries"]) == 2
     for identifier in (101, 102):
         key = ("live", identifier, "2026-07-12T08:00:00")
         assert cache.load_snapshot(namespace, key) == {"id": identifier}
+
+
+def test_snapshot_replace_retries_transient_windows_lock(isolated_cache, monkeypatch):
+    namespace = "replace_retry"
+    key = ("live", 111, "2026-07-12T08:00:00")
+    original_replace = cache.os.replace
+    attempts = 0
+
+    def flaky_replace(source, target):
+        nonlocal attempts
+        if str(target).endswith(".pkl") and attempts < 3:
+            attempts += 1
+            raise PermissionError(13, "simulated Windows sharing violation")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(cache.os, "replace", flaky_replace)
+    monkeypatch.setattr(cache, "_ATOMIC_REPLACE_RETRY_BASE_SEC", 0.001)
+
+    assert cache.store_snapshot(namespace, key, {"version": 1})
+    assert attempts == 3
+    assert cache.load_snapshot(namespace, key) == {"version": 1}
+
+
+def test_manifest_replace_retries_transient_windows_lock(isolated_cache, monkeypatch):
+    namespace = "manifest_replace_retry"
+    key = ("live", 113, "2026-07-12T08:00:00")
+    original_replace = cache.os.replace
+    attempts = 0
+
+    def flaky_replace(source, target):
+        nonlocal attempts
+        if str(target).endswith(cache._MANIFEST_FILE_NAME) and attempts < 2:
+            attempts += 1
+            raise PermissionError(13, "simulated manifest sharing violation")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(cache.os, "replace", flaky_replace)
+    monkeypatch.setattr(cache, "_ATOMIC_REPLACE_RETRY_BASE_SEC", 0.001)
+
+    assert cache.store_snapshot(namespace, key, {"version": 1})
+    assert attempts == 2
+    assert cache.load_snapshot(namespace, key) == {"version": 1}
+
+
+def test_snapshot_replace_does_not_retry_non_transient_error(isolated_cache, monkeypatch):
+    namespace = "replace_non_transient"
+    key = ("live", 112, "2026-07-12T08:00:00")
+    attempts = 0
+
+    def broken_replace(_source, target):
+        nonlocal attempts
+        if str(target).endswith(".pkl"):
+            attempts += 1
+            raise OSError(22, "invalid replacement")
+        raise AssertionError("manifest replacement must not run")
+
+    monkeypatch.setattr(cache.os, "replace", broken_replace)
+
+    assert cache.store_snapshot(namespace, key, {"version": 1}) is False
+    assert attempts == 1
+    assert not cache._cache_path(namespace, key).exists()
 
 
 @pytest.mark.parametrize("invalidation_kind", ["admission", "exact"])
