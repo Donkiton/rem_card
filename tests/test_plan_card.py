@@ -21,6 +21,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from rem_card.ui.doctor_view import doctor_remcard_widget as doctor_module  # noqa: E402
 from rem_card.services.remcard_facade import RemCardService  # noqa: E402
 from rem_card.services.shift_service import ShiftService  # noqa: E402
+from rem_card.ui.doctor_view.components.beds_selection_widget import BedsSelectionWidget  # noqa: E402
 from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget  # noqa: E402
 from rem_card.ui.rem_card_sectors.sector_2b import Sector2b  # noqa: E402
 from rem_card.ui.rem_card_sectors.sector_4_sub import Sector4v  # noqa: E402
@@ -224,6 +225,44 @@ class PlanCardTest(unittest.TestCase):
             self.assertTrue(widget.btn_new_card.isEnabled())
         finally:
             widget.deleteLater()
+
+    def test_w1_show_button_is_disabled_without_current_medical_day_card(self):
+        show_button = _ButtonStub()
+        yesterday_button = _ButtonStub()
+        new_button = _ButtonStub()
+        plan_button = _ButtonStub()
+        row = SimpleNamespace(
+            sector_4b=SimpleNamespace(update_status=lambda _status: None),
+            sector_4v=SimpleNamespace(
+                btn_show_card=show_button,
+                btn_yest_card=yesterday_button,
+                btn_new_card=new_button,
+                btn_plan_card=plan_button,
+                set_recovery_mode=lambda *_args, **_kwargs: None,
+                update_latest_vitals=lambda *_args, **_kwargs: None,
+            ),
+        )
+        widget = SimpleNamespace(remcard_service=SimpleNamespace())
+        patient = SimpleNamespace(id=1, bed_number="1")
+        now = datetime(2026, 6, 22, 8, 1)
+
+        BedsSelectionWidget._apply_runtime_state(
+            widget,
+            row,
+            patient,
+            now,
+            now - timedelta(days=1),
+            runtime_snapshot={
+                "card_exists": False,
+                "has_any_card": True,
+                "yest_exists": True,
+                "plan_card_available": False,
+            },
+        )
+
+        self.assertFalse(show_button.enabled)
+        self.assertTrue(yesterday_button.enabled)
+        self.assertTrue(new_button.enabled)
 
     def test_nurse_archive_card_list_hides_future_plan_card(self):
         now = datetime(2026, 6, 22, 7, 30)
