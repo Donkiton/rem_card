@@ -33,6 +33,20 @@ def test_explicit_manual_refresh_still_requests_full_refresh():
     assert payload["sync_actions"]["full_refresh_required"] is True
 
 
+def test_partial_change_rows_requests_full_refresh():
+    payload = SyncCoordinator.classify(
+        {
+            "forced": True,
+            "gap_detected": True,
+            "reason": "partial_change_rows",
+            "changes": [],
+        }
+    )
+
+    assert payload["sync_actions"]["full_refresh_required"] is True
+    assert payload["sync_actions"]["card_snapshot_required"] is True
+
+
 def test_focus_only_wakes_monitor_without_forced_payload():
     calls = []
 

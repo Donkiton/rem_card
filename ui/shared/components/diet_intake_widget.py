@@ -479,22 +479,42 @@ class DietIntakeWidget(QWidget):
         cached_templates = list(self._templates)
 
         def job():
-            templates = (
-                list(service.list_diet_templates() or [])
-                if should_reload_templates
-                else cached_templates
+            snapshot_builder = getattr(
+                service,
+                "build_diet_intake_widget_snapshot",
+                None,
             )
-            plan = service.get_diet_plan(admission_id, shift_date)
-            events = service.get_oral_intake_events(admission_id, shift_date)
-            version = 0
-            if hasattr(service, "get_latest_change_id"):
-                version = int(
-                    service.get_latest_change_id(
-                        admission_id=admission_id,
-                        include_global=True,
-                    )
-                    or 0
+            if callable(snapshot_builder):
+                snapshot = snapshot_builder(
+                    admission_id,
+                    shift_date,
+                    include_templates=should_reload_templates,
                 )
+                templates = (
+                    list((snapshot or {}).get("templates") or [])
+                    if should_reload_templates
+                    else cached_templates
+                )
+                plan = (snapshot or {}).get("plan")
+                events = list((snapshot or {}).get("events") or [])
+                version = int((snapshot or {}).get("change_id") or 0)
+            else:
+                templates = (
+                    list(service.list_diet_templates() or [])
+                    if should_reload_templates
+                    else cached_templates
+                )
+                plan = service.get_diet_plan(admission_id, shift_date)
+                events = service.get_oral_intake_events(admission_id, shift_date)
+                version = 0
+                if hasattr(service, "get_latest_change_id"):
+                    version = int(
+                        service.get_latest_change_id(
+                            admission_id=admission_id,
+                            include_global=True,
+                        )
+                        or 0
+                    )
             return {
                 "templates": templates,
                 "plan": plan,

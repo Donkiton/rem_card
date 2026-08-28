@@ -46,12 +46,17 @@ class _DataService:
         self._shutting_down = False
         self._runtime_role = "doctor"
         self.maintenance_calls = 0
+        self.latest_change_id = 0
+        self.change_rows = []
 
     def run_poll_maintenance_tasks(self):
         self.maintenance_calls += 1
 
     def get_latest_change_id(self):
-        return 0
+        return self.latest_change_id
+
+    def fetch_changes_since(self, _last_change_id):
+        return list(self.change_rows)
 
 
 def test_monitor_reuses_one_connection_across_poll_scopes():
@@ -67,6 +72,43 @@ def test_monitor_reuses_one_connection_across_poll_scopes():
     assert db.scope_connections == [db.connections[0], db.connections[0]]
     monitor._close_persistent_read_connection()
     assert db.connections[0].closed is True
+
+
+def test_monitor_forces_full_refresh_for_partial_change_log_gap():
+    db = _Db()
+    service = _DataService(db)
+    service.latest_change_id = 20
+    service.change_rows = [
+        {
+            "id": 15,
+            "entity_name": "vitals",
+            "entity_id": 1,
+            "admission_id": 7,
+            "action": "update",
+            "changed_at": "2026-08-28 00:00:00",
+            "changed_by": "doctor",
+            "version": None,
+        }
+    ]
+    monitor = DataUpdateMonitor(service, enabled=True)
+    monitor._last_seen_id = 10
+    monitor._last_seen_settings_id = 0
+    emitted = []
+    monitor._emit_payload = lambda **payload: emitted.append(payload)
+
+    monitor._poll_once(
+        force_emit=False,
+        force_sources=[],
+        run_maintenance=False,
+    )
+
+    assert monitor._last_seen_id == 20
+    assert monitor._state_epoch == 1
+    assert len(emitted) == 1
+    assert emitted[0]["gap_detected"] is True
+    assert emitted[0]["forced"] is True
+    assert emitted[0]["reason"] == "partial_change_rows"
+    assert emitted[0]["changes"] == []
 
 
 def test_monitor_reopens_after_connection_is_discarded():

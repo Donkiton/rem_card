@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 23
-SCHEMA_MIN_MIGRATION_VERSION = 23
+SCHEMA_FASTPATH_REV = 24
+SCHEMA_MIN_MIGRATION_VERSION = 24
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -472,15 +472,18 @@ def _create_change_triggers(
         """
     )
 
-    when_clause = ""
+    update_when = ""
     if use_updated_at_gate:
-        when_clause = "WHEN OLD.updated_at != NEW.updated_at"
+        compared_columns = sorted(_get_columns(conn, table_name) - {"updated_at"})
+        update_when = "WHEN " + " OR ".join(
+            f"OLD.{column} IS NOT NEW.{column}" for column in compared_columns
+        )
 
     conn.execute(
         f"""
         CREATE TRIGGER {trigger_update}
         AFTER UPDATE ON {table_name}
-        {when_clause}
+        {update_when}
         BEGIN
             {version_bump_sql}
             INSERT INTO change_log (
@@ -1627,7 +1630,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'system')",
         "COALESCE(OLD.last_modified_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1638,7 +1641,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'system')",
         "COALESCE(OLD.last_modified_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1649,7 +1652,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'system')",
         "COALESCE(OLD.last_modified_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1660,7 +1663,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1671,7 +1674,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "(SELECT admission_id FROM orders WHERE id = OLD.order_id)",
         "COALESCE(NEW.last_modified_by, 'system')",
         "COALESCE(OLD.last_modified_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1682,7 +1685,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, NEW.created_by, 'system')",
         "COALESCE(OLD.last_modified_by, OLD.created_by, 'system')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
 
     _create_change_triggers(
@@ -1694,7 +1697,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "NULL",
         "COALESCE(NEW.last_modified_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1705,7 +1708,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1716,7 +1719,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'nurse')",
         "COALESCE(OLD.last_modified_by, 'nurse')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1727,7 +1730,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.updated_by, NEW.created_by, 'doctor')",
         "COALESCE(OLD.updated_by, OLD.created_by, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -1738,7 +1741,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.completed_by_role, NEW.created_by_role, 'doctor')",
         "COALESCE(OLD.completed_by_role, OLD.created_by_role, 'doctor')",
-        use_updated_at_gate=False,
+        use_updated_at_gate=True,
     )
     _create_change_triggers(
         conn,
@@ -2035,6 +2038,6 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(
         conn,
         SCHEMA_MIN_MIGRATION_VERSION,
-        "isolated network write receipts and affected row identity",
+        "single change-log event for timestamped row updates",
     )
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

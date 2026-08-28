@@ -336,13 +336,44 @@ class DataUpdateMonitor(QThread):
         if current_change_id > previous_change_id:
             rows = self._data_service.fetch_changes_since(previous_change_id)
             raw_changes = [self._normalize_row(row) for row in rows]
-            if not raw_changes and not settings_changes:
+            raw_change_ids = [
+                int(change["id"])
+                for change in raw_changes
+                if change.get("id") is not None
+            ]
+            expected_ids = range(previous_change_id + 1, current_change_id + 1)
+            gap_reason = ""
+            if not raw_change_ids:
+                gap_reason = "empty_change_rows"
+            elif any(actual != expected for actual, expected in zip(raw_change_ids, expected_ids)):
+                gap_reason = "partial_change_rows"
+            elif raw_change_ids[-1] != current_change_id:
+                gap_reason = "partial_change_rows"
+
+            if gap_reason:
+                first_change_id = raw_change_ids[0] if raw_change_ids else None
+                last_change_id = raw_change_ids[-1] if raw_change_ids else None
+                self._increment_state_epoch()
                 self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
                 self._set_last_seen_settings_id(current_settings_change_id)
                 logger.warning(
-                    "Change-log gap suspected: previous=%s current=%s rows=0. Forcing full refresh.",
+                    "Change-log gap detected: previous=%s current=%s first=%s last=%s rows=%s reason=%s. Forcing full refresh.",
                     previous_change_id,
                     current_change_id,
+                    first_change_id,
+                    last_change_id,
+                    len(raw_change_ids),
+                    gap_reason,
+                )
+                record_metric(
+                    "change_log_gap_detected",
+                    1,
+                    previous_change_id=int(previous_change_id),
+                    current_change_id=int(current_change_id),
+                    first_change_id=first_change_id,
+                    last_change_id=last_change_id,
+                    returned_rows=len(raw_change_ids),
+                    reason=gap_reason,
                 )
                 self._emit_payload(
                     current_change_id=current_change_id,
@@ -352,7 +383,7 @@ class DataUpdateMonitor(QThread):
                     changes=[],
                     forced=True,
                     gap_detected=True,
-                    reason="empty_change_rows",
+                    reason=gap_reason,
                     force_sources=force_sources,
                 )
                 return
