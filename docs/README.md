@@ -14,6 +14,7 @@
 - `updater_visible_chat_2026-07-14.md` - стенограмма видимой переписки и журнал решений по задаче.
 - `settings_db.md` - центральная settings DB, release snapshot и legacy import настроек.
 - `db_safety_contract.md` - инварианты сетевой SQLite-БД, backup, миграции, recovery.
+- `source_of_truth_and_sync_contract.md` - источник истины, путь записи, local replica, snapshots, cache и доставка изменений на второй компьютер.
 - `crash_reporting.md` - размещение обычных логов, структурированные аварийные отчёты, обработка и срок хранения 180 дней.
 - `architecture_guardrails.md` и `code_quality.md` - статические safety/quality gates.
 - `operational_acceptance.md` - базовая приемка и дополнительные gates по аварийному режиму/оперблоку.
@@ -26,7 +27,7 @@
 ## Исторические документы
 
 - `journal_to_remcard_migration_plan.md` - исторический план миграции журнала в RemCard. Не использовать как текущий backlog без сверки с кодом и changelog.
-- `local_first_sync_plan.md` - план/статус local-first; режим остается выключенным по умолчанию и требует отдельного аудита перед включением.
+- `local_first_sync_plan.md` - исторический план внедрения local-first; актуальный контракт и ограничения находятся в `source_of_truth_and_sync_contract.md` и текущем коде.
 - `project_checkpoint/` - снимок архитектуры от 2026-05-12. Он полезен как карта системы, но line refs и статусные утверждения могут отставать от текущего кода. При расхождении приоритет: текущий код, действующие регламенты из списка выше и `CHANGELOG.md`.
 
 ## Legacy в коде
