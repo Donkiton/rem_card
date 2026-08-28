@@ -117,6 +117,7 @@ def _service_with_card_map(card_shift_starts: set[datetime]) -> RemCardService:
 
 def _bind_plan_methods(widget):
     for name in (
+        "_latest_created_card_date",
         "_plan_card_state_for_admission",
         "_card_shift_start",
         "_is_plan_card_date",
@@ -264,6 +265,25 @@ class PlanCardTest(unittest.TestCase):
         self.assertTrue(yesterday_button.enabled)
         self.assertTrue(new_button.enabled)
 
+        BedsSelectionWidget._apply_runtime_state(
+            widget,
+            row,
+            patient,
+            now,
+            now - timedelta(days=1),
+            runtime_snapshot={
+                "card_exists": True,
+                "has_any_card": True,
+                "yest_exists": True,
+                "plan_card_available": True,
+            },
+        )
+
+        self.assertTrue(show_button.enabled)
+        self.assertTrue(yesterday_button.enabled)
+        self.assertFalse(new_button.enabled)
+        self.assertTrue(plan_button.enabled)
+
     def test_nurse_archive_card_list_hides_future_plan_card(self):
         now = datetime(2026, 6, 22, 7, 30)
         current_shift_start, next_shift_start = ShiftService.get_day_period(now)
@@ -348,6 +368,53 @@ class PlanCardTest(unittest.TestCase):
         self.assertFalse(current_exists)
         self.assertTrue(open_available)
         self.assertEqual(target_date, historical_shift_start)
+
+    def test_show_card_resolution_excludes_future_plan_card(self):
+        now = datetime(2026, 6, 22, 7, 30)
+        current_shift_start, plan_shift_start = ShiftService.get_day_period(now)
+        historical_shift_start = current_shift_start - timedelta(days=1)
+        service = _PlanCardServiceStub(now, {historical_shift_start, plan_shift_start})
+        service.get_all_card_dates = lambda _admission_id: [historical_shift_start, plan_shift_start]
+        widget = SimpleNamespace(
+            admission_id=1,
+            service=service,
+            _archive_read_only_mode=False,
+            _current_date=historical_shift_start,
+            _card_snapshot_cache={},
+        )
+        _bind_plan_methods(widget)
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            target_date = widget._resolve_current_or_latest_card_date(1)
+        finally:
+            doctor_module.datetime = original_datetime
+
+        self.assertEqual(target_date, historical_shift_start)
+
+    def test_show_card_from_plan_card_returns_to_current_card(self):
+        now = datetime(2026, 6, 22, 7, 30)
+        current_shift_start, plan_shift_start = ShiftService.get_day_period(now)
+        service = _PlanCardServiceStub(now, {current_shift_start, plan_shift_start})
+        service.get_all_card_dates = lambda _admission_id: [current_shift_start, plan_shift_start]
+        opened = []
+        widget = SimpleNamespace(
+            admission_id=1,
+            service=service,
+            _archive_read_only_mode=False,
+            _current_date=plan_shift_start,
+            _card_snapshot_cache={},
+            refresh_data=lambda **_kwargs: self.fail("plan card must not be refreshed by show action"),
+            safe_load_archived_card=lambda target_date, **kwargs: opened.append((target_date, kwargs)),
+        )
+        _bind_plan_methods(widget)
+        widget.on_show_card_clicked = MethodType(DoctorRemCardWidget.on_show_card_clicked, widget)
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            widget.on_show_card_clicked()
+        finally:
+            doctor_module.datetime = original_datetime
+
+        self.assertEqual(opened, [(now, {"balance_patient_period_manual_mode": False})])
 
     def test_historical_card_disables_creation_when_current_card_check_fails(self):
         now = datetime(2026, 6, 22, 12, 0)
