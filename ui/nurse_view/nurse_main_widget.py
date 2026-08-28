@@ -1558,9 +1558,7 @@ class NurseMainWidget(QWidget):
             return
 
         if hasattr(layout, 'sector_4v'):
-            layout.sector_4v.show_card_requested.connect(
-                lambda: self.load_patient_card(layout.current_admission_id, datetime.now())
-            )
+            layout.sector_4v.show_card_requested.connect(self.on_show_card_clicked)
             layout.sector_4v.yest_card_requested.connect(self.on_yest_card_clicked)
             layout.sector_4v.full_report_requested.connect(self.on_full_report_clicked)
             layout.sector_4v.daily_report_requested.connect(self.on_daily_report_clicked)
@@ -2031,6 +2029,36 @@ class NurseMainWidget(QWidget):
                     self.layout_manager.current_admission_id,
                     self._current_date
                 )
+
+    def _latest_created_card_date(self, admission_id: int):
+        try:
+            card_dates = self.remcard_service.get_all_card_dates(int(admission_id))
+            if card_dates:
+                return max(card_dates)
+        except Exception as exc:
+            logger.warning("Failed to resolve latest nurse card date admission_id=%s: %s", admission_id, exc)
+        return None
+
+    def _resolve_current_or_latest_card_date(self, admission_id: int):
+        now = datetime.now()
+        try:
+            if self.remcard_service.has_card(int(admission_id), now):
+                return now
+        except Exception as exc:
+            logger.warning("Failed to resolve current nurse card date admission_id=%s: %s", admission_id, exc)
+        return self._latest_created_card_date(int(admission_id))
+
+    def on_show_card_clicked(self):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        admission_id = self.layout_manager.current_admission_id
+        if not admission_id:
+            return
+        target_date = self._resolve_current_or_latest_card_date(int(admission_id))
+        if target_date is None:
+            CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
+            return
+        self.load_patient_card(int(admission_id), target_date)
 
     def load_patient_card(self, admission_id, date):
         if self._is_closing:
