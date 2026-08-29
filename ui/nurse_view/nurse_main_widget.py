@@ -75,6 +75,7 @@ VITALS_CACHE_CHANGE_ENTITIES = {
     "patient_status_events",
     "fluids",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
 }
 CARD_CACHE_CHANGE_ENTITIES = VITALS_CACHE_CHANGE_ENTITIES | ORDER_CHANGE_ENTITIES | {
@@ -96,6 +97,7 @@ W1_BEDS_REFRESH_ENTITIES = {
     "fluids",
     "orders",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
 }
 W1_BEDS_PARTIAL_REFRESH_ENTITIES = {
@@ -103,6 +105,7 @@ W1_BEDS_PARTIAL_REFRESH_ENTITIES = {
     "vital_settings",
     "fluids",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
 }
 W1_REFRESH_ENTITIES = W1_BEDS_REFRESH_ENTITIES | W1A_PANEL_REFRESH_ENTITIES | {"diet_templates"}
@@ -444,13 +447,13 @@ class NurseMainWidget(QWidget):
     def _ensure_diet_widget(self):
         if getattr(self, "diet_intake_widget", None) is not None:
             return self.diet_intake_widget
-        if not hasattr(self, "layout_manager") or not hasattr(self.layout_manager, "sector_5"):
+        if not hasattr(self, "layout_manager") or not hasattr(self.layout_manager, "_oral_nutrition_layout"):
             return None
-        from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
+        from rem_card.ui.shared.components.oral_nutrition_widget import OralNutritionWidget
 
-        self.diet_intake_widget = DietIntakeWidget(self.remcard_service, role="nurse", show_prn_input=False)
+        self.diet_intake_widget = OralNutritionWidget(self.remcard_service, role="nurse")
         self.diet_intake_widget.data_changed.connect(self._schedule_balance_update)
-        self.layout_manager.sector_5.set_content(self.diet_intake_widget)
+        self.layout_manager._oral_nutrition_layout.addWidget(self.diet_intake_widget)
         return self.diet_intake_widget
 
     def _configure_balance_quick_oral_input(self):
@@ -1257,7 +1260,7 @@ class NurseMainWidget(QWidget):
         diet_widget = getattr(self, "diet_intake_widget", None)
         if diet_widget is None:
             return False
-        diet_entities = {"diet_templates", "diet_plan", "oral_intake_events"}
+        diet_entities = {"diet_templates", "diet_plan", "diet_plan_versions", "oral_intake_events"}
         has_diet_changes = bool(changed_entities.intersection(diet_entities))
         if full_refresh_required or diet_refresh:
             diet_widget.handle_data_changes(payload)
@@ -2309,6 +2312,10 @@ class NurseMainWidget(QWidget):
             tab_name = self.layout_manager.sector_2b.current_tab_name() or tab_name
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
+        elif tab_name == "Диета":
+            widget = self._ensure_diet_widget()
+            if widget is not None:
+                widget.set_context(self.layout_manager.current_admission_id, self._current_date)
         elif tab_name == "Назначения":
             ow = self._ensure_orders_widget()
             if ow is None:

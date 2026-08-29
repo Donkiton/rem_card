@@ -16,7 +16,7 @@ from ..rem_card_sectors.sector_w1a import SectorW1a
 
 # Нижний ряд 5/6/7a оставлен в дереве виджетов для быстрого восстановления.
 # Чтобы вернуть его на вкладку, добавьте название вкладки в этот набор.
-BOTTOM_ROW_VISIBLE_TABS = frozenset({"Баланс жидкости"})
+BOTTOM_ROW_VISIBLE_TABS = frozenset()
 TAB_FOREGROUND_ACTIVITY_TTL_SEC = 5.0
 
 
@@ -26,6 +26,8 @@ def _tab_foreground_activity_name(tab_name: str) -> str:
         "витальные функции": "tab_vitals",
         "назначения": "tab_orders",
         "баланс жидкости": "tab_balance",
+        "диета": "tab_diet",
+        "пероральное питание": "tab_diet",
         "движение": "tab_movement",
         "события": "tab_movement",
         "процедуры": "tab_procedures",
@@ -202,6 +204,11 @@ class NurseRemCardLayoutManager(QWidget):
         self._print_layout.setContentsMargins(0, 0, 0, 0)
         self._print_initialized = False
         self.vitals_stack.addWidget(self.print_tab_widget)
+
+        self.oral_nutrition_tab_widget = QWidget()
+        self._oral_nutrition_layout = QVBoxLayout(self.oral_nutrition_tab_widget)
+        self._oral_nutrition_layout.setContentsMargins(0, 0, 0, 0)
+        self.vitals_stack.addWidget(self.oral_nutrition_tab_widget)
 
         # Сборка рядов
         self.mid_row = SplitterManager.create_splitter(Qt.Horizontal)
@@ -906,6 +913,7 @@ class NurseRemCardLayoutManager(QWidget):
             )
         try:
             tab_name = "Движение" if tab_name == "События" else tab_name
+            tab_name = "Диета" if tab_name == "Пероральное питание" else tab_name
             if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "is_tab_visible"):
                 if not self.sector_2b.is_tab_visible(tab_name):
                     tab_name = self.sector_2b.first_visible_tab_name()
@@ -920,7 +928,8 @@ class NurseRemCardLayoutManager(QWidget):
                 "События": 3,
                 "Процедуры": 4,
                 "Анализы": 5,
-                "Печать": 6
+                "Печать": 6,
+                "Диета": 7,
             }
             if tab_name in tab_map:
                 idx = tab_map[tab_name]
@@ -929,6 +938,7 @@ class NurseRemCardLayoutManager(QWidget):
                 if updates_enabled:
                     self.setUpdatesEnabled(False)
                 try:
+                    self.sector_3_4_wrapper.setVisible(tab_name != "Диета")
                     if is_orders:
                         self.ensure_orders_widget()
                     self.vitals_stack.setCurrentIndex(idx)

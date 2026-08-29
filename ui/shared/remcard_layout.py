@@ -16,7 +16,9 @@ import time
 
 # Нижний ряд 5/6/7a оставлен в дереве виджетов для быстрого восстановления.
 # Чтобы вернуть его на вкладку, добавьте название вкладки в этот набор.
-BOTTOM_ROW_VISIBLE_TABS = frozenset({"Баланс жидкости"})
+# Сектора 5–7 больше не используются как контейнер питания; отдельная вкладка
+# занимает центральную область, поэтому пустой нижний ряд всегда скрыт.
+BOTTOM_ROW_VISIBLE_TABS = frozenset()
 TAB_FOREGROUND_ACTIVITY_TTL_SEC = 5.0
 
 
@@ -26,6 +28,8 @@ def _tab_foreground_activity_name(tab_name: str) -> str:
         "витальные функции": "tab_vitals",
         "назначения": "tab_orders",
         "баланс жидкости": "tab_balance",
+        "диета": "tab_diet",
+        "пероральное питание": "tab_diet",
         "движение": "tab_movement",
         "события": "tab_movement",
         "ивл": "tab_ventilation",
@@ -209,6 +213,13 @@ class RemCardLayoutManager(QWidget):
         self._print_layout.setContentsMargins(0, 0, 0, 0)
         self._print_initialized = False
         self.vitals_stack.addWidget(self.print_tab_widget)
+
+        # Полноразмерная вкладка перорального питания. Содержимое подключается
+        # владельцем карты после привязки RemCardService и роли.
+        self.oral_nutrition_tab_widget = QWidget()
+        self._oral_nutrition_layout = QVBoxLayout(self.oral_nutrition_tab_widget)
+        self._oral_nutrition_layout.setContentsMargins(0, 0, 0, 0)
+        self.vitals_stack.addWidget(self.oral_nutrition_tab_widget)
 
         # Основной ряд (Центр + Правая колонка)
         self.mid_row = SplitterManager.create_splitter(Qt.Horizontal)
@@ -1057,6 +1068,7 @@ class RemCardLayoutManager(QWidget):
             )
         try:
             tab_name = "Движение" if tab_name == "События" else tab_name
+            tab_name = "Диета" if tab_name == "Пероральное питание" else tab_name
             if hasattr(self, "sector_2b"):
                 if hasattr(self.sector_2b, "is_tab_available"):
                     tab_available = self.sector_2b.is_tab_available(tab_name)
@@ -1083,6 +1095,7 @@ class RemCardLayoutManager(QWidget):
             try:
                 # Всегда 240px
                 self.sector_3_4_wrapper.setFixedWidth(240)
+                self.sector_3_4_wrapper.setVisible(tab_name != "Диета")
                 self._apply_bottom_row_visibility(tab_name, is_orders=is_orders)
                 self.sector_3_4_spacer.show()
 
@@ -1137,6 +1150,10 @@ class RemCardLayoutManager(QWidget):
                     self.sector_7b_stack.setCurrentIndex(6)
                     if hasattr(self, 'sector_print') and hasattr(self.sector_print, 'refresh'):
                         self.sector_print.refresh()
+                elif tab_name == "Диета":
+                    self.vitals_stack.setCurrentIndex(8)
+                    self.sector_7a_stack.setCurrentIndex(0)
+                    self.sector_7b_stack.setCurrentIndex(0)
 
                 self._fix_timer.stop()
                 self._post_restore_fix()

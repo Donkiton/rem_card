@@ -29,7 +29,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.styles.theme import COLOR_SECONDARY
 
 
-DIET_ENTITIES = {"diet_templates", "diet_plan", "oral_intake_events"}
+DIET_ENTITIES = {"diet_templates", "diet_plan", "diet_plan_versions", "oral_intake_events"}
 DIET_CACHE_LIMIT = 10
 
 

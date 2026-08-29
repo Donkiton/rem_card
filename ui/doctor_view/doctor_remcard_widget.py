@@ -72,6 +72,7 @@ VITALS_CACHE_CHANGE_ENTITIES = {
     "patient_status_events",
     "fluids",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
 }
 CARD_CACHE_CHANGE_ENTITIES = VITALS_CACHE_CHANGE_ENTITIES | ORDER_CHANGE_ENTITIES | {
@@ -1262,7 +1263,7 @@ class DoctorRemCardWidget(QWidget):
         diet_widget = getattr(self, "diet_intake_widget", None)
         if diet_widget is None:
             return False
-        diet_entities = {"diet_templates", "diet_plan", "oral_intake_events"}
+        diet_entities = {"diet_templates", "diet_plan", "diet_plan_versions", "oral_intake_events"}
         has_diet_changes = bool(changed_entities.intersection(diet_entities))
         if full_refresh_required or diet_refresh:
             diet_widget.handle_data_changes(payload)
@@ -1513,13 +1514,13 @@ class DoctorRemCardWidget(QWidget):
     def _ensure_diet_widget(self):
         if getattr(self, "diet_intake_widget", None) is not None:
             return self.diet_intake_widget
-        if not hasattr(self, "layout_manager") or not hasattr(self.layout_manager, "sector_5"):
+        if not hasattr(self, "layout_manager") or not hasattr(self.layout_manager, "_oral_nutrition_layout"):
             return None
-        from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
+        from rem_card.ui.shared.components.oral_nutrition_widget import OralNutritionWidget
 
-        self.diet_intake_widget = DietIntakeWidget(self.service, role="doctor")
+        self.diet_intake_widget = OralNutritionWidget(self.service, role="doctor")
         self.diet_intake_widget.data_changed.connect(self.update_balance_data)
-        self.layout_manager.sector_5.set_content(self.diet_intake_widget)
+        self.layout_manager._oral_nutrition_layout.addWidget(self.diet_intake_widget)
         return self.diet_intake_widget
 
     def _close_archive_readonly_manager(self):
@@ -3360,6 +3361,10 @@ class DoctorRemCardWidget(QWidget):
             tab_name = self.layout_manager.sector_2b.current_tab_name() or tab_name
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
+        elif tab_name == "Диета":
+            widget = self._ensure_diet_widget()
+            if widget is not None:
+                widget.set_context(self.admission_id, self._current_date)
         elif tab_name == "Назначения":
             show_started = time.perf_counter()
             admission_id = self.admission_id

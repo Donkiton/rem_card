@@ -30,6 +30,7 @@ W1_BEDS_REFRESH_ENTITIES = {
     "fluids",
     "orders",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
 }
 W1_BEDS_PARTIAL_REFRESH_ENTITIES = {
@@ -37,6 +38,7 @@ W1_BEDS_PARTIAL_REFRESH_ENTITIES = {
     "vital_settings",
     "fluids",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
 }
 W1_REFRESH_ENTITIES = W1_BEDS_REFRESH_ENTITIES | W1A_PANEL_REFRESH_ENTITIES | {"diet_templates"}
