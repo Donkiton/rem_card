@@ -355,21 +355,30 @@ def _normalize_diet_schedule(schedule: Any) -> str:
     if not isinstance(raw_items, list):
         raise ValueError("Расписание питания должно быть списком")
     normalized = []
-    seen_times = set()
-    for item in raw_items:
+    seen_keys = set()
+    for index, item in enumerate(raw_items, start=1):
         if not isinstance(item, dict):
             raise ValueError("Строка расписания питания должна быть объектом")
         time_text = str(item.get("time") or "").strip()
         if not ShiftService.is_time_input_valid(time_text):
             raise ValueError("Время питания должно быть в формате HH:mm")
         normalized_time = ShiftService.normalize_time(time_text)
-        if normalized_time in seen_times:
-            raise ValueError("В расписании питания не должно быть повторяющихся времен")
-        seen_times.add(normalized_time)
+        item_key = str(item.get("key") or f"{normalized_time}-{index}").strip()
+        if item_key in seen_keys:
+            raise ValueError("В расписании питания не должно быть повторяющихся строк")
+        seen_keys.add(item_key)
         amount = int(float(item.get("amount") or 0))
         if amount <= 0:
             raise ValueError("Объем питания должен быть больше 0 мл")
-        normalized.append({"time": normalized_time, "amount": amount})
+        normalized.append(
+            {
+                "key": item_key,
+                "meal": str(item.get("meal") or item.get("name") or "Приём пищи").strip(),
+                "time": normalized_time,
+                "amount": amount,
+                "note": str(item.get("note") or "").strip(),
+            }
+        )
     normalized.sort(key=lambda item: ((int(item["time"][:2]) - 8) % 24, int(item["time"][3:5])))
     return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
 
@@ -1678,6 +1687,10 @@ class SettingsService:
             schedule_json = _normalize_diet_schedule(raw.get("schedule", raw.get("schedule_json", [])))
             full_payload = dict(raw)
             full_payload["schedule_json"] = schedule_json
+            details = raw.get("details", raw.get("details_json", {}))
+            full_payload["details_json"] = (
+                str(details or "{}") if isinstance(details, str) else _stable_json(details or {})
+            )
             key = str(raw.get("template_key") or raw.get("code") or raw.get("id") or fallback_key)
             template_key = _slug(key or name, f"diet_{sort_order}")
             cursor.execute(
@@ -2799,6 +2812,7 @@ class SettingsService:
                     name=str(row["name"] or ""),
                     diet_text=str(row["description"] or payload.get("diet_text") or ""),
                     schedule_json=str(payload.get("schedule_json") or "[]"),
+                    details_json=str(payload.get("details_json") or "{}"),
                     is_default=_normalize_bool_int(payload.get("is_default", False)),
                     version=int(row["revision"] or 1),
                     created_at=str(row["created_at"] or ""),
@@ -2816,7 +2830,14 @@ class SettingsService:
                 return template
         raise ValueError("Шаблон питания не найден")
 
-    def create_diet_template(self, name: str, diet_text: str = "", schedule_json: Any = None, is_default: bool = False) -> int:
+    def create_diet_template(
+        self,
+        name: str,
+        diet_text: str = "",
+        schedule_json: Any = None,
+        is_default: bool = False,
+        details_json: Any = None,
+    ) -> int:
         self.ensure_ready()
         normalized_name = str(name or "").strip()
         if not normalized_name:
@@ -2832,6 +2853,7 @@ class SettingsService:
                 "name": normalized_name,
                 "diet_text": str(diet_text or ""),
                 "schedule_json": _normalize_diet_schedule(schedule_json),
+                "details_json": str(details_json or "{}") if isinstance(details_json, str) else _stable_json(details_json or {}),
                 "is_default": bool(is_default),
                 "last_modified_by": "doctor",
             }
@@ -2849,7 +2871,16 @@ class SettingsService:
             self._bump_catalog_version(cursor, DIET_TEMPLATES_KEY, "diet_templates", str(new_id), "insert", after=payload)
             return new_id
 
-    def update_diet_template(self, template_id: int, name: str, diet_text: str = "", schedule_json: Any = None, is_default: bool = False, expected_version: Optional[int] = None) -> None:
+    def update_diet_template(
+        self,
+        template_id: int,
+        name: str,
+        diet_text: str = "",
+        schedule_json: Any = None,
+        is_default: bool = False,
+        details_json: Any = None,
+        expected_version: Optional[int] = None,
+    ) -> None:
         self.ensure_ready()
         normalized_name = str(name or "").strip()
         if not normalized_name:
@@ -2866,6 +2897,7 @@ class SettingsService:
                     "name": normalized_name,
                     "diet_text": str(diet_text or ""),
                     "schedule_json": _normalize_diet_schedule(schedule_json),
+                    "details_json": str(details_json or "{}") if isinstance(details_json, str) else _stable_json(details_json or {}),
                     "is_default": bool(is_default),
                     "last_modified_by": "doctor",
                 }

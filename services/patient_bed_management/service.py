@@ -1137,6 +1137,7 @@ class PatientBedManagementService:
             ("fluids", "admission_id"),
             ("orders", "admission_id"),
             ("lab_orders", "admission_id"),
+            ("diet_plan_versions", "admission_id"),
             ("oral_intake_events", "admission_id"),
         )
         for table_name, column_name in checks:

@@ -19,6 +19,7 @@ from rem_card.ui.procedures.procedure_pdf_worker import ProcedurePdfWorker
 from rem_card.ui.procedures.procedures_list_widget import ProceduresListWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.pdf_opener import open_pdf_file
+from rem_card.ui.styles.component_styles import build_procedure_create_button_style
 
 
 class ProceduresPanel(QWidget):
@@ -65,25 +66,8 @@ class ProceduresPanel(QWidget):
                 border-bottom-left-radius: 5px;
                 border-bottom-right-radius: 5px;
             }
-            QPushButton#ProcedureCreateButton {
-                background: #eef3f8;
-                color: #172033;
-                border: 1px solid #aebccd;
-                border-radius: 6px;
-                padding: 6px 12px;
-                min-height: 34px;
-                font-weight: 700;
-            }
-            QPushButton#ProcedureCreateButton:hover {
-                background: #e2ebf5;
-                border-color: #7aa6d8;
-            }
-            QPushButton#ProcedureCreateButton:pressed {
-                background: #d5e2ef;
-                padding-top: 7px;
-                padding-bottom: 5px;
-            }
             """
+            + build_procedure_create_button_style()
         )
         root.addWidget(frame, 1)
 

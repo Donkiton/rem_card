@@ -27,7 +27,7 @@ from ..data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabOrderStatus
 from .patient_service import PatientService
 from .vital_service import VitalService
 from .fluid_service import FluidService
-from .diet_service import DietPlanService, DietTemplateService, OralIntakeService, schedule_items
+from .diet_service import DietPlanService, DietTemplateService, OralIntakeService
 from .order_service import OrderService
 from .shift_service import ShiftService
 from .ventilation_service import VentilationService
@@ -162,6 +162,11 @@ class RemCardService(QObject):
 
             return OralIntakeDAO(self.orders_dao.db)
 
+        def create_diet_plan_version_dao():
+            from rem_card.data.dao.diet_dao import DietPlanVersionDAO
+
+            return DietPlanVersionDAO(self.orders_dao.db)
+
         def create_procedures_dao():
             from rem_card.data.dao.procedures_dao import ProceduresDAO
 
@@ -200,9 +205,16 @@ class RemCardService(QObject):
             )
 
         self.diet_plan_dao = _LazyDependency(create_diet_plan_dao)
+        self.diet_plan_version_dao = _LazyDependency(create_diet_plan_version_dao)
         self.oral_intake_dao = _LazyDependency(create_oral_intake_dao)
         self._diet_templates = _LazyDependency(DietTemplateService)
-        self._diet_plan = _LazyDependency(lambda: DietPlanService(self.diet_plan_dao, self._diet_templates))
+        self._diet_plan = _LazyDependency(
+            lambda: DietPlanService(
+                self.diet_plan_dao,
+                self._diet_templates,
+                self.diet_plan_version_dao,
+            )
+        )
         self._oral_intake = _LazyDependency(
             lambda: OralIntakeService(self.oral_intake_dao, self._vitals, self._diet_plan)
         )
@@ -1193,7 +1205,7 @@ class RemCardService(QObject):
         calc_time = now if start_dt <= now < end_dt else end_dt
         oral_events = []
         oral_plan_schedule = []
-        oral_totals = {"current": 0.0, "daily": 0.0}
+        oral_totals = {"actual": 0.0, "planned": 0.0, "current": 0.0, "daily": 0.0}
         oral_start_dt, oral_end_dt = start_dt, end_dt
         try:
             if hasattr(self._vitals, "get_effective_bounds_for_patient"):
@@ -1206,26 +1218,36 @@ class RemCardService(QObject):
             logger.warning("Failed to resolve oral intake bounds for balance snapshot: %s", exc)
         try:
             loaded_oral_events = self.get_oral_intake_events(admission_id, shift_date)
-            oral_plan = self.get_diet_plan(admission_id, shift_date)
-            if oral_plan is not None:
-                oral_plan_schedule = schedule_items(getattr(oral_plan, "schedule_json", "[]"))
+            oral_plan_schedule = self.get_planned_oral_items(admission_id, shift_date)
+            actual_total = 0.0
             for event in loaded_oral_events:
                 amount = float(getattr(event, "amount_ml", 0.0) or 0.0)
                 event_time = getattr(event, "event_time", None)
+                if event_time is not None and oral_start_dt <= event_time < oral_end_dt:
+                    actual_total += amount
                 oral_events.append(
                     {
                         "event_time": event_time.isoformat() if event_time is not None else None,
                         "amount_ml": amount,
                     }
                 )
-            oral_totals = self._oral_intake._calculate_totals(
-                loaded_oral_events,
-                oral_plan,
-                shift_date,
-                oral_start_dt,
-                oral_end_dt,
-                calc_time,
-            )
+            planned_total = 0.0
+            for item in oral_plan_schedule:
+                planned_dt = item.get("planned_dt")
+                if not isinstance(planned_dt, datetime):
+                    try:
+                        planned_dt = ShiftService.resolve_datetime(str(item.get("time") or ""), shift_date)
+                    except Exception:
+                        continue
+                if oral_start_dt <= planned_dt < oral_end_dt:
+                    planned_total += float(item.get("amount") or 0.0)
+            oral_totals = {
+                "actual": round(actual_total, 1),
+                "planned": round(planned_total, 1),
+                # Старые имена оставлены для совместимости с сохранёнными снимками.
+                "current": round(actual_total, 1),
+                "daily": round(planned_total, 1),
+            }
         except Exception as exc:
             logger.warning("Failed to load oral intake runtime for balance snapshot: %s", exc)
         balance_calc = BalanceCalculator.calculate(
@@ -1604,12 +1626,16 @@ class RemCardService(QObject):
     def get_diet_template(self, template_id: int) -> DietTemplateDTO:
         return self._diet_templates.get_template(template_id)
 
-    def create_diet_template(self, name: str, diet_text: str = "", schedule_json=None, is_default: bool = False):
+    def create_diet_template(
+        self, name: str, diet_text: str = "", schedule_json=None,
+        is_default: bool = False, details_json=None,
+    ):
         return self._diet_templates.create_template(
             name=name,
             diet_text=diet_text,
             schedule_json=schedule_json,
             is_default=is_default,
+            details_json=details_json,
         )
 
     def update_diet_template(
@@ -1620,6 +1646,7 @@ class RemCardService(QObject):
         schedule_json=None,
         is_default: bool = False,
         expected_version: Optional[int] = None,
+        details_json=None,
     ):
         return self._diet_templates.update_template(
             template_id=template_id,
@@ -1627,6 +1654,7 @@ class RemCardService(QObject):
             diet_text=diet_text,
             schedule_json=schedule_json,
             is_default=is_default,
+            details_json=details_json,
             expected_version=expected_version,
         )
 
@@ -1661,12 +1689,14 @@ class RemCardService(QObject):
         schedule_json,
         template_id: Optional[int] = None,
         expected_version: Optional[int] = None,
+        details_json=None,
     ):
         return self._diet_plan.upsert_plan(
             admission_id=admission_id,
             shift_date=shift_date,
             diet_text=diet_text,
             schedule_json=schedule_json,
+            details_json=details_json,
             template_id=template_id,
             expected_version=expected_version,
         )
@@ -1676,6 +1706,111 @@ class RemCardService(QObject):
 
     def get_oral_intake_events(self, admission_id: int, shift_date: datetime) -> List[OralIntakeEventDTO]:
         return self._oral_intake.get_events(admission_id, shift_date)
+
+    def get_diet_plan_versions(self, admission_id: int, shift_date: datetime):
+        return self._diet_plan.list_versions(admission_id, shift_date)
+
+    def assign_diet_version(self, admission_id: int, effective_from: datetime, **kwargs):
+        is_valid, message = self.is_timestamp_valid(int(admission_id), effective_from)
+        if not is_valid:
+            raise ValueError(message)
+        return self._diet_plan.assign_version(admission_id, effective_from, **kwargs)
+
+    def delete_diet_version(
+        self,
+        admission_id: int,
+        version_id: int,
+        expected_version: Optional[int] = None,
+    ) -> None:
+        return self._diet_plan.delete_version(
+            admission_id,
+            version_id,
+            expected_version=expected_version,
+        )
+
+    def get_planned_oral_items(self, admission_id: int, shift_date: datetime):
+        return self._diet_plan.planned_items_for_day(admission_id, shift_date)
+
+    def get_active_diet_restrictions(self, admission_id: int, moment: datetime) -> dict:
+        return self._oral_intake.active_restrictions(admission_id, moment)
+
+    def create_oral_intake_fact(self, admission_id: int, event_time: datetime, amount_ml: float, **kwargs):
+        return self._oral_intake.create_fact(admission_id, event_time, amount_ml, **kwargs)
+
+    def update_oral_intake_fact(self, event_id: int, event_time: datetime, amount_ml: float, **kwargs):
+        return self._oral_intake.update_fact(event_id, event_time, amount_ml, **kwargs)
+
+    def delete_oral_intake_fact(self, event_id: int, expected_version: Optional[int] = None):
+        return self._oral_intake.delete_fact(event_id, expected_version=expected_version)
+
+    def undo_last_oral_intake_action(self, admission_id: int, actor: str) -> int:
+        return self._oral_intake.undo_last_action(admission_id, actor)
+
+    def clear_oral_intake_facts(self, admission_id: int, before: Optional[datetime] = None) -> int:
+        return self._oral_intake.clear_facts(admission_id, before=before)
+
+    @read_scoped_snapshot
+    def build_oral_nutrition_snapshot(self, admission_id: int, shift_date: datetime) -> dict:
+        versions = self.get_diet_plan_versions(admission_id, shift_date)
+        planned = self.get_planned_oral_items(admission_id, shift_date)
+        events = self.get_oral_intake_events(admission_id, shift_date)
+        event_by_item: dict[tuple[Optional[int], str], list] = {}
+        for event in events:
+            if event.planned_item_key:
+                event_by_item.setdefault((event.plan_version_id, event.planned_item_key), []).append(event)
+        rows = []
+        for item in planned:
+            facts = event_by_item.get((item.get("plan_version_id"), str(item.get("key") or "")), [])
+            fact_total = sum(float(event.amount_ml or 0) for event in facts)
+            planned_amount = float(item.get("amount") or 0)
+            rows.append(
+                {
+                    **item,
+                    "facts": facts,
+                    "fact_total": fact_total,
+                    "percent": round((fact_total / planned_amount * 100.0), 1) if planned_amount > 0 else None,
+                }
+            )
+        shift_keys = {
+            str(row["shift_start"])
+            for row in self.orders_dao.db.fetch_all_remcard(
+                """
+                SELECT shift_start FROM diet_plan_versions WHERE admission_id = ?
+                UNION SELECT shift_start FROM oral_intake_events WHERE admission_id = ?
+                """,
+                (int(admission_id), int(admission_id)),
+            )
+            if row["shift_start"]
+        }
+        history = []
+        for shift_key in sorted(shift_keys):
+            day = datetime.fromisoformat(shift_key.replace(" ", "T"))
+            day_planned = sum(float(item.get("amount") or 0) for item in self._diet_plan.planned_items_for_day(admission_id, day))
+            day_events = self._oral_intake.get_events(admission_id, day)
+            day_fact = sum(float(event.amount_ml or 0) for event in day_events)
+            history.append(
+                {
+                    "shift_start": day,
+                    "planned_ml": round(day_planned, 1),
+                    "fact_ml": round(day_fact, 1),
+                    "percent": round(day_fact / day_planned * 100.0, 1) if day_planned > 0 else None,
+                }
+            )
+        day_start, day_end = self.get_day_period(shift_date)
+        now = datetime.now()
+        active_moment = min(max(now, day_start), day_end - timedelta(minutes=1))
+        active = self._diet_plan.active_at(admission_id, active_moment)
+        if active is None and versions:
+            active = versions[-1]
+        return {
+            "templates": self.list_diet_templates(),
+            "versions": versions,
+            "active": active,
+            "planned_rows": rows,
+            "events": events,
+            "history": history,
+            "change_id": self.get_latest_change_id(admission_id=admission_id, include_global=True),
+        }
 
     def upsert_oral_intake_event(
         self,
@@ -2414,6 +2549,7 @@ class RemCardService(QObject):
         self._fluids.fluids_dao.delete_all_for_admission(admission_id)
         self._orders.dao.delete_all_for_admission(admission_id)
         self.orders_dao.db.execute_remcard("DELETE FROM diet_plan WHERE admission_id = ?", (admission_id,))
+        self.orders_dao.db.execute_remcard("DELETE FROM diet_plan_versions WHERE admission_id = ?", (admission_id,))
         self.orders_dao.db.execute_remcard("DELETE FROM oral_intake_events WHERE admission_id = ?", (admission_id,))
         self.orders_dao.db.execute_remcard("DELETE FROM lab_orders WHERE admission_id = ?", (admission_id,))
 
@@ -2440,6 +2576,14 @@ class RemCardService(QObject):
             )
             cursor.execute(
                 "DELETE FROM diet_plan WHERE admission_id = ? AND DATETIME(shift_start) >= DATETIME(?) AND DATETIME(shift_start) < DATETIME(?)",
+                (
+                    admission_id,
+                    start_dt.isoformat(timespec="minutes").replace("T", " "),
+                    end_dt.isoformat(timespec="minutes").replace("T", " "),
+                ),
+            )
+            cursor.execute(
+                "DELETE FROM diet_plan_versions WHERE admission_id = ? AND DATETIME(effective_from) >= DATETIME(?) AND DATETIME(effective_from) < DATETIME(?)",
                 (
                     admission_id,
                     start_dt.isoformat(timespec="minutes").replace("T", " "),

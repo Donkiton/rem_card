@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 24
-SCHEMA_MIN_MIGRATION_VERSION = 24
+SCHEMA_FASTPATH_REV = 25
+SCHEMA_MIN_MIGRATION_VERSION = 25
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -36,6 +36,7 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
     "medical_audit_log",
     "diet_templates",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
     "procedures",
     "lab_orders",
@@ -105,9 +106,10 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
     },
     "patient_status_events": {"last_modified_by", "updated_at", "revision"},
     "transfusions": {"source", "source_order_id", "source_admin_id"},
-    "diet_templates": {"name", "diet_text", "schedule_json", "is_default", "created_at", "version", "last_modified_by", "updated_at"},
-    "diet_plan": {"admission_id", "shift_start", "template_id", "diet_text", "schedule_json", "created_at", "version", "last_modified_by", "updated_at"},
-    "oral_intake_events": {"admission_id", "shift_start", "event_time", "amount_ml", "created_at", "version", "last_modified_by", "updated_at"},
+    "diet_templates": {"name", "diet_text", "schedule_json", "details_json", "is_default", "created_at", "version", "last_modified_by", "updated_at"},
+    "diet_plan": {"admission_id", "shift_start", "template_id", "diet_text", "schedule_json", "details_json", "created_at", "version", "last_modified_by", "updated_at"},
+    "diet_plan_versions": {"admission_id", "shift_start", "effective_from", "template_id", "diet_name", "diet_text", "schedule_json", "details_json", "change_note", "created_at", "version", "last_modified_by", "updated_at"},
+    "oral_intake_events": {"admission_id", "shift_start", "event_time", "amount_ml", "plan_version_id", "planned_item_key", "entry_kind", "meal_name", "note", "action_id", "created_at", "version", "last_modified_by", "updated_at"},
     "procedures": {
         "patient_id",
         "admission_id",
@@ -157,6 +159,8 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_orders_admission_status_committed_time",
     "idx_active_status",
     "idx_diet_plan_admission_shift",
+    "idx_diet_plan_versions_admission_effective",
+    "idx_diet_plan_versions_admission_shift",
     "idx_oral_intake_admission_event_time",
     "idx_oral_intake_admission_shift",
     "idx_medical_audit_admission_changed",
@@ -189,6 +193,7 @@ _UPDATED_AT_TRIGGER_TABLES: tuple[str, ...] = (
     "patient_status_events",
     "diet_templates",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
     "procedures",
     "lab_orders",
@@ -212,6 +217,7 @@ _CHANGE_TRIGGER_TABLES: tuple[str, ...] = (
     "respiratory_support",
     "diet_templates",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
     "procedures",
     "lab_orders",
@@ -232,6 +238,7 @@ _MEDICAL_AUDIT_TABLES: tuple[str, ...] = (
     "ivl_episodes",
     "clinical_events",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
     "lab_orders",
 )
@@ -369,6 +376,67 @@ def _ensure_column(
         return
     logger.info("Adding missing column %s.%s", table_name, column_name)
     conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
+def _oral_intake_has_legacy_unique_time(conn: sqlite3.Connection) -> bool:
+    if not _table_exists(conn, "oral_intake_events"):
+        return False
+    for row in conn.execute("PRAGMA index_list(oral_intake_events)").fetchall():
+        # origin='u' marks the auto-index created by the old UNIQUE constraint.
+        if len(row) < 4 or str(row[3] or "") != "u":
+            continue
+        columns = [
+            str(info[2])
+            for info in conn.execute(f"PRAGMA index_info({row[1]})").fetchall()
+        ]
+        if columns == ["admission_id", "event_time"]:
+            return True
+    return False
+
+
+def _migrate_oral_intake_events_v25(conn: sqlite3.Connection, logger: logging.Logger) -> None:
+    if not _oral_intake_has_legacy_unique_time(conn):
+        return
+    logger.info("Rebuilding oral_intake_events for multiple facts per minute")
+    conn.execute("DROP TABLE IF EXISTS oral_intake_events_v25")
+    conn.execute(
+        """
+        CREATE TABLE oral_intake_events_v25 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admission_id INTEGER NOT NULL,
+            shift_start TEXT NOT NULL,
+            event_time TEXT NOT NULL,
+            amount_ml REAL NOT NULL CHECK(amount_ml > 0),
+            plan_version_id INTEGER,
+            planned_item_key TEXT,
+            entry_kind TEXT NOT NULL DEFAULT 'unplanned',
+            meal_name TEXT,
+            note TEXT,
+            action_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            updated_at TEXT,
+            version INTEGER DEFAULT 1,
+            last_modified_by TEXT,
+            FOREIGN KEY (admission_id) REFERENCES admissions(id) ON DELETE CASCADE,
+            FOREIGN KEY (plan_version_id) REFERENCES diet_plan_versions(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO oral_intake_events_v25 (
+            id, admission_id, shift_start, event_time, amount_ml,
+            entry_kind, meal_name, note, action_id,
+            created_at, updated_at, version, last_modified_by
+        )
+        SELECT id, admission_id, shift_start, event_time, amount_ml,
+               'legacy', '', '', NULL,
+               created_at, updated_at, version, last_modified_by
+        FROM oral_intake_events
+        """
+    )
+    conn.execute("DROP TABLE oral_intake_events")
+    conn.execute("ALTER TABLE oral_intake_events_v25 RENAME TO oral_intake_events")
 
 
 def _drop_trigger(conn: sqlite3.Connection, trigger_name: str):
@@ -1255,6 +1323,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             name TEXT NOT NULL,
             diet_text TEXT,
             schedule_json TEXT NOT NULL DEFAULT '[]',
+            details_json TEXT NOT NULL DEFAULT '{}',
             is_default INTEGER DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
             updated_at TEXT,
@@ -1273,11 +1342,36 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             template_id INTEGER,
             diet_text TEXT,
             schedule_json TEXT NOT NULL DEFAULT '[]',
+            details_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
             updated_at TEXT,
             version INTEGER DEFAULT 1,
             last_modified_by TEXT,
             UNIQUE(admission_id, shift_start),
+            FOREIGN KEY (admission_id) REFERENCES admissions(id) ON DELETE CASCADE,
+            FOREIGN KEY (template_id) REFERENCES diet_templates(id) ON DELETE SET NULL
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS diet_plan_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admission_id INTEGER NOT NULL,
+            shift_start TEXT NOT NULL,
+            effective_from TEXT NOT NULL,
+            template_id INTEGER,
+            diet_name TEXT,
+            diet_text TEXT,
+            schedule_json TEXT NOT NULL DEFAULT '[]',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            change_note TEXT,
+            created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            updated_at TEXT,
+            version INTEGER DEFAULT 1,
+            last_modified_by TEXT,
+            UNIQUE(admission_id, effective_from),
             FOREIGN KEY (admission_id) REFERENCES admissions(id) ON DELETE CASCADE,
             FOREIGN KEY (template_id) REFERENCES diet_templates(id) ON DELETE SET NULL
         )
@@ -1292,15 +1386,23 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             shift_start TEXT NOT NULL,
             event_time TEXT NOT NULL,
             amount_ml REAL NOT NULL CHECK(amount_ml > 0),
+            plan_version_id INTEGER,
+            planned_item_key TEXT,
+            entry_kind TEXT NOT NULL DEFAULT 'unplanned',
+            meal_name TEXT,
+            note TEXT,
+            action_id TEXT,
             created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
             updated_at TEXT,
             version INTEGER DEFAULT 1,
             last_modified_by TEXT,
-            UNIQUE(admission_id, event_time),
-            FOREIGN KEY (admission_id) REFERENCES admissions(id) ON DELETE CASCADE
+            FOREIGN KEY (admission_id) REFERENCES admissions(id) ON DELETE CASCADE,
+            FOREIGN KEY (plan_version_id) REFERENCES diet_plan_versions(id) ON DELETE SET NULL
         )
         """
     )
+
+    _migrate_oral_intake_events_v25(conn, logger)
 
     _ensure_column(conn, "patients", "admission_uid", "TEXT", logger)
     _ensure_column(conn, "patients", "birth_date", "TEXT", logger)
@@ -1397,6 +1499,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
 
     _ensure_column(conn, "diet_templates", "diet_text", "TEXT", logger)
     _ensure_column(conn, "diet_templates", "schedule_json", "TEXT NOT NULL DEFAULT '[]'", logger)
+    _ensure_column(conn, "diet_templates", "details_json", "TEXT NOT NULL DEFAULT '{}'", logger)
     _ensure_column(conn, "diet_templates", "is_default", "INTEGER DEFAULT 0", logger)
     _ensure_column(conn, "diet_templates", "created_at", "TEXT", logger)
     _ensure_column(conn, "diet_templates", "updated_at", "TEXT", logger)
@@ -1407,6 +1510,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "diet_plan", "template_id", "INTEGER", logger)
     _ensure_column(conn, "diet_plan", "diet_text", "TEXT", logger)
     _ensure_column(conn, "diet_plan", "schedule_json", "TEXT NOT NULL DEFAULT '[]'", logger)
+    _ensure_column(conn, "diet_plan", "details_json", "TEXT NOT NULL DEFAULT '{}'", logger)
     _ensure_column(conn, "diet_plan", "created_at", "TEXT", logger)
     _ensure_column(conn, "diet_plan", "updated_at", "TEXT", logger)
     _ensure_column(conn, "diet_plan", "version", "INTEGER DEFAULT 1", logger)
@@ -1415,6 +1519,12 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "oral_intake_events", "shift_start", "TEXT", logger)
     _ensure_column(conn, "oral_intake_events", "event_time", "TEXT", logger)
     _ensure_column(conn, "oral_intake_events", "amount_ml", "REAL", logger)
+    _ensure_column(conn, "oral_intake_events", "plan_version_id", "INTEGER", logger)
+    _ensure_column(conn, "oral_intake_events", "planned_item_key", "TEXT", logger)
+    _ensure_column(conn, "oral_intake_events", "entry_kind", "TEXT NOT NULL DEFAULT 'unplanned'", logger)
+    _ensure_column(conn, "oral_intake_events", "meal_name", "TEXT", logger)
+    _ensure_column(conn, "oral_intake_events", "note", "TEXT", logger)
+    _ensure_column(conn, "oral_intake_events", "action_id", "TEXT", logger)
     _ensure_column(conn, "oral_intake_events", "created_at", "TEXT", logger)
     _ensure_column(conn, "oral_intake_events", "updated_at", "TEXT", logger)
     _ensure_column(conn, "oral_intake_events", "version", "INTEGER DEFAULT 1", logger)
@@ -1469,7 +1579,28 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("UPDATE patient_status_events SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE diet_templates SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE diet_plan SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
+    conn.execute("UPDATE diet_templates SET details_json = '{}' WHERE details_json IS NULL OR details_json = ''")
+    conn.execute("UPDATE diet_plan SET details_json = '{}' WHERE details_json IS NULL OR details_json = ''")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO diet_plan_versions (
+            admission_id, shift_start, effective_from, template_id, diet_name,
+            diet_text, schedule_json, details_json, change_note,
+            created_at, updated_at, version, last_modified_by
+        )
+        SELECT dp.admission_id, dp.shift_start, dp.shift_start, dp.template_id,
+               COALESCE(dt.name, dp.diet_text, 'Питание'),
+               dp.diet_text, dp.schedule_json, COALESCE(dp.details_json, '{}'),
+               'Перенесено из прежнего плана питания',
+               dp.created_at, dp.updated_at, COALESCE(dp.version, 1),
+               COALESCE(dp.last_modified_by, 'doctor')
+        FROM diet_plan dp
+        LEFT JOIN diet_templates dt ON dt.id = dp.template_id
+        """
+    )
+    conn.execute("UPDATE diet_plan_versions SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE oral_intake_events SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
+    conn.execute("UPDATE oral_intake_events SET entry_kind = 'legacy' WHERE entry_kind IS NULL OR entry_kind = ''")
     conn.execute("UPDATE lab_orders SET status = COALESCE(status, 'assigned') WHERE status IS NULL OR status = ''")
     conn.execute("UPDATE lab_orders SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
     conn.execute("UPDATE lab_orders SET created_at_db = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE created_at_db IS NULL")
@@ -1557,8 +1688,14 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("CREATE INDEX IF NOT EXISTS idx_diet_templates_updated_at ON diet_templates(updated_at)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_diet_plan_admission_shift ON diet_plan(admission_id, shift_start)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_diet_plan_updated_at ON diet_plan(updated_at)")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_oral_intake_admission_event_time ON oral_intake_events(admission_id, event_time)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_diet_plan_versions_admission_effective ON diet_plan_versions(admission_id, effective_from)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_diet_plan_versions_admission_shift ON diet_plan_versions(admission_id, shift_start, effective_from)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_diet_plan_versions_updated_at ON diet_plan_versions(updated_at)")
+    conn.execute("DROP INDEX IF EXISTS idx_oral_intake_admission_event_time")
+    conn.execute("CREATE INDEX idx_oral_intake_admission_event_time ON oral_intake_events(admission_id, event_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_oral_intake_admission_shift ON oral_intake_events(admission_id, shift_start)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_oral_intake_plan_item ON oral_intake_events(plan_version_id, planned_item_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_oral_intake_action ON oral_intake_events(admission_id, action_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_oral_intake_updated_at ON oral_intake_events(updated_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_change_log_admission_id ON change_log(admission_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_change_log_entity ON change_log(entity_name, id)")
@@ -1603,6 +1740,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 17, "lab orders worklist")
     _mark_schema_migration(conn, 18, "operblock and remcard icon settings")
     _mark_schema_migration(conn, 19, "recovery bed admission marker")
+    _mark_schema_migration(conn, 25, "versioned oral nutrition plans and detailed intake facts")
 
     for table in (
         "vitals",
@@ -1613,6 +1751,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "patient_status_events",
         "diet_templates",
         "diet_plan",
+        "diet_plan_versions",
         "oral_intake_events",
         "procedures",
         "lab_orders",
@@ -1702,6 +1841,17 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _create_change_triggers(
         conn,
         "diet_plan",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.last_modified_by, 'doctor')",
+        "COALESCE(OLD.last_modified_by, 'doctor')",
+        use_updated_at_gate=True,
+    )
+    _create_change_triggers(
+        conn,
+        "diet_plan_versions",
         "NEW.id",
         "OLD.id",
         "NEW.admission_id",
@@ -1998,6 +2148,22 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     )
     _create_medical_audit_triggers(
         conn,
+        "diet_plan_versions",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.last_modified_by, 'doctor')",
+        "COALESCE(OLD.last_modified_by, 'doctor')",
+        (
+            "id", "admission_id", "shift_start", "effective_from", "template_id",
+            "diet_name", "diet_text", "schedule_json", "details_json", "change_note",
+            "version", "updated_at", "last_modified_by",
+        ),
+        use_updated_at_gate=True,
+    )
+    _create_medical_audit_triggers(
+        conn,
         "oral_intake_events",
         "NEW.id",
         "OLD.id",
@@ -2005,7 +2171,11 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'nurse')",
         "COALESCE(OLD.last_modified_by, 'nurse')",
-        ("id", "admission_id", "shift_start", "event_time", "amount_ml", "version", "updated_at", "last_modified_by"),
+        (
+            "id", "admission_id", "shift_start", "event_time", "amount_ml",
+            "plan_version_id", "planned_item_key", "entry_kind", "meal_name", "note",
+            "action_id", "version", "updated_at", "last_modified_by",
+        ),
         use_updated_at_gate=True,
     )
     _create_medical_audit_triggers(

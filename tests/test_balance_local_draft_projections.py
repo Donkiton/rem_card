@@ -5,6 +5,7 @@ import pytest
 
 from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO
 from rem_card.services.balance_calculator import BalanceCalculator
+from rem_card.ui.shared.orders_balance_adapter import oral_totals_from_runtime
 
 
 SHIFT_START = datetime(2026, 7, 13, 8, 0)
@@ -136,3 +137,54 @@ def test_legacy_single_projection_behavior_is_unchanged():
 
     assert result["current"]["total"] == pytest.approx(0.0)
     assert result["daily"]["total"] == pytest.approx(500.0)
+
+
+def _oral_runtime(*, events, plan):
+    return {
+        "oral_shift_date": SHIFT_START,
+        "oral_start_dt": SHIFT_START,
+        "oral_end_dt": SHIFT_END,
+        "oral_events": events,
+        "oral_plan_schedule": plan,
+    }
+
+
+def test_oral_balance_shows_all_entered_volume_over_plan_without_clamping():
+    runtime = _oral_runtime(
+        events=[
+            {"event_time": SHIFT_START + timedelta(hours=1), "amount_ml": 400},
+            # Весь внесённый факт суток учитывается, даже если он позже calc_time.
+            {"event_time": SHIFT_START + timedelta(hours=7), "amount_ml": 350},
+        ],
+        plan=[
+            {"time": "09:00", "amount": 300},
+            {"time": "13:00", "amount": 250},
+        ],
+    )
+
+    assert oral_totals_from_runtime(runtime, NOW) == (750.0, 550.0)
+
+
+def test_oral_balance_allows_planned_volume_to_exceed_actual_volume():
+    runtime = _oral_runtime(
+        events=[{"event_time": SHIFT_START + timedelta(hours=1), "amount_ml": 200}],
+        plan=[
+            {"time": "09:00", "amount": 300},
+            {"time": "13:00", "amount": 300},
+        ],
+    )
+
+    assert oral_totals_from_runtime(runtime, NOW) == (200.0, 600.0)
+
+
+def test_oral_balance_prefers_explicit_actual_and_planned_snapshot_totals():
+    runtime = {
+        "oral_totals": {
+            "actual": 450,
+            "planned": 700,
+            "current": 1,
+            "daily": 2,
+        }
+    }
+
+    assert oral_totals_from_runtime(runtime, NOW) == (450.0, 700.0)

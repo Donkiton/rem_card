@@ -50,6 +50,7 @@ REMCARD_MERGE_TABLE_ORDER: tuple[str, ...] = (
     "order_audit_log",
     "diet_templates",
     "diet_plan",
+    "diet_plan_versions",
     "oral_intake_events",
     "procedures",
     "lab_orders",

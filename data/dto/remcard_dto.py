@@ -172,6 +172,7 @@ class DietTemplateDTO:
     name: str = ""
     diet_text: str = ""
     schedule_json: str = "[]"
+    details_json: str = "{}"
     is_default: int = 0
     version: int = 0
     created_at: Optional[str] = None
@@ -186,6 +187,7 @@ class DietPlanDTO:
     template_id: Optional[int] = None
     diet_text: str = ""
     schedule_json: str = "[]"
+    details_json: str = "{}"
     version: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -198,6 +200,30 @@ class OralIntakeEventDTO:
     shift_start: datetime = field(default_factory=datetime.now)
     event_time: datetime = field(default_factory=datetime.now)
     amount_ml: float = 0
+    plan_version_id: Optional[int] = None
+    planned_item_key: Optional[str] = None
+    entry_kind: str = "unplanned"
+    meal_name: str = ""
+    note: str = ""
+    action_id: Optional[str] = None
+    version: int = 0
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    last_modified_by: Optional[str] = None
+
+
+@dataclass
+class DietPlanVersionDTO:
+    id: Optional[int] = None
+    admission_id: int = 0
+    shift_start: datetime = field(default_factory=datetime.now)
+    effective_from: datetime = field(default_factory=datetime.now)
+    template_id: Optional[int] = None
+    diet_name: str = ""
+    diet_text: str = ""
+    schedule_json: str = "[]"
+    details_json: str = "{}"
+    change_note: str = ""
     version: int = 0
     created_at: Optional[str] = None
     updated_at: Optional[str] = None

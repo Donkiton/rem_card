@@ -12,11 +12,12 @@ from ..shared.layout_components import CurrentPageStack, SectorFactory, Splitter
 from ..shared.w1_handoff import W1LayoutHandoff
 from .components.nurse_beds_selection_widget import NurseBedsSelectionWidget
 from ..rem_card_sectors.sector_w1a import SectorW1a
+from ..rem_card_sectors.sector_7tab_b import Sector7diet_b
 
 
 # Нижний ряд 5/6/7a оставлен в дереве виджетов для быстрого восстановления.
 # Чтобы вернуть его на вкладку, добавьте название вкладки в этот набор.
-BOTTOM_ROW_VISIBLE_TABS = frozenset({"Баланс жидкости"})
+BOTTOM_ROW_VISIBLE_TABS = frozenset()
 TAB_FOREGROUND_ACTIVITY_TTL_SEC = 5.0
 
 
@@ -26,6 +27,8 @@ def _tab_foreground_activity_name(tab_name: str) -> str:
         "витальные функции": "tab_vitals",
         "назначения": "tab_orders",
         "баланс жидкости": "tab_balance",
+        "диета": "tab_diet",
+        "пероральное питание": "tab_diet",
         "движение": "tab_movement",
         "события": "tab_movement",
         "процедуры": "tab_procedures",
@@ -75,7 +78,7 @@ class NurseRemCardLayoutManager(QWidget):
 
     def _align_nurse_7b_chrome(self):
         margins = self.sector_7na_b_nurse.main_layout_v.contentsMargins()
-        for sector in (self.sector_7vit_b, self.sector_7bal_b):
+        for sector in (self.sector_7vit_b, self.sector_7bal_b, self.sector_7diet_b):
             sector.main_layout_v.setContentsMargins(
                 margins.left(),
                 margins.top(),
@@ -115,6 +118,7 @@ class NurseRemCardLayoutManager(QWidget):
         
         sectors['sector_7na_b_nurse'] = NurseSector7naB()
         sectors['sector_7na_b_nurse'].setMinimumHeight(120)
+        sectors['sector_7diet_b'] = Sector7diet_b()
 
         self.sector_events = None
             
@@ -203,6 +207,11 @@ class NurseRemCardLayoutManager(QWidget):
         self._print_initialized = False
         self.vitals_stack.addWidget(self.print_tab_widget)
 
+        self.oral_nutrition_tab_widget = QWidget()
+        self._oral_nutrition_layout = QVBoxLayout(self.oral_nutrition_tab_widget)
+        self._oral_nutrition_layout.setContentsMargins(0, 0, 0, 0)
+        self.vitals_stack.addWidget(self.oral_nutrition_tab_widget)
+
         # Сборка рядов
         self.mid_row = SplitterManager.create_splitter(Qt.Horizontal)
         self.left_content_splitter = SplitterManager.create_splitter(Qt.Vertical)
@@ -217,6 +226,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.sector_7bal_a.setFixedHeight(target_h)
         self.sector_7bal_b.setFixedHeight(target_h)
         self.sector_7na_b_nurse.setFixedHeight(target_h)
+        self.sector_7diet_b.setFixedHeight(target_h)
         
         self.sector_7a_stack = QStackedWidget()
         self.sector_7a_stack.addWidget(self.sector_7vit_a)
@@ -224,6 +234,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.sector_7b_stack = QStackedWidget()
         self.sector_7b_stack.addWidget(self.sector_7vit_b)
         self.sector_7b_stack.addWidget(self.sector_7bal_b)
+        self.sector_7b_stack.addWidget(self.sector_7diet_b)
         self.sector_7b_mode_stack = QStackedWidget()
         self.sector_7b_mode_stack.addWidget(self.sector_7na_b_nurse)
         self.sector_7b_mode_stack.addWidget(self.sector_7b_stack)
@@ -432,6 +443,7 @@ class NurseRemCardLayoutManager(QWidget):
             self.sector_7vit_b,
             self.sector_7bal_b,
             self.sector_7na_b_nurse,
+            self.sector_7diet_b,
             self.sector_7b_stack,
             self.sector_7b_mode_stack,
         ):
@@ -906,6 +918,7 @@ class NurseRemCardLayoutManager(QWidget):
             )
         try:
             tab_name = "Движение" if tab_name == "События" else tab_name
+            tab_name = "Диета" if tab_name == "Пероральное питание" else tab_name
             if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "is_tab_visible"):
                 if not self.sector_2b.is_tab_visible(tab_name):
                     tab_name = self.sector_2b.first_visible_tab_name()
@@ -920,7 +933,8 @@ class NurseRemCardLayoutManager(QWidget):
                 "События": 3,
                 "Процедуры": 4,
                 "Анализы": 5,
-                "Печать": 6
+                "Печать": 6,
+                "Диета": 7,
             }
             if tab_name in tab_map:
                 idx = tab_map[tab_name]
@@ -929,6 +943,7 @@ class NurseRemCardLayoutManager(QWidget):
                 if updates_enabled:
                     self.setUpdatesEnabled(False)
                 try:
+                    self.sector_3_4_wrapper.setVisible(True)
                     if is_orders:
                         self.ensure_orders_widget()
                     self.vitals_stack.setCurrentIndex(idx)
@@ -971,6 +986,9 @@ class NurseRemCardLayoutManager(QWidget):
                         self._ensure_print_tab_initialized()
                         if hasattr(self, 'sector_print') and hasattr(self.sector_print, 'refresh'):
                             self.sector_print.refresh()
+                    elif tab_name == "Диета":
+                        self.sector_7a_stack.setCurrentIndex(0)
+                        self.sector_7b_stack.setCurrentWidget(self.sector_7diet_b)
                     else:
                         self.sector_7a_stack.setCurrentIndex(0)
                         self.sector_7b_stack.setCurrentIndex(0)

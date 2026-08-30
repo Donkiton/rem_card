@@ -2151,6 +2151,7 @@ class OperBlockService:
                 "lab_data",
                 "lab_orders",
                 "diet_plan",
+                "diet_plan_versions",
                 "oral_intake_events",
             ):
                 cls._delete_where_in(cursor, table_name, "admission_id", removable_admission_ids)

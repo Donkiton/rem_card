@@ -25,6 +25,7 @@ class SyncCoordinator:
         "vital_settings": {"vitals"},
         "fluids": {"balance"},
         "diet_plan": {"diet"},
+        "diet_plan_versions": {"diet", "balance"},
         "oral_intake_events": {"diet", "balance"},
         "diet_templates": {"diet"},
         "beds": {"beds", "patient_header"},

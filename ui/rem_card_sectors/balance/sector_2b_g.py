@@ -75,7 +75,8 @@ class Sector2b_g(QWidget):
         self.blood_val = self.add_balance_row("Кровь", "balans_blood.png")
         self.plasma_val = self.add_balance_row("Плазма", "balans_plasma.png")
         self.oral_val = self.add_balance_row("Перорально", "diet.png")
-        self._add_quick_oral_input()
+        # Фактическое пероральное потребление вводится только в отдельной вкладке
+        # «Диета», чтобы не создавать два конкурирующих места ввода.
         
         self.data_layout.addStretch()
         self.main_layout_v.addWidget(self.data_area)
@@ -228,6 +229,8 @@ class Sector2b_g(QWidget):
         self.data_layout.addWidget(self.quick_oral_frame)
 
     def configure_quick_oral_intake(self, service=None, admission_id=None, shift_date=None, visible=False):
+        if not hasattr(self, "quick_oral_frame"):
+            return
         self.quick_oral_service = service
         self.quick_oral_admission_id = int(admission_id) if admission_id else None
         self.quick_oral_shift_date = shift_date

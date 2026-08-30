@@ -29,6 +29,7 @@ class NurseSector2b(BaseSectorWidget):
         self.btn_vitals = self.create_tab_button("Витальные функции", active=True)
         self.btn_orders = self.create_tab_button("Назначения", enabled=True)
         self.btn_balance = self.create_tab_button("Баланс жидкости", enabled=True)
+        self.btn_oral_nutrition = self.create_tab_button("Диета", enabled=True)
         self.btn_events = self.create_tab_button("Движение", enabled=True)
         
         # Вкладка ИВЛ ОТСУТСТВУЕТ у медсестры
@@ -47,6 +48,7 @@ class NurseSector2b(BaseSectorWidget):
             "vitals": self.btn_vitals,
             "orders": self.btn_orders,
             "balance": self.btn_balance,
+            "oral_nutrition": self.btn_oral_nutrition,
             "events": self.btn_events,
             "procedures": self.btn_procedures,
             "labs": self.btn_labs,
@@ -56,6 +58,7 @@ class NurseSector2b(BaseSectorWidget):
             "vitals": "Витальные функции",
             "orders": "Назначения",
             "balance": "Баланс жидкости",
+            "oral_nutrition": "Диета",
             "events": "Движение",
             "procedures": "Процедуры",
             "labs": "Анализы",

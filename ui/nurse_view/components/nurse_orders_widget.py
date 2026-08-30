@@ -50,6 +50,7 @@ class NurseOrdersWidget(QWidget):
     ordersPresenceChanged = Signal(bool)
     orderMarked = Signal()
     localBalanceChanged = Signal()
+    balanceSnapshotRequired = Signal()
     _LOCAL_SILENT_FORCE_PREFIXES = ("nurse_order_mark:",)
     _ORDERS_CHANGE_ENTITIES = {"orders", "administrations"}
 
@@ -106,6 +107,8 @@ class NurseOrdersWidget(QWidget):
         self._orders_click_seq = 0
         self._pending_admin_write_count = 0
         self._pending_admin_ids: set[int] = set()
+        self._balance_mark_overrides = {}
+        self._balance_mark_override_seq = 0
         self._deferred_change_reload = False
         self._legacy_direct_snapshot_warned = False
         self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
@@ -398,6 +401,7 @@ class NurseOrdersWidget(QWidget):
         self.shift_date = shift_date
         current_context_key = self._current_context_key()
         if previous_context_key != current_context_key:
+            self._balance_mark_overrides.clear()
             self._detach_active_snapshot_for_context_switch(
                 new_context_key=current_context_key,
                 new_context_hash=None,
@@ -1844,12 +1848,49 @@ class NurseOrdersWidget(QWidget):
         if key is None:
             return
         pending_admin = copy(admin)
+        actual_time = datetime.now() if mark else None
         setattr(pending_admin, "_pending_mark", mark or "")
         self.model.admin_map[key] = pending_admin
+        self._balance_mark_override_seq += 1
+        self._balance_mark_overrides[int(getattr(admin, "id", 0) or 0)] = {
+            "mark": mark or "",
+            "actual_time": actual_time,
+            "sequence": self._balance_mark_override_seq,
+            "pending": True,
+        }
         self.model.dataChanged.emit(index, index, [Qt.UserRole])
         self.localBalanceChanged.emit()
 
+    def balance_mark_overrides(self) -> dict:
+        return {
+            int(admin_id): dict(value)
+            for admin_id, value in self._balance_mark_overrides.items()
+        }
+
+    def balance_mark_override_sequence(self) -> int:
+        pending = [int(value["sequence"]) for value in self._balance_mark_overrides.values() if value.get("pending")]
+        return min(pending) - 1 if pending else int(self._balance_mark_override_seq or 0)
+
+    def acknowledge_balance_mark_overrides(self, through_sequence: int) -> None:
+        try:
+            limit = int(through_sequence or 0)
+        except (TypeError, ValueError):
+            return
+        for admin_id, value in list(self._balance_mark_overrides.items()):
+            if int(value.get("sequence") or 0) <= limit:
+                self._balance_mark_overrides.pop(admin_id, None)
+
+    def _discard_balance_mark_override(self, admin_id) -> None:
+        try:
+            self._balance_mark_overrides.pop(int(admin_id), None)
+        except (TypeError, ValueError):
+            pass
+
     def _apply_committed_nurse_mark(self, index, admin, mark: str):
+        override = self._balance_mark_overrides.get(int(admin.id)) if admin is not None else None
+        if override is not None:
+            override["pending"] = False
+        self.balanceSnapshotRequired.emit()
         if not self.model or not index.isValid() or admin is None:
             return
         key = self._admin_key_from_admin(admin)
@@ -1956,6 +1997,8 @@ class NurseOrdersWidget(QWidget):
                             def on_error(exc):
                                 self._finish_admin_write(admin_id)
                                 if write_context_key == self._current_context_key():
+                                    self._discard_balance_mark_override(admin_id)
+                                    self.balanceSnapshotRequired.emit()
                                     self._restore_admin_cell(index, key, previous_admin)
 
                             self._enqueue_write(

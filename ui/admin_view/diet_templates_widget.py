@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt, QTime
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialogButtonBox,
     QFrame,
     QHeaderView,
@@ -12,24 +13,33 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTimeEdit,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from rem_card.services.diet_service import schedule_items
+from rem_card.services.diet_service import diet_details, schedule_items
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.admin_view.dictionary_page_chrome import apply_dictionary_page_chrome
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 
 
-class DietTemplateDialog(BaseStyledDialog):
+class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     def __init__(self, template=None, parent=None):
         title = "Редактирование шаблона питания" if template else "Новый шаблон питания"
         super().__init__(title, parent)
-        self.setMinimumSize(520, 430)
+        self._init_saved_frameless_dialog(
+            "admin/diet_template_dialog_geometry_v2",
+            drag_area_height=42,
+        )
+        self.setMinimumSize(760, 650)
+        self.resize(900, 760)
+        self.setSizeGripEnabled(True)
         self.template = template
         self.setup_ui()
         self.fill_data()
+        self._restore_saved_geometry()
 
     def setup_ui(self):
         self.name_input = QLineEdit()
@@ -39,12 +49,54 @@ class DietTemplateDialog(BaseStyledDialog):
         self.text_input.setPlaceholderText("Описание питания")
 
         self.default_check = QCheckBox("Шаблон по умолчанию")
+        self.fractional_check = QCheckBox("Дробное питание малыми порциями")
+        self.no_food_check = QCheckBox("Голод — пища не назначена")
+        self.no_fluids_check = QCheckBox("Полное ограничение жидкости")
+        self.on_demand_check = QCheckBox("Питьё по требованию")
+
+        self.consistency_combo = QComboBox()
+        self.consistency_combo.setEditable(True)
+        self.consistency_combo.addItems(["", "Обычная", "Мягкая", "Протёртая", "Полужидкая", "Жидкая"])
+        self.temperature_combo = QComboBox()
+        self.temperature_combo.setEditable(True)
+        self.temperature_combo.addItems(["", "Комнатная", "Тёплая", "Холодная"])
+        self.salt_input = QLineEdit()
+        self.salt_input.setPlaceholderText("Например: до 5 г/сут")
+        self.daily_fluid_spin = QSpinBox()
+        self.daily_fluid_spin.setRange(0, 10000)
+        self.daily_fluid_spin.setSpecialValueText("Не задан")
+        self.daily_fluid_spin.setSuffix(" мл/сут")
+        self.instructions_input = QTextEdit()
+        self.instructions_input.setPlaceholderText("Особые указания по кормлению")
+        self.instructions_input.setFixedHeight(60)
+        self.instructions_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.instructions_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.comment_input = QTextEdit()
+        self.comment_input.setPlaceholderText("Общий комментарий к диете")
+        self.comment_input.setFixedHeight(52)
+        self.comment_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.comment_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.schedule_table = QTableWidget()
-        self.schedule_table.setColumnCount(2)
-        self.schedule_table.setHorizontalHeaderLabels(["Время", "Объем, мл"])
+        self.schedule_table.setObjectName("DietTemplateScheduleTable")
+        self.schedule_table.setColumnCount(4)
+        self.schedule_table.setHorizontalHeaderLabels(["Приём пищи", "Время", "Объём, мл", "Примечание"])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.schedule_table.verticalHeader().setDefaultSectionSize(34)
+        self.schedule_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.schedule_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.schedule_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.schedule_table.setStyleSheet(
+            """
+            QTableWidget#DietTemplateScheduleTable {
+                outline: none;
+                selection-background-color: transparent;
+            }
+            QTableWidget#DietTemplateScheduleTable::item:selected {
+                background-color: transparent;
+            }
+            """
+        )
 
         form = QVBoxLayout()
         form.addWidget(QLabel("Название"))
@@ -52,6 +104,24 @@ class DietTemplateDialog(BaseStyledDialog):
         form.addWidget(QLabel("Описание"))
         form.addWidget(self.text_input)
         form.addWidget(self.default_check)
+        form.addWidget(QLabel("Параметры диеты"))
+        parameters = QHBoxLayout()
+        parameters.addWidget(QLabel("Консистенция"))
+        parameters.addWidget(self.consistency_combo)
+        parameters.addWidget(QLabel("Температура"))
+        parameters.addWidget(self.temperature_combo)
+        parameters.addWidget(QLabel("Соль"))
+        parameters.addWidget(self.salt_input)
+        parameters.addWidget(QLabel("Жидкость"))
+        parameters.addWidget(self.daily_fluid_spin)
+        form.addLayout(parameters)
+        checks = QHBoxLayout()
+        for check in (self.fractional_check, self.on_demand_check, self.no_food_check, self.no_fluids_check):
+            checks.addWidget(check)
+        checks.addStretch()
+        form.addLayout(checks)
+        form.addWidget(self.instructions_input)
+        form.addWidget(self.comment_input)
         form.addWidget(QLabel("Расписание"))
         form.addWidget(self.schedule_table)
 
@@ -68,26 +138,55 @@ class DietTemplateDialog(BaseStyledDialog):
         self.content_layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        for btn in buttons.buttons():
-            btn.setObjectName("DialogOkBtn")
+        save_button = buttons.button(QDialogButtonBox.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.Cancel)
+        save_button.setText("Сохранить")
+        cancel_button.setText("Отмена")
+        for button in (save_button, cancel_button):
+            button.setObjectName("DialogOkBtn")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         self.content_layout.addWidget(buttons)
 
+        self.on_demand_check.toggled.connect(
+            lambda checked: self._clear_conflicting_check(self.no_fluids_check, checked)
+        )
+        self.no_fluids_check.toggled.connect(
+            lambda checked: self._clear_conflicting_check(self.on_demand_check, checked)
+        )
         self.btn_add_row.clicked.connect(lambda: self.add_schedule_row())
         self.btn_delete_row.clicked.connect(self.delete_selected_row)
+
+    @staticmethod
+    def _clear_conflicting_check(other_check: QCheckBox, checked: bool) -> None:
+        if checked and other_check.isChecked():
+            other_check.setChecked(False)
 
     def fill_data(self):
         if self.template:
             self.name_input.setText(self.template.name or "")
             self.text_input.setText(self.template.diet_text or "")
             self.default_check.setChecked(bool(self.template.is_default))
+            details = diet_details(getattr(self.template, "details_json", "{}"))
+            self.consistency_combo.setCurrentText(str(details.get("consistency") or ""))
+            self.temperature_combo.setCurrentText(str(details.get("temperature") or ""))
+            self.salt_input.setText(str(details.get("salt_limit") or ""))
+            self.daily_fluid_spin.setValue(int(details.get("daily_fluid_ml") or 0))
+            self.fractional_check.setChecked(bool(details.get("fractional")))
+            self.no_food_check.setChecked(bool(details.get("no_food")))
+            self.no_fluids_check.setChecked(bool(details.get("no_fluids")))
+            self.on_demand_check.setChecked(bool(details.get("on_demand")))
+            self.instructions_input.setPlainText(str(details.get("special_instructions") or ""))
+            self.comment_input.setPlainText(str(details.get("comment") or ""))
             for item in schedule_items(self.template.schedule_json):
-                self.add_schedule_row(item.get("time", "09:00"), item.get("amount", 200))
+                self.add_schedule_row(
+                    item.get("time", "09:00"), item.get("amount", 200),
+                    item.get("meal", "Приём пищи"), item.get("note", ""), item.get("key"),
+                )
         if self.schedule_table.rowCount() == 0:
             self.add_schedule_row("09:00", 200)
 
-    def add_schedule_row(self, time_text="09:00", amount=200):
+    def add_schedule_row(self, time_text="09:00", amount=200, meal="Приём пищи", note="", item_key=None):
         row = self.schedule_table.rowCount()
         self.schedule_table.insertRow(row)
 
@@ -101,8 +200,15 @@ class DietTemplateDialog(BaseStyledDialog):
         amount_spin.setSuffix(" мл")
         amount_spin.setValue(int(amount or 200))
 
-        self.schedule_table.setCellWidget(row, 0, time_edit)
-        self.schedule_table.setCellWidget(row, 1, amount_spin)
+        meal_input = QLineEdit(str(meal or "Приём пищи"))
+        meal_input.setProperty("item_key", str(item_key or ""))
+        note_input = QLineEdit(str(note or ""))
+        note_input.setPlaceholderText("Например: после ФГДС")
+        self.schedule_table.setCellWidget(row, 0, meal_input)
+        self.schedule_table.setCellWidget(row, 1, time_edit)
+        self.schedule_table.setCellWidget(row, 2, amount_spin)
+        self.schedule_table.setCellWidget(row, 3, note_input)
+        self.schedule_table.setRowHeight(row, 40)
 
     def delete_selected_row(self):
         row = self.schedule_table.currentRow()
@@ -117,14 +223,19 @@ class DietTemplateDialog(BaseStyledDialog):
 
         schedule = []
         for row in range(self.schedule_table.rowCount()):
-            time_edit = self.schedule_table.cellWidget(row, 0)
-            amount_spin = self.schedule_table.cellWidget(row, 1)
-            if not time_edit or not amount_spin:
+            meal_input = self.schedule_table.cellWidget(row, 0)
+            time_edit = self.schedule_table.cellWidget(row, 1)
+            amount_spin = self.schedule_table.cellWidget(row, 2)
+            note_input = self.schedule_table.cellWidget(row, 3)
+            if not meal_input or not time_edit or not amount_spin:
                 continue
             schedule.append(
                 {
+                    "key": meal_input.property("item_key") or f"{time_edit.time().toString('HH:mm')}-{row + 1}",
+                    "meal": meal_input.text().strip() or "Приём пищи",
                     "time": time_edit.time().toString("HH:mm"),
                     "amount": int(amount_spin.value()),
+                    "note": note_input.text().strip() if note_input else "",
                 }
             )
 
@@ -132,6 +243,18 @@ class DietTemplateDialog(BaseStyledDialog):
             "name": name,
             "diet_text": self.text_input.text().strip(),
             "schedule_json": schedule,
+            "details_json": {
+                "consistency": self.consistency_combo.currentText().strip(),
+                "temperature": self.temperature_combo.currentText().strip(),
+                "salt_limit": self.salt_input.text().strip(),
+                "fractional": self.fractional_check.isChecked(),
+                "daily_fluid_ml": self.daily_fluid_spin.value() or None,
+                "special_instructions": self.instructions_input.toPlainText().strip(),
+                "comment": self.comment_input.toPlainText().strip(),
+                "no_food": self.no_food_check.isChecked(),
+                "no_fluids": self.no_fluids_check.isChecked(),
+                "on_demand": self.on_demand_check.isChecked(),
+            },
             "is_default": self.default_check.isChecked(),
             "version": getattr(self.template, "version", None),
         }
@@ -303,6 +426,7 @@ class DietTemplatesWidget(QWidget):
                         diet_text=data["diet_text"],
                         schedule_json=data["schedule_json"],
                         is_default=data["is_default"],
+                        details_json=data["details_json"],
                         expected_version=data["version"],
                     ),
                 )

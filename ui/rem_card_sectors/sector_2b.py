@@ -34,6 +34,7 @@ class Sector2b(BaseSectorWidget):
         # Создание вкладок
         self.btn_vitals = self.create_tab_button("Витальные функции", active=True)
         self.btn_balance = self.create_tab_button("Баланс жидкости", enabled=True) # Включено обратно
+        self.btn_oral_nutrition = self.create_tab_button("Диета", enabled=True)
         self.btn_events = self.create_tab_button("Движение", enabled=True)
         self.btn_ivl = self.create_tab_button("ИВЛ", enabled=True)
         self.btn_orders = self.create_tab_button("Назначения", enabled=True)
@@ -55,6 +56,7 @@ class Sector2b(BaseSectorWidget):
             "vitals": self.btn_vitals,
             "orders": self.btn_orders,
             "balance": self.btn_balance,
+            "oral_nutrition": self.btn_oral_nutrition,
             "events": self.btn_events,
             "ivl": self.btn_ivl,
             "procedures": self.btn_procedures,
@@ -65,6 +67,7 @@ class Sector2b(BaseSectorWidget):
             "vitals": "Витальные функции",
             "orders": "Назначения",
             "balance": "Баланс жидкости",
+            "oral_nutrition": "Диета",
             "events": "Движение",
             "ivl": "ИВЛ",
             "procedures": "Процедуры",
