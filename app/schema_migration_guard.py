@@ -18,6 +18,9 @@ from rem_card.app.unified_db_schema import (
 from rem_card.app.version import APP_VERSION
 
 
+SCHEMA_MIGRATION_LOCK_TIMEOUT_SEC = 60.0
+
+
 @dataclass(frozen=True)
 class SchemaMigrationResult:
     migrated: bool
@@ -39,26 +42,30 @@ def _controller_owner_id(controller: Any) -> str:
     return str(getattr(controller, "owner_id", "") or f"{socket.gethostname()}:{os.getpid()}:schema_migration")
 
 
-def _acquire_controller_file_lock(controller: Any, source: str):
-    attempts = max(1, int(getattr(controller, "max_retries", 20)))
-    retry_delay = max(0.05, float(getattr(controller, "retry_delay_sec", 0.2)))
-    lock = getattr(controller, "lock")
-    owner_id = _controller_owner_id(controller)
-    for _attempt in range(attempts):
-        if lock.acquire(owner_id, source):
+def _wait_for_migration_lock(lock: FileWriteLock, owner_id: str, source: str, retry_delay: float = 0.2):
+    # Миграция с резервной копией может длиться дольше обычной записи в БД.
+    deadline = time.monotonic() + SCHEMA_MIGRATION_LOCK_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        if lock.acquire(owner_id=owner_id, source=source):
             return
-        time.sleep(retry_delay)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(retry_delay, remaining))
     raise sqlite3.OperationalError("Could not acquire db lock for schema migration")
+
+
+def _acquire_controller_file_lock(controller: Any, source: str):
+    retry_delay = max(0.05, float(getattr(controller, "retry_delay_sec", 0.2)))
+    _wait_for_migration_lock(controller.lock, _controller_owner_id(controller), source, retry_delay)
 
 
 def _acquire_file_lock(lock_path: str, owner_id: str, source: str, logger: logging.Logger):
     lock = FileWriteLock(lock_path, stale_timeout_sec=10 * 60, logger=logger)
-    deadline = time.time() + 60.0
-    while time.time() < deadline:
-        if lock.acquire(owner_id=owner_id, source=source):
-            return lock
-        time.sleep(0.2)
-    raise sqlite3.OperationalError(f"Could not acquire db lock for schema migration: {lock_path}")
+    try:
+        _wait_for_migration_lock(lock, owner_id, source)
+    except sqlite3.OperationalError as exc:
+        raise sqlite3.OperationalError(f"Could not acquire db lock for schema migration: {lock_path}") from exc
+    return lock
 
 
 @contextmanager
