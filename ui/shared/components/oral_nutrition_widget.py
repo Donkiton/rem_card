@@ -758,6 +758,14 @@ class OralNutritionWidget(QWidget):
         self.status_label.setVisible(bool(text))
 
     def _render(self):
+        self._render_active_diet()
+        self._render_intake_rows()
+        self._render_diet_versions()
+        self._render_daily_totals()
+        self._set_status_message("" if self.admission_id else "Нет пациента")
+        self._update_actions()
+
+    def _render_active_diet(self):
         active = self._snapshot.get("active")
         if active is None:
             self.active_title.setText("Диета не назначена")
@@ -785,6 +793,7 @@ class OralNutritionWidget(QWidget):
                 f"с {active.effective_from:%d.%m.%Y %H:%M}" + (f" · {' · '.join(tag for tag in tags if tag)}" if any(tags) else "")
             )
 
+    def _render_intake_rows(self):
         self.intake_table.setRowCount(0)
         planned_rows = list(self._snapshot.get("planned_rows") or [])
         for record in planned_rows:
@@ -830,6 +839,7 @@ class OralNutritionWidget(QWidget):
                  event.event_time.strftime("%H:%M"), "—", event.note or "", "Вне плана"],
             )
 
+    def _render_diet_versions(self):
         self.version_table.setRowCount(0)
         for version in reversed(list(self._snapshot.get("versions") or [])):
             row = self.version_table.rowCount()
@@ -840,6 +850,7 @@ class OralNutritionWidget(QWidget):
             self.version_table.setItem(row, 1, QTableWidgetItem(version.diet_name or version.diet_text))
             self.version_table.setItem(row, 2, QTableWidgetItem(version.change_note or ""))
 
+    def _render_daily_totals(self):
         self.totals_table.setRowCount(0)
         for item in self._snapshot.get("history") or []:
             row = self.totals_table.rowCount()
@@ -851,8 +862,6 @@ class OralNutritionWidget(QWidget):
             ]
             for column, value in enumerate(values):
                 self.totals_table.setItem(row, column, QTableWidgetItem(value))
-        self._set_status_message("" if self.admission_id else "Нет пациента")
-        self._update_actions()
 
     def _append_intake_row(self, planned_item, event, values):
         row = self.intake_table.rowCount()
