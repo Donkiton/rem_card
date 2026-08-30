@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QComboBox, QDateTimeEdit, QWidget
 
+from rem_card.ui.styles.component_styles import build_procedure_create_button_style
 from rem_card.ui.styles.theme import (
     FORM_DROPDOWN_ARROW_IMAGE,
     FORM_SPIN_DOWN_ARROW_IMAGE,
@@ -183,7 +184,7 @@ QTableWidget#OralTotalsTable QTableCornerButton::section {{
     background-color: #d9e2ec;
     border: none;
 }}
-"""
+""" + build_procedure_create_button_style("OralSummaryButton")
 
 
 def build_oral_nutrition_dialog_style(tokens: dict[str, str]) -> str:

@@ -28,6 +28,8 @@ from rem_card.ui.rem_card_sectors.sector_2b import Sector2b  # noqa: E402
 from rem_card.ui.shared.display_settings_storage import REMCARD_TABS  # noqa: E402
 from rem_card.ui.shared.custom_message_box import CustomMessageBox  # noqa: E402
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin  # noqa: E402
+from rem_card.ui.procedures.procedures_panel import ProceduresPanel  # noqa: E402
+from rem_card.ui.styles.component_styles import build_procedure_create_button_style  # noqa: E402
 
 
 def _application() -> QApplication:
@@ -68,9 +70,11 @@ def test_oral_nutrition_tab_uses_remcard_cards_and_action_roles():
     assert widget.outer_header.text() == "Пероральное питание"
     assert widget.outer_header.objectName() == "OralNutritionOuterHeader"
     assert widget.outer_body.objectName() == "OralNutritionOuterBody"
-    assert widget.assign_btn.objectName() == "OralPrimaryButton"
-    assert widget.undo_btn.objectName() == "OralSecondaryButton"
-    assert widget.clear_btn.objectName() == "OralDangerButton"
+    for button in (widget.assign_btn, widget.edit_version_btn, widget.clear_btn, widget.undo_btn):
+        assert button.objectName() == "OralSummaryButton"
+    assert widget.add_planned_fact_btn.objectName() == "OralPrimaryButton"
+    assert widget.edit_fact_btn.objectName() == "OralSecondaryButton"
+    assert widget.delete_fact_btn.objectName() == "OralDangerButton"
     assert widget.intake_table.objectName() == "OralIntakeTable"
     assert len(widget.findChildren(QFrame, "OralNutritionSectionCard")) == 3
     assert 'QFrame#OralNutritionSummary[dietState="assigned"]' not in widget.styleSheet()
@@ -78,6 +82,26 @@ def test_oral_nutrition_tab_uses_remcard_cards_and_action_roles():
     assert "border-radius" in widget.styleSheet()
     assert widget.lower_layout.stretch(0) == 1
     assert widget.lower_layout.stretch(1) == 1
+
+
+def test_diet_summary_buttons_reuse_procedure_create_style_without_icons():
+    _application()
+    widget = OralNutritionWidget(role="doctor")
+    procedures = ProceduresPanel()
+    procedure_style = build_procedure_create_button_style()
+    diet_style = build_procedure_create_button_style("OralSummaryButton")
+
+    assert procedure_style in procedures.findChild(QFrame, "procedures_frame").styleSheet()
+    assert diet_style in widget.styleSheet()
+    assert diet_style == procedure_style.replace("ProcedureCreateButton", "OralSummaryButton")
+    procedures.add_cvc_btn.ensurePolished()
+    for button in (widget.assign_btn, widget.edit_version_btn, widget.clear_btn, widget.undo_btn):
+        button.ensurePolished()
+        assert button.icon().isNull()
+        assert button.minimumHeight() == procedures.add_cvc_btn.minimumHeight()
+        assert button.minimumHeight() >= 36
+        assert button.maximumHeight() == procedures.add_cvc_btn.maximumHeight()
+        assert not button.styleSheet()
 
 
 def test_diet_table_headers_match_ventilation_palette():
@@ -117,7 +141,7 @@ def test_oral_nutrition_hides_redundant_plan_fact_footer_after_render():
 
     widget._render()
 
-    assert widget.status_label.text() == ""
+    assert widget.status_label.text().strip() == ""
     assert widget.status_label.isHidden()
 
 

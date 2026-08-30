@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -519,12 +520,9 @@ class OralNutritionWidget(QWidget):
         self.edit_version_btn = QPushButton("Изменить выбранное")
         self.clear_btn = QPushButton("Очистить факты")
         self.undo_btn = QPushButton("Отменить последнее действие")
-        self.assign_btn.setObjectName("OralPrimaryButton")
-        self.edit_version_btn.setObjectName("OralSecondaryButton")
-        self.clear_btn.setObjectName("OralDangerButton")
-        self.undo_btn.setObjectName("OralSecondaryButton")
         for button in (self.assign_btn, self.edit_version_btn, self.clear_btn, self.undo_btn):
-            button.setFixedHeight(34)
+            button.setObjectName("OralSummaryButton")
+            button.setMinimumHeight(36)
             summary_layout.addWidget(button)
         root.addWidget(self.summary_frame)
 
@@ -595,6 +593,10 @@ class OralNutritionWidget(QWidget):
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("OralNutritionStatus")
+        # Нижняя строка нужна только для ошибок и пояснений, не для фоновых операций.
+        status_policy = self.status_label.sizePolicy()
+        status_policy.setHorizontalPolicy(QSizePolicy.Ignored)
+        self.status_label.setSizePolicy(status_policy)
         self.status_label.hide()
         root.addWidget(self.status_label)
 
@@ -713,8 +715,6 @@ class OralNutritionWidget(QWidget):
         admission_id = int(self.admission_id)
         shift_date = self.shift_date
         service = self.service
-        self._set_status_message("Загрузка питания…")
-
         worker = AsyncCallThread(
             lambda: service.build_oral_nutrition_snapshot(admission_id, shift_date), parent=self
         )
@@ -754,6 +754,7 @@ class OralNutritionWidget(QWidget):
     def _set_status_message(self, message: str):
         text = str(message or "")
         self.status_label.setText(text)
+        self.status_label.setToolTip(text)
         self.status_label.setVisible(bool(text))
 
     def _render(self):
@@ -1200,7 +1201,6 @@ class OralNutritionWidget(QWidget):
         shift_date = self.shift_date
         self._write_pending = True
         self._update_actions()
-        self._set_status_message("Сохранение…")
 
         def success(_result=None):
             try:
