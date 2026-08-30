@@ -88,6 +88,7 @@ class RemCardLayoutManager(QWidget):
             self.sector_7vit_b,
             self.sector_7bal_b,
             self.sector_7events_b,
+            self.sector_7diet_b,
             self.sector_7ivl_b,
             self.sector_7proc_b,
             self.sector_7anal_b,
@@ -120,6 +121,7 @@ class RemCardLayoutManager(QWidget):
 
         from ..rem_card_sectors.sector_7tab_b import (
             Sector7anal_b,
+            Sector7diet_b,
             Sector7events_b,
             Sector7ivl_b,
             Sector7print_b,
@@ -127,6 +129,7 @@ class RemCardLayoutManager(QWidget):
         )
 
         self.sector_7events_b = Sector7events_b()
+        self.sector_7diet_b = Sector7diet_b()
         self.sector_7ivl_b = Sector7ivl_b()
         self.sector_7proc_b = Sector7proc_b()
         self.sector_7anal_b = Sector7anal_b()
@@ -243,6 +246,7 @@ class RemCardLayoutManager(QWidget):
         self.sector_7bal_b.setFixedHeight(target_h)
         self.sector_7na_b.setFixedHeight(target_h)
         self.sector_7events_b.setFixedHeight(target_h)
+        self.sector_7diet_b.setFixedHeight(target_h)
         self.sector_7ivl_b.setFixedHeight(target_h)
         self.sector_7proc_b.setFixedHeight(target_h)
         self.sector_7anal_b.setFixedHeight(target_h)
@@ -260,6 +264,7 @@ class RemCardLayoutManager(QWidget):
         self.sector_7b_stack.addWidget(self.sector_7proc_b)
         self.sector_7b_stack.addWidget(self.sector_7anal_b)
         self.sector_7b_stack.addWidget(self.sector_7print_b)
+        self.sector_7b_stack.addWidget(self.sector_7diet_b)
         self.sector_7b_mode_stack.addWidget(self.sector_7b_stack)
         self.sector_7b_mode_stack.setCurrentIndex(1)
         wrapper_layout.addWidget(self.sector_7b_mode_stack)
@@ -516,6 +521,7 @@ class RemCardLayoutManager(QWidget):
             self.sector_7bal_b,
             self.sector_7na_b,
             self.sector_7events_b,
+            self.sector_7diet_b,
             self.sector_7ivl_b,
             self.sector_7proc_b,
             self.sector_7anal_b,
@@ -1095,7 +1101,7 @@ class RemCardLayoutManager(QWidget):
             try:
                 # Всегда 240px
                 self.sector_3_4_wrapper.setFixedWidth(240)
-                self.sector_3_4_wrapper.setVisible(tab_name != "Диета")
+                self.sector_3_4_wrapper.setVisible(True)
                 self._apply_bottom_row_visibility(tab_name, is_orders=is_orders)
                 self.sector_3_4_spacer.show()
 
@@ -1153,7 +1159,7 @@ class RemCardLayoutManager(QWidget):
                 elif tab_name == "Диета":
                     self.vitals_stack.setCurrentIndex(8)
                     self.sector_7a_stack.setCurrentIndex(0)
-                    self.sector_7b_stack.setCurrentIndex(0)
+                    self.sector_7b_stack.setCurrentWidget(self.sector_7diet_b)
 
                 self._fix_timer.stop()
                 self._post_restore_fix()

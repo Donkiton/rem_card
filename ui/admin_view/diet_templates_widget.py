@@ -22,16 +22,24 @@ from rem_card.services.diet_service import diet_details, schedule_items
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.admin_view.dictionary_page_chrome import apply_dictionary_page_chrome
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 
 
-class DietTemplateDialog(BaseStyledDialog):
+class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     def __init__(self, template=None, parent=None):
         title = "Редактирование шаблона питания" if template else "Новый шаблон питания"
         super().__init__(title, parent)
+        self._init_saved_frameless_dialog(
+            "admin/diet_template_dialog_geometry_v2",
+            drag_area_height=42,
+        )
         self.setMinimumSize(760, 650)
+        self.resize(900, 760)
+        self.setSizeGripEnabled(True)
         self.template = template
         self.setup_ui()
         self.fill_data()
+        self._restore_saved_geometry()
 
     def setup_ui(self):
         self.name_input = QLineEdit()
@@ -61,15 +69,34 @@ class DietTemplateDialog(BaseStyledDialog):
         self.instructions_input = QTextEdit()
         self.instructions_input.setPlaceholderText("Особые указания по кормлению")
         self.instructions_input.setFixedHeight(60)
+        self.instructions_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.instructions_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.comment_input = QTextEdit()
         self.comment_input.setPlaceholderText("Общий комментарий к диете")
         self.comment_input.setFixedHeight(52)
+        self.comment_input.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.comment_input.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.schedule_table = QTableWidget()
+        self.schedule_table.setObjectName("DietTemplateScheduleTable")
         self.schedule_table.setColumnCount(4)
         self.schedule_table.setHorizontalHeaderLabels(["Приём пищи", "Время", "Объём, мл", "Примечание"])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.schedule_table.verticalHeader().setDefaultSectionSize(34)
+        self.schedule_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.schedule_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.schedule_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.schedule_table.setStyleSheet(
+            """
+            QTableWidget#DietTemplateScheduleTable {
+                outline: none;
+                selection-background-color: transparent;
+            }
+            QTableWidget#DietTemplateScheduleTable::item:selected {
+                background-color: transparent;
+            }
+            """
+        )
 
         form = QVBoxLayout()
         form.addWidget(QLabel("Название"))
@@ -111,14 +138,29 @@ class DietTemplateDialog(BaseStyledDialog):
         self.content_layout.addLayout(form)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        for btn in buttons.buttons():
-            btn.setObjectName("DialogOkBtn")
+        save_button = buttons.button(QDialogButtonBox.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.Cancel)
+        save_button.setText("Сохранить")
+        cancel_button.setText("Отмена")
+        for button in (save_button, cancel_button):
+            button.setObjectName("DialogOkBtn")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         self.content_layout.addWidget(buttons)
 
+        self.on_demand_check.toggled.connect(
+            lambda checked: self._clear_conflicting_check(self.no_fluids_check, checked)
+        )
+        self.no_fluids_check.toggled.connect(
+            lambda checked: self._clear_conflicting_check(self.on_demand_check, checked)
+        )
         self.btn_add_row.clicked.connect(lambda: self.add_schedule_row())
         self.btn_delete_row.clicked.connect(self.delete_selected_row)
+
+    @staticmethod
+    def _clear_conflicting_check(other_check: QCheckBox, checked: bool) -> None:
+        if checked and other_check.isChecked():
+            other_check.setChecked(False)
 
     def fill_data(self):
         if self.template:
@@ -166,6 +208,7 @@ class DietTemplateDialog(BaseStyledDialog):
         self.schedule_table.setCellWidget(row, 1, time_edit)
         self.schedule_table.setCellWidget(row, 2, amount_spin)
         self.schedule_table.setCellWidget(row, 3, note_input)
+        self.schedule_table.setRowHeight(row, 40)
 
     def delete_selected_row(self):
         row = self.schedule_table.currentRow()

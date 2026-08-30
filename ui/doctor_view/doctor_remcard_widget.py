@@ -20,9 +20,11 @@ from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.services.archive_readonly_service import create_archive_readonly_service
 from rem_card.ui.shared.orders_balance_adapter import (
     apply_current_order_mark_overrides,
-    build_balance_orders_from_orders_widget,
+    apply_orders_widget_mark_overrides,
+    project_balance_orders,
     oral_totals_from_runtime,
 )
+from rem_card.ui.shared.balance_snapshot_sync import BalanceSnapshotSync
 
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
@@ -162,6 +164,15 @@ class DoctorRemCardWidget(QWidget):
         self._balance_update_timer = QTimer(self)
         self._balance_update_timer.setSingleShot(True)
         self._balance_update_timer.timeout.connect(self._flush_scheduled_balance_update)
+        self._balance_snapshot_sync = BalanceSnapshotSync(
+            self,
+            context_provider=self._balance_snapshot_context,
+            load_snapshot=self._load_balance_snapshot_job,
+            apply_snapshot=self._apply_authoritative_balance_snapshot,
+            overlay_sequence_provider=self._balance_mark_override_sequence,
+            role="doctor",
+            delay_ms=self._balance_update_delay_ms,
+        )
 
         # Кнопка не опрашивает сетевой lock в фоне: проверка выполняется только при нажатии.
         self._add_patient_lock_watch_timer = None
@@ -814,6 +825,7 @@ class DoctorRemCardWidget(QWidget):
 
         snapshot = dict(request.get("snapshot") or {})
         previous_snapshot = self._card_snapshot_cache or {}
+        snapshot = self._balance_snapshot_sync.merge_card_snapshot(snapshot)
         snapshot_signature = self._card_snapshot_apply_signature(snapshot)
         if (
             snapshot_signature is not None
@@ -1113,58 +1125,74 @@ class DoctorRemCardWidget(QWidget):
             )
 
     def _refresh_balance_from_db(self) -> None:
-        try:
-            self._ensure_card_widgets_initialized()
-            self._bind_balance_widgets_if_ready()
-            if not self.admission_id:
-                return
-            snapshot = None
-            coordinator = self._get_read_coordinator()
-            if coordinator is not None and hasattr(coordinator, "load_balance_snapshot"):
-                snapshot = coordinator.load_balance_snapshot(
-                    self.admission_id,
-                    self._current_date,
-                    role="doctor",
-                    mode="archive" if self._archive_read_only_mode else "live",
-                    source_db=self._archive_source_db_path if self._archive_read_only_mode else "live",
-                    balance_only_committed=True,
-                    force_refresh=True,
-                )
-            elif hasattr(self.service, "build_balance_snapshot"):
-                snapshot = self.service.build_balance_snapshot(
-                    self.admission_id,
-                    self._current_date,
-                    include_change_cursor=True,
-                    balance_only_committed=True,
-                )
+        if hasattr(self, "_balance_snapshot_sync"):
+            self._balance_snapshot_sync.schedule()
 
-            if snapshot:
-                cached_snapshot = dict(self._card_snapshot_cache or {})
-                for key in ("effective_bounds", "fluids", "balance_runtime", "balance_calc", "change_id", "version"):
-                    if key in snapshot:
-                        cached_snapshot[key] = snapshot.get(key)
-                self._card_snapshot_cache = cached_snapshot
-                if snapshot.get("balance_runtime") is not None:
-                    self._balance_runtime_cache = snapshot.get("balance_runtime")
-                if (
-                    hasattr(self, "balance_controller")
-                    and snapshot.get("effective_bounds")
-                    and snapshot.get("fluids") is not None
-                ):
-                    self.balance_controller.apply_loaded_data(
-                        snapshot.get("fluids") or [],
-                        snapshot.get("effective_bounds"),
-                    )
-                else:
-                    self.update_balance_data()
-                return
+    def _balance_snapshot_context(self):
+        if self._is_closing or self._selection_mode != "card" or not self.admission_id or self._current_date is None:
+            return None
+        return (
+            int(self.admission_id),
+            self._current_date,
+            "archive" if self._archive_read_only_mode else "live",
+            self._archive_source_db_path if self._archive_read_only_mode else "live",
+            self.service,
+        )
 
-            if hasattr(self, "balance_controller"):
-                self.balance_controller.refresh()
-            else:
-                self.update_balance_data()
-        except Exception:
-            logger.exception("Doctor balance partial refresh failed")
+    def _balance_mark_override_sequence(self) -> int:
+        widget = getattr(getattr(self, "layout_manager", None), "orders_widget", None)
+        getter = getattr(widget, "balance_mark_override_sequence", None)
+        return int(getter() or 0) if callable(getter) else 0
+
+    def _load_balance_snapshot_job(self, request: dict) -> dict:
+        admission_id, shift_date, mode, source_db, service = request["context"]
+        coordinator = getattr(service, "read_coordinator", None)
+        if coordinator is not None and hasattr(coordinator, "load_balance_snapshot"):
+            return coordinator.load_balance_snapshot(
+                admission_id,
+                shift_date,
+                role="doctor",
+                mode=mode,
+                source_db=source_db,
+                balance_only_committed=True,
+                force_refresh=True,
+            )
+        return service.build_balance_snapshot(
+            admission_id,
+            shift_date,
+            include_change_cursor=True,
+            balance_only_committed=True,
+        )
+
+    def _apply_authoritative_balance_snapshot(self, snapshot: dict, request: dict) -> None:
+        if not snapshot:
+            return
+        cached_snapshot = dict(self._card_snapshot_cache or {})
+        for key in BalanceSnapshotSync.BALANCE_FIELDS:
+            if key in snapshot:
+                cached_snapshot[key] = snapshot.get(key)
+        self._card_snapshot_cache = cached_snapshot
+        if snapshot.get("balance_runtime") is not None:
+            self._balance_runtime_cache = snapshot.get("balance_runtime")
+        self._last_change_id = max(
+            int(self._last_change_id or 0),
+            int(snapshot.get("change_id") or snapshot.get("version") or 0),
+        )
+        widget = getattr(getattr(self, "layout_manager", None), "orders_widget", None)
+        acknowledge = getattr(widget, "acknowledge_balance_mark_overrides", None)
+        if callable(acknowledge):
+            acknowledge(request.get("overlay_sequence") or 0)
+        if (
+            hasattr(self, "balance_controller")
+            and snapshot.get("effective_bounds")
+            and snapshot.get("fluids") is not None
+        ):
+            self.balance_controller.apply_loaded_data(
+                snapshot.get("fluids") or [],
+                snapshot.get("effective_bounds"),
+            )
+        else:
+            self.update_balance_data()
 
     def _refresh_status_from_db(self) -> None:
         try:
@@ -1365,6 +1393,7 @@ class DoctorRemCardWidget(QWidget):
             )
             return
         if self._is_local_orders_force_payload(payload, changed_entities):
+            self._balance_snapshot_sync.schedule(payload.get("last_change_id", 0))
             if hasattr(self.layout_manager, 'orders_widget'):
                 try:
                     self.layout_manager.orders_widget.handle_data_changes(
@@ -1382,6 +1411,9 @@ class DoctorRemCardWidget(QWidget):
             )
             self._schedule_balance_update()
             return
+
+        if sync_actions.get("balance_refresh") or full_refresh_required:
+            self._balance_snapshot_sync.schedule(payload.get("last_change_id", 0))
 
         if "admissions" in changed_entities and sync_actions.get("patient_header_refresh"):
             self._refresh_emergency_notice_from_db()
@@ -1483,6 +1515,14 @@ class DoctorRemCardWidget(QWidget):
         except Exception:
             return None
         if getattr(widget, "shift_date", None) != self._current_date:
+            return None
+        snapshot = getattr(widget, "_snapshot", None)
+        if isinstance(snapshot, dict) and "events" in snapshot and "planned_rows" in snapshot:
+            return (
+                list(snapshot.get("events") or []),
+                list(snapshot.get("planned_rows") or []),
+            )
+        if not hasattr(widget, "_events") and not hasattr(widget, "_plan"):
             return None
         return (
             list(getattr(widget, "_events", []) or []),
@@ -1956,6 +1996,7 @@ class DoctorRemCardWidget(QWidget):
         return orders_context_unchanged
 
     def _reset_patient_card_context_state(self, admission_id, date, balance_patient_period_manual_mode):
+        self._balance_snapshot_sync.reset()
         self.admission_id = admission_id
         self.current_date = date
         self._balance_patient_period_manual_mode = bool(balance_patient_period_manual_mode)
@@ -2584,6 +2625,8 @@ class DoctorRemCardWidget(QWidget):
         ow.ordersPresenceChanged.connect(self._schedule_balance_update)
         if hasattr(ow, "localBalanceChanged"):
             ow.localBalanceChanged.connect(self._schedule_balance_update)
+        if hasattr(ow, "balanceSnapshotRequired"):
+            ow.balanceSnapshotRequired.connect(self._refresh_balance_from_db)
         self.controls.btn_save.clicked.connect(ow.finalize_card)
         self.controls.btn_clean_sheet.clicked.connect(self.on_clean_sheet_clicked)
         self.controls.btn_clear.clicked.connect(self.on_clear_orders_clicked)
@@ -2814,7 +2857,8 @@ class DoctorRemCardWidget(QWidget):
             if hasattr(self.balance_controller, "set_patient_period_manual_mode"):
                 self.balance_controller.set_patient_period_manual_mode(self._balance_patient_period_manual_mode)
         if not self._apply_balance_snapshot_if_available():
-            self._request_card_snapshot(load_scope="full")
+            self._refresh_balance_from_db()
+        self._balance_snapshot_sync.ensure_current()
 
     def on_show_card_clicked(self):
         target_date = self._resolve_current_or_latest_card_date(self.admission_id)
@@ -3269,13 +3313,23 @@ class DoctorRemCardWidget(QWidget):
         if not runtime:
             return
         committed_orders = runtime.get("orders") or []
-        local_orders = build_balance_orders_from_orders_widget(
+        orders = project_balance_orders(
+            committed_orders,
             getattr(self.layout_manager, "orders_widget", None),
             self.admission_id,
             self._current_date,
-            tab_active=self._is_orders_tab_active(),
         )
-        orders = local_orders if local_orders is not None else committed_orders
+        orders_widget = getattr(self.layout_manager, "orders_widget", None)
+        marked_orders = apply_orders_widget_mark_overrides(
+            orders, orders_widget, self.admission_id, self._current_date,
+        )
+        if marked_orders is not None:
+            orders = marked_orders
+        marked_committed = apply_orders_widget_mark_overrides(
+            committed_orders, orders_widget, self.admission_id, self._current_date,
+        )
+        if marked_committed is not None:
+            committed_orders = marked_committed
         nurse_orders_widget = getattr(self.layout_manager, "nurse_orders_manager", None)
         panel_orders = apply_current_order_mark_overrides(
             orders,
@@ -4189,6 +4243,7 @@ class DoctorRemCardWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        self._balance_snapshot_sync.shutdown()
         self._shutdown_snapshot_worker()
         if hasattr(self, "chart") and self.chart and hasattr(self.chart, "shutdown"):
             self.chart.shutdown()

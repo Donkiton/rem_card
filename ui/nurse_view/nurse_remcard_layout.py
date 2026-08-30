@@ -12,6 +12,7 @@ from ..shared.layout_components import CurrentPageStack, SectorFactory, Splitter
 from ..shared.w1_handoff import W1LayoutHandoff
 from .components.nurse_beds_selection_widget import NurseBedsSelectionWidget
 from ..rem_card_sectors.sector_w1a import SectorW1a
+from ..rem_card_sectors.sector_7tab_b import Sector7diet_b
 
 
 # Нижний ряд 5/6/7a оставлен в дереве виджетов для быстрого восстановления.
@@ -77,7 +78,7 @@ class NurseRemCardLayoutManager(QWidget):
 
     def _align_nurse_7b_chrome(self):
         margins = self.sector_7na_b_nurse.main_layout_v.contentsMargins()
-        for sector in (self.sector_7vit_b, self.sector_7bal_b):
+        for sector in (self.sector_7vit_b, self.sector_7bal_b, self.sector_7diet_b):
             sector.main_layout_v.setContentsMargins(
                 margins.left(),
                 margins.top(),
@@ -117,6 +118,7 @@ class NurseRemCardLayoutManager(QWidget):
         
         sectors['sector_7na_b_nurse'] = NurseSector7naB()
         sectors['sector_7na_b_nurse'].setMinimumHeight(120)
+        sectors['sector_7diet_b'] = Sector7diet_b()
 
         self.sector_events = None
             
@@ -224,6 +226,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.sector_7bal_a.setFixedHeight(target_h)
         self.sector_7bal_b.setFixedHeight(target_h)
         self.sector_7na_b_nurse.setFixedHeight(target_h)
+        self.sector_7diet_b.setFixedHeight(target_h)
         
         self.sector_7a_stack = QStackedWidget()
         self.sector_7a_stack.addWidget(self.sector_7vit_a)
@@ -231,6 +234,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.sector_7b_stack = QStackedWidget()
         self.sector_7b_stack.addWidget(self.sector_7vit_b)
         self.sector_7b_stack.addWidget(self.sector_7bal_b)
+        self.sector_7b_stack.addWidget(self.sector_7diet_b)
         self.sector_7b_mode_stack = QStackedWidget()
         self.sector_7b_mode_stack.addWidget(self.sector_7na_b_nurse)
         self.sector_7b_mode_stack.addWidget(self.sector_7b_stack)
@@ -439,6 +443,7 @@ class NurseRemCardLayoutManager(QWidget):
             self.sector_7vit_b,
             self.sector_7bal_b,
             self.sector_7na_b_nurse,
+            self.sector_7diet_b,
             self.sector_7b_stack,
             self.sector_7b_mode_stack,
         ):
@@ -938,7 +943,7 @@ class NurseRemCardLayoutManager(QWidget):
                 if updates_enabled:
                     self.setUpdatesEnabled(False)
                 try:
-                    self.sector_3_4_wrapper.setVisible(tab_name != "Диета")
+                    self.sector_3_4_wrapper.setVisible(True)
                     if is_orders:
                         self.ensure_orders_widget()
                     self.vitals_stack.setCurrentIndex(idx)
@@ -981,6 +986,9 @@ class NurseRemCardLayoutManager(QWidget):
                         self._ensure_print_tab_initialized()
                         if hasattr(self, 'sector_print') and hasattr(self.sector_print, 'refresh'):
                             self.sector_print.refresh()
+                    elif tab_name == "Диета":
+                        self.sector_7a_stack.setCurrentIndex(0)
+                        self.sector_7b_stack.setCurrentWidget(self.sector_7diet_b)
                     else:
                         self.sector_7a_stack.setCurrentIndex(0)
                         self.sector_7b_stack.setCurrentIndex(0)

@@ -408,6 +408,41 @@ class DietPlanVersionDAO:
             row = self.db.fetch_one_remcard(query, params)
         return self._map(row) if row else None
 
+    def delete_by_id(
+        self,
+        version_id: int,
+        *,
+        expected_version: Optional[int] = None,
+        cursor=None,
+    ) -> None:
+        if cursor is None:
+            with self.db.remcard_transaction(source="diet_plan_version_delete") as cur:
+                self.delete_by_id(
+                    version_id,
+                    expected_version=expected_version,
+                    cursor=cur,
+                )
+                return
+
+        params = [int(version_id)]
+        where_version = ""
+        if expected_version is not None and int(expected_version) > 0:
+            where_version = " AND version = ?"
+            params.append(int(expected_version))
+
+        # Фактическое потребление является самостоятельной медицинской записью
+        # и при удалении назначения должно сохраниться без устаревшей ссылки.
+        cursor.execute(
+            "UPDATE oral_intake_events SET plan_version_id = NULL WHERE plan_version_id = ?",
+            (int(version_id),),
+        )
+        cursor.execute(
+            f"DELETE FROM diet_plan_versions WHERE id = ?{where_version}",
+            tuple(params),
+        )
+        if cursor.rowcount != 1:
+            raise OptimisticLockError("Назначение диеты было изменено или удалено другим пользователем")
+
     @staticmethod
     def _map(row) -> DietPlanVersionDTO:
         rd = dict(row)
@@ -454,6 +489,45 @@ class OralIntakeDAO:
         else:
             row = self.db.fetch_one_remcard(query, params)
         return self._map(row) if row else None
+
+    def get_unplanned_event_at(
+        self,
+        admission_id: int,
+        event_time: datetime,
+        cursor=None,
+    ) -> Optional[OralIntakeEventDTO]:
+        query = """
+            SELECT *
+            FROM oral_intake_events
+            WHERE admission_id = ?
+              AND DATETIME(event_time) = DATETIME(?)
+              AND COALESCE(entry_kind, 'unplanned') = 'unplanned'
+            ORDER BY id DESC
+            LIMIT 1
+        """
+        params = (int(admission_id), _dt_to_db(event_time))
+        if cursor is not None:
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+        else:
+            row = self.db.fetch_one_remcard(query, params)
+        return self._map(row) if row else None
+
+    def upsert_unplanned_event(self, dto: OralIntakeEventDTO, cursor=None) -> OralIntakeEventDTO:
+        if cursor is None:
+            with self.db.remcard_transaction(source="oral_intake_unplanned_upsert") as cur:
+                return self.upsert_unplanned_event(dto, cursor=cur)
+
+        existing = self.get_unplanned_event_at(dto.admission_id, dto.event_time, cursor=cursor)
+        if existing is None:
+            return self.create_event(dto, cursor=cursor)
+
+        dto.id = existing.id
+        return self.update_event_by_id(
+            dto,
+            expected_version=existing.version,
+            cursor=cursor,
+        )
 
     def upsert_event(
         self,

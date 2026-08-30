@@ -98,13 +98,6 @@ def _event_value(event, name: str):
     return getattr(event, name, None)
 
 
-def _minute_key(value) -> str | None:
-    dt = _parse_datetime(value)
-    if dt is None:
-        return None
-    return dt.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
-
-
 def _plan_schedule_source(plan):
     if plan is None:
         return None
@@ -154,32 +147,29 @@ def _runtime_plan(runtime: dict):
 
 def _plan_aware_oral_totals(runtime: dict, events, current_time, plan) -> tuple[float, float]:
     current_limit = _parse_datetime(current_time)
-    if current_limit is not None:
-        current_limit = current_limit.replace(second=0, microsecond=0)
+    start_dt = _parse_datetime(runtime.get("oral_start_dt")) or _parse_datetime(runtime.get("start_dt"))
+    end_dt = _parse_datetime(runtime.get("oral_end_dt")) or _parse_datetime(runtime.get("end_dt"))
 
-    current = 0.0
+    actual = 0.0
     for event in events or []:
         event_time = _parse_datetime(_event_value(event, "event_time"))
-        if event_time is None or current_limit is None:
+        if event_time is None:
             continue
-        if event_time.replace(second=0, microsecond=0) <= current_limit:
-            current += _number(_event_value(event, "amount_ml"))
+        if start_dt is not None and event_time < start_dt:
+            continue
+        if end_dt is not None and event_time >= end_dt:
+            continue
+        actual += _number(_event_value(event, "amount_ml"))
 
     items = _plan_items(plan)
-    if not items:
-        daily = sum(_number(_event_value(event, "amount_ml")) for event in events or [])
-        return round(current, 1), round(daily, 1)
-
     shift_date = (
         _parse_datetime(runtime.get("oral_shift_date"))
         or _parse_datetime(runtime.get("start_dt"))
         or current_limit
         or datetime.now()
     )
-    start_dt = _parse_datetime(runtime.get("oral_start_dt")) or _parse_datetime(runtime.get("start_dt"))
-    end_dt = _parse_datetime(runtime.get("oral_end_dt")) or _parse_datetime(runtime.get("end_dt"))
 
-    planned_by_time = {}
+    planned = 0.0
     for item in items:
         try:
             planned_dt = ShiftService.resolve_datetime(str(item["time"]), shift_date)
@@ -189,18 +179,9 @@ def _plan_aware_oral_totals(runtime: dict, events, current_time, plan) -> tuple[
             continue
         if end_dt is not None and planned_dt >= end_dt:
             continue
-        key = _minute_key(planned_dt)
-        if key:
-            planned_by_time[key] = planned_by_time.get(key, 0.0) + _number(item.get("amount"))
+        planned += _number(item.get("amount"))
 
-    unplanned_daily = 0.0
-    for event in events or []:
-        event_key = _minute_key(_event_value(event, "event_time"))
-        if event_key not in planned_by_time:
-            unplanned_daily += _number(_event_value(event, "amount_ml"))
-
-    daily = sum(planned_by_time.values()) + unplanned_daily
-    return round(current, 1), round(daily, 1)
+    return round(actual, 1), round(planned, 1)
 
 
 def oral_totals_from_runtime(
@@ -222,7 +203,9 @@ def oral_totals_from_runtime(
         return _plan_aware_oral_totals(runtime, events, current_time, plan)
 
     totals = runtime.get("oral_totals") or {}
-    return round(_number(totals.get("current")), 1), round(_number(totals.get("daily")), 1)
+    actual = totals.get("actual", totals.get("current"))
+    planned = totals.get("planned", totals.get("daily"))
+    return round(_number(actual), 1), round(_number(planned), 1)
 
 
 def _current_orders_mark_overrides(current_orders_widget):
@@ -284,6 +267,55 @@ def apply_current_order_mark_overrides(
     return patched_orders
 
 
+def apply_orders_widget_mark_overrides(
+    orders,
+    orders_widget,
+    admission_id,
+    shift_date,
+):
+    """Patch execution fields only, preserving the authoritative order structure."""
+    if orders_widget is None:
+        return None
+    model = getattr(orders_widget, "model", None)
+    if model is None:
+        return None
+    try:
+        if int(getattr(model, "admission_id", 0) or 0) != int(admission_id or 0):
+            return None
+    except Exception:
+        return None
+    if not _same_shift(model, shift_date):
+        return None
+
+    getter = getattr(orders_widget, "balance_mark_overrides", None)
+    overrides = getter() if callable(getter) else getattr(orders_widget, "_balance_mark_overrides", None)
+    if not overrides:
+        return None
+
+    patched_orders = []
+    for order in orders or []:
+        order_copy = copy(order)
+        patched_admins = []
+        for admin in getattr(order, "administrations", []) or []:
+            admin_copy = copy(admin)
+            try:
+                override = overrides.get(int(getattr(admin, "id", 0) or 0))
+            except Exception:
+                override = None
+            if override is not None:
+                mark = str(override.get("mark") or "")
+                admin_copy.comment = mark if mark in _NURSE_MARKS else ""
+                admin_copy.actual_time = (
+                    _parse_datetime(override.get("actual_time"))
+                    if admin_copy.comment
+                    else None
+                )
+            patched_admins.append(admin_copy)
+        order_copy.administrations = patched_admins
+        patched_orders.append(order_copy)
+    return patched_orders
+
+
 def build_balance_orders_from_orders_widget(
     orders_widget,
     admission_id,
@@ -335,3 +367,49 @@ def build_balance_orders_from_orders_widget(
         balance_orders.append(order_copy)
 
     return balance_orders
+
+
+def project_balance_orders(committed_orders, orders_widget, admission_id, shift_date):
+    """Use the shared snapshot everywhere, layering only actual local drafts.
+
+    The visible table may lag behind a background balance read. Its unedited
+    rows and execution marks must not replace newer authoritative data.
+    """
+    committed_orders = list(committed_orders or [])
+    has_drafts = getattr(orders_widget, "has_drafts", None)
+    if not callable(has_drafts) or not has_drafts():
+        return committed_orders
+    local = build_balance_orders_from_orders_widget(
+        orders_widget, admission_id, shift_date, tab_active=False,
+    )
+    if local is None:
+        return committed_orders
+
+    dirty_ids = getattr(orders_widget, "_local_draft_dirty_order_ids", None)
+    if dirty_ids is not None:
+        dirty_ids = set(dirty_ids)
+        dirty_ids.update(key[0] for key in getattr(orders_widget, "_local_draft_dirty_admin_keys", ()))
+        dirty_ids.update(getattr(orders_widget, "_local_deleted_orders", {}))
+        local = [order for order in local if order.id in dirty_ids]
+        local += [order for order in committed_orders if order.id not in dirty_ids]
+
+    committed_admins = {
+        admin.id: admin
+        for order in committed_orders
+        for admin in getattr(order, "administrations", ()) or ()
+        if getattr(admin, "id", None) is not None
+    }
+    projected = []
+    for order in local:
+        order_copy = copy(order)
+        admins = []
+        for admin in getattr(order, "administrations", ()) or ():
+            admin_copy = copy(admin)
+            committed = committed_admins.get(getattr(admin, "id", None))
+            if committed is not None:
+                admin_copy.comment = committed.comment
+                admin_copy.actual_time = committed.actual_time
+            admins.append(admin_copy)
+        order_copy.administrations = admins
+        projected.append(order_copy)
+    return projected

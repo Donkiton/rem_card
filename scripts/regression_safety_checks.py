@@ -4071,8 +4071,12 @@ def _check_card_bottom_row_hidden_on_vitals_open(temp_root: str) -> tuple[bool, 
 
         layout.set_active_tab("Баланс жидкости", source="refresh")
         app.processEvents()
-        if layout.bottom_row.isHidden():
-            return False, "bottom row must still be visible on balance tab"
+        # The obsolete empty 5/6/7a row is intentionally hidden on every tab;
+        # the balance summary lives in the separate right-hand wrapper.
+        if not layout.bottom_row.isHidden():
+            return False, "obsolete empty bottom row must remain hidden on balance tab"
+        if layout.sector_3_4_wrapper.isHidden():
+            return False, "balance summary sidebar must remain visible on balance tab"
     finally:
         if layout is not None:
             layout.close()
@@ -15903,7 +15907,7 @@ def _check_orders_balance_adapter_uses_local_state(temp_root: str) -> tuple[bool
         },
         shift_start + timedelta(hours=2),
     )
-    if (oral_current, oral_daily) != (100.0, 300.0):
+    if (oral_current, oral_daily) != (300.0, 0.0):
         return False, f"cached oral totals mismatch: {(oral_current, oral_daily)}"
 
     oral_plan_schedule = [
@@ -15946,7 +15950,7 @@ def _check_orders_balance_adapter_uses_local_state(temp_root: str) -> tuple[bool
         },
         shift_start + timedelta(hours=2),
     )
-    if (unplanned_current, unplanned_daily) != (100.0, 600.0):
+    if (unplanned_current, unplanned_daily) != (100.0, 500.0):
         return False, f"planned oral totals mismatch with unplanned fact: {(unplanned_current, unplanned_daily)}"
 
     explicit_local_plan_current, explicit_local_plan_daily = oral_totals_from_runtime(
@@ -16025,6 +16029,8 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
             return False, f"{path.name}: local order force must not synchronously reload balance from DB"
         if "_schedule_balance_update()" not in local_force_block:
             return False, f"{path.name}: local order force must schedule local balance update"
+        if '_balance_snapshot_sync.schedule(payload.get("last_change_id", 0))' not in local_force_block:
+            return False, f"{path.name}: local order force must schedule cursor-guarded balance read"
         if "_refresh_current_orders_from_payload(payload)" not in local_force_block:
             return False, f"{path.name}: local order force must refresh sector 1a current orders"
         refresh_orders_method = methods.get("_refresh_orders_from_payload", "")
@@ -16050,6 +16056,10 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
             return False, f"{path.name}: balance UI update must not synchronously read oral totals from DB"
         if "oral_totals_from_runtime" not in balance_method:
             return False, f"{path.name}: balance UI update must use cached oral runtime"
+        if "project_balance_orders(" not in balance_method or "apply_orders_widget_mark_overrides(" not in balance_method:
+            return False, f"{path.name}: balance must project drafts and execution over authoritative state"
+        if "_balance_snapshot_sync.schedule()" not in methods.get("_refresh_balance_from_db", ""):
+            return False, f"{path.name}: balance refresh must be asynchronous"
     return True, "ok"
 
 

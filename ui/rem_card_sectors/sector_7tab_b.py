@@ -18,6 +18,11 @@ class Sector7events_b(Sector7TabB):
         super().__init__("Движение", parent)
 
 
+class Sector7diet_b(Sector7TabB):
+    def __init__(self, parent=None):
+        super().__init__("Диеты", parent)
+
+
 class Sector7ivl_b(Sector7TabB):
     def __init__(self, parent=None):
         super().__init__("ИВЛ", parent)

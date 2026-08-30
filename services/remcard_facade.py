@@ -27,7 +27,7 @@ from ..data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabOrderStatus
 from .patient_service import PatientService
 from .vital_service import VitalService
 from .fluid_service import FluidService
-from .diet_service import DietPlanService, DietTemplateService, OralIntakeService, schedule_items
+from .diet_service import DietPlanService, DietTemplateService, OralIntakeService
 from .order_service import OrderService
 from .shift_service import ShiftService
 from .ventilation_service import VentilationService
@@ -1205,7 +1205,7 @@ class RemCardService(QObject):
         calc_time = now if start_dt <= now < end_dt else end_dt
         oral_events = []
         oral_plan_schedule = []
-        oral_totals = {"current": 0.0, "daily": 0.0}
+        oral_totals = {"actual": 0.0, "planned": 0.0, "current": 0.0, "daily": 0.0}
         oral_start_dt, oral_end_dt = start_dt, end_dt
         try:
             if hasattr(self._vitals, "get_effective_bounds_for_patient"):
@@ -1218,26 +1218,36 @@ class RemCardService(QObject):
             logger.warning("Failed to resolve oral intake bounds for balance snapshot: %s", exc)
         try:
             loaded_oral_events = self.get_oral_intake_events(admission_id, shift_date)
-            oral_plan = self.get_diet_plan(admission_id, shift_date)
-            if oral_plan is not None:
-                oral_plan_schedule = schedule_items(getattr(oral_plan, "schedule_json", "[]"))
+            oral_plan_schedule = self.get_planned_oral_items(admission_id, shift_date)
+            actual_total = 0.0
             for event in loaded_oral_events:
                 amount = float(getattr(event, "amount_ml", 0.0) or 0.0)
                 event_time = getattr(event, "event_time", None)
+                if event_time is not None and oral_start_dt <= event_time < oral_end_dt:
+                    actual_total += amount
                 oral_events.append(
                     {
                         "event_time": event_time.isoformat() if event_time is not None else None,
                         "amount_ml": amount,
                     }
                 )
-            oral_totals = self._oral_intake._calculate_totals(
-                loaded_oral_events,
-                oral_plan,
-                shift_date,
-                oral_start_dt,
-                oral_end_dt,
-                calc_time,
-            )
+            planned_total = 0.0
+            for item in oral_plan_schedule:
+                planned_dt = item.get("planned_dt")
+                if not isinstance(planned_dt, datetime):
+                    try:
+                        planned_dt = ShiftService.resolve_datetime(str(item.get("time") or ""), shift_date)
+                    except Exception:
+                        continue
+                if oral_start_dt <= planned_dt < oral_end_dt:
+                    planned_total += float(item.get("amount") or 0.0)
+            oral_totals = {
+                "actual": round(actual_total, 1),
+                "planned": round(planned_total, 1),
+                # Старые имена оставлены для совместимости с сохранёнными снимками.
+                "current": round(actual_total, 1),
+                "daily": round(planned_total, 1),
+            }
         except Exception as exc:
             logger.warning("Failed to load oral intake runtime for balance snapshot: %s", exc)
         balance_calc = BalanceCalculator.calculate(
@@ -1706,6 +1716,18 @@ class RemCardService(QObject):
             raise ValueError(message)
         return self._diet_plan.assign_version(admission_id, effective_from, **kwargs)
 
+    def delete_diet_version(
+        self,
+        admission_id: int,
+        version_id: int,
+        expected_version: Optional[int] = None,
+    ) -> None:
+        return self._diet_plan.delete_version(
+            admission_id,
+            version_id,
+            expected_version=expected_version,
+        )
+
     def get_planned_oral_items(self, admission_id: int, shift_date: datetime):
         return self._diet_plan.planned_items_for_day(admission_id, shift_date)
 
@@ -1727,6 +1749,7 @@ class RemCardService(QObject):
     def clear_oral_intake_facts(self, admission_id: int, before: Optional[datetime] = None) -> int:
         return self._oral_intake.clear_facts(admission_id, before=before)
 
+    @read_scoped_snapshot
     def build_oral_nutrition_snapshot(self, admission_id: int, shift_date: datetime) -> dict:
         versions = self.get_diet_plan_versions(admission_id, shift_date)
         planned = self.get_planned_oral_items(admission_id, shift_date)

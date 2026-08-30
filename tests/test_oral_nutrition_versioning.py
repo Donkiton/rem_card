@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from rem_card.app.unified_db_schema import ensure_unified_schema, is_unified_schema_ready
 from rem_card.data.dao.diet_dao import DietPlanDAO, DietPlanVersionDAO, OralIntakeDAO
 from rem_card.data.dto.remcard_dto import DietTemplateDTO
-from rem_card.services.diet_service import DietPlanService, OralIntakeService
+from rem_card.services.diet_service import DietPlanService, OralIntakeService, diet_details
+from rem_card.services.remcard_facade import RemCardService
 
 
 class SQLiteRemcardDB:
@@ -94,6 +95,10 @@ def _services():
     return db, plans, oral
 
 
+def test_oral_nutrition_snapshot_uses_shared_read_scope():
+    assert hasattr(RemCardService.build_oral_nutrition_snapshot, "__wrapped__")
+
+
 def test_diet_change_applies_from_effective_time_and_can_be_backdated():
     _db, plans, _oral = _services()
     day = datetime(2026, 8, 29, 10, 0)
@@ -112,6 +117,103 @@ def test_diet_change_applies_from_effective_time_and_can_be_backdated():
     assert [item["key"] for item in plans.planned_items_for_day(1, day)] == ["breakfast"]
 
 
+def test_diet_assignment_and_later_changes_continue_across_future_medical_days():
+    _db, plans, _oral = _services()
+    first_day = datetime(2026, 8, 29, 8, 0)
+    initial = plans.assign_version(1, first_day, template_id=9)
+
+    for days_ahead in (0, 1, 7, 30):
+        check_day = first_day + timedelta(days=days_ahead)
+        assert [item["key"] for item in plans.planned_items_for_day(1, check_day)] == [
+            "breakfast",
+            "lunch",
+            "dinner",
+        ]
+        assert plans.active_at(1, check_day.replace(hour=12)).id == initial.id
+
+    change_time = first_day + timedelta(days=2, hours=5)
+    changed = plans.assign_version(
+        1,
+        change_time,
+        diet_name="Вечерняя диета",
+        diet_text="Питание вечером",
+        schedule_json=[
+            {"key": "evening", "meal": "Вечерний приём", "time": "18:00", "amount": 180, "note": ""}
+        ],
+        details_json={"consistency": "Мягкая", "on_demand": True, "daily_fluid_ml": 1200},
+        change_note="Смена диеты",
+    )
+
+    change_day_items = plans.planned_items_for_day(1, change_time)
+    assert [item["key"] for item in change_day_items] == ["breakfast", "lunch", "evening"]
+    assert plans.active_at(1, change_time - timedelta(minutes=1)).id == initial.id
+    assert plans.active_at(1, change_time).id == changed.id
+
+    future_day = first_day + timedelta(days=12)
+    assert [item["key"] for item in plans.planned_items_for_day(1, future_day)] == ["evening"]
+    future_active = plans.active_at(1, future_day.replace(hour=20))
+    assert future_active.id == changed.id
+    assert future_active.diet_name == "Вечерняя диета"
+    assert future_active.change_note == "Смена диеты"
+    future_details = diet_details(future_active.details_json)
+    assert future_details["consistency"] == "Мягкая"
+    assert future_details["on_demand"] is True
+    assert future_details["daily_fluid_ml"] == 1200
+
+    edited = plans.assign_version(
+        1,
+        change_time,
+        version_id=changed.id,
+        expected_version=changed.version,
+        diet_name="Исправленная диета",
+        diet_text="Исправленные параметры",
+        schedule_json=[
+            {"key": "late", "meal": "Поздний приём", "time": "19:00", "amount": 200, "note": ""}
+        ],
+        details_json={"consistency": "Протёртая", "no_fluids": True},
+        change_note="Исправление назначения",
+    )
+
+    assert edited.version == changed.version + 1
+    assert [item["key"] for item in plans.planned_items_for_day(1, future_day)] == ["late"]
+    edited_future = plans.active_at(1, future_day.replace(hour=20))
+    assert edited_future.id == changed.id
+    assert edited_future.diet_name == "Исправленная диета"
+    edited_details = diet_details(edited_future.details_json)
+    assert edited_details["consistency"] == "Протёртая"
+    assert edited_details["no_fluids"] is True
+
+
+def test_deleting_diet_change_restores_previous_assignment_and_preserves_intake_fact():
+    _db, plans, oral = _services()
+    shift_start = datetime(2026, 8, 29, 8, 0)
+    initial = plans.assign_version(1, shift_start, template_id=9)
+    changed = plans.assign_version(1, datetime(2026, 8, 29, 13, 0), template_id=10)
+    fact = oral.create_fact(
+        1,
+        datetime(2026, 8, 29, 14, 0),
+        50,
+        plan_version_id=changed.id,
+        planned_item_key="water",
+        meal_name="Вода",
+        entry_kind="planned",
+    )
+
+    plans.delete_version(1, changed.id, expected_version=changed.version)
+
+    assert [version.id for version in plans.list_all_versions(1)] == [initial.id]
+    assert plans.active_at(1, datetime(2026, 8, 29, 14, 0)).id == initial.id
+    assert [item["key"] for item in plans.planned_items_for_day(1, shift_start)] == [
+        "breakfast",
+        "lunch",
+        "dinner",
+    ]
+    preserved = oral.get_events(1, shift_start)
+    assert len(preserved) == 1
+    assert preserved[0].id == fact.id
+    assert preserved[0].plan_version_id is None
+
+
 def test_multiple_facts_in_one_minute_are_separate_and_aggregate_in_balance():
     _db, plans, oral = _services()
     plans.assign_version(1, datetime(2026, 8, 29, 8, 0), template_id=9)
@@ -125,6 +227,81 @@ def test_multiple_facts_in_one_minute_are_separate_and_aggregate_in_balance():
     assert oral.get_totals(1, datetime(2026, 8, 29, 12, 0), current_time=moment)["current"] == 150
 
 
+def test_later_unplanned_fact_at_same_time_replaces_previous_value():
+    _db, plans, oral = _services()
+    plans.assign_version(1, datetime(2026, 8, 29, 8, 0), template_id=9)
+    moment = datetime(2026, 8, 29, 12, 20)
+    planned = oral.create_fact(
+        1,
+        moment,
+        100,
+        planned_item_key="lunch",
+        plan_version_id=1,
+        entry_kind="planned",
+    )
+    original = oral.create_fact(
+        1,
+        moment,
+        50,
+        meal_name="Вода",
+        note="первое значение",
+        entry_kind="unplanned",
+    )
+
+    replacement = oral.create_fact(
+        1,
+        moment,
+        75,
+        meal_name="Чай",
+        note="исправленное значение",
+        entry_kind="unplanned",
+    )
+
+    events = oral.get_events(1, datetime(2026, 8, 29, 12, 0))
+    unplanned = [event for event in events if event.entry_kind == "unplanned"]
+    assert len(events) == 2
+    assert len(unplanned) == 1
+    assert replacement.id == original.id
+    assert replacement.version == original.version + 1
+    assert replacement.amount_ml == 75
+    assert replacement.meal_name == "Чай"
+    assert replacement.note == "исправленное значение"
+    assert planned.id != replacement.id
+    assert sum(event.amount_ml for event in events) == 175
+
+
+def test_diet_change_fact_retention_modes_preserve_before_and_all():
+    _db, plans, oral = _services()
+    shift_start = datetime(2026, 8, 29, 8, 0)
+    change_time = datetime(2026, 8, 29, 12, 0)
+    plans.assign_version(1, shift_start, template_id=9)
+    oral.create_fact(1, datetime(2026, 8, 29, 10, 0), 50, meal_name="До изменения")
+    oral.create_fact(1, change_time, 75, meal_name="На границе изменения")
+    oral.create_fact(1, datetime(2026, 8, 29, 14, 0), 100, meal_name="После изменения")
+
+    plans.assign_version(
+        1,
+        change_time,
+        diet_name="Новая диета",
+        diet_text="Изменённое назначение",
+        schedule_json=[],
+        details_json={"consistency": "Жидкая"},
+    )
+
+    preserved = oral.get_events(1, shift_start)
+    assert len(preserved) == 3
+
+    assert oral.clear_facts(1, before=change_time) == 1
+    after_before_mode = oral.get_events(1, shift_start)
+    assert [event.event_time for event in after_before_mode] == [
+        change_time,
+        datetime(2026, 8, 29, 14, 0),
+    ]
+
+    assert oral.clear_facts(1) == 2
+    assert oral.get_events(1, shift_start) == []
+
+
 def test_hunger_is_warning_state_not_database_block():
     _db, plans, oral = _services()
     plans.assign_version(1, datetime(2026, 8, 29, 8, 0), template_id=10)
@@ -134,6 +311,87 @@ def test_hunger_is_warning_state_not_database_block():
 
     event = oral.create_fact(1, datetime(2026, 8, 29, 10, 0), 50, meal_name="Вода")
     assert event.amount_ml == 50
+
+
+def test_planned_fact_can_be_entered_from_three_hours_before_until_shift_end():
+    _db, plans, oral = _services()
+    shift_start = datetime(2026, 8, 29, 8, 0)
+    planned_time = datetime(2026, 8, 29, 12, 0)
+    plans.assign_version(1, shift_start, template_id=9)
+
+    earliest = oral.create_fact(
+        1,
+        datetime(2026, 8, 29, 9, 0),
+        100,
+        planned_item_key="lunch",
+        planned_time=planned_time,
+        entry_kind="planned",
+    )
+    latest = oral.create_fact(
+        1,
+        datetime(2026, 8, 30, 7, 59),
+        50,
+        planned_item_key="lunch",
+        planned_time=planned_time,
+        entry_kind="planned",
+    )
+
+    assert earliest.event_time == datetime(2026, 8, 29, 9, 0)
+    assert latest.event_time == datetime(2026, 8, 30, 7, 59)
+
+
+def test_planned_fact_may_use_a_future_scheduled_time():
+    _db, _plans, oral = _services()
+    planned_time = datetime.now().replace(second=0, microsecond=0) + timedelta(minutes=30)
+
+    event = oral.create_fact(
+        1,
+        planned_time,
+        100,
+        planned_item_key="future-meal",
+        planned_time=planned_time,
+        entry_kind="planned",
+    )
+
+    assert event.event_time == planned_time
+
+
+def test_planned_fact_rejects_too_early_time_with_feeding_guidance():
+    _db, plans, oral = _services()
+    plans.assign_version(1, datetime(2026, 8, 29, 8, 0), template_id=9)
+
+    try:
+        oral.create_fact(
+            1,
+            datetime(2026, 8, 29, 8, 59),
+            100,
+            planned_item_key="lunch",
+            planned_time=datetime(2026, 8, 29, 12, 0),
+            entry_kind="planned",
+        )
+    except ValueError as exc:
+        assert "Не следует кормить пациента раньше назначенного времени" in str(exc)
+    else:
+        raise AssertionError("Слишком раннее плановое кормление должно быть отклонено")
+
+
+def test_planned_fact_rejects_time_outside_its_medical_day():
+    _db, plans, oral = _services()
+    plans.assign_version(1, datetime(2026, 8, 29, 8, 0), template_id=9)
+
+    try:
+        oral.create_fact(
+            1,
+            datetime(2026, 8, 30, 8, 0),
+            100,
+            planned_item_key="lunch",
+            planned_time=datetime(2026, 8, 29, 12, 0),
+            entry_kind="planned",
+        )
+    except ValueError as exc:
+        assert "в пределах текущих медицинских суток" in str(exc)
+    else:
+        raise AssertionError("Время следующей смены должно быть отклонено")
 
 
 def test_schema_contract_contains_versioned_nutrition_objects():

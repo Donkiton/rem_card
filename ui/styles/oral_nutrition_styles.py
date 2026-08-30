@@ -53,9 +53,6 @@ QFrame#OralNutritionSectionCard {{
     border: 1.5px solid {t("sector.border", "#bdc3c7")};
     border-radius: {t("radius.md", "7px")};
 }}
-QFrame#OralNutritionSummary {{
-    border-left: 4px solid {t("button.accent.bg", "#2f80c0")};
-}}
 QLabel#OralNutritionTitle {{
     color: {t("sector.title_text", "#2c3e50")};
     background: transparent;
@@ -87,48 +84,58 @@ QLabel#OralNutritionStatus {{
 QPushButton#OralPrimaryButton,
 QPushButton#OralSecondaryButton,
 QPushButton#OralDangerButton {{
-    border-radius: {t("radius.md", "7px")};
+    border-radius: 5px;
     padding: 6px 12px;
     min-height: 20px;
-    font-size: 12px;
-    font-weight: 650;
 }}
 QPushButton#OralPrimaryButton {{
-    background-color: {t("button.accent.bg", "#2f80c0")};
-    color: {t("button.accent.text", "#ffffff")};
-    border: 1px solid {t("border.focus", "#23689f")};
+    background-color: #2f80c0;
+    color: #ffffff;
+    border: 1px solid #23689f;
+    padding: 6px 18px;
+    font-weight: bold;
+    min-width: 110px;
 }}
 QPushButton#OralPrimaryButton:hover {{
-    background-color: {t("button.accent.hover", "#236fa9")};
+    background-color: #236fa9;
 }}
 QPushButton#OralSecondaryButton {{
-    background-color: {t("surface.subtle", "#f4f7fb")};
-    color: {t("text.primary", "#172033")};
-    border: 1px solid {t("border.default", "#b9c5d3")};
+    background-color: #f4f7fb;
+    color: #172033;
+    border: 1px solid #b9c5d3;
 }}
 QPushButton#OralSecondaryButton:hover {{
-    background-color: {t("surface.hover", "#e8f1fb")};
-    border-color: {t("border.focus", "#7aa6d8")};
+    background-color: #e8f1fb;
+    border-color: #7aa6d8;
 }}
 QPushButton#OralDangerButton {{
-    background-color: {t("button.danger.bg", "#f7e5e3")};
-    color: {t("button.danger.text", "#8b2f28")};
-    border: 1px solid {t("border.error", "#d89a94")};
+    background-color: #f7e5e3;
+    color: #8b2f28;
+    border: 1px solid #d89a94;
+    font-weight: bold;
 }}
 QPushButton#OralDangerButton:hover {{
-    background-color: {t("button.danger.hover", "#e9c5c1")};
+    background-color: #e9c5c1;
 }}
-QPushButton#OralPrimaryButton:pressed,
-QPushButton#OralSecondaryButton:pressed,
+QPushButton#OralPrimaryButton:pressed {{
+    background-color: #23689f;
+}}
+QPushButton#OralSecondaryButton:pressed {{
+    background-color: #d5e2ef;
+}}
 QPushButton#OralDangerButton:pressed {{
-    background-color: {t("button.neutral.pressed", "#d5e2ef")};
+    background-color: #ddb5b0;
 }}
-QPushButton#OralPrimaryButton:disabled,
+QPushButton#OralPrimaryButton:disabled {{
+    background-color: #9dbbd3;
+    color: #edf4fa;
+    border-color: #9dbbd3;
+}}
 QPushButton#OralSecondaryButton:disabled,
 QPushButton#OralDangerButton:disabled {{
-    background-color: {t("surface.subtle", "#f1f5f9")};
-    color: {t("text.disabled", "#8a96a6")};
-    border-color: {t("border.subtle", "#d9e2ec")};
+    background-color: #f1f5f9;
+    color: #8a96a6;
+    border-color: #d9e2ec;
 }}
 QTableWidget#OralIntakeTable,
 QTableWidget#OralVersionTable,
@@ -157,18 +164,23 @@ QTableWidget#OralTotalsTable::item:hover {{
 QTableWidget#OralIntakeTable QHeaderView::section,
 QTableWidget#OralVersionTable QHeaderView::section,
 QTableWidget#OralTotalsTable QHeaderView::section {{
-    background-color: {t("table.header_bg", "#e8eef5")};
-    color: {t("table.header_text", "#172033")};
+    background-color: #d9e2ec;
+    color: #243b53;
     padding: 6px;
     border: none;
     border-right: 1px solid {t("table.grid", "#d9e2ec")};
     border-bottom: 1px solid {t("table.grid", "#d9e2ec")};
     font-weight: 700;
 }}
+QTableWidget#OralIntakeTable QHeaderView::section:hover,
+QTableWidget#OralVersionTable QHeaderView::section:hover,
+QTableWidget#OralTotalsTable QHeaderView::section:hover {{
+    background-color: #cbd7e5;
+}}
 QTableWidget#OralIntakeTable QTableCornerButton::section,
 QTableWidget#OralVersionTable QTableCornerButton::section,
 QTableWidget#OralTotalsTable QTableCornerButton::section {{
-    background-color: {t("table.header_bg", "#e8eef5")};
+    background-color: #d9e2ec;
     border: none;
 }}
 """
@@ -309,13 +321,20 @@ QTableWidget#OralScheduleTable::item {{
     padding: 4px 6px;
 }}
 QTableWidget#OralScheduleTable QHeaderView::section {{
-    background-color: {t("table.header_bg", "#e8eef5")};
-    color: {t("table.header_text", "#172033")};
+    background-color: #d9e2ec;
+    color: #243b53;
     padding: 6px;
     border: none;
     border-right: 1px solid {t("table.grid", "#d9e2ec")};
     border-bottom: 1px solid {t("table.grid", "#d9e2ec")};
     font-weight: 700;
+}}
+QTableWidget#OralScheduleTable QHeaderView::section:hover {{
+    background-color: #cbd7e5;
+}}
+QTableWidget#OralScheduleTable QTableCornerButton::section {{
+    background-color: #d9e2ec;
+    border: none;
 }}
 QComboBox QAbstractItemView {{
     background-color: {t("surface.card", "#ffffff")};
@@ -328,44 +347,54 @@ QComboBox QAbstractItemView {{
 QPushButton#OralDialogPrimaryButton,
 QPushButton#OralDialogSecondaryButton,
 QPushButton#OralDialogDangerButton {{
-    border-radius: {t("radius.md", "7px")};
-    padding: 7px 16px;
-    min-width: 105px;
-    min-height: 20px;
-    font-size: 12px;
-    font-weight: 700;
+    border-radius: 5px;
+    padding: 6px 18px;
+    min-width: 110px;
+    font-weight: bold;
 }}
 QPushButton#OralDialogPrimaryButton {{
-    background-color: {t("button.accent.bg", "#2f80c0")};
-    color: {t("button.accent.text", "#ffffff")};
-    border: 1px solid {t("border.focus", "#23689f")};
+    background-color: #2f80c0;
+    color: #ffffff;
+    border: 1px solid #23689f;
 }}
 QPushButton#OralDialogPrimaryButton:hover {{
-    background-color: {t("button.accent.hover", "#236fa9")};
+    background-color: #236fa9;
 }}
 QPushButton#OralDialogSecondaryButton {{
-    background-color: {t("surface.subtle", "#f4f7fb")};
-    color: {t("text.primary", "#172033")};
-    border: 1px solid {t("border.default", "#b9c5d3")};
+    background-color: #f4f7fb;
+    color: #172033;
+    border: 1px solid #b9c5d3;
 }}
 QPushButton#OralDialogSecondaryButton:hover {{
-    background-color: {t("surface.hover", "#e8f1fb")};
-    border-color: {t("border.focus", "#7aa6d8")};
+    background-color: #e5ebf2;
 }}
 QPushButton#OralDialogDangerButton {{
-    background-color: {t("button.danger.bg", "#f7e5e3")};
-    color: {t("button.danger.text", "#8b2f28")};
-    border: 1px solid {t("border.error", "#d89a94")};
+    background-color: #f7e5e3;
+    color: #8b2f28;
+    border: 1px solid #d89a94;
 }}
 QPushButton#OralDialogDangerButton:hover {{
-    background-color: {t("button.danger.hover", "#e9c5c1")};
+    background-color: #e9c5c1;
 }}
-QPushButton#OralDialogPrimaryButton:disabled,
+QPushButton#OralDialogPrimaryButton:pressed {{
+    background-color: #23689f;
+}}
+QPushButton#OralDialogSecondaryButton:pressed {{
+    background-color: #d5e2ef;
+}}
+QPushButton#OralDialogDangerButton:pressed {{
+    background-color: #ddb5b0;
+}}
+QPushButton#OralDialogPrimaryButton:disabled {{
+    background-color: #9dbbd3;
+    color: #edf4fa;
+    border-color: #9dbbd3;
+}}
 QPushButton#OralDialogSecondaryButton:disabled,
 QPushButton#OralDialogDangerButton:disabled {{
-    background-color: {t("surface.subtle", "#f1f5f9")};
-    color: {t("text.disabled", "#8a96a6")};
-    border-color: {t("border.subtle", "#d9e2ec")};
+    background-color: #f1f5f9;
+    color: #8a96a6;
+    border-color: #d9e2ec;
 }}
 QCalendarWidget QWidget {{
     background-color: {t("surface.card", "#ffffff")};
@@ -410,15 +439,26 @@ QAbstractItemView::item:hover {{
     background-color: {t("surface.hover", "#eef6ff")};
 }}
 """
+    # PySide returns Python wrappers for Qt-owned popup views/calendars. If
+    # these wrappers only live as temporaries, cyclic GC can finalize them on
+    # whichever Python worker happens to trigger a collection. Destroying a
+    # popup (and its basic timer) outside the GUI thread corrupts Qt's native
+    # heap on Windows. Keep them alive for the complete dialog lifetime.
+    retained_popups = []
+
     combos = [root] if isinstance(root, QComboBox) else []
     combos.extend(root.findChildren(QComboBox))
     for combo in combos:
-        combo.view().setStyleSheet(popup_style)
+        view = combo.view()
+        view.setStyleSheet(popup_style)
+        retained_popups.append(view)
 
     date_edits = [root] if isinstance(root, QDateTimeEdit) else []
     date_edits.extend(root.findChildren(QDateTimeEdit))
     for editor in date_edits:
         if editor.calendarPopup():
-            editor.calendarWidget().setStyleSheet(
-                build_oral_nutrition_dialog_style(tokens)
-            )
+            calendar = editor.calendarWidget()
+            calendar.setStyleSheet(build_oral_nutrition_dialog_style(tokens))
+            retained_popups.append(calendar)
+
+    root._oral_popup_widgets = retained_popups

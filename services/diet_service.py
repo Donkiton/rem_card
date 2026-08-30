@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, List, Optional
 
 from rem_card.app.paths import SEED_DIR, USER_DICT_DIR
@@ -602,6 +602,27 @@ class DietPlanService:
                 self._sync_day_anchor(cur, int(admission_id), affected_shift)
             return version
 
+    def delete_version(
+        self,
+        admission_id: int,
+        version_id: int,
+        *,
+        expected_version: Optional[int] = None,
+    ) -> None:
+        if self.version_dao is None:
+            raise RuntimeError("История назначений диеты недоступна")
+        current = self.version_dao.get_by_id(int(version_id))
+        if current is None or int(current.admission_id) != int(admission_id):
+            raise ValueError("Назначение диеты не найдено")
+
+        with self.dao.db.remcard_transaction(source="diet_plan_version_delete") as cur:
+            self.version_dao.delete_by_id(
+                int(version_id),
+                expected_version=expected_version,
+                cursor=cur,
+            )
+            self._sync_day_anchor(cur, int(admission_id), current.shift_start)
+
     def _sync_day_anchor(self, cursor, admission_id: int, shift_start: datetime) -> None:
         cursor.execute(
             """
@@ -720,6 +741,8 @@ class DietPlanService:
 
 
 class OralIntakeService:
+    PLANNED_ENTRY_EARLY_WINDOW = timedelta(hours=3)
+
     def __init__(self, dao: OralIntakeDAO, vital_service, diet_plan_service: Optional[DietPlanService] = None):
         self.dao = dao
         self.vital_service = vital_service
@@ -729,8 +752,28 @@ class OralIntakeService:
         dt = normalize_minute(event_time or datetime.now())
         now = normalize_minute(datetime.now())
         if dt > now:
-            raise ValueError("Факт перорального ввода не может быть в будущем")
+            raise ValueError("Время фактического питания не может быть в будущем")
         return dt
+
+    def normalize_planned_fact_time(self, event_time: datetime, planned_time: datetime) -> datetime:
+        event_dt = normalize_minute(event_time)
+        planned_dt = normalize_minute(planned_time)
+        shift_start, shift_end = ShiftService.get_day_period(planned_dt)
+        earliest = max(
+            normalize_minute(shift_start),
+            planned_dt - self.PLANNED_ENTRY_EARLY_WINDOW,
+        )
+        if event_dt < earliest:
+            raise ValueError(
+                "Не следует кормить пациента раньше назначенного времени. "
+                "Данные можно внести не ранее чем за 3 часа до запланированного приёма пищи."
+            )
+        if event_dt >= normalize_minute(shift_end):
+            raise ValueError(
+                "Время фактического питания должно находиться в пределах текущих "
+                "медицинских суток (08:00–08:00)."
+            )
+        return event_dt
 
     def shift_start_for_event(self, event_time: datetime) -> datetime:
         start, _ = ShiftService.get_day_period(event_time)
@@ -821,13 +864,18 @@ class OralIntakeService:
         *,
         plan_version_id: Optional[int] = None,
         planned_item_key: Optional[str] = None,
+        planned_time: Optional[datetime] = None,
         entry_kind: str = "unplanned",
         meal_name: str = "",
         note: str = "",
         actor: str = "nurse",
         action_id: Optional[str] = None,
     ) -> OralIntakeEventDTO:
-        event_dt = self.normalize_event_time(event_time)
+        event_dt = (
+            self.normalize_planned_fact_time(event_time, planned_time)
+            if planned_time is not None
+            else self.normalize_event_time(event_time)
+        )
         is_ok, msg = self.vital_service.validate_timestamp(
             int(admission_id), event_dt, self.shift_start_for_event(event_dt)
         )
@@ -835,16 +883,18 @@ class OralIntakeService:
             raise ValueError(msg)
         if float(amount_ml or 0) <= 0:
             raise ValueError("Фактический объём должен быть больше 0 мл")
-        return self.dao.create_event(
-            OralIntakeEventDTO(
-                admission_id=int(admission_id), shift_start=self.shift_start_for_event(event_dt),
-                event_time=event_dt, amount_ml=float(amount_ml),
-                plan_version_id=plan_version_id, planned_item_key=planned_item_key,
-                entry_kind=str(entry_kind or "unplanned"), meal_name=str(meal_name or ""),
-                note=str(note or ""), action_id=action_id or uuid.uuid4().hex,
-                last_modified_by=str(actor or "nurse"),
-            )
+        normalized_entry_kind = str(entry_kind or "unplanned")
+        dto = OralIntakeEventDTO(
+            admission_id=int(admission_id), shift_start=self.shift_start_for_event(event_dt),
+            event_time=event_dt, amount_ml=float(amount_ml),
+            plan_version_id=plan_version_id, planned_item_key=planned_item_key,
+            entry_kind=normalized_entry_kind, meal_name=str(meal_name or ""),
+            note=str(note or ""), action_id=action_id or uuid.uuid4().hex,
+            last_modified_by=str(actor or "nurse"),
         )
+        if normalized_entry_kind == "unplanned":
+            return self.dao.upsert_unplanned_event(dto)
+        return self.dao.create_event(dto)
 
     def update_fact(
         self,
@@ -854,13 +904,18 @@ class OralIntakeService:
         *,
         note: str = "",
         meal_name: Optional[str] = None,
+        planned_time: Optional[datetime] = None,
         actor: str = "doctor",
         expected_version: Optional[int] = None,
     ) -> OralIntakeEventDTO:
         current = self.dao.get_event(int(event_id))
         if current is None:
             raise ValueError("Факт питания не найден")
-        event_dt = self.normalize_event_time(event_time)
+        event_dt = (
+            self.normalize_planned_fact_time(event_time, planned_time)
+            if planned_time is not None
+            else self.normalize_event_time(event_time)
+        )
         is_ok, msg = self.vital_service.validate_timestamp(
             int(current.admission_id), event_dt, self.shift_start_for_event(event_dt)
         )

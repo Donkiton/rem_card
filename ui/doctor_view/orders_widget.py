@@ -107,6 +107,7 @@ class OrdersWidget(QWidget):
     administrationStatusChanged = Signal(bool)
     ordersPresenceChanged = Signal(bool)
     localBalanceChanged = Signal()
+    balanceSnapshotRequired = Signal()
     localDraftResolutionFinished = Signal(bool)
     _LOCAL_SILENT_FORCE_PREFIXES = (
         "orders_add_input:",
@@ -183,6 +184,8 @@ class OrdersWidget(QWidget):
         self._admin_only_snapshot_until = 0.0
         self._orders_click_seq = 0
         self._pending_admin_write_count = 0
+        self._balance_mark_overrides = {}
+        self._balance_mark_override_seq = 0
         self._pending_admin_cell_write_keys = set()
         self._recent_admin_cell_clicks = {}
         self._local_cell_draft_guard = False
@@ -1209,6 +1212,7 @@ class OrdersWidget(QWidget):
         self.shift_date = shift_date
         current_context_key = self._current_context_key()
         if previous_context_key != current_context_key:
+            self._balance_mark_overrides.clear()
             self._detach_active_snapshot_for_context_switch(
                 new_context_key=current_context_key,
                 new_context_hash=None,
@@ -2899,14 +2903,54 @@ class OrdersWidget(QWidget):
             return {}
         previous = copy(self.model.admin_map.get(key)) if key in self.model.admin_map else None
         pending_admin = copy(admin)
+        actual_time = datetime.now() if mark else None
         pending_admin.comment = mark or ""
-        pending_admin.actual_time = datetime.now() if mark else None
+        pending_admin.actual_time = actual_time
         setattr(pending_admin, "_pending_mark", mark or "")
         self.model.admin_map[key] = pending_admin
+        self._balance_mark_override_seq += 1
+        self._balance_mark_overrides[int(getattr(admin, "id", 0) or 0)] = {
+            "mark": mark or "",
+            "actual_time": actual_time,
+            "sequence": self._balance_mark_override_seq,
+            "pending": True,
+        }
         self._emit_admin_cell_changes([key], mark_draft=False)
         return {key: (previous is not None, previous)}
 
-    def _apply_committed_order_mark(self, index, admin, mark: str):
+    def balance_mark_overrides(self) -> dict:
+        return {
+            int(admin_id): dict(value)
+            for admin_id, value in self._balance_mark_overrides.items()
+        }
+
+    def balance_mark_override_sequence(self) -> int:
+        pending = [int(value["sequence"]) for value in self._balance_mark_overrides.values() if value.get("pending")]
+        return min(pending) - 1 if pending else int(self._balance_mark_override_seq or 0)
+
+    def acknowledge_balance_mark_overrides(self, through_sequence: int) -> None:
+        try:
+            limit = int(through_sequence or 0)
+        except (TypeError, ValueError):
+            return
+        for admin_id, value in list(self._balance_mark_overrides.items()):
+            if int(value.get("sequence") or 0) <= limit:
+                self._balance_mark_overrides.pop(admin_id, None)
+
+    def _discard_balance_mark_override(self, admin_id) -> None:
+        try:
+            self._balance_mark_overrides.pop(int(admin_id), None)
+        except (TypeError, ValueError):
+            pass
+
+    def _apply_committed_order_mark(self, index, admin, mark: str, *, sequence=None):
+        override = self._balance_mark_overrides.get(int(admin.id)) if admin is not None else None
+        if sequence is not None and (override is None or override.get("sequence") != sequence):
+            self.balanceSnapshotRequired.emit()
+            return
+        if override is not None:
+            override["pending"] = False
+        self.balanceSnapshotRequired.emit()
         if not self.model or not index.isValid() or admin is None:
             return
         key = self._admin_key_from_admin(admin)
@@ -4304,12 +4348,13 @@ class OrdersWidget(QWidget):
         self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
         self._begin_admin_write()
         previous_by_key = self._apply_pending_order_mark(index, admin, next_mark)
+        balance_sequence = self._balance_mark_override_seq
 
         def on_success():
             self._finish_admin_write()
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
-            self._apply_committed_order_mark(index, admin, next_mark)
+            self._apply_committed_order_mark(index, admin, next_mark, sequence=balance_sequence)
             self._schedule_fast_sync()
             self._schedule_state_sync()
 
@@ -4317,7 +4362,14 @@ class OrdersWidget(QWidget):
             self._finish_admin_write()
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
-            self._restore_admin_cells(previous_by_key)
+            override = self._balance_mark_overrides.get(admin_id)
+            if override is not None and override.get("sequence") == balance_sequence:
+                self._discard_balance_mark_override(admin_id)
+                for _, previous in previous_by_key.values():
+                    if previous is not None and hasattr(previous, "_pending_mark"):
+                        delattr(previous, "_pending_mark")
+                self._restore_admin_cells(previous_by_key)
+            self.balanceSnapshotRequired.emit()
             self.request_refresh(force=True)
 
         self._enqueue_write(
