@@ -511,9 +511,10 @@ def perform_daily_backup_and_cleanup(role: str | None = None, *, force: bool = F
             cutoff_report_days = now - timedelta(days=REPORT_RETENTION_DAYS)
             _cleanup_old_report_files(REPORT_DIR, cutoff_report_days)
 
-            # Cleanup old local runtime logs (> 30 days)
-            cutoff_30_days = now - timedelta(days=30)
-            _cleanup_old_files(LOGS_DIR, "*.log", cutoff_30_days, "local log")
+            # Local log maintenance also runs independently of this backup.
+            from rem_card.app.runtime_paths import cleanup_old_local_logs
+
+            cleanup_old_local_logs(LOGS_DIR)
 
             if prune_stats and prune_stats.get("deleted_rows", 0) > 0:
                 logger.info(

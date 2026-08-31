@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Any, Optional
 
 from rem_card.app.runtime_paths import get_writable_runtime_logs_dir
+from rem_card.app.runtime_log_storage import append_log_lines
+from rem_card.app.runtime_log_retention import request_log_cleanup
 from rem_card.app.version import APP_VERSION
 
 
@@ -27,9 +29,13 @@ def _json_default(value: Any) -> str:
 
 def _append_jsonl(path: str, payload: dict[str, Any]) -> bool:
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False, default=_json_default) + "\n")
+        # Shared mirrors also get process/session-owned segments, but never
+        # schedule local retention against the network data directory.
+        append_log_lines(
+            os.path.dirname(path), "audit",
+            [json.dumps(payload, ensure_ascii=False, default=_json_default) + "\n"],
+            extension="jsonl", managed=False,
+        )
         return True
     except Exception:
         return False
@@ -97,8 +103,10 @@ def write_audit_event(
 
     log_name = f"audit_{datetime.now().strftime('%Y%m%d')}.jsonl"
     try:
-        local_path = os.path.join(get_writable_runtime_logs_dir(), log_name)
+        local_dir = get_writable_runtime_logs_dir()
+        local_path = os.path.join(local_dir, log_name)
         _append_jsonl(local_path, payload)
+        request_log_cleanup(local_dir)
     except Exception:
         pass
     if baza_dir:
