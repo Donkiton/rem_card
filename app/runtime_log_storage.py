@@ -139,10 +139,14 @@ class LogSegmentWriter:
             self._finish_segment()
             raise
 
-    def close(self) -> None:
-        with self._lock:
+    def close(self, *, blocking: bool = True) -> None:
+        if not self._lock.acquire(blocking=blocking):
+            return
+        try:
             if self._pid == os.getpid():
                 self._finish_segment()
+        finally:
+            self._lock.release()
 
 
 def append_log_lines(
@@ -189,14 +193,18 @@ class RuntimeLogHandler(logging.Handler):
 
 def close_log_writers() -> None:
     # Stop the maintenance producer before sealing cached log segments.
-    from rem_card.app.runtime_log_retention import stop_log_maintenance
+    from rem_card.app.runtime_log_retention import _is_local_path, stop_log_maintenance
 
     stop_log_maintenance()
     with _WRITERS_LOCK:
         writers = list(_WRITERS.values())
         _WRITERS.clear()
     for writer in writers:
-        writer.close()
+        # Never wait for the best-effort audit mirror, nor do SMB rename from
+        # the exiting UI process. An unsealed segment is still valid/readable;
+        # dead-PID detection makes it eligible for its normal retention later.
+        if writer.managed and _is_local_path(writer.directory):
+            writer.close(blocking=False)
 
 
 atexit.register(close_log_writers)

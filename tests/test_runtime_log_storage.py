@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -168,6 +169,39 @@ def test_inherited_writer_cannot_seal_parent_segment(tmp_path, monkeypatch):
     assert active.exists()
     writer.close()
     assert not active.exists()
+
+
+def test_shutdown_does_not_close_or_wait_for_best_effort_audit_mirror(tmp_path, monkeypatch):
+    local = storage.append_log_lines(tmp_path, "doctor", ["local\n"])
+    shared = storage.append_log_lines(tmp_path / "shared", "audit", ['{"event":"probe"}\n'], extension="jsonl", managed=False)
+    mirror = next(writer for writer in storage._WRITERS.values() if writer.prefix == "audit")
+    monkeypatch.setattr(mirror, "close", lambda **_kwargs: pytest.fail("must not wait for network mirror"))
+    storage.close_log_writers()
+    assert not local.exists()
+    assert json.loads(shared.read_text()) == {"event": "probe"}
+
+
+def test_shutdown_preserves_busy_local_writer_without_waiting(tmp_path):
+    active = storage.append_log_lines(tmp_path, "doctor", ["preserved\n"])
+    writer = next(iter(storage._WRITERS.values()))
+    acquired, release = threading.Event(), threading.Event()
+
+    def busy_writer():
+        with writer._lock:
+            acquired.set()
+            release.wait(timeout=5)
+
+    thread = threading.Thread(target=busy_writer)
+    thread.start()
+    try:
+        assert acquired.wait(timeout=1)
+        started = time.monotonic()
+        storage.close_log_writers()
+        assert time.monotonic() - started < 0.25
+        assert active.read_text() == "preserved\n"
+    finally:
+        release.set()
+        thread.join(timeout=2)
 
 
 def test_preview_never_deletes_and_apply_preserves_changed_files(tmp_path):
