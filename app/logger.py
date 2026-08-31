@@ -15,6 +15,7 @@ from rem_card.app.runtime_paths import (
     migrate_legacy_runtime_logs,
     record_runtime_log_location,
 )
+from rem_card.app.compact_logging import CompactLogHandler
 
 
 LOGS_DIR = get_runtime_logs_dir()
@@ -78,7 +79,7 @@ def _create_file_handler(formatter: logging.Formatter):
                 preferred_dir=LOGS_DIR,
                 fallback_reason="; ".join(warnings),
             )
-        return handler, warnings
+        return CompactLogHandler(handler), warnings
     return None, warnings
 
 

@@ -222,7 +222,7 @@ class StartupPathValidationTest(unittest.TestCase):
         ):
             handler, warnings = app_logger._create_file_handler(logging.Formatter("%(message)s"))
 
-        self.assertIs(handler, file_handler_class.return_value)
+        self.assertIs(handler.target, file_handler_class.return_value)
         file_handler_class.assert_called_once_with(
             fallback, app_logger.get_log_file_prefix(),
         )

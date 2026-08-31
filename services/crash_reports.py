@@ -7,6 +7,7 @@ import json
 import os
 import re
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -47,6 +48,15 @@ _CURRENT_SESSION_ID = ""
 _CURRENT_MARKER_PATH: Path | None = None
 _CURRENT_NATIVE_PATH: Path | None = None
 _DATABASE_LAST_REPORTED: dict[str, float] = {}
+_UI_HANG_LAST_DUMP_MONO = 0.0
+_UI_HANG_STARTED_MONO = 0.0
+_UI_HANG_TOTAL_CAPTURED = 0
+_UI_HANG_SIGNATURES: dict[str, dict[str, int]] = {}
+
+UI_HANG_INCIDENT_RESET_SEC = 120.0
+UI_HANG_MAX_DUMPS = 5
+UI_HANG_MAX_DUMPS_PER_SIGNATURE = 2
+UI_HANG_MAX_NATIVE_BYTES = 2 * 1024 * 1024
 
 _WINDOWS_PATH_RE = re.compile(r"(?i)(?:[a-z]:\\|\\\\)[^\r\n\t\"<>|]+")
 _UNIX_PATH_RE = re.compile(r"(?<![\w.])/(?:[^\s/:]+/)+[^\s:]+")
@@ -551,24 +561,118 @@ def initialize_crash_session(role: str | None = None) -> str:
         _CURRENT_SESSION_ID = session_id
         _CURRENT_MARKER_PATH = marker_path
         _CURRENT_NATIVE_PATH = native_path
+        _reset_ui_hang_state_locked()
         return session_id
+
+
+def _positive_int_env(name: str, default: int, *, maximum: int) -> int:
+    try:
+        return min(maximum, max(1, int(os.environ.get(name, str(default)))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _reset_ui_hang_state_locked() -> None:
+    global _UI_HANG_LAST_DUMP_MONO, _UI_HANG_STARTED_MONO, _UI_HANG_TOTAL_CAPTURED
+    _UI_HANG_LAST_DUMP_MONO = 0.0
+    _UI_HANG_STARTED_MONO = 0.0
+    _UI_HANG_TOTAL_CAPTURED = 0
+    _UI_HANG_SIGNATURES.clear()
+
+
+def _ui_hang_stack_signature() -> str:
+    frames = []
+    try:
+        for thread_id, frame in sorted(sys._current_frames().items()):
+            stack = traceback.extract_stack(frame, limit=16)
+            frames.append((thread_id, tuple((Path(item.filename).name, item.lineno, item.name) for item in stack)))
+    except Exception:
+        frames = []
+    return hashlib.sha256(repr(frames).encode("utf-8", errors="replace")).hexdigest()[:24]
+
+
+def _write_ui_hang_summary_locked(fault_file, *, status: str, now: float) -> None:
+    if _UI_HANG_TOTAL_CAPTURED <= 0 and not _UI_HANG_SIGNATURES:
+        return
+    payload = {
+        "status": status,
+        "duration_ms": round(max(0.0, now - _UI_HANG_STARTED_MONO) * 1000.0, 3),
+        "captured": _UI_HANG_TOTAL_CAPTURED,
+        "suppressed": sum(item.get("suppressed", 0) for item in _UI_HANG_SIGNATURES.values()),
+        "signatures": [
+            {"fingerprint": key, **value}
+            for key, value in sorted(_UI_HANG_SIGNATURES.items())
+        ][:16],
+    }
+    fault_file.write(
+        "\n=== REMCARD_THREAD_DUMP_SUMMARY "
+        + json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        + " ===\n"
+    )
+    fault_file.flush()
 
 
 def dump_current_thread_stacks(*, reason: str = "ui_hang") -> bool:
     """Append every Python thread stack to the current local native log."""
+    global _UI_HANG_LAST_DUMP_MONO, _UI_HANG_STARTED_MONO, _UI_HANG_TOTAL_CAPTURED
     if not _STATE_LOCK.acquire(timeout=0.1):
         return False
     try:
         fault_file = _FAULT_FILE
         if fault_file is None:
             return False
+        if os.environ.get("REMCARD_TEXT_LOG_COMPACTION_ENABLED", "1") != "0":
+            now = time.monotonic()
+            if _UI_HANG_LAST_DUMP_MONO and now - _UI_HANG_LAST_DUMP_MONO >= UI_HANG_INCIDENT_RESET_SEC:
+                _write_ui_hang_summary_locked(fault_file, status="quiet", now=now)
+                _reset_ui_hang_state_locked()
+            if _UI_HANG_STARTED_MONO <= 0:
+                _UI_HANG_STARTED_MONO = now
+            _UI_HANG_LAST_DUMP_MONO = now
+            signature = _ui_hang_stack_signature()
+            if signature not in _UI_HANG_SIGNATURES and len(_UI_HANG_SIGNATURES) >= 15:
+                signature = "overflow"
+            item = _UI_HANG_SIGNATURES.setdefault(signature, {"captured": 0, "suppressed": 0})
+            max_dumps = _positive_int_env(
+                "REMCARD_UI_HANG_MAX_DUMPS", UI_HANG_MAX_DUMPS, maximum=10,
+            )
+            max_per_signature = min(
+                max_dumps,
+                _positive_int_env(
+                    "REMCARD_UI_HANG_MAX_DUMPS_PER_SIGNATURE",
+                    UI_HANG_MAX_DUMPS_PER_SIGNATURE,
+                    maximum=5,
+                ),
+            )
+            max_bytes = _positive_int_env(
+                "REMCARD_UI_HANG_MAX_NATIVE_BYTES",
+                UI_HANG_MAX_NATIVE_BYTES,
+                maximum=8 * 1024 * 1024,
+            )
+            try:
+                current_bytes = int(fault_file.tell())
+            except Exception:
+                current_bytes = 0
+            if (
+                _UI_HANG_TOTAL_CAPTURED >= max_dumps
+                or item["captured"] >= max_per_signature
+                or current_bytes >= max_bytes
+            ):
+                item["suppressed"] += 1
+                suppressed = sum(value["suppressed"] for value in _UI_HANG_SIGNATURES.values())
+                if suppressed in {1, 10, 100, 1000} or (suppressed > 1000 and suppressed % 1000 == 0):
+                    _write_ui_hang_summary_locked(fault_file, status="active", now=now)
+                return True
         fault_file.write(
-            f"\n=== REMCARD_THREAD_DUMP reason={str(reason or 'ui_hang')} "
+            f"\n=== REMCARD_THREAD_DUMP reason={_sanitize_text(reason or 'ui_hang', max_chars=80)} "
             f"ts={_now_iso()} ===\n"
         )
         fault_file.flush()
         faulthandler.dump_traceback(file=fault_file, all_threads=True)
         fault_file.flush()
+        if os.environ.get("REMCARD_TEXT_LOG_COMPACTION_ENABLED", "1") != "0":
+            _UI_HANG_TOTAL_CAPTURED += 1
+            item["captured"] += 1
         return True
     finally:
         _STATE_LOCK.release()
@@ -591,6 +695,9 @@ def finalize_crash_session(exit_code: int | None = None, *, crash_recorded: bool
             pass
         try:
             if fault_file is not None:
+                if os.environ.get("REMCARD_TEXT_LOG_COMPACTION_ENABLED", "1") != "0":
+                    _write_ui_hang_summary_locked(fault_file, status="shutdown", now=time.monotonic())
+                    _reset_ui_hang_state_locked()
                 fault_file.flush()
                 fault_file.close()
         except Exception:
