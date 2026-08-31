@@ -5,9 +5,10 @@ import socket
 import threading
 import time
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from rem_card.app.metric_aggregation import MAX_DETAIL_SEC, MetricAggregator
 from rem_card.app.runtime_paths import get_writable_runtime_logs_dir
 
 
@@ -25,6 +26,7 @@ _CACHED_PATH_DAY: str | None = None
 _CACHED_PATH: str | None = None
 _HOSTNAME = socket.gethostname()
 _PID = os.getpid()
+_AGGREGATOR = MetricAggregator()
 
 _DEFAULT_QUEUE_SIZE = 10000
 _DEFAULT_BATCH_SIZE = 250
@@ -121,13 +123,11 @@ def _take_dropped_metric_payload() -> dict[str, Any] | None:
     }
 
 
-def _drain_queue(max_items: int | None = None) -> list[dict[str, Any]]:
+def _drain_queue(max_items: int | None = None, *, force_summaries: bool = False) -> list[dict[str, Any]]:
     metrics_queue = _METRICS_QUEUE
-    if metrics_queue is None:
-        return []
     batch: list[dict[str, Any]] = []
     limit = max_items if max_items is not None else _batch_size()
-    while len(batch) < limit:
+    while metrics_queue is not None and len(batch) < limit:
         try:
             batch.append(metrics_queue.get_nowait())
         except queue.Empty:
@@ -135,6 +135,8 @@ def _drain_queue(max_items: int | None = None) -> list[dict[str, Any]]:
     dropped_payload = _take_dropped_metric_payload()
     if dropped_payload is not None:
         batch.append(dropped_payload)
+    for summary in _AGGREGATOR.drain(force=force_summaries):
+        batch.append({"ts": _now_iso(), "host": _HOSTNAME, "pid": _PID, **summary})
     return batch
 
 
@@ -143,7 +145,7 @@ def _metrics_worker() -> None:
     while not _METRICS_STOP.wait(interval):
         _write_payloads(_drain_queue())
     while True:
-        batch = _drain_queue(max_items=_batch_size())
+        batch = _drain_queue(max_items=_batch_size(), force_summaries=True)
         if not batch:
             break
         _write_payloads(batch)
@@ -170,7 +172,7 @@ def flush_metrics(timeout: float = 1.0) -> None:
         return
     deadline = time.monotonic() + max(0.0, float(timeout or 0.0))
     while time.monotonic() <= deadline:
-        batch = _drain_queue(max_items=_batch_size())
+        batch = _drain_queue(max_items=_batch_size(), force_summaries=True)
         if not batch:
             return
         _write_payloads(batch)
@@ -207,6 +209,8 @@ def _should_record_metric(name: str, value: Any, fields: dict[str, Any]) -> bool
     with _LATEST_CHANGE_METRIC_LOCK:
         previous = _LATEST_CHANGE_METRIC_STATE.get(key)
         if previous is None:
+            if len(_LATEST_CHANGE_METRIC_STATE) >= 1024:
+                _LATEST_CHANGE_METRIC_STATE.pop(next(iter(_LATEST_CHANGE_METRIC_STATE)))
             _LATEST_CHANGE_METRIC_STATE[key] = (value, now)
             return True
         previous_value, previous_ts = previous
@@ -219,7 +223,8 @@ def _should_record_metric(name: str, value: Any, fields: dict[str, Any]) -> bool
 def record_metric(name: str, value: Any = None, *, force_flush: bool = False, **fields: Any):
     if not _enabled():
         return
-    if not _should_record_metric(str(name), value, fields):
+    detailed = _AGGREGATOR.detailed()
+    if not (force_flush or detailed) and not _should_record_metric(str(name), value, fields):
         return
     payload = {
         "ts": _now_iso(),
@@ -229,6 +234,12 @@ def record_metric(name: str, value: Any = None, *, force_flush: bool = False, **
         "pid": _PID,
     }
     payload.update(fields)
+    try:
+        if _AGGREGATOR.observe(payload, force_raw=force_flush or detailed):
+            _ensure_worker_started()  # Flush summaries even when the app goes idle.
+            return
+    except Exception:
+        pass  # Diagnostics must fail open to the existing detailed writer.
     if _sync_mode() or force_flush:
         _write_payloads([payload])
         return
@@ -240,6 +251,16 @@ def record_metric(name: str, value: Any = None, *, force_flush: bool = False, **
             _DROPPED_METRICS += 1
     except Exception:
         pass
+
+
+def enable_detailed_metrics(seconds: float = MAX_DETAIL_SEC) -> str:
+    """Enable raw metrics for up to 30 minutes; new workers inherit the deadline."""
+    duration = float(seconds)
+    if not 0 <= duration <= MAX_DETAIL_SEC:
+        raise ValueError(f"Detailed metrics duration must be between 0 and {MAX_DETAIL_SEC} seconds")
+    until = (datetime.now(timezone.utc) + timedelta(seconds=duration)).isoformat()
+    os.environ["REMCARD_METRICS_DETAIL_UNTIL"] = until
+    return until
 
 
 atexit.register(shutdown_metrics)

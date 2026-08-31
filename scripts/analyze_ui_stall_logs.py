@@ -439,18 +439,35 @@ def build_summary(events: list[Event], *, window_sec: float) -> dict[str, Any]:
         "fault_crash_count": sum(1 for event in events if event.kind == "fault_crash"),
         "top_slow_metrics": _top_slow_metrics(events),
         "top_metric_counts": _metric_counts(events),
+        "metric_summaries": [
+            {"ts": event.ts.isoformat() if event.ts else None, **event.fields}
+            for event in events if event.kind == "local_metrics_summary"
+        ],
     }
 
 
 def _metric_counts(events: list[Event]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for event in events:
+        if event.kind == "local_metrics_summary":
+            name = event.fields.get("source_metric")
+            amount = event.fields.get("aggregated_count")
+            if isinstance(name, str) and isinstance(amount, int) and amount > 0:
+                counts[name] = counts.get(name, 0) + amount
+            continue
         counts[event.kind] = counts.get(event.kind, 0) + 1
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:30])
 
 
 def _print_human(summary: dict[str, Any]) -> None:
     print(f"Events: {summary['event_count']}")
+    windows = summary.get("metric_summaries", [])
+    if windows:
+        print(f"Metric summary windows: {len(windows)} (showing last 20)")
+    for item in windows[-20:]:
+        print(f"Summary: {item.get('source_metric')} count={item.get('count')} "
+              f"raw={item.get('raw_count')} errors={item.get('error_count')} "
+              f"avg_ms={item.get('duration_avg_ms')} max_ms={item.get('duration_max_ms')}")
     print(f"UI pauses: {summary['ui_pause_count']}")
     print("Top UIWatchdog pauses:")
     for pause in sorted(summary["ui_pauses"], key=lambda item: item.get("pause_ms") or 0.0, reverse=True)[:20]:
