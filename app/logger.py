@@ -4,6 +4,7 @@ import sys
 import time
 import functools
 from datetime import datetime
+from rem_card.app.runtime_log_storage import RuntimeLogHandler, storage_enabled
 
 from rem_card.app.runtime_paths import (
     cleanup_old_local_logs,
@@ -62,7 +63,11 @@ def _create_file_handler(formatter: logging.Formatter):
             f"{get_log_file_prefix()}_{datetime.now().strftime('%Y%m%d')}.log",
         )
         try:
-            handler = logging.FileHandler(log_file, encoding="utf-8")
+            handler = (
+                RuntimeLogHandler(log_dir, get_log_file_prefix())
+                if storage_enabled()
+                else logging.FileHandler(log_file, encoding="utf-8")
+            )
         except OSError as exc:
             warnings.append(f"{log_file}: {exc}")
             continue

@@ -377,11 +377,10 @@ def _write_startup_local_log(message: str):
             except Exception:
                 pass
         cleanup_old_local_logs(log_dir)
-        path = os.path.join(log_dir, "startup.log")
+        from rem_card.app.runtime_log_storage import append_log_lines
         from datetime import datetime
 
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(f"{datetime.now().isoformat(timespec='seconds')} | {message}\n")
+        append_log_lines(log_dir, "startup", [f"{datetime.now().isoformat(timespec='seconds')} | {message}\n"])
     except Exception:
         pass
 
