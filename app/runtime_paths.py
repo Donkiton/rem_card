@@ -922,6 +922,13 @@ def get_log_file_prefix() -> str:
 
 
 def cleanup_old_local_logs(log_dir: str, retention_days: int = LOCAL_LOG_RETENTION_DAYS) -> int:
+    from rem_card.app.runtime_log_storage import storage_enabled
+
+    if storage_enabled():
+        from rem_card.app.runtime_log_retention import request_log_cleanup
+
+        request_log_cleanup(log_dir)
+        return 0
     if not os.path.isdir(log_dir):
         return 0
     cutoff_ts = time.time() - (max(1, int(retention_days)) * 86400)

@@ -394,9 +394,9 @@ def _write_log(_baza_dir: str, message: str, *, target_dir: str = ""):
             ):
                 migrate_legacy_runtime_logs(logs_dir)
             cleanup_old_local_logs(logs_dir)
-            path = os.path.join(logs_dir, f"updater_{datetime.now().strftime('%Y%m%d')}.log")
-            with open(path, "a", encoding="utf-8") as fh:
-                fh.write(f"{_now_text()} | {message}\n")
+            from rem_card.app.runtime_log_storage import append_log_lines
+
+            append_log_lines(logs_dir, "updater", [f"{_now_text()} | {message}\n"])
             if os.path.normcase(logs_dir) != os.path.normcase(os.path.abspath(preferred)):
                 record_runtime_log_location(
                     logs_dir,

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from rem_card.app.runtime_paths import get_writable_runtime_logs_dir
+from rem_card.app.runtime_log_storage import append_log_lines, storage_enabled
 
 
 _METRICS_LOCK = threading.Lock()
@@ -98,6 +99,13 @@ def _write_payloads(payloads: list[dict[str, Any]]) -> None:
         return
     try:
         with _METRICS_LOCK:
+            if storage_enabled():
+                append_log_lines(
+                    get_writable_runtime_logs_dir(), "metrics",
+                    (json.dumps(payload, ensure_ascii=False, default=str) + "\n" for payload in payloads),
+                    extension="jsonl",
+                )
+                return
             with open(_metrics_path(), "a", encoding="utf-8") as fh:
                 for payload in payloads:
                     fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
