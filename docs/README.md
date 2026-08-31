@@ -17,6 +17,7 @@
 - `source_of_truth_and_sync_contract.md` - источник истины, путь записи, local replica, snapshots, cache и доставка изменений на второй компьютер.
 - `crash_reporting.md` - размещение обычных логов, структурированные аварийные отчёты, обработка и срок хранения 180 дней.
 - `metric_aggregation.md` - минутные сводки штатных метрик, сохранение аномалий, временная диагностика и независимый откат второго этапа.
+- `compact_text_logging.md` - компактные текстовые INFO, breadcrumbs, повторные ошибки, hang-дампы и независимый откат третьего этапа.
 - `architecture_guardrails.md` и `code_quality.md` - статические safety/quality gates.
 - `operational_acceptance.md` - базовая приемка и дополнительные gates по аварийному режиму/оперблоку.
 - `emergency_runbook.md` и `emergency_mode_smoke_checklist.md` - аварийный режим и ручной smoke.
