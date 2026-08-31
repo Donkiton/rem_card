@@ -3244,6 +3244,7 @@ class DatabaseManager:
         started = time.perf_counter()
         source = "central"
         status = "error"
+        fallback_used = False
         try:
             if self._in_current_thread_remcard_transaction():
                 rows = self._fetch_all_central(query, params, use_write_connection=True, cancel_check=cancel_check)
@@ -3267,6 +3268,7 @@ class DatabaseManager:
                     exc_name = exc.__class__.__name__.lower()
                     if cancel_check is not None and ("cancel" in exc_name or "cancelled" in str(exc).lower()):
                         raise
+                    fallback_used = True
                     logger.debug("Local replica fetch_all failed, fallback to central: %s", exc)
             rows = self._fetch_all_central(query, params, cancel_check=cancel_check)
             status = "ok"
@@ -3283,6 +3285,7 @@ class DatabaseManager:
                 operation="fetch_all",
                 source=source,
                 status=status,
+                fallback_used=fallback_used,
             )
 
     def fetch_one_remcard(self, query, params=()):
@@ -3290,6 +3293,7 @@ class DatabaseManager:
         started = time.perf_counter()
         source = "central"
         status = "error"
+        fallback_used = False
         try:
             if self._in_current_thread_remcard_transaction():
                 row = self._fetch_one_central(query, params, use_write_connection=True)
@@ -3302,6 +3306,7 @@ class DatabaseManager:
                     status = "ok"
                     return row
                 except Exception as exc:
+                    fallback_used = True
                     logger.debug("Local replica fetch_one failed, fallback to central: %s", exc)
             row = self._fetch_one_central(query, params)
             status = "ok"
@@ -3313,6 +3318,7 @@ class DatabaseManager:
                 operation="fetch_one",
                 source=source,
                 status=status,
+                fallback_used=fallback_used,
             )
 
     def fetch_all_journal(self, query, params=()):
