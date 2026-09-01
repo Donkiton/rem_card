@@ -567,14 +567,23 @@ def test_legacy_oral_rows_migrate_without_loss_and_same_minute_becomes_available
         )
 
 
-def test_current_v25_oral_table_is_rebuilt_to_allow_zero_without_data_loss():
+def test_fastpath_repairs_positive_only_oral_constraint_without_data_loss():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     ensure_unified_schema(conn)
-    for row in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'oral_intake_events'"
-    ).fetchall():
-        conn.execute(f"DROP TRIGGER {row['name']}")
+    dependent_sql = [
+        row["sql"]
+        for row in conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE tbl_name = 'oral_intake_events'
+              AND type IN ('index', 'trigger')
+              AND sql IS NOT NULL
+            ORDER BY type, name
+            """
+        ).fetchall()
+    ]
     conn.execute("DROP TABLE oral_intake_events")
     conn.executescript(
         """
@@ -602,10 +611,15 @@ def test_current_v25_oral_table_is_rebuilt_to_allow_zero_without_data_loss():
         INSERT INTO oral_intake_events(
             admission_id, shift_start, event_time, amount_ml, entry_kind, meal_name, version
         ) VALUES(998, '2026-08-29 08:00', '2026-08-29 09:00', 100, 'planned', 'Завтрак', 3);
-        DELETE FROM schema_migrations WHERE version >= 26;
-        UPDATE meta SET value = '25' WHERE key = 'unified_schema_fastpath_rev';
         """
     )
+    for object_sql in dependent_sql:
+        conn.execute(object_sql)
+    conn.execute(
+        "UPDATE meta SET value = '26' WHERE key = 'unified_schema_fastpath_rev'"
+    )
+
+    assert not is_unified_schema_ready(conn)
 
     ensure_unified_schema(conn)
 

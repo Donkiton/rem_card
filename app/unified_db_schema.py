@@ -323,6 +323,13 @@ def _schema_contract_satisfied(conn: sqlite3.Connection, deep_column_check: bool
     if not _schema_migration_applied(conn, SCHEMA_MIN_MIGRATION_VERSION):
         return False
 
+    # Version 26 introduced explicit zero-intake facts.  Some databases had
+    # already received the fast-path marker while the physical table still
+    # retained the old CHECK(amount_ml > 0), so columns and migration numbers
+    # alone are not enough to prove that this contract is satisfied.
+    if _oral_intake_requires_positive_amount(conn):
+        return False
+
     required_indexes = list(_FASTPATH_REQUIRED_INDEXES)
     if _table_exists(conn, "operation_cases"):
         required_indexes.append("idx_operation_cases_started_at_id")
@@ -394,6 +401,16 @@ def _oral_intake_has_legacy_unique_time(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _oral_intake_requires_positive_amount(conn: sqlite3.Connection) -> bool:
+    if not _table_exists(conn, "oral_intake_events"):
+        return False
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'oral_intake_events'"
+    ).fetchone()
+    table_sql = "" if not row or not row[0] else "".join(str(row[0]).lower().split())
+    return "check(amount_ml>0)" in table_sql
+
+
 def _migrate_oral_intake_events_v25(conn: sqlite3.Connection, logger: logging.Logger) -> None:
     if not _oral_intake_has_legacy_unique_time(conn):
         return
@@ -441,11 +458,7 @@ def _migrate_oral_intake_events_v25(conn: sqlite3.Connection, logger: logging.Lo
 
 def _migrate_oral_intake_events_allow_zero(conn: sqlite3.Connection, logger: logging.Logger) -> None:
     """Allow an explicit 0 ml fact without treating it as a missing row."""
-    row = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'oral_intake_events'"
-    ).fetchone()
-    table_sql = "" if not row or not row[0] else "".join(str(row[0]).lower().split())
-    if "check(amount_ml>0)" not in table_sql:
+    if not _oral_intake_requires_positive_amount(conn):
         return
 
     logger.info("Rebuilding oral_intake_events to allow explicit zero intake facts")
