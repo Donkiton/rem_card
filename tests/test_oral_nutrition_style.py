@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (  # noqa: E402
     QFrame,
     QLabel,
     QTableWidgetItem,
+    QWidget,
+    QWidgetItem,
 )
 
 from rem_card.ui.shared.components.oral_nutrition_widget import (  # noqa: E402
@@ -31,6 +33,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox  # noqa: E402
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin  # noqa: E402
 from rem_card.ui.procedures.procedures_panel import ProceduresPanel  # noqa: E402
 from rem_card.ui.styles.component_styles import build_procedure_create_button_style  # noqa: E402
+from rem_card.ui.styles.context_menu_style import _TextEditContextMenuFilter  # noqa: E402
 
 
 def _application() -> QApplication:
@@ -569,6 +572,18 @@ def test_version_selection_filter_accepts_system_window_mouse_events():
     system_window = QWindow()
 
     assert widget.eventFilter(system_window, QEvent(QEvent.MouseButtonPress)) is False
+
+
+def test_global_event_filters_ignore_qwidget_items():
+    app = _application()
+    watched_widget = QWidget()
+    widget_item = QWidgetItem(watched_widget)
+    event = QEvent(QEvent.Resize)
+    nutrition_widget = OralNutritionWidget(role="doctor")
+    context_menu_filter = _TextEditContextMenuFilter(app)
+
+    assert nutrition_widget.eventFilter(widget_item, event) is False
+    assert context_menu_filter.eventFilter(widget_item, event) is False
 
 
 def test_edit_dialog_delete_request_removes_selected_diet_version(monkeypatch):
