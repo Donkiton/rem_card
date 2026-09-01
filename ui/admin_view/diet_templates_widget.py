@@ -4,11 +4,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialogButtonBox,
     QFrame,
+    QGridLayout,
     QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -33,7 +35,7 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
             "admin/diet_template_dialog_geometry_v2",
             drag_area_height=42,
         )
-        self.setMinimumSize(760, 650)
+        self.setMinimumSize(900, 650)
         self.resize(900, 760)
         self.setSizeGripEnabled(True)
         self.template = template
@@ -57,15 +59,25 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.consistency_combo = QComboBox()
         self.consistency_combo.setEditable(True)
         self.consistency_combo.addItems(["", "Обычная", "Мягкая", "Протёртая", "Полужидкая", "Жидкая"])
+        self.consistency_combo.lineEdit().setAlignment(Qt.AlignCenter)
+        self.consistency_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.consistency_combo.setMinimumWidth(125)
         self.temperature_combo = QComboBox()
         self.temperature_combo.setEditable(True)
         self.temperature_combo.addItems(["", "Комнатная", "Тёплая", "Холодная"])
+        self.temperature_combo.lineEdit().setAlignment(Qt.AlignCenter)
+        self.temperature_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.temperature_combo.setMinimumWidth(125)
         self.salt_input = QLineEdit()
         self.salt_input.setPlaceholderText("Например: до 5 г/сут")
+        self.salt_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.salt_input.setMinimumWidth(125)
         self.daily_fluid_spin = QSpinBox()
         self.daily_fluid_spin.setRange(0, 10000)
         self.daily_fluid_spin.setSpecialValueText("Не задан")
         self.daily_fluid_spin.setSuffix(" мл/сут")
+        self.daily_fluid_spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.daily_fluid_spin.setMinimumWidth(125)
         self.instructions_input = QTextEdit()
         self.instructions_input.setPlaceholderText("Особые указания по кормлению")
         self.instructions_input.setFixedHeight(60)
@@ -82,7 +94,7 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.schedule_table.setColumnCount(4)
         self.schedule_table.setHorizontalHeaderLabels(["Приём пищи", "Время", "Объём, мл", "Примечание"])
         self.schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.schedule_table.verticalHeader().setDefaultSectionSize(34)
+        self.schedule_table.verticalHeader().setDefaultSectionSize(48)
         self.schedule_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.schedule_table.setSelectionMode(QTableWidget.SingleSelection)
         self.schedule_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -105,15 +117,21 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         form.addWidget(self.text_input)
         form.addWidget(self.default_check)
         form.addWidget(QLabel("Параметры диеты"))
-        parameters = QHBoxLayout()
-        parameters.addWidget(QLabel("Консистенция"))
-        parameters.addWidget(self.consistency_combo)
-        parameters.addWidget(QLabel("Температура"))
-        parameters.addWidget(self.temperature_combo)
-        parameters.addWidget(QLabel("Соль"))
-        parameters.addWidget(self.salt_input)
-        parameters.addWidget(QLabel("Жидкость"))
-        parameters.addWidget(self.daily_fluid_spin)
+        parameters = QGridLayout()
+        parameters.setHorizontalSpacing(12)
+        parameters.setVerticalSpacing(8)
+        parameters.addWidget(QLabel("Консистенция"), 0, 0)
+        parameters.addWidget(self.consistency_combo, 0, 1)
+        parameters.addWidget(QLabel("Температура"), 0, 2)
+        parameters.addWidget(self.temperature_combo, 0, 3)
+        parameters.addWidget(QLabel("Соль"), 0, 4)
+        parameters.addWidget(self.salt_input, 0, 5)
+        parameters.addWidget(QLabel("Жидкость"), 0, 6)
+        parameters.addWidget(self.daily_fluid_spin, 0, 7)
+        parameters.setColumnStretch(1, 1)
+        parameters.setColumnStretch(3, 1)
+        parameters.setColumnStretch(5, 1)
+        parameters.setColumnStretch(7, 1)
         form.addLayout(parameters)
         checks = QHBoxLayout()
         for check in (self.fractional_check, self.on_demand_check, self.no_food_check, self.no_fluids_check):
@@ -154,6 +172,8 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.no_fluids_check.toggled.connect(
             lambda checked: self._clear_conflicting_check(self.on_demand_check, checked)
         )
+        self.no_fluids_check.toggled.connect(self._sync_no_fluids_state)
+        self.no_food_check.toggled.connect(self._sync_hunger_state)
         self.btn_add_row.clicked.connect(lambda: self.add_schedule_row())
         self.btn_delete_row.clicked.connect(self.delete_selected_row)
 
@@ -161,6 +181,22 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     def _clear_conflicting_check(other_check: QCheckBox, checked: bool) -> None:
         if checked and other_check.isChecked():
             other_check.setChecked(False)
+
+    def _sync_no_fluids_state(self, checked: bool) -> None:
+        self.daily_fluid_spin.setEnabled(not bool(checked))
+        if checked:
+            self.daily_fluid_spin.setValue(0)
+
+    def _sync_hunger_state(self, checked: bool) -> None:
+        schedule_enabled = not bool(checked)
+        self.fractional_check.setEnabled(schedule_enabled)
+        self.schedule_table.setEnabled(schedule_enabled)
+        self.btn_add_row.setEnabled(schedule_enabled)
+        self.btn_delete_row.setEnabled(schedule_enabled)
+        if checked:
+            self.fractional_check.setChecked(False)
+        elif self.schedule_table.rowCount() == 0:
+            self.add_schedule_row("09:00", 200)
 
     def fill_data(self):
         if self.template:
@@ -183,8 +219,37 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
                     item.get("time", "09:00"), item.get("amount", 200),
                     item.get("meal", "Приём пищи"), item.get("note", ""), item.get("key"),
                 )
-        if self.schedule_table.rowCount() == 0:
+        if self.schedule_table.rowCount() == 0 and not self.no_food_check.isChecked():
             self.add_schedule_row("09:00", 200)
+
+    @staticmethod
+    def _schedule_cell(editor: QWidget) -> QWidget:
+        container = QWidget()
+        container.setObjectName("DietTemplateScheduleCell")
+        cell_layout = QHBoxLayout(container)
+        cell_layout.setContentsMargins(4, 4, 4, 4)
+        cell_layout.setSpacing(0)
+        editor.setProperty("settingsSurfaceControl", True)
+        editor.setMinimumHeight(36)
+        editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        cell_layout.addWidget(editor)
+        return container
+
+    @staticmethod
+    def _schedule_editor(table: QTableWidget, row: int, column: int):
+        container = table.cellWidget(row, column)
+        if container is None:
+            return None
+        layout = container.layout()
+        if layout is None or layout.count() == 0:
+            return container
+        return layout.itemAt(0).widget()
+
+    @staticmethod
+    def _repolish_schedule_editor(editor: QWidget) -> None:
+        editor.style().unpolish(editor)
+        editor.style().polish(editor)
+        editor.update()
 
     def add_schedule_row(self, time_text="09:00", amount=200, meal="Приём пищи", note="", item_key=None):
         row = self.schedule_table.rowCount()
@@ -204,11 +269,11 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         meal_input.setProperty("item_key", str(item_key or ""))
         note_input = QLineEdit(str(note or ""))
         note_input.setPlaceholderText("Например: после ФГДС")
-        self.schedule_table.setCellWidget(row, 0, meal_input)
-        self.schedule_table.setCellWidget(row, 1, time_edit)
-        self.schedule_table.setCellWidget(row, 2, amount_spin)
-        self.schedule_table.setCellWidget(row, 3, note_input)
-        self.schedule_table.setRowHeight(row, 40)
+        editors = (meal_input, time_edit, amount_spin, note_input)
+        for column, editor in enumerate(editors):
+            self.schedule_table.setCellWidget(row, column, self._schedule_cell(editor))
+            self._repolish_schedule_editor(editor)
+        self.schedule_table.setRowHeight(row, 48)
 
     def delete_selected_row(self):
         row = self.schedule_table.currentRow()
@@ -221,12 +286,14 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
             CustomMessageBox.warning(self, "Ошибка", "Укажите название шаблона.")
             return None
 
+        no_food = self.no_food_check.isChecked()
+        no_fluids = self.no_fluids_check.isChecked()
         schedule = []
-        for row in range(self.schedule_table.rowCount()):
-            meal_input = self.schedule_table.cellWidget(row, 0)
-            time_edit = self.schedule_table.cellWidget(row, 1)
-            amount_spin = self.schedule_table.cellWidget(row, 2)
-            note_input = self.schedule_table.cellWidget(row, 3)
+        for row in range(0 if no_food else self.schedule_table.rowCount()):
+            meal_input = self._schedule_editor(self.schedule_table, row, 0)
+            time_edit = self._schedule_editor(self.schedule_table, row, 1)
+            amount_spin = self._schedule_editor(self.schedule_table, row, 2)
+            note_input = self._schedule_editor(self.schedule_table, row, 3)
             if not meal_input or not time_edit or not amount_spin:
                 continue
             schedule.append(
@@ -248,11 +315,11 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
                 "temperature": self.temperature_combo.currentText().strip(),
                 "salt_limit": self.salt_input.text().strip(),
                 "fractional": self.fractional_check.isChecked(),
-                "daily_fluid_ml": self.daily_fluid_spin.value() or None,
+                "daily_fluid_ml": None if no_fluids else (self.daily_fluid_spin.value() or None),
                 "special_instructions": self.instructions_input.toPlainText().strip(),
                 "comment": self.comment_input.toPlainText().strip(),
-                "no_food": self.no_food_check.isChecked(),
-                "no_fluids": self.no_fluids_check.isChecked(),
+                "no_food": no_food,
+                "no_fluids": no_fluids,
                 "on_demand": self.on_demand_check.isChecked(),
             },
             "is_default": self.default_check.isChecked(),

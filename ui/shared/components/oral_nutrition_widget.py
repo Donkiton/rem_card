@@ -67,7 +67,7 @@ def _dialog_section(title: str) -> tuple[QFrame, QVBoxLayout]:
 
 
 class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
-    def __init__(self, templates, version=None, parent=None):
+    def __init__(self, templates, version=None, initial_version=None, parent=None):
         super().__init__("Назначение диеты", parent)
         self._init_saved_frameless_dialog(
             "oral_nutrition/diet_assignment_dialog_geometry_v1",
@@ -78,6 +78,7 @@ class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.setSizeGripEnabled(True)
         self.templates = list(templates or [])
         self.version = version
+        self.initial_version = initial_version
         self.delete_requested = False
         self._templates_by_id = {
             int(item.id): item for item in self.templates if getattr(item, "id", None) is not None
@@ -225,6 +226,7 @@ class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.no_fluids_check.toggled.connect(
             lambda checked: self._clear_conflicting_check(self.on_demand_check, checked)
         )
+        self.no_fluids_check.toggled.connect(self._sync_no_fluids_state)
         self.no_food_check.toggled.connect(self._sync_hunger_state)
         self.add_row_btn.clicked.connect(self._add_schedule_row)
         self.remove_row_btn.clicked.connect(self._remove_schedule_row)
@@ -242,6 +244,11 @@ class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         if checked:
             self.fractional_check.setChecked(False)
 
+    def _sync_no_fluids_state(self, checked: bool) -> None:
+        self.daily_fluid_spin.setEnabled(not bool(checked))
+        if checked:
+            self.daily_fluid_spin.setValue(0)
+
     def _fill(self):
         if self.version is not None:
             if self.version.template_id is not None:
@@ -255,21 +262,43 @@ class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
                 self.version.details_json,
             )
             self.change_note_input.setPlainText(self.version.change_note or "")
-        elif self.templates:
-            default = next((item for item in self.templates if item.is_default), self.templates[0])
-            index = self.template_combo.findData(int(default.id))
-            self.template_combo.setCurrentIndex(max(0, index))
-            self._template_changed(self.template_combo.currentIndex())
+        elif self.initial_version is not None:
+            if self.initial_version.template_id is not None:
+                index = self.template_combo.findData(int(self.initial_version.template_id))
+                self.template_combo.setCurrentIndex(max(0, index))
+            self._load_values(
+                self.initial_version.diet_name,
+                self.initial_version.diet_text,
+                self.initial_version.schedule_json,
+                self.initial_version.details_json,
+            )
         else:
-            self._add_schedule_row("Завтрак", "08:00", 250, "")
+            self._reset_individual_fields()
 
     def _template_changed(self, _index):
         template_id = self.template_combo.currentData()
         if template_id is None:
+            self._reset_individual_fields()
             return
         template = self._templates_by_id.get(int(template_id))
         if template is not None:
             self._load_values(template.name, template.diet_text, template.schedule_json, template.details_json)
+
+    def _reset_individual_fields(self) -> None:
+        self.name_input.clear()
+        self.text_input.clear()
+        self.consistency_combo.setCurrentText("")
+        self.temperature_combo.setCurrentText("")
+        self.salt_input.clear()
+        self.daily_fluid_spin.setValue(0)
+        self.fractional_check.setChecked(False)
+        self.on_demand_check.setChecked(False)
+        self.no_food_check.setChecked(False)
+        self.no_fluids_check.setChecked(False)
+        self.instructions_input.clear()
+        self.change_note_input.clear()
+        self.clear_mode_combo.setCurrentIndex(0)
+        self.schedule_table.setRowCount(0)
 
     def _load_values(self, name, text, schedule_json, details_json):
         self.name_input.setText(str(name or ""))
@@ -332,6 +361,7 @@ class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
 
     def data(self) -> dict:
         hunger = self.no_food_check.isChecked()
+        no_fluids = self.no_fluids_check.isChecked()
         schedule = []
         for row in range(0 if hunger else self.schedule_table.rowCount()):
             meal = self.schedule_table.item(row, 0)
@@ -361,11 +391,11 @@ class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
                 "temperature": "" if hunger else self.temperature_combo.currentText().strip(),
                 "salt_limit": "" if hunger else self.salt_input.text().strip(),
                 "fractional": False if hunger else self.fractional_check.isChecked(),
-                "daily_fluid_ml": None if hunger else (self.daily_fluid_spin.value() or None),
+                "daily_fluid_ml": None if hunger or no_fluids else (self.daily_fluid_spin.value() or None),
                 "special_instructions": self.instructions_input.toPlainText().strip(),
                 "comment": "",
                 "no_food": hunger,
-                "no_fluids": self.no_fluids_check.isChecked(),
+                "no_fluids": no_fluids,
                 "on_demand": self.on_demand_check.isChecked(),
             },
             "change_note": self.change_note_input.toPlainText().strip(),
@@ -410,9 +440,14 @@ class OralFactDialog(BaseStyledDialog):
         layout.addWidget(self.time_edit, 1, 1)
         layout.addWidget(_field_label("Количество"), 2, 0)
         self.amount_spin = QSpinBox()
-        self.amount_spin.setRange(1, 10000)
+        self.amount_spin.setRange(0, 10000)
         self.amount_spin.setSuffix(" мл")
-        initial_amount = getattr(event, "amount_ml", None) or self.planned_item.get("amount") or 100
+        event_amount = getattr(event, "amount_ml", None)
+        initial_amount = (
+            event_amount
+            if event_amount is not None
+            else self.planned_item.get("amount") or 100
+        )
         self.amount_spin.setValue(int(initial_amount))
         layout.addWidget(self.amount_spin, 2, 1)
         layout.addWidget(_field_label("Примечание"), 3, 0)
@@ -470,6 +505,7 @@ class OralNutritionWidget(QWidget):
         self._refresh_worker = None
         self._refresh_pending = False
         self._write_pending = False
+        self._context_loading = False
         self._local_undo = []
         self._owned_modal_dialogs = {}
         self._write_success_ready.connect(self._apply_write_success, Qt.QueuedConnection)
@@ -600,7 +636,7 @@ class OralNutritionWidget(QWidget):
         self.status_label.hide()
         root.addWidget(self.status_label)
 
-        self.assign_btn.clicked.connect(lambda: self._open_assignment(None))
+        self.assign_btn.clicked.connect(self._open_active_or_new_assignment)
         self.edit_version_btn.clicked.connect(self._edit_selected_version)
         self.clear_btn.clicked.connect(self._clear_facts)
         self.undo_btn.clicked.connect(self._undo_last)
@@ -689,10 +725,16 @@ class OralNutritionWidget(QWidget):
         self._update_actions()
 
     def set_context(self, admission_id: Optional[int], shift_date: Optional[datetime]):
-        if self.admission_id != admission_id or self.shift_date != shift_date:
+        normalized_admission_id = int(admission_id) if admission_id else None
+        context_changed = self.admission_id != normalized_admission_id or self.shift_date != shift_date
+        if context_changed:
             self._local_undo = []
-        self.admission_id = int(admission_id) if admission_id else None
+            self._snapshot = {}
+        self.admission_id = normalized_admission_id
         self.shift_date = shift_date
+        if context_changed:
+            self._context_loading = bool(self.service and self.admission_id and self.shift_date)
+            self._render()
         self.refresh_data()
 
     def handle_data_changes(self, payload: dict):
@@ -705,6 +747,7 @@ class OralNutritionWidget(QWidget):
         generation = self._refresh_generation
         if not self.service or not self.admission_id or not self.shift_date:
             self._refresh_pending = False
+            self._context_loading = False
             self._snapshot = {}
             self._render()
             return
@@ -740,6 +783,7 @@ class OralNutritionWidget(QWidget):
             generation = getattr(self.sender(), "_oral_refresh_generation", -1)
         if generation != self._refresh_generation or not isinstance(result, dict):
             return
+        self._context_loading = False
         self._snapshot = result
         self._render()
 
@@ -748,8 +792,10 @@ class OralNutritionWidget(QWidget):
             generation = getattr(self.sender(), "_oral_refresh_generation", -1)
         if generation != self._refresh_generation:
             return
+        self._context_loading = False
         logger.warning("Oral nutrition refresh failed: %s", exc, exc_info=True)
         self._set_status_message(f"Не удалось загрузить питание: {exc}")
+        self._update_actions()
 
     def _set_status_message(self, message: str):
         text = str(message or "")
@@ -848,7 +894,9 @@ class OralNutritionWidget(QWidget):
             first.setData(Qt.UserRole, version)
             self.version_table.setItem(row, 0, first)
             self.version_table.setItem(row, 1, QTableWidgetItem(version.diet_name or version.diet_text))
-            self.version_table.setItem(row, 2, QTableWidgetItem(version.change_note or ""))
+            comment = QTableWidgetItem(version.change_note or "")
+            comment.setToolTip(str(version.change_note or ""))
+            self.version_table.setItem(row, 2, comment)
 
     def _render_daily_totals(self):
         self.totals_table.setRowCount(0)
@@ -904,7 +952,9 @@ class OralNutritionWidget(QWidget):
         return item.data(Qt.UserRole) if item else None
 
     def _update_actions(self):
-        writable = bool(self.admission_id and not self.read_only and not self._write_pending)
+        writable = bool(
+            self.admission_id and not self.read_only and not self._write_pending and not self._context_loading
+        )
         doctor = self.role == "doctor"
         planned, event = self._selected_intake()
         complete_oral_restriction = self._has_complete_oral_restriction()
@@ -934,11 +984,17 @@ class OralNutritionWidget(QWidget):
         details = diet_details(getattr(active, "details_json", None))
         return bool(details.get("no_food") and details.get("no_fluids"))
 
-    def _open_assignment(self, version):
+    def _open_active_or_new_assignment(self):
+        self._open_assignment(None, initial_version=self._snapshot.get("active"))
+
+    def _open_assignment(self, version, initial_version=None):
         if self.role != "doctor" or self.read_only:
             return
+        dialog_kwargs = {"version": version, "parent": self}
+        if initial_version is not None:
+            dialog_kwargs["initial_version"] = initial_version
         dialog = self._own_modal_dialog(
-            DietAssignmentDialog(self._snapshot.get("templates") or [], version=version, parent=self)
+            DietAssignmentDialog(self._snapshot.get("templates") or [], **dialog_kwargs)
         )
         try:
             if not dialog.exec():
@@ -1036,6 +1092,7 @@ class OralNutritionWidget(QWidget):
             ) != CustomMessageBox.Yes:
                 return
         if event is not None:
+            before_state = self._fact_state(event)
             self._enqueue_write(
                 "oral_fact_update",
                 lambda: self.service.update_oral_intake_fact(
@@ -1045,10 +1102,12 @@ class OralNutritionWidget(QWidget):
                     planned_time=planned.get("planned_dt") if planned else None,
                     **data,
                 ),
-                after_success=lambda result, before=event, planned_item=planned: self._remember_undo(
+                after_success=lambda result, before=before_state, planned_item=planned: self._remember_undo(
                     {
                         "kind": "restore",
                         "before": before,
+                        "after": self._fact_state(result),
+                        "event_id": result.id,
                         "expected_version": result.version,
                         "planned_time": planned_item.get("planned_dt") if planned_item else None,
                     }
@@ -1063,11 +1122,30 @@ class OralNutritionWidget(QWidget):
             "planned_item_key": planned.get("key") if planned else None,
             "planned_time": planned.get("planned_dt") if planned else None,
         }
+        replaced_unplanned = None
+        if planned is None:
+            event_minute = data["event_time"].replace(second=0, microsecond=0)
+            replaced_unplanned = next(
+                (
+                    item
+                    for item in self._snapshot.get("events") or []
+                    if str(getattr(item, "entry_kind", "unplanned") or "unplanned") == "unplanned"
+                    and getattr(item, "event_time", event_minute).replace(second=0, microsecond=0)
+                    == event_minute
+                ),
+                None,
+            )
+            # Version 0 means "create only if the minute is still empty".
+            # It prevents a just-arrived fact from another workstation being
+            # silently overwritten between the snapshot and this write.
+            kwargs["expected_version"] = int(getattr(replaced_unplanned, "version", 0) or 0)
+        replaced_state = self._fact_state(replaced_unplanned)
         self._enqueue_write(
             "oral_fact_create",
             lambda: self.service.create_oral_intake_fact(self.admission_id, **kwargs),
-            after_success=lambda result: self._remember_undo(
-                {"kind": "delete", "event_id": result.id, "expected_version": result.version}
+            after_success=lambda result, before=replaced_state: self._remember_created_fact(
+                result,
+                before,
             ),
         )
 
@@ -1130,23 +1208,114 @@ class OralNutritionWidget(QWidget):
             planned = self._planned_item_for_event(event)
         if CustomMessageBox.question(self, "Удаление факта", "Удалить выбранный факт питания?") != CustomMessageBox.Yes:
             return
+        before_state = self._fact_state(event)
         self._enqueue_write(
             "oral_fact_delete",
             lambda: self.service.delete_oral_intake_fact(int(event.id), expected_version=event.version),
-            after_success=lambda _result, before=event, planned_item=planned: self._remember_undo(
+            after_success=lambda _result, before=before_state, planned_item=planned: self._remember_undo(
                 {
                     "kind": "recreate",
                     "before": before,
+                    "after": None,
+                    "event_id": before.get("id"),
                     "planned_time": planned_item.get("planned_dt") if planned_item else None,
                 }
             ),
         )
 
+    @staticmethod
+    def _fact_state(event):
+        if event is None:
+            return None
+
+        def value(name, default=None):
+            if isinstance(event, dict):
+                return event.get(name, default)
+            return getattr(event, name, default)
+
+        return {
+            "id": value("id"),
+            "admission_id": value("admission_id"),
+            "shift_start": value("shift_start"),
+            "event_time": value("event_time"),
+            "amount_ml": float(value("amount_ml", 0) or 0),
+            "plan_version_id": value("plan_version_id"),
+            "planned_item_key": value("planned_item_key"),
+            "entry_kind": str(value("entry_kind", "unplanned") or "unplanned"),
+            "meal_name": str(value("meal_name", "") or ""),
+            "note": str(value("note", "") or ""),
+            "version": int(value("version", 0) or 0),
+        }
+
+    def _remember_created_fact(self, result, replaced_state=None):
+        after = self._fact_state(result)
+        if replaced_state is not None:
+            self._remember_undo(
+                {
+                    "kind": "restore",
+                    "before": replaced_state,
+                    "after": after,
+                    "event_id": result.id,
+                    "expected_version": result.version,
+                    "planned_time": None,
+                }
+            )
+            return
+        self._remember_undo(
+            {
+                "kind": "delete",
+                "after": after,
+                "event_id": result.id,
+                "expected_version": result.version,
+            }
+        )
+
+    @staticmethod
+    def _same_fact_content(left, right) -> bool:
+        if left is None or right is None:
+            return left is right
+        fields = (
+            "admission_id",
+            "shift_start",
+            "event_time",
+            "plan_version_id",
+            "planned_item_key",
+            "entry_kind",
+            "meal_name",
+            "note",
+        )
+        return (
+            all(left.get(field) == right.get(field) for field in fields)
+            and abs(float(left.get("amount_ml") or 0) - float(right.get("amount_ml") or 0)) < 0.001
+        )
+
+    def _finish_local_undo(self, action, result):
+        if not self._local_undo or self._local_undo[-1] is not action:
+            return
+        self._local_undo.pop()
+        restored = self._fact_state(result)
+        if restored is None:
+            return
+
+        old_event_id = action.get("event_id")
+        for previous in reversed(self._local_undo):
+            if previous.get("event_id") != old_event_id:
+                continue
+            if not self._same_fact_content(previous.get("after"), restored):
+                # The same fact had an intervening state not produced by this
+                # session. Keep its old version so optimistic locking blocks
+                # the next undo instead of rolling another user's edit back.
+                break
+            previous["event_id"] = restored.get("id")
+            previous["expected_version"] = restored.get("version")
+            previous["after"] = restored
+            break
+
     def _undo_last(self):
         if not self.admission_id:
             return
         if self._local_undo:
-            action = self._local_undo.pop()
+            action = self._local_undo[-1]
             if action["kind"] == "delete":
                 def operation():
                     return self.service.delete_oral_intake_fact(
@@ -1157,8 +1326,8 @@ class OralNutritionWidget(QWidget):
 
                 def operation():
                     return self.service.update_oral_intake_fact(
-                        int(before.id), before.event_time, before.amount_ml,
-                        note=before.note, meal_name=before.meal_name, actor=self.role,
+                        int(action["event_id"]), before["event_time"], before["amount_ml"],
+                        note=before["note"], meal_name=before["meal_name"], actor=self.role,
                         planned_time=action.get("planned_time"),
                         expected_version=action.get("expected_version"),
                     )
@@ -1167,24 +1336,23 @@ class OralNutritionWidget(QWidget):
 
                 def operation():
                     return self.service.create_oral_intake_fact(
-                        self.admission_id, before.event_time, before.amount_ml,
-                        plan_version_id=before.plan_version_id,
-                        planned_item_key=before.planned_item_key,
+                        self.admission_id, before["event_time"], before["amount_ml"],
+                        plan_version_id=before["plan_version_id"],
+                        planned_item_key=before["planned_item_key"],
                         planned_time=action.get("planned_time"),
-                        entry_kind=before.entry_kind,
-                        meal_name=before.meal_name,
-                        note=before.note,
+                        entry_kind=before["entry_kind"],
+                        meal_name=before["meal_name"],
+                        note=before["note"],
                         actor=self.role,
+                        expected_version=0,
                     )
-            self._enqueue_write("oral_fact_undo_local", operation)
+            self._enqueue_write(
+                "oral_fact_undo_local",
+                operation,
+                after_success=lambda result, current=action: self._finish_local_undo(current, result),
+            )
             return
-        if self.role == "doctor":
-            self._set_status_message("Нет действия текущего сеанса для отмены")
-            return
-        self._enqueue_write(
-            "oral_fact_undo_last",
-            lambda: self.service.undo_last_oral_intake_action(self.admission_id, self.role),
-        )
+        self._set_status_message("Нет действия текущего сеанса для отмены")
 
     def _clear_facts(self):
         if self.role != "doctor" or not self._snapshot.get("events"):

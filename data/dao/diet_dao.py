@@ -513,19 +513,33 @@ class OralIntakeDAO:
             row = self.db.fetch_one_remcard(query, params)
         return self._map(row) if row else None
 
-    def upsert_unplanned_event(self, dto: OralIntakeEventDTO, cursor=None) -> OralIntakeEventDTO:
+    def upsert_unplanned_event(
+        self,
+        dto: OralIntakeEventDTO,
+        expected_version: Optional[int] = None,
+        cursor=None,
+    ) -> OralIntakeEventDTO:
         if cursor is None:
             with self.db.remcard_transaction(source="oral_intake_unplanned_upsert") as cur:
-                return self.upsert_unplanned_event(dto, cursor=cur)
+                return self.upsert_unplanned_event(
+                    dto,
+                    expected_version=expected_version,
+                    cursor=cur,
+                )
 
         existing = self.get_unplanned_event_at(dto.admission_id, dto.event_time, cursor=cursor)
         if existing is None:
+            if expected_version not in (None, 0):
+                raise OptimisticLockError("Факт питания был изменен другим пользователем")
             return self.create_event(dto, cursor=cursor)
+
+        if expected_version is not None and int(expected_version) != int(existing.version or 0):
+            raise OptimisticLockError("Факт питания был изменен другим пользователем")
 
         dto.id = existing.id
         return self.update_event_by_id(
             dto,
-            expected_version=existing.version,
+            expected_version=(existing.version if expected_version is None else expected_version),
             cursor=cursor,
         )
 

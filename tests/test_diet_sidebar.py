@@ -40,6 +40,32 @@ class DietSidebarTest(unittest.TestCase):
     def test_nurse_diet_tab_keeps_balance_sidebar_visible(self):
         self._assert_diet_sidebar(NurseRemCardLayoutManager())
 
+    def _assert_balance_lower_edge_is_stable(self, layout):
+        layout.resize(1400, 900)
+        layout.show()
+        self.app.processEvents()
+        layout.set_active_tab("Витальные функции", source="refresh")
+        self.app.processEvents()
+        stack_geometry = layout.vitals_stack.geometry()
+
+        layout.set_active_tab("Баланс жидкости", source="refresh")
+        self.app.processEvents()
+
+        self.assertEqual(layout._balance_grid_wrapper.layout().contentsMargins().bottom(), 5)
+        self.assertEqual(layout.vitals_stack.geometry(), stack_geometry)
+
+        layout.set_active_tab("Витальные функции", source="refresh")
+        self.app.processEvents()
+        self.assertEqual(layout.vitals_stack.geometry(), stack_geometry)
+        layout.deleteLater()
+        self.app.processEvents()
+
+    def test_doctor_balance_grid_keeps_same_lower_boundary_as_other_tabs(self):
+        self._assert_balance_lower_edge_is_stable(RemCardLayoutManager())
+
+    def test_nurse_balance_grid_keeps_same_lower_boundary_as_other_tabs(self):
+        self._assert_balance_lower_edge_is_stable(NurseRemCardLayoutManager())
+
 
 if __name__ == "__main__":
     unittest.main()

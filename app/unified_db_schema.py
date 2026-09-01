@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 25
-SCHEMA_MIN_MIGRATION_VERSION = 25
+SCHEMA_FASTPATH_REV = 26
+SCHEMA_MIN_MIGRATION_VERSION = 26
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -406,7 +406,7 @@ def _migrate_oral_intake_events_v25(conn: sqlite3.Connection, logger: logging.Lo
             admission_id INTEGER NOT NULL,
             shift_start TEXT NOT NULL,
             event_time TEXT NOT NULL,
-            amount_ml REAL NOT NULL CHECK(amount_ml > 0),
+            amount_ml REAL NOT NULL CHECK(amount_ml >= 0),
             plan_version_id INTEGER,
             planned_item_key TEXT,
             entry_kind TEXT NOT NULL DEFAULT 'unplanned',
@@ -437,6 +437,57 @@ def _migrate_oral_intake_events_v25(conn: sqlite3.Connection, logger: logging.Lo
     )
     conn.execute("DROP TABLE oral_intake_events")
     conn.execute("ALTER TABLE oral_intake_events_v25 RENAME TO oral_intake_events")
+
+
+def _migrate_oral_intake_events_allow_zero(conn: sqlite3.Connection, logger: logging.Logger) -> None:
+    """Allow an explicit 0 ml fact without treating it as a missing row."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'oral_intake_events'"
+    ).fetchone()
+    table_sql = "" if not row or not row[0] else "".join(str(row[0]).lower().split())
+    if "check(amount_ml>0)" not in table_sql:
+        return
+
+    logger.info("Rebuilding oral_intake_events to allow explicit zero intake facts")
+    conn.execute("DROP TABLE IF EXISTS oral_intake_events_v26")
+    conn.execute(
+        """
+        CREATE TABLE oral_intake_events_v26 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admission_id INTEGER NOT NULL,
+            shift_start TEXT NOT NULL,
+            event_time TEXT NOT NULL,
+            amount_ml REAL NOT NULL CHECK(amount_ml >= 0),
+            plan_version_id INTEGER,
+            planned_item_key TEXT,
+            entry_kind TEXT NOT NULL DEFAULT 'unplanned',
+            meal_name TEXT,
+            note TEXT,
+            action_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            updated_at TEXT,
+            version INTEGER DEFAULT 1,
+            last_modified_by TEXT,
+            FOREIGN KEY (admission_id) REFERENCES admissions(id) ON DELETE CASCADE,
+            FOREIGN KEY (plan_version_id) REFERENCES diet_plan_versions(id) ON DELETE SET NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO oral_intake_events_v26 (
+            id, admission_id, shift_start, event_time, amount_ml,
+            plan_version_id, planned_item_key, entry_kind, meal_name, note, action_id,
+            created_at, updated_at, version, last_modified_by
+        )
+        SELECT id, admission_id, shift_start, event_time, amount_ml,
+               plan_version_id, planned_item_key, entry_kind, meal_name, note, action_id,
+               created_at, updated_at, version, last_modified_by
+        FROM oral_intake_events
+        """
+    )
+    conn.execute("DROP TABLE oral_intake_events")
+    conn.execute("ALTER TABLE oral_intake_events_v26 RENAME TO oral_intake_events")
 
 
 def _drop_trigger(conn: sqlite3.Connection, trigger_name: str):
@@ -1385,7 +1436,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             admission_id INTEGER NOT NULL,
             shift_start TEXT NOT NULL,
             event_time TEXT NOT NULL,
-            amount_ml REAL NOT NULL CHECK(amount_ml > 0),
+            amount_ml REAL NOT NULL CHECK(amount_ml >= 0),
             plan_version_id INTEGER,
             planned_item_key TEXT,
             entry_kind TEXT NOT NULL DEFAULT 'unplanned',
@@ -1529,6 +1580,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "oral_intake_events", "updated_at", "TEXT", logger)
     _ensure_column(conn, "oral_intake_events", "version", "INTEGER DEFAULT 1", logger)
     _ensure_column(conn, "oral_intake_events", "last_modified_by", "TEXT", logger)
+    _migrate_oral_intake_events_allow_zero(conn, logger)
 
     _ensure_column(conn, "patient_status_events", "last_modified_by", "TEXT", logger)
     _ensure_column(conn, "patient_status_events", "updated_at", "DATETIME", logger)
@@ -1741,6 +1793,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 18, "operblock and remcard icon settings")
     _mark_schema_migration(conn, 19, "recovery bed admission marker")
     _mark_schema_migration(conn, 25, "versioned oral nutrition plans and detailed intake facts")
+    _mark_schema_migration(conn, 26, "explicit zero oral intake facts")
 
     for table in (
         "vitals",

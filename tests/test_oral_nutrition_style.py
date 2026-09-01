@@ -1,4 +1,5 @@
 import gc
+import json
 import os
 import threading
 from datetime import datetime
@@ -481,6 +482,25 @@ def test_edit_selected_diet_deactivates_after_click_outside_changes_table():
     assert widget.edit_version_btn.isEnabled() is False
 
 
+def test_diet_change_comment_shows_full_text_in_tooltip():
+    _application()
+    version = _diet_version()
+    version.change_note = "Длинный комментарий к изменению назначения после обследования"
+    widget = OralNutritionWidget(role="doctor")
+    widget.admission_id = 1
+    widget._snapshot = {
+        "active": version,
+        "versions": [version],
+        "planned_rows": [],
+        "events": [],
+        "history": [],
+    }
+
+    widget._render()
+
+    assert widget.version_table.item(0, 2).toolTip() == version.change_note
+
+
 def test_edit_selected_diet_button_keeps_selection_until_action_runs(monkeypatch):
     app = _application()
     selected = _diet_version()
@@ -604,6 +624,112 @@ def test_diet_assignment_restrictions_cannot_be_selected_together():
     assert dialog.no_fluids_check.isChecked() is False
 
 
+def test_no_fluids_disables_and_clears_daily_fluid_amount():
+    _application()
+    dialog = DietAssignmentDialog([_template()])
+    dialog.daily_fluid_spin.setValue(600)
+
+    dialog.no_fluids_check.setChecked(True)
+
+    assert dialog.daily_fluid_spin.isEnabled() is False
+    assert dialog.daily_fluid_spin.value() == 0
+    assert dialog.data()["details_json"]["daily_fluid_ml"] is None
+
+    dialog.no_fluids_check.setChecked(False)
+    assert dialog.daily_fluid_spin.isEnabled() is True
+
+
+def test_new_assignment_starts_with_blank_individual_diet_and_resets_template_values():
+    _application()
+    template = _template()
+    template.schedule_json = json.dumps([
+        {"key": "breakfast", "meal": "Завтрак", "time": "08:00", "amount": 250, "note": ""}
+    ])
+    template.details_json = {
+        "consistency": "Протёртая",
+        "temperature": "Тёплая",
+        "salt_limit": "до 5 г/сут",
+        "daily_fluid_ml": 600,
+        "fractional": True,
+        "special_instructions": "Кормить медленно",
+    }
+    dialog = DietAssignmentDialog([template])
+
+    assert dialog.template_combo.currentData() is None
+    assert dialog.name_input.text() == ""
+    assert dialog.schedule_table.rowCount() == 0
+
+    dialog.template_combo.setCurrentIndex(dialog.template_combo.findData(template.id))
+    dialog.change_note_input.setPlainText("Комментарий прошлого назначения")
+    dialog.clear_mode_combo.setCurrentIndex(2)
+    assert dialog.name_input.text() == template.name
+    assert dialog.daily_fluid_spin.value() == 600
+    assert dialog.schedule_table.rowCount() == 1
+
+    dialog.template_combo.setCurrentIndex(0)
+
+    assert dialog.template_combo.currentData() is None
+    assert dialog.name_input.text() == ""
+    assert dialog.text_input.text() == ""
+    assert dialog.consistency_combo.currentText() == ""
+    assert dialog.temperature_combo.currentText() == ""
+    assert dialog.salt_input.text() == ""
+    assert dialog.daily_fluid_spin.value() == 0
+    assert dialog.fractional_check.isChecked() is False
+    assert dialog.instructions_input.toPlainText() == ""
+    assert dialog.change_note_input.toPlainText() == ""
+    assert dialog.clear_mode_combo.currentData() == "preserve"
+    assert dialog.schedule_table.rowCount() == 0
+
+
+def test_existing_patient_assignment_uses_active_diet_as_clean_starting_copy(monkeypatch):
+    app = _application()
+    active = _diet_version()
+    widget = OralNutritionWidget(role="doctor")
+    widget.admission_id = 1
+    widget.shift_date = datetime(2026, 8, 30, 8, 0)
+    widget._snapshot = {
+        "active": active,
+        "versions": [active],
+        "planned_rows": [],
+        "events": [],
+        "history": [],
+    }
+    opened = []
+    monkeypatch.setattr(
+        widget,
+        "_open_assignment",
+        lambda version, initial_version=None: opened.append((version, initial_version)),
+    )
+    widget._render()
+
+    QTest.mouseClick(widget.assign_btn, Qt.LeftButton)
+    app.processEvents()
+
+    assert opened == [(None, active)]
+
+    dialog = DietAssignmentDialog([_template()], initial_version=active)
+    assert dialog.template_combo.currentData() == active.template_id
+    assert dialog.name_input.text() == active.diet_name
+    assert dialog.change_note_input.toPlainText() == ""
+    assert dialog.delete_button.isHidden() is True
+
+
+def test_patient_context_switch_clears_stale_diet_before_refresh(monkeypatch):
+    _application()
+    widget = OralNutritionWidget(service=object(), role="doctor")
+    widget.admission_id = 1
+    widget.shift_date = datetime(2026, 8, 30, 8, 0)
+    widget._snapshot = {"active": _diet_version(), "templates": [_template()]}
+    monkeypatch.setattr(widget, "refresh_data", lambda: None)
+
+    widget.set_context(2, datetime(2026, 8, 30, 8, 0))
+
+    assert widget._snapshot == {}
+    assert widget._context_loading is True
+    assert widget.assign_btn.isEnabled() is False
+
+
 def test_hunger_disables_diet_parameters_and_meal_schedule_only():
     _application()
     dialog = DietAssignmentDialog([_template()])
@@ -722,6 +848,207 @@ def test_oral_fact_dialog_uses_same_dialog_design_language():
     assert dialog.time_edit.maximumDateTime().toPython() == dialog.allowed_end
     assert not hasattr(dialog, "time_window_label")
     assert dialog.time_edit.calendarWidget() in dialog._oral_popup_widgets
+
+
+def test_oral_fact_dialog_accepts_and_preserves_explicit_zero_amount():
+    _application()
+    moment = datetime(2026, 8, 30, 12, 0)
+    event = SimpleNamespace(
+        event_time=moment,
+        amount_ml=0,
+        meal_name="Обед",
+        note="Отказался от пищи",
+    )
+    dialog = OralFactDialog(
+        planned_item={"meal": "Обед", "amount": 100, "planned_dt": moment},
+        event=event,
+        shift_date=datetime(2026, 8, 30, 8, 0),
+    )
+
+    assert dialog.amount_spin.minimum() == 0
+    assert dialog.amount_spin.value() == 0
+    assert dialog.data()["amount_ml"] == 0
+
+
+class _VersionedFactService:
+    def __init__(self, fact):
+        self.current = fact
+        self.undo_last_calls = 0
+
+    @staticmethod
+    def _copy(fact, **changes):
+        data = dict(vars(fact))
+        data.update(changes)
+        return SimpleNamespace(**data)
+
+    def update_oral_intake_fact(
+        self,
+        event_id,
+        event_time,
+        amount_ml,
+        *,
+        expected_version=None,
+        meal_name="",
+        note="",
+        **_kwargs,
+    ):
+        if (
+            self.current is None
+            or int(event_id) != int(self.current.id)
+            or int(expected_version or 0) != int(self.current.version)
+        ):
+            raise RuntimeError("Факт питания был изменен другим пользователем")
+        self.current = self._copy(
+            self.current,
+            event_time=event_time,
+            amount_ml=float(amount_ml),
+            meal_name=meal_name,
+            note=note,
+            version=int(self.current.version) + 1,
+        )
+        return self.current
+
+    def delete_oral_intake_fact(self, event_id, expected_version=None):
+        if (
+            self.current is None
+            or int(event_id) != int(self.current.id)
+            or int(expected_version or 0) != int(self.current.version)
+        ):
+            raise RuntimeError("Факт питания был изменен другим пользователем")
+        self.current = None
+
+    def create_oral_intake_fact(self, admission_id, event_time, amount_ml, **kwargs):
+        self.current = SimpleNamespace(
+            id=91,
+            admission_id=admission_id,
+            shift_start=datetime(2026, 8, 30, 8, 0),
+            event_time=event_time,
+            amount_ml=float(amount_ml),
+            plan_version_id=kwargs.get("plan_version_id"),
+            planned_item_key=kwargs.get("planned_item_key"),
+            entry_kind=kwargs.get("entry_kind", "unplanned"),
+            meal_name=kwargs.get("meal_name", ""),
+            note=kwargs.get("note", ""),
+            version=1,
+        )
+        return self.current
+
+    def undo_last_oral_intake_action(self, *_args):
+        self.undo_last_calls += 1
+        raise AssertionError("Глобальная отмена по роли не должна вызываться")
+
+
+def _fact_state_fixture(amount, version):
+    return SimpleNamespace(
+        id=17,
+        admission_id=1,
+        shift_start=datetime(2026, 8, 30, 8, 0),
+        event_time=datetime(2026, 8, 30, 12, 0),
+        amount_ml=float(amount),
+        plan_version_id=3,
+        planned_item_key="lunch",
+        entry_kind="planned",
+        meal_name="Обед",
+        note="",
+        version=version,
+    )
+
+
+def _remember_update(widget, before, after):
+    widget._remember_undo(
+        {
+            "kind": "restore",
+            "before": widget._fact_state(before),
+            "after": widget._fact_state(after),
+            "event_id": after.id,
+            "expected_version": after.version,
+            "planned_time": after.event_time,
+        }
+    )
+
+
+def test_repeated_undo_rebases_consecutive_changes_from_current_session(monkeypatch):
+    app = _application()
+    original = _fact_state_fixture(100, 1)
+    service = _VersionedFactService(original)
+    widget = OralNutritionWidget(service=service, role="nurse")
+    widget.admission_id = 1
+    widget.shift_date = datetime(2026, 8, 30, 8, 0)
+    monkeypatch.setattr(widget, "refresh_data", lambda: None)
+
+    first = service.update_oral_intake_fact(
+        17, original.event_time, 200, expected_version=1, meal_name="Обед"
+    )
+    _remember_update(widget, original, first)
+    second = service.update_oral_intake_fact(
+        17, first.event_time, 300, expected_version=2, meal_name="Обед"
+    )
+    _remember_update(widget, first, second)
+
+    widget._undo_last()
+    app.processEvents()
+    assert service.current.amount_ml == 200
+    assert service.current.version == 4
+    assert widget._local_undo[-1]["expected_version"] == 4
+
+    widget._undo_last()
+    app.processEvents()
+    assert service.current.amount_ml == 100
+    assert service.current.version == 5
+    assert widget._local_undo == []
+
+
+def test_undo_stops_before_intervening_change_to_same_fact(monkeypatch):
+    app = _application()
+    warnings = []
+    original = _fact_state_fixture(100, 1)
+    service = _VersionedFactService(original)
+    widget = OralNutritionWidget(service=service, role="nurse")
+    widget.admission_id = 1
+    widget.shift_date = datetime(2026, 8, 30, 8, 0)
+    monkeypatch.setattr(widget, "refresh_data", lambda: None)
+    monkeypatch.setattr(
+        CustomMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append((args, kwargs)),
+    )
+
+    own_first = service.update_oral_intake_fact(
+        17, original.event_time, 200, expected_version=1, meal_name="Обед"
+    )
+    _remember_update(widget, original, own_first)
+    foreign = service.update_oral_intake_fact(
+        17, own_first.event_time, 250, expected_version=2, meal_name="Обед"
+    )
+    own_second = service.update_oral_intake_fact(
+        17, foreign.event_time, 300, expected_version=3, meal_name="Обед"
+    )
+    _remember_update(widget, foreign, own_second)
+
+    widget._undo_last()
+    app.processEvents()
+    assert service.current.amount_ml == 250
+    assert len(widget._local_undo) == 1
+    assert widget._local_undo[-1]["expected_version"] == 2
+
+    widget._undo_last()
+    app.processEvents()
+    assert service.current.amount_ml == 250
+    assert len(widget._local_undo) == 1
+    assert warnings
+    assert "изменен другим пользователем" in warnings[-1][0][2]
+
+
+def test_empty_nurse_undo_does_not_fall_back_to_role_wide_database_action():
+    _application()
+    service = _VersionedFactService(_fact_state_fixture(100, 1))
+    widget = OralNutritionWidget(service=service, role="nurse")
+    widget.admission_id = 1
+
+    widget._undo_last()
+
+    assert service.undo_last_calls == 0
+    assert widget.status_label.text() == "Нет действия текущего сеанса для отмены"
 
 
 def test_oral_popup_wrappers_are_retained_for_dialog_lifetime():
