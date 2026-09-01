@@ -42,11 +42,17 @@ class SQLiteWriteCommitRetryTest(unittest.TestCase):
         reader.execute("SELECT * FROM clinical_events").fetchall()
 
         reader_released = threading.Event()
+        commit_retry_observed = threading.Event()
 
         def release_reader():
-            time.sleep(0.35)
+            if not commit_retry_observed.wait(timeout=2.0):
+                return
             reader.execute("ROLLBACK")
             reader_released.set()
+
+        def capture_metric(name, *_args, **_kwargs):
+            if name == "sqlite_write_commit_retry":
+                commit_retry_observed.set()
 
         release_thread = threading.Thread(target=release_reader, daemon=True)
         release_thread.start()
@@ -57,7 +63,10 @@ class SQLiteWriteCommitRetryTest(unittest.TestCase):
             retry_delay_ms=50,
         )
         try:
-            with patch("rem_card.app.sqlite_shared.record_metric") as metric:
+            with patch(
+                "rem_card.app.sqlite_shared.record_metric",
+                side_effect=capture_metric,
+            ) as metric:
                 with controller.transaction(
                     writer,
                     source="nurse_order_mark:test",
