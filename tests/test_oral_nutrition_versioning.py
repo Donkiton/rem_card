@@ -2,7 +2,10 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
+import pytest
+
 from rem_card.app.unified_db_schema import ensure_unified_schema, is_unified_schema_ready
+from rem_card.data.dao.exceptions import OptimisticLockError
 from rem_card.data.dao.diet_dao import DietPlanDAO, DietPlanVersionDAO, OralIntakeDAO
 from rem_card.data.dto.remcard_dto import DietTemplateDTO
 from rem_card.services.diet_service import DietPlanService, OralIntakeService, diet_details
@@ -117,6 +120,50 @@ def test_diet_change_applies_from_effective_time_and_can_be_backdated():
     assert [item["key"] for item in plans.planned_items_for_day(1, day)] == ["breakfast"]
 
 
+def test_template_assignment_preserves_doctor_schedule_edits():
+    _db, plans, _oral = _services()
+    day = datetime(2026, 8, 29, 8, 0)
+
+    assigned = plans.assign_version(
+        1,
+        day,
+        template_id=9,
+        diet_name="Стол № 9",
+        diet_text="Диабетический стол без обеда",
+        schedule_json=[
+            {"key": "breakfast", "meal": "Завтрак", "time": "09:00", "amount": 250, "note": ""},
+            {"key": "dinner", "meal": "Ужин", "time": "17:00", "amount": 350, "note": ""},
+        ],
+        details_json={"consistency": "Мягкая", "daily_fluid_ml": 900},
+    )
+
+    assert assigned.template_id == 9
+    assert assigned.diet_text == "Диабетический стол без обеда"
+    assert [item["key"] for item in plans.planned_items_for_day(1, day)] == ["breakfast", "dinner"]
+    assigned_details = diet_details(assigned.details_json)
+    assert assigned_details["consistency"] == "Мягкая"
+    assert assigned_details["daily_fluid_ml"] == 900
+
+
+def test_template_assignment_allows_doctor_to_remove_every_meal():
+    _db, plans, _oral = _services()
+    day = datetime(2026, 8, 29, 8, 0)
+
+    assigned = plans.assign_version(
+        1,
+        day,
+        template_id=9,
+        diet_name="Стол № 9",
+        diet_text="Временно без плановых приёмов",
+        schedule_json=[],
+        details_json={},
+    )
+
+    assert assigned.template_id == 9
+    assert assigned.schedule_json == "[]"
+    assert plans.planned_items_for_day(1, day) == []
+
+
 def test_diet_assignment_and_later_changes_continue_across_future_medical_days():
     _db, plans, _oral = _services()
     first_day = datetime(2026, 8, 29, 8, 0)
@@ -227,6 +274,40 @@ def test_multiple_facts_in_one_minute_are_separate_and_aggregate_in_balance():
     assert oral.get_totals(1, datetime(2026, 8, 29, 12, 0), current_time=moment)["current"] == 150
 
 
+def test_explicit_zero_intake_is_stored_for_refusal_and_can_replace_a_value():
+    _db, _plans, oral = _services()
+    first_time = datetime(2026, 8, 29, 10, 0)
+    second_time = datetime(2026, 8, 29, 11, 0)
+
+    refused = oral.create_fact(1, first_time, 0, meal_name="Завтрак", note="Отказался")
+    consumed = oral.create_fact(1, second_time, 100, meal_name="Второй завтрак")
+    corrected = oral.update_fact(
+        consumed.id,
+        second_time,
+        0,
+        meal_name=consumed.meal_name,
+        note="Отказался",
+        expected_version=consumed.version,
+    )
+
+    events = oral.get_events(1, first_time)
+    assert [(event.event_time, event.amount_ml, event.note) for event in events] == [
+        (first_time, 0.0, "Отказался"),
+        (second_time, 0.0, "Отказался"),
+    ]
+    assert refused.id is not None
+    assert corrected.id == consumed.id
+    assert corrected.version == consumed.version + 1
+    assert oral.get_totals(1, first_time, current_time=second_time)["current"] == 0
+
+
+def test_negative_intake_remains_invalid():
+    _db, _plans, oral = _services()
+
+    with pytest.raises(ValueError, match="не может быть меньше 0"):
+        oral.create_fact(1, datetime(2026, 8, 29, 10, 0), -1)
+
+
 def test_later_unplanned_fact_at_same_time_replaces_previous_value():
     _db, plans, oral = _services()
     plans.assign_version(1, datetime(2026, 8, 29, 8, 0), template_id=9)
@@ -268,6 +349,26 @@ def test_later_unplanned_fact_at_same_time_replaces_previous_value():
     assert replacement.note == "исправленное значение"
     assert planned.id != replacement.id
     assert sum(event.amount_ml for event in events) == 175
+
+
+def test_unplanned_fact_does_not_overwrite_a_concurrent_same_minute_value():
+    _db, _plans, oral = _services()
+    moment = datetime(2026, 8, 29, 12, 20)
+    existing = oral.create_fact(1, moment, 50, meal_name="Вода", entry_kind="unplanned")
+
+    with pytest.raises(OptimisticLockError, match="изменен другим пользователем"):
+        oral.create_fact(
+            1,
+            moment,
+            75,
+            meal_name="Чай",
+            entry_kind="unplanned",
+            expected_version=0,
+        )
+
+    current = oral.get_events(1, moment)[0]
+    assert current.id == existing.id
+    assert current.amount_ml == 50
 
 
 def test_diet_change_fact_retention_modes_preserve_before_and_all():
@@ -451,3 +552,70 @@ def test_legacy_oral_rows_migrate_without_loss_and_same_minute_becomes_available
     assert conn.execute(
         "SELECT COUNT(*) FROM oral_intake_events WHERE admission_id = 999"
     ).fetchone()[0] == 2
+    conn.execute(
+        """
+        INSERT INTO oral_intake_events(admission_id, shift_start, event_time, amount_ml)
+        VALUES(999, '2026-08-29 08:00', '2026-08-29 10:00', 0)
+        """
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO oral_intake_events(admission_id, shift_start, event_time, amount_ml)
+            VALUES(999, '2026-08-29 08:00', '2026-08-29 11:00', -1)
+            """
+        )
+
+
+def test_current_v25_oral_table_is_rebuilt_to_allow_zero_without_data_loss():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_unified_schema(conn)
+    for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'oral_intake_events'"
+    ).fetchall():
+        conn.execute(f"DROP TRIGGER {row['name']}")
+    conn.execute("DROP TABLE oral_intake_events")
+    conn.executescript(
+        """
+        CREATE TABLE oral_intake_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admission_id INTEGER NOT NULL,
+            shift_start TEXT NOT NULL,
+            event_time TEXT NOT NULL,
+            amount_ml REAL NOT NULL CHECK(amount_ml > 0),
+            plan_version_id INTEGER,
+            planned_item_key TEXT,
+            entry_kind TEXT NOT NULL DEFAULT 'unplanned',
+            meal_name TEXT,
+            note TEXT,
+            action_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            updated_at TEXT,
+            version INTEGER DEFAULT 1,
+            last_modified_by TEXT
+        );
+        INSERT INTO patients(id, full_name, admission_uid)
+        VALUES(998, 'Тест v25', 'nutrition-v25');
+        INSERT INTO admissions(id, patient_id, bed_number, history_number, admission_datetime)
+        VALUES(998, 998, 'T2', 'H2', '2026-08-29 08:00');
+        INSERT INTO oral_intake_events(
+            admission_id, shift_start, event_time, amount_ml, entry_kind, meal_name, version
+        ) VALUES(998, '2026-08-29 08:00', '2026-08-29 09:00', 100, 'planned', 'Завтрак', 3);
+        DELETE FROM schema_migrations WHERE version >= 26;
+        UPDATE meta SET value = '25' WHERE key = 'unified_schema_fastpath_rev';
+        """
+    )
+
+    ensure_unified_schema(conn)
+
+    preserved = conn.execute(
+        "SELECT amount_ml, meal_name, version FROM oral_intake_events WHERE admission_id = 998"
+    ).fetchone()
+    assert dict(preserved) == {"amount_ml": 100.0, "meal_name": "Завтрак", "version": 3}
+    conn.execute(
+        """
+        INSERT INTO oral_intake_events(admission_id, shift_start, event_time, amount_ml)
+        VALUES(998, '2026-08-29 08:00', '2026-08-29 10:00', 0)
+        """
+    )

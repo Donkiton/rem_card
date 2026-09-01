@@ -638,7 +638,10 @@ class RemCardLayoutManager(QWidget):
 
         self._balance_grid_wrapper = QWidget()
         grid_wrapper_layout = QVBoxLayout(self._balance_grid_wrapper)
-        grid_wrapper_layout.setContentsMargins(0, 0, 0, 3)
+        # Match the 5 px lower inset used by the other RemCard tab surfaces.
+        # A 3 px inset made the diuresis frame two pixels taller and produced
+        # a visible lower-edge jump while switching tabs.
+        grid_wrapper_layout.setContentsMargins(0, 0, 0, 5)
         grid_wrapper_layout.setSpacing(0)
         if self.balance_grid is not None:
             grid_wrapper_layout.addWidget(self.balance_grid)

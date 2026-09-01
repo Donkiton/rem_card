@@ -546,8 +546,8 @@ class DietPlanService:
         effective_from: datetime,
         *,
         template_id: Optional[int] = None,
-        diet_name: str = "",
-        diet_text: str = "",
+        diet_name: Optional[str] = None,
+        diet_text: Optional[str] = None,
         schedule_json: Any = None,
         details_json: Any = None,
         change_note: str = "",
@@ -560,10 +560,17 @@ class DietPlanService:
         template = self.template_service.get_template(int(template_id)) if template_id is not None else None
         if template is not None:
             stored_template_id = int(template.id or template_id)
-            resolved_name = template.name
-            resolved_text = template.diet_text
-            resolved_schedule = template.schedule_json
-            resolved_details = template.details_json
+            # A template is the starting preset, not an immutable override.
+            # Values explicitly edited in the assignment dialog must win,
+            # including an empty schedule after the doctor removes every row.
+            resolved_name = template.name if diet_name is None else str(diet_name).strip()
+            resolved_text = template.diet_text if diet_text is None else str(diet_text).strip()
+            resolved_schedule = normalize_schedule(
+                template.schedule_json if schedule_json is None else schedule_json
+            )
+            resolved_details = normalize_diet_details(
+                template.details_json if details_json is None else details_json
+            )
         else:
             stored_template_id = None
             resolved_name = str(diet_name or diet_text or "Индивидуальная диета").strip()
@@ -870,6 +877,7 @@ class OralIntakeService:
         note: str = "",
         actor: str = "nurse",
         action_id: Optional[str] = None,
+        expected_version: Optional[int] = None,
     ) -> OralIntakeEventDTO:
         event_dt = (
             self.normalize_planned_fact_time(event_time, planned_time)
@@ -881,8 +889,8 @@ class OralIntakeService:
         )
         if not is_ok:
             raise ValueError(msg)
-        if float(amount_ml or 0) <= 0:
-            raise ValueError("Фактический объём должен быть больше 0 мл")
+        if amount_ml is None or float(amount_ml) < 0:
+            raise ValueError("Фактический объём не может быть меньше 0 мл")
         normalized_entry_kind = str(entry_kind or "unplanned")
         dto = OralIntakeEventDTO(
             admission_id=int(admission_id), shift_start=self.shift_start_for_event(event_dt),
@@ -893,7 +901,7 @@ class OralIntakeService:
             last_modified_by=str(actor or "nurse"),
         )
         if normalized_entry_kind == "unplanned":
-            return self.dao.upsert_unplanned_event(dto)
+            return self.dao.upsert_unplanned_event(dto, expected_version=expected_version)
         return self.dao.create_event(dto)
 
     def update_fact(
@@ -921,8 +929,8 @@ class OralIntakeService:
         )
         if not is_ok:
             raise ValueError(msg)
-        if float(amount_ml or 0) <= 0:
-            raise ValueError("Фактический объём должен быть больше 0 мл")
+        if amount_ml is None or float(amount_ml) < 0:
+            raise ValueError("Фактический объём не может быть меньше 0 мл")
         current.event_time = event_dt
         current.shift_start = self.shift_start_for_event(event_dt)
         current.amount_ml = float(amount_ml)
