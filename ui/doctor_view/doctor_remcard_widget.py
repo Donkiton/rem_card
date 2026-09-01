@@ -2,6 +2,7 @@ import json
 import os
 import socket
 import time
+from copy import deepcopy
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
@@ -137,6 +138,7 @@ class DoctorRemCardWidget(QWidget):
         self._monitor_connected = False
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
+        self._balance_runtime_provisional = False
         self._read_only_widget_signature = None
         self._operblock_archive_viewer = None
         self._operblock_archive_db_manager = None
@@ -832,7 +834,9 @@ class DoctorRemCardWidget(QWidget):
             and snapshot_signature == self._last_applied_card_snapshot_signature
         ):
             self._card_snapshot_cache = snapshot
-            self._balance_runtime_cache = snapshot.get("balance_runtime")
+            if snapshot.get("balance_runtime") is not None:
+                self._balance_runtime_cache = snapshot.get("balance_runtime")
+                self._balance_runtime_provisional = False
             self._last_change_id = max(
                 int(self._last_change_id or 0),
                 int(snapshot.get("change_id") or 0),
@@ -861,7 +865,9 @@ class DoctorRemCardWidget(QWidget):
             return
         self._card_snapshot_cache = snapshot
         self._last_applied_card_snapshot_signature = snapshot_signature
-        self._balance_runtime_cache = snapshot.get("balance_runtime")
+        if snapshot.get("balance_runtime") is not None:
+            self._balance_runtime_cache = snapshot.get("balance_runtime")
+            self._balance_runtime_provisional = False
         effective_bounds = snapshot.get("effective_bounds")
 
         self._ensure_card_widgets_initialized()
@@ -1174,6 +1180,7 @@ class DoctorRemCardWidget(QWidget):
         self._card_snapshot_cache = cached_snapshot
         if snapshot.get("balance_runtime") is not None:
             self._balance_runtime_cache = snapshot.get("balance_runtime")
+            self._balance_runtime_provisional = False
         self._last_change_id = max(
             int(self._last_change_id or 0),
             int(snapshot.get("change_id") or snapshot.get("version") or 0),
@@ -1481,6 +1488,64 @@ class DoctorRemCardWidget(QWidget):
         if not self.admission_id:
             return
         self._balance_update_timer.start(self._balance_update_delay_ms)
+
+    def _initialize_provisional_balance_runtime(self, start_dt, end_dt) -> None:
+        self._balance_runtime_cache = {
+            "orders": [],
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "transfer_time": None,
+            "active_intervals": [],
+            "outcome_time": None,
+            "oral_events": [],
+            "oral_plan_schedule": [],
+            "oral_shift_date": self._current_date,
+            "oral_start_dt": start_dt,
+            "oral_end_dt": end_dt,
+            "oral_totals": {
+                "actual": 0.0,
+                "planned": 0.0,
+                "current": 0.0,
+                "daily": 0.0,
+            },
+        }
+        self._balance_runtime_provisional = True
+
+    def _accept_committed_orders_balance_baseline(self, payload) -> None:
+        payload = dict(payload or {})
+        try:
+            admission_id = int(payload.get("admission_id") or 0)
+        except (TypeError, ValueError):
+            return
+        if (
+            admission_id != int(self.admission_id or 0)
+            or payload.get("shift_date") != self._current_date
+        ):
+            return
+
+        runtime = dict(self._balance_runtime_cache or {})
+        if not runtime.get("start_dt") or not runtime.get("end_dt"):
+            try:
+                start_dt, end_dt = self.service.get_day_period(self._current_date)
+            except Exception:
+                logger.warning(
+                    "Failed to initialize balance runtime from committed orders admission_id=%s",
+                    admission_id,
+                    exc_info=True,
+                )
+                return
+            self._initialize_provisional_balance_runtime(start_dt, end_dt)
+            runtime = dict(self._balance_runtime_cache or {})
+
+        runtime["orders"] = deepcopy(list(payload.get("orders") or []))
+        self._balance_runtime_cache = runtime
+        cached_snapshot = dict(self._card_snapshot_cache or {})
+        cached_snapshot["balance_runtime"] = runtime
+        self._card_snapshot_cache = cached_snapshot
+
+        change_id = int(payload.get("change_id") or 0)
+        if str(payload.get("source") or "").strip().lower() == "post_finalize":
+            self._balance_snapshot_sync.schedule(change_id)
 
     def _bind_nurse_orders_balance_signals(self):
         if self._nurse_orders_balance_signals_bound:
@@ -1927,6 +1992,8 @@ class DoctorRemCardWidget(QWidget):
             date,
             balance_patient_period_manual_mode,
         )
+        if not request_snapshot:
+            self._initialize_provisional_balance_runtime(card_start_dt, card_end_dt)
         self._sync_patient_card_layout_context(
             admission_id,
             date,
@@ -2002,6 +2069,7 @@ class DoctorRemCardWidget(QWidget):
         self._balance_patient_period_manual_mode = bool(balance_patient_period_manual_mode)
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
+        self._balance_runtime_provisional = False
         try:
             card_start_dt, card_end_dt = self.service.get_day_period(date)
         except Exception:
@@ -2627,6 +2695,8 @@ class DoctorRemCardWidget(QWidget):
             ow.localBalanceChanged.connect(self._schedule_balance_update)
         if hasattr(ow, "balanceSnapshotRequired"):
             ow.balanceSnapshotRequired.connect(self._refresh_balance_from_db)
+        if hasattr(ow, "committedOrdersBalanceReady"):
+            ow.committedOrdersBalanceReady.connect(self._accept_committed_orders_balance_baseline)
         self.controls.btn_save.clicked.connect(ow.finalize_card)
         self.controls.btn_clean_sheet.clicked.connect(self.on_clean_sheet_clicked)
         self.controls.btn_clear.clicked.connect(self.on_clear_orders_clicked)
@@ -3019,6 +3089,12 @@ class DoctorRemCardWidget(QWidget):
             if hasattr(self, 'vitals_input'):
                 self.vitals_input.update_undo_button_state()
                 self.vitals_input.data_changed.emit()
+            balance_sync = getattr(self, "_balance_snapshot_sync", None)
+            if balance_sync is not None and hasattr(balance_sync, "schedule"):
+                balance_sync.schedule()
+            schedule_balance_update = getattr(self, "_schedule_balance_update", None)
+            if callable(schedule_balance_update):
+                schedule_balance_update()
             self.update_patient_info()
             message = (
                 "Плановая карта успешно создана. Вы можете заполнить её заранее."

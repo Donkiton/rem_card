@@ -13,6 +13,7 @@ from .template_dialog import TemplateSelectionDialog
 from ..shared.orders_model import OrdersModel
 from ..shared.orders_delegate import OrdersDelegate
 from ..shared.async_call import AsyncCallThread
+from ..shared.orders_balance_adapter import build_balance_orders_from_orders_widget
 from .components.order_template_builder import build_orders_from_template
 from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
 from rem_card.app.logger import logger
@@ -108,6 +109,7 @@ class OrdersWidget(QWidget):
     ordersPresenceChanged = Signal(bool)
     localBalanceChanged = Signal()
     balanceSnapshotRequired = Signal()
+    committedOrdersBalanceReady = Signal(object)
     localDraftResolutionFinished = Signal(bool)
     _LOCAL_SILENT_FORCE_PREFIXES = (
         "orders_add_input:",
@@ -2079,6 +2081,12 @@ class OrdersWidget(QWidget):
             self._last_polled_context_key = current_context_key
         self._apply_table_header_layout()
         self.check_drafts()
+        self._emit_committed_orders_balance_ready(
+            snapshot,
+            admission_id=admission_id,
+            shift_date=shift_date,
+            change_id=snapshot_change_id,
+        )
         self.localBalanceChanged.emit()
         self._clear_soft_update_state()
         record_orders_sync_event(
@@ -2174,6 +2182,34 @@ class OrdersWidget(QWidget):
         )
         self._last_applied_snapshot_signature = snapshot_signature
         return True
+
+    def _emit_committed_orders_balance_ready(
+        self,
+        snapshot,
+        *,
+        admission_id,
+        shift_date,
+        change_id: int,
+    ) -> None:
+        if not bool(snapshot.get("only_committed", False)) or bool(snapshot.get("has_any_draft", False)):
+            return
+        balance_orders = build_balance_orders_from_orders_widget(
+            self,
+            admission_id,
+            shift_date,
+            tab_active=True,
+        )
+        if balance_orders is None:
+            return
+        self.committedOrdersBalanceReady.emit(
+            {
+                "admission_id": int(admission_id or 0),
+                "shift_date": shift_date,
+                "change_id": int(change_id or 0),
+                "source": str(snapshot.get("source") or ""),
+                "orders": balance_orders,
+            }
+        )
 
     def _snapshot_apply_signature(self, snapshot, context_key):
         try:

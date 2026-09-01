@@ -53,6 +53,7 @@ def owner(role, orders):
     result = SimpleNamespace(
         admission_id=7, _current_date=START, layout_manager=layout,
         _balance_runtime_cache={"start_dt": START, "end_dt": END, "orders": deepcopy(orders)},
+        _balance_runtime_provisional=False,
         _balance_calculator_cls=BalanceCalculator,
         _local_oral_state_for_balance=lambda: None,
         _ensure_card_widgets_initialized=lambda: None,
@@ -60,6 +61,8 @@ def owner(role, orders):
         _bind_balance_widgets_if_ready=lambda: None,
         _is_orders_tab_active=lambda: True,
         _card_snapshot_cache={"patient": "unchanged", "version": 1}, _last_change_id=0,
+        service=SimpleNamespace(get_day_period=lambda _date: (START, END)),
+        _balance_snapshot_sync=SimpleNamespace(schedule=lambda *_args: None),
     )
     cls = DoctorRemCardWidget if role == "doctor" else NurseMainWidget
     name = "update_balance_data" if role == "doctor" else "_update_balance_calculations"
@@ -67,6 +70,19 @@ def owner(role, orders):
     setattr(result, name, calculate)
     result.apply_snapshot = MethodType(cls._apply_authoritative_balance_snapshot, result)
     return result, values, calculate
+
+
+def _enable_local_draft(orders_widget, orders):
+    orders_widget.model.orders = deepcopy(list(orders))
+    orders_widget.model.admin_map = {
+        (item.id, admin.planned_time.isoformat()): deepcopy(admin)
+        for item in orders
+        for admin in item.administrations
+    }
+    orders_widget._local_draft_dirty_order_ids = {item.id for item in orders}
+    orders_widget._local_draft_dirty_admin_keys = set()
+    orders_widget._local_deleted_orders = {}
+    orders_widget.has_drafts = lambda: bool(orders_widget._local_draft_dirty_order_ids)
 
 
 @pytest.mark.parametrize("role", ["doctor", "nurse"])
@@ -199,6 +215,94 @@ def test_remote_order_add_delete_and_execution_are_visible_with_stale_table(role
             {"overlay_sequence": 0},
         )
         assert (values[-1]["total"], values[-1]["total_daily"]) == expected
+
+
+def test_post_finalize_committed_baseline_prevents_visual_balance_rollback():
+    baseline = [order()]
+    committed = [*baseline, order(2, hours=(4,), volume=500)]
+    card, values, calculate = owner("doctor", baseline)
+    scheduled = []
+    card._balance_snapshot_sync = SimpleNamespace(schedule=scheduled.append)
+    card._accept_committed_orders_balance_baseline = MethodType(
+        DoctorRemCardWidget._accept_committed_orders_balance_baseline,
+        card,
+    )
+
+    _enable_local_draft(card.layout_manager.orders_widget, committed)
+    calculate()
+    assert values[-1]["total_daily"] == 800
+
+    card.layout_manager.orders_widget._local_draft_dirty_order_ids.clear()
+    card._accept_committed_orders_balance_baseline(
+        {
+            "admission_id": 7,
+            "shift_date": START,
+            "change_id": 17,
+            "source": "post_finalize",
+            "orders": committed,
+        }
+    )
+    calculate()
+
+    assert values[-1]["total_daily"] == 800
+    assert scheduled == [17]
+
+
+def test_post_finalize_delete_baseline_does_not_resurrect_removed_volume():
+    baseline = [order(), order(2, hours=(4,), volume=500)]
+    committed = baseline[:1]
+    card, values, calculate = owner("doctor", baseline)
+    card._accept_committed_orders_balance_baseline = MethodType(
+        DoctorRemCardWidget._accept_committed_orders_balance_baseline,
+        card,
+    )
+    orders_widget = card.layout_manager.orders_widget
+    orders_widget.model.orders = deepcopy(committed)
+    orders_widget.model.admin_map = {
+        (item.id, admin.planned_time.isoformat()): deepcopy(admin)
+        for item in committed
+        for admin in item.administrations
+    }
+    orders_widget._local_draft_dirty_order_ids = {2}
+    orders_widget._local_draft_dirty_admin_keys = set()
+    orders_widget._local_deleted_orders = {2: object()}
+    orders_widget.has_drafts = lambda: bool(orders_widget._local_draft_dirty_order_ids)
+    calculate()
+    assert values[-1]["total_daily"] == 300
+
+    orders_widget._local_draft_dirty_order_ids.clear()
+    card._accept_committed_orders_balance_baseline(
+        {
+            "admission_id": 7,
+            "shift_date": START,
+            "change_id": 18,
+            "source": "post_finalize",
+            "orders": committed,
+        }
+    )
+    calculate()
+
+    assert values[-1]["total_daily"] == 300
+
+
+def test_new_card_provisional_runtime_projects_unsaved_orders_immediately():
+    card, values, calculate = owner("doctor", [])
+    card._balance_runtime_cache = None
+    card._initialize_provisional_balance_runtime = MethodType(
+        DoctorRemCardWidget._initialize_provisional_balance_runtime,
+        card,
+    )
+    card._initialize_provisional_balance_runtime(START, END)
+    _enable_local_draft(
+        card.layout_manager.orders_widget,
+        [order(2, hours=(4,), volume=500)],
+    )
+
+    calculate()
+
+    assert values[-1]["total"] == 0
+    assert values[-1]["total_daily"] == 500
+    assert card._balance_runtime_provisional is True
 
 
 @pytest.mark.parametrize("cls", [DoctorRemCardWidget, NurseMainWidget])
