@@ -191,14 +191,14 @@ class _TextEditContextMenuFilter(QObject):
             if not obj.property("_remcard_context_menu_styled"):
                 apply_context_menu_style(obj)
                 obj.setProperty("_remcard_context_menu_styled", True)
-            return super().eventFilter(obj, event)
+            return False
 
         if event.type() != QEvent.ContextMenu:
-            return super().eventFilter(obj, event)
+            return False
 
         editor = _text_editor_from_event_object(obj)
         if editor is None:
-            return super().eventFilter(obj, event)
+            return False
 
         global_pos = event.globalPos()
         menu = build_text_edit_context_menu(editor, global_pos)

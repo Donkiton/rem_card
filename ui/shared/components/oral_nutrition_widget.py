@@ -684,7 +684,9 @@ class OralNutritionWidget(QWidget):
                 on_selected_version = self.version_table.itemAt(position) is not None
             if not on_edit_button and not on_selected_version:
                 self._clear_version_selection()
-        return super().eventFilter(obj, event)
+        # QApplication filters can receive Qt-internal QWidgetItem objects,
+        # which QObject.eventFilter cannot accept as its watched argument.
+        return False
 
     @staticmethod
     def _event_hits_widget(obj, global_position, widget):
