@@ -74,7 +74,7 @@ class SyncCoordinator:
         "diet": {"diet"},
         "oral_intake": {"diet", "balance"},
         "status_": {"patient_status", "patient_header", "vitals", "balance"},
-        "doctor_create_empty_card:": {"vitals", "patient_header"},
+        "doctor_create_empty_card:": {"vitals", "patient_header", "balance"},
         "ivl": {"ivl"},
         "vent": {"ivl"},
         "procedure": {"procedures"},

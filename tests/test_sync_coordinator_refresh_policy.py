@@ -47,6 +47,20 @@ def test_partial_change_rows_requests_full_refresh():
     assert payload["sync_actions"]["card_snapshot_required"] is True
 
 
+def test_new_card_event_initializes_balance_scope_without_full_refresh():
+    payload = SyncCoordinator.classify(
+        {
+            "forced": True,
+            "force_sources": ["doctor_create_empty_card:7"],
+            "changed_entities": ["vitals"],
+        }
+    )
+
+    assert payload["sync_actions"]["balance_refresh"] is True
+    assert payload["sync_actions"]["vitals_snapshot_required"] is True
+    assert payload["sync_actions"]["full_refresh_required"] is False
+
+
 def test_focus_only_wakes_monitor_without_forced_payload():
     calls = []
 

@@ -207,6 +207,37 @@ def test_save_submits_exactly_one_write_task():
         widget.shutdown()
 
 
+def test_post_finalize_snapshot_emits_committed_orders_for_balance_before_refresh():
+    widget, service = _make_widget()
+    try:
+        widget._handle_cell_action(
+            widget.model.index(0, 1),
+            "orders_left_click",
+            service.forbidden_cell_write,
+        )
+        service.commit_result = {
+            "order_id_map": {},
+            "snapshot": _committed_snapshot_for_current_mark(widget, change_id=17),
+        }
+        payloads = []
+        events = []
+        widget.committedOrdersBalanceReady.connect(
+            lambda payload: (payloads.append(payload), events.append("committed"))
+        )
+        widget.localBalanceChanged.connect(lambda: events.append("recalculate"))
+
+        widget.finalize_card()
+
+        assert len(payloads) == 1
+        assert payloads[0]["change_id"] == 17
+        assert payloads[0]["source"] == "post_finalize"
+        assert len(payloads[0]["orders"]) == 1
+        assert len(payloads[0]["orders"][0].administrations) == 1
+        assert events[-2:] == ["committed", "recalculate"]
+    finally:
+        widget.shutdown()
+
+
 def test_double_save_queues_once_and_error_keeps_overlay_for_retry():
     widget, service = _make_widget()
     try:
