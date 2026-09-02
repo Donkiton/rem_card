@@ -902,6 +902,128 @@ class FileWriteLock:
             payload["lease_expires_at"] = timestamp + self.lease_duration_sec
         return payload
 
+    def _staged_payload_path(self) -> str:
+        directory = os.path.dirname(self.lock_path)
+        base_name = os.path.basename(self.lock_path)
+        host = "".join(
+            char if char.isalnum() or char in "_.-" else "_"
+            for char in socket.gethostname()
+        )[:80] or "host"
+        return os.path.join(
+            directory,
+            f".{base_name}.{host}.{os.getpid()}.{uuid.uuid4().hex}.tmp",
+        )
+
+    def _write_staged_payload(self, raw: bytes) -> str:
+        """Persist a complete payload without exposing it as the live lock."""
+        staged_path = self._staged_payload_path()
+        fd = None
+        try:
+            fd = os.open(staged_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            written = 0
+            while written < len(raw):
+                chunk_size = os.write(fd, raw[written:])
+                if chunk_size <= 0:
+                    raise OSError("lock payload write returned no progress")
+                written += int(chunk_size)
+            os.fsync(fd)
+            os.close(fd)
+            fd = None
+            return staged_path
+        except Exception:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+            try:
+                os.remove(staged_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+            raise
+
+    @staticmethod
+    def _discard_staged_payload(staged_path: str) -> None:
+        if not staged_path:
+            return
+        try:
+            os.remove(staged_path)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    def _publish_staged_payload_exclusive(self, staged_path: str) -> None:
+        """Publish a complete payload only when no lock currently exists."""
+        if os.name == "nt":
+            try:
+                # MoveFile on Windows is atomic and does not replace an existing
+                # destination. This is the production path for Windows SMB.
+                os.rename(staged_path, self.lock_path)
+            except OSError as exc:
+                if os.path.exists(self.lock_path):
+                    raise FileExistsError(self.lock_path) from exc
+                raise
+            return
+
+        # POSIX rename replaces an existing destination, so use an atomic hard
+        # link publication instead. If the filesystem cannot provide it, fail
+        # closed rather than overwrite another owner's lock.
+        os.link(staged_path, self.lock_path)
+        self._discard_staged_payload(staged_path)
+
+    def _recover_existing_for_acquire(
+        self,
+        *,
+        owner_id: str,
+        source: str,
+        thread_id: int,
+        metric_context: dict[str, Any] | None,
+    ) -> bool:
+        """Return True only when the caller should retry exclusive publication."""
+        existing = self._try_read_payload()
+        if existing is _LOCK_READ_UNAVAILABLE:
+            return self.cleanup_abandoned(
+                source=source,
+                metric_context=metric_context,
+            )
+        if existing is None and not os.path.exists(self.lock_path):
+            return True
+        if self._is_self_orphan(existing, owner_id, thread_id):
+            try:
+                os.remove(self.lock_path)
+                self.logger.warning(
+                    "Removed orphan self-owned db lock at %s",
+                    self.lock_path,
+                )
+                return True
+            except FileNotFoundError:
+                return True
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to remove orphan self-owned db lock %s: %s",
+                    self.lock_path,
+                    exc,
+                )
+        if self._cleanup_local_dead_pid_lock(
+            source=source,
+            metric_context=metric_context,
+        ):
+            return True
+        if self._cleanup_expired_replica_lease(
+            source=source,
+            metric_context=metric_context,
+        ):
+            return True
+        if self._is_stale(existing):
+            self.logger.warning(
+                "Observed stale db lock at %s; age-only cleanup is disabled",
+                self.lock_path,
+            )
+        return False
+
     def _try_read_payload(self) -> Optional[dict[str, Any]]:
         try:
             with open(self.lock_path, "r", encoding="utf-8") as fh:
@@ -1380,22 +1502,23 @@ class FileWriteLock:
         raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
 
         while True:
-            fd = None
+            if os.path.exists(self.lock_path):
+                if self._recover_existing_for_acquire(
+                    owner_id=owner_id,
+                    source=source,
+                    thread_id=thread_id,
+                    metric_context=metric_context,
+                ):
+                    continue
+                return False
+
+            staged_path = ""
             created_here = False
             try:
-                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                staged_path = self._write_staged_payload(raw)
+                self._publish_staged_payload_exclusive(staged_path)
+                staged_path = ""
                 created_here = True
-                try:
-                    written = 0
-                    while written < len(raw):
-                        chunk_size = os.write(fd, raw[written:])
-                        if chunk_size <= 0:
-                            raise OSError("lock payload write returned no progress")
-                        written += int(chunk_size)
-                    os.fsync(fd)
-                finally:
-                    os.close(fd)
-                    fd = None
                 with self._mutex:
                     self._owner_token = payload
                     self._owner_thread_id = thread_id
@@ -1411,39 +1534,17 @@ class FileWriteLock:
                     )
                 return True
             except FileExistsError:
-                existing = self._try_read_payload()
-                if existing is _LOCK_READ_UNAVAILABLE:
-                    if self.cleanup_abandoned(
-                        source=source,
-                        metric_context=metric_context,
-                    ):
-                        continue
-                    return False
-                if self._is_self_orphan(existing, owner_id, thread_id):
-                    try:
-                        os.remove(self.lock_path)
-                        self.logger.warning("Removed orphan self-owned db lock at %s", self.lock_path)
-                        continue
-                    except FileNotFoundError:
-                        continue
-                    except Exception as exc:
-                        self.logger.warning("Failed to remove orphan self-owned db lock %s: %s", self.lock_path, exc)
-                if self._cleanup_local_dead_pid_lock(source=source, metric_context=metric_context):
-                    continue
-                if self._cleanup_expired_replica_lease(
+                self._discard_staged_payload(staged_path)
+                if self._recover_existing_for_acquire(
+                    owner_id=owner_id,
                     source=source,
+                    thread_id=thread_id,
                     metric_context=metric_context,
                 ):
                     continue
-                if self._is_stale(existing):
-                    self.logger.warning("Observed stale db lock at %s; age-only cleanup is disabled", self.lock_path)
                 return False
             except Exception as exc:
-                if fd is not None:
-                    try:
-                        os.close(fd)
-                    except Exception:
-                        pass
+                self._discard_staged_payload(staged_path)
                 if created_here:
                     try:
                         os.remove(self.lock_path)
@@ -1482,31 +1583,45 @@ class FileWriteLock:
         if not expected_token:
             return False
 
+        staged_path = ""
         try:
-            with open(self.lock_path, "r+", encoding="utf-8") as fh:
-                payload = json.load(fh)
-                if not isinstance(payload, dict):
-                    return False
-                current_token = str(payload.get("lock_token") or "")
-                if not current_token or current_token != expected_token:
-                    return False
+            snapshot = self._read_lock_snapshot()
+            if not snapshot.readable:
+                return False
+            payload = dict(snapshot.payload or {})
+            current_token = str(payload.get("lock_token") or "")
+            if not current_token or current_token != expected_token:
+                return False
 
-                payload["timestamp"] = time.time()
-                if self.lease_duration_sec is not None:
-                    payload["lease_expires_at"] = payload["timestamp"] + self.lease_duration_sec
-                for key, value in dict(metadata or {}).items():
-                    if key not in {"lock_token", "pid", "host", "user_id", "thread_id"}:
-                        payload[key] = value
+            payload["timestamp"] = time.time()
+            if self.lease_duration_sec is not None:
+                payload["lease_expires_at"] = payload["timestamp"] + self.lease_duration_sec
+            for key, value in dict(metadata or {}).items():
+                if key not in {"lock_token", "pid", "host", "user_id", "thread_id"}:
+                    payload[key] = value
 
-                fh.seek(0)
-                json.dump(payload, fh, ensure_ascii=True)
-                fh.truncate()
+            raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+            staged_path = self._write_staged_payload(raw)
+
+            # Recheck ownership after the potentially slow SMB staging write.
+            latest = self._read_lock_snapshot()
+            latest_token = str((latest.payload or {}).get("lock_token") or "")
+            if not latest.readable or latest_token != expected_token:
+                return False
+
+            os.replace(staged_path, self.lock_path)
+            staged_path = ""
+            with self._mutex:
+                if str((self._owner_token or {}).get("lock_token") or "") == expected_token:
+                    self._owner_token = dict(payload)
             return True
         except FileNotFoundError:
             return False
         except Exception as exc:
             self.logger.warning("Failed to refresh db lock %s: %s", self.lock_path, exc)
             return False
+        finally:
+            self._discard_staged_payload(staged_path)
 
     def release(self) -> bool:
         thread_id = threading.get_ident()
