@@ -54,6 +54,14 @@ def test_dialog_prefills_context_and_renders_reference_example():
     assert "T31.5" in dialog.patient_context_label.text()
     assert "ниже целевого" in dialog.warning_label.text()
 
+    style = dialog.styleSheet()
+    assert "QComboBox::down-arrow" in style
+    assert "QDateTimeEdit::drop-down" in style
+    assert "QDoubleSpinBox::up-button" in style
+    assert "combo_arrow_down.svg" in style
+    assert "spin_arrow_up.svg" in style
+    assert "spin_arrow_down.svg" in style
+
     dialog.close()
     dialog.deleteLater()
     app.processEvents()

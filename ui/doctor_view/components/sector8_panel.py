@@ -98,7 +98,7 @@ class Sector8Panel(QWidget):
 
         # Кнопка калькулятора инфузии при ожогах (только из подходящей карты пациента)
         self.btn_burn_calc = QPushButton(" Ожоги", self)
-        burn_icon = os.path.join(self.icon_dir, "operblock_drop_blue.svg")
+        burn_icon = os.path.join(self.icon_dir, "fire.png")
         self.btn_burn_calc.setIcon(QIcon(burn_icon))
         self.btn_burn_calc.setIconSize(QSize(18, 18))
         self.btn_burn_calc.setMinimumHeight(32)
