@@ -43,6 +43,9 @@ from rem_card.ui.styles.theme import (
     COLOR_PRIMARY,
     COLOR_SUCCESS,
     COLOR_WARNING,
+    FORM_DROPDOWN_ARROW_IMAGE,
+    FORM_SPIN_DOWN_ARROW_IMAGE,
+    FORM_SPIN_UP_ARROW_IMAGE,
     TEXT_MUTED,
     TEXT_PRIMARY,
     TEXT_SECONDARY,
@@ -683,10 +686,63 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
                 color: {TEXT_PRIMARY};
                 border: 1px solid {BORDER_COLOR};
                 border-radius: 5px;
-                padding: 0 7px;
+                padding: 0 27px 0 7px;
             }}
             QDoubleSpinBox:focus, QDateTimeEdit:focus, QComboBox:focus {{
                 border: 2px solid {COLOR_PRIMARY};
+            }}
+            QComboBox::drop-down, QDateTimeEdit::drop-down {{
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 24px;
+                border: none;
+                border-left: 1px solid {BORDER_LIGHT};
+                border-top-right-radius: 5px;
+                border-bottom-right-radius: 5px;
+                background: {BG_LIGHT};
+            }}
+            QComboBox::drop-down:hover, QDateTimeEdit::drop-down:hover {{
+                background: {BORDER_LIGHT};
+                border-left-color: {BORDER_COLOR};
+            }}
+            QComboBox::down-arrow, QDateTimeEdit::down-arrow {{
+                image: {FORM_DROPDOWN_ARROW_IMAGE};
+                width: 12px;
+                height: 12px;
+            }}
+            QDateTimeEdit::up-button, QDateTimeEdit::down-button {{
+                width: 0;
+                border: none;
+            }}
+            QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+                subcontrol-origin: border;
+                width: 24px;
+                border: none;
+                border-left: 1px solid {BORDER_LIGHT};
+                background: {BG_LIGHT};
+            }}
+            QDoubleSpinBox::up-button {{
+                subcontrol-position: top right;
+                border-bottom: 1px solid {BORDER_LIGHT};
+                border-top-right-radius: 5px;
+            }}
+            QDoubleSpinBox::down-button {{
+                subcontrol-position: bottom right;
+                border-bottom-right-radius: 5px;
+            }}
+            QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+                background: {BORDER_LIGHT};
+                border-left-color: {BORDER_COLOR};
+            }}
+            QDoubleSpinBox::up-arrow {{
+                image: {FORM_SPIN_UP_ARROW_IMAGE};
+                width: 10px;
+                height: 10px;
+            }}
+            QDoubleSpinBox::down-arrow {{
+                image: {FORM_SPIN_DOWN_ARROW_IMAGE};
+                width: 10px;
+                height: 10px;
             }}
             QPushButton#BurnModeButton {{
                 min-height: 34px;
