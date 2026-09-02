@@ -24,6 +24,7 @@ from rem_card.app.local_replica_worker import (
     LocalReplicaWorkerTimeout,
     _open_central_readonly,
     _sync_snapshot,
+    _sync_snapshot_with_network_lease,
 )
 from rem_card.app.sqlite_shared import FileWriteLock
 from rem_card.data.dao.db_manager import DatabaseManager
@@ -667,6 +668,188 @@ class LocalReplicaSyncTest(unittest.TestCase):
             self.assertTrue(list(quarantine_dir.glob("*.malformed")))
         finally:
             lock.release()
+
+    def test_lock_payload_is_staged_before_live_path_is_published(self):
+        lock_path = self.root / "staged.lock"
+        lock = FileWriteLock(str(lock_path))
+        write_started = threading.Event()
+        allow_write = threading.Event()
+        published = threading.Event()
+        allow_release = threading.Event()
+        result = {}
+        original_write = os.write
+
+        def blocked_write(fd, data):
+            write_started.set()
+            if not allow_write.wait(2.0):
+                raise TimeoutError("test did not release staged write")
+            return original_write(fd, data)
+
+        def acquire_lock():
+            result["acquired"] = lock.acquire("owner", "test")
+            published.set()
+            if result["acquired"]:
+                allow_release.wait(2.0)
+                result["released"] = lock.release()
+
+        with patch("rem_card.app.sqlite_shared.os.write", side_effect=blocked_write):
+            thread = threading.Thread(target=acquire_lock, daemon=True)
+            thread.start()
+            self.assertTrue(write_started.wait(1.0))
+            self.assertFalse(lock_path.exists())
+            allow_write.set()
+            self.assertTrue(published.wait(2.0))
+            self.assertTrue(result.get("acquired"))
+            self.assertIsInstance(
+                json.loads(lock_path.read_text(encoding="utf-8")),
+                dict,
+            )
+            allow_release.set()
+            thread.join(timeout=2.0)
+
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(result.get("released"))
+
+    def test_failed_staged_write_never_leaves_live_or_temp_lock(self):
+        lock_path = self.root / "failed-staged.lock"
+        lock = FileWriteLock(str(lock_path))
+
+        with patch(
+            "rem_card.app.sqlite_shared.os.write",
+            side_effect=OSError("simulated interrupted SMB write"),
+        ):
+            self.assertFalse(lock.acquire("owner", "test"))
+
+        self.assertFalse(lock_path.exists())
+        self.assertFalse(list(self.root.glob(".failed-staged.lock.*.tmp")))
+
+    def test_busy_lock_does_not_write_staging_payload(self):
+        lock_path = self.root / "busy.lock"
+        owner = FileWriteLock(str(lock_path))
+        contender = FileWriteLock(str(lock_path))
+        self.assertTrue(owner.acquire("owner", "test"))
+        try:
+            with patch.object(
+                contender,
+                "_write_staged_payload",
+                side_effect=AssertionError("busy path must not stage a payload"),
+            ):
+                self.assertFalse(contender.acquire("contender", "test"))
+        finally:
+            owner.release()
+
+    def test_simultaneous_atomic_publication_has_exactly_one_owner(self):
+        lock_path = self.root / "simultaneous.lock"
+        contenders = [FileWriteLock(str(lock_path)) for _ in range(2)]
+        barrier = threading.Barrier(2)
+        allow_release = threading.Event()
+        results = []
+        results_lock = threading.Lock()
+
+        def run_contender(index, contender):
+            original_stage = contender._write_staged_payload
+
+            def stage_together(raw):
+                staged_path = original_stage(raw)
+                barrier.wait(timeout=2.0)
+                return staged_path
+
+            with patch.object(
+                contender,
+                "_write_staged_payload",
+                side_effect=stage_together,
+            ):
+                acquired = contender.acquire(f"owner-{index}", "test")
+            with results_lock:
+                results.append((index, acquired))
+            if acquired:
+                allow_release.wait(2.0)
+                contender.release()
+
+        threads = [
+            threading.Thread(
+                target=run_contender,
+                args=(index, contender),
+                daemon=True,
+            )
+            for index, contender in enumerate(contenders)
+        ]
+        for thread in threads:
+            thread.start()
+
+        deadline = time.monotonic() + 2.0
+        while len(results) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(sum(1 for _, acquired in results if acquired), 1)
+        self.assertTrue(lock_path.exists())
+        self.assertIsInstance(
+            json.loads(lock_path.read_text(encoding="utf-8")),
+            dict,
+        )
+
+        allow_release.set()
+        for thread in threads:
+            thread.join(timeout=2.0)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertFalse(lock_path.exists())
+        self.assertFalse(list(self.root.glob(".simultaneous.lock.*.tmp")))
+
+    def test_failed_atomic_publish_never_leaves_live_or_temp_lock(self):
+        lock_path = self.root / "failed-publish.lock"
+        lock = FileWriteLock(str(lock_path))
+
+        with patch(
+            "rem_card.app.sqlite_shared.os.rename",
+            side_effect=OSError("simulated interrupted SMB publish"),
+        ):
+            self.assertFalse(lock.acquire("owner", "test"))
+
+        self.assertFalse(lock_path.exists())
+        self.assertFalse(list(self.root.glob(".failed-publish.lock.*.tmp")))
+
+    def test_failed_atomic_refresh_preserves_previous_valid_payload(self):
+        lock_path = self.root / "refresh.lock"
+        lock = FileWriteLock(str(lock_path), lease_duration_sec=30.0)
+        self.assertTrue(lock.acquire("owner", "test"))
+        original = lock_path.read_bytes()
+
+        with patch(
+            "rem_card.app.sqlite_shared.os.replace",
+            side_effect=OSError("simulated interrupted SMB replace"),
+        ):
+            self.assertFalse(lock.refresh(metadata={"role": "nurse"}))
+
+        self.assertEqual(lock_path.read_bytes(), original)
+        self.assertIsInstance(json.loads(original.decode("utf-8")), dict)
+        self.assertFalse(list(self.root.glob(".refresh.lock.*.tmp")))
+        self.assertTrue(lock.release())
+
+    def test_snapshot_gate_preserves_stable_empty_file_until_maintenance(self):
+        gate_path = self.root / "replica_snapshot_copy.lock"
+        lease_path = self.root / "replica_snapshots" / "nurse.lock"
+        quarantine_dir = self.root / "quarantine" / "locks"
+        gate_path.write_bytes(b"")
+        old = time.time() - 60.0
+        os.utime(gate_path, (old, old))
+
+        with self.assertRaises(LocalReplicaSnapshotBusy):
+            _sync_snapshot_with_network_lease(
+                {
+                    "central_db_path": str(self.central_path),
+                    "temp_db_path": str(self.root / "empty-gate.sync_tmp.db"),
+                    "local_state": {},
+                    "snapshot_lease_path": str(lease_path),
+                    "snapshot_gate_path": str(gate_path),
+                    "writer_lock_path": str(self.root / "db.lock"),
+                    "malformed_quarantine_dir": str(quarantine_dir),
+                    "lease_duration_sec": 15.0,
+                }
+            )
+
+        self.assertTrue(gate_path.exists())
+        self.assertEqual(gate_path.read_bytes(), b"")
+        self.assertFalse(lease_path.exists())
+        self.assertFalse(list(quarantine_dir.glob("*.malformed")))
 
     def test_busy_rotation_lock_fails_fast_without_worker_timeout(self):
         rotation_lock_path = self.root / "db_rotation.lock"

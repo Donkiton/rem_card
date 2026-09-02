@@ -331,11 +331,11 @@ def _sync_snapshot_with_network_lease(
         snapshot_gate_path,
         stale_timeout_sec=60.0,
         lease_duration_sec=lease_duration_sec,
-        # This path is shared by different hosts. A check-then-delete takeover
-        # cannot safely distinguish an expired gate from a replacement created
-        # by another SMB client. Only normal owner release or same-host dead-PID
-        # recovery may remove it; a foreign orphan safely disables snapshots
-        # while clinical writes and central-read fallback remain available.
+        # This path is shared by different hosts. Atomic publication prevents
+        # this client from exposing partial JSON, but a malformed or expired
+        # foreign gate still cannot be reclaimed safely: it may belong to a live
+        # SMB client whose write or release is delayed. Preserve it until an
+        # explicit maintenance window confirms that every client is stopped.
         allow_expired_lease_cleanup=False,
         allow_legacy_replica_cleanup=False,
         allow_malformed_cleanup=False,
