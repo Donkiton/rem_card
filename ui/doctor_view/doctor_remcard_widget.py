@@ -3242,17 +3242,19 @@ class DoctorRemCardWidget(QWidget):
                 ow.stop_timer()
             
             should_ensure_initial_status = self._should_ensure_initial_status_for_date(selected_date)
-            if target_id and self.service.status_service and should_ensure_initial_status:
-                s_start, _ = self.service.get_day_period(selected_date)
-                patient = self.service.get_patient(target_id)
-                adm_dt = patient.admission_datetime if patient else None
-                self.service.status_service.ensure_initial_status(target_id, s_start, adm_dt)
-            elif target_id and self.service.status_service and not self._archive_read_only_mode:
-                logger.info(
-                    "[ARCHIVE] skip initial status write for historical card admission_id=%s date=%s",
-                    target_id,
-                    selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
-                )
+            if target_id and self.service.status_service and not self._archive_read_only_mode:
+                if should_ensure_initial_status:
+                    logger.info(
+                        "[ARCHIVE] defer initial status write to snapshot worker admission_id=%s date=%s",
+                        target_id,
+                        selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
+                    )
+                else:
+                    logger.info(
+                        "[ARCHIVE] skip initial status write for historical card admission_id=%s date=%s",
+                        target_id,
+                        selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
+                    )
 
             if admission_id is not None:
                 self.admission_id = admission_id
@@ -3267,6 +3269,9 @@ class DoctorRemCardWidget(QWidget):
             if hasattr(self.layout_manager, 'nurse_orders_manager') and self.layout_manager.nurse_orders_manager:
                 self._bind_nurse_orders_balance_signals()
                 self.layout_manager.nurse_orders_manager.set_context(target_id, self._current_date)
+            # Не выполняем сетевую SQLite-запись в GUI-потоке. Построение
+            # снимка ниже обеспечит начальный статус в фоновом потоке, если
+            # открыта карта текущих медицинских суток.
             self.force_reload_all(ensure_initial_status=should_ensure_initial_status)
             self._update_yesterday_button_state()
             self._apply_archive_read_only_state()

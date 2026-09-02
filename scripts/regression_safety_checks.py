@@ -13157,12 +13157,7 @@ def _w1_archive_assigns_initial_status_helper_result(archive_method: ast.Functio
     return False
 
 
-def _w1_archive_status_writes_guarded_by_helper_result(archive_method: ast.FunctionDef) -> bool:
-    parent_by_id = {}
-    for parent in ast.walk(archive_method):
-        for child in ast.iter_child_nodes(parent):
-            parent_by_id[id(child)] = parent
-
+def _w1_archive_defers_initial_status_write(archive_method: ast.FunctionDef) -> bool:
     ensure_calls = [
         node
         for node in ast.walk(archive_method)
@@ -13170,17 +13165,22 @@ def _w1_archive_status_writes_guarded_by_helper_result(archive_method: ast.Funct
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "ensure_initial_status"
     ]
-    if not ensure_calls:
+    if ensure_calls:
         return False
-    for call in ensure_calls:
-        parent = parent_by_id.get(id(call))
-        while parent is not None:
-            if isinstance(parent, ast.If) and _ast_contains_name(parent.test, "should_ensure_initial_status"):
-                break
-            parent = parent_by_id.get(id(parent))
-        else:
-            return False
-    return True
+
+    for node in ast.walk(archive_method):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "force_reload_all":
+            continue
+        for keyword in node.keywords:
+            if (
+                keyword.arg == "ensure_initial_status"
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "should_ensure_initial_status"
+            ):
+                return True
+    return False
 
 
 def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tuple[bool, str]:
@@ -13230,8 +13230,8 @@ def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tu
 
     if not _w1_archive_assigns_initial_status_helper_result(archive_method):
         return False, "safe_load_archived_card must assign helper result for selected_date"
-    if not _w1_archive_status_writes_guarded_by_helper_result(archive_method):
-        return False, "safe_load_archived_card status write must be guarded by helper result"
+    if not _w1_archive_defers_initial_status_write(archive_method):
+        return False, "safe_load_archived_card must defer initial status writes to force_reload_all"
 
     if "skip initial status write for historical card" not in archive_source:
         return False, "safe_load_archived_card must log skipped historical status writes"
