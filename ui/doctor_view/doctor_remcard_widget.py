@@ -137,6 +137,7 @@ class DoctorRemCardWidget(QWidget):
         self._create_card_write_pending = False
         self._monitor_connected = False
         self._card_snapshot_cache = None
+        self._burn_patient_hint = None
         self._balance_runtime_cache = None
         self._balance_runtime_provisional = False
         self._read_only_widget_signature = None
@@ -340,6 +341,38 @@ class DoctorRemCardWidget(QWidget):
         else:
             self._set_add_patient_button_hint("Кнопка доступна только в режиме списка коек")
 
+    def _apply_burn_calculator_button_state(self):
+        panel = getattr(self, "sector8_panel", None)
+        if not self._is_qobject_alive(panel):
+            return
+        if self._selection_mode != "card" or not self.admission_id:
+            panel.set_burn_calc_enabled(False, "Калькулятор доступен только из карты пациента")
+            return
+
+        patient = self._burn_patient_for_context(load_if_missing=False)
+        if patient is None:
+            panel.set_burn_calc_enabled(False, "Ожидается загрузка диагноза пациента")
+            return
+
+        from rem_card.services.burn_infusion_calculator import is_acute_burn_mkb
+
+        diagnosis_value = " ".join(
+            filter(
+                None,
+                (
+                    str(self._electrolyte_patient_value(patient, "mkb_code") or "").strip(),
+                    str(self._electrolyte_patient_value(patient, "diagnosis_text") or "").strip(),
+                ),
+            )
+        )
+        enabled = is_acute_burn_mkb(diagnosis_value)
+        tooltip = (
+            "Открыть калькулятор инфузии при ожогах"
+            if enabled
+            else "Диагноз не относится к острым ожогам T20–T25, T27, T29–T32"
+        )
+        panel.set_burn_calc_enabled(enabled, tooltip)
+
     def _refresh_add_patient_button_lock_state(self):
         try:
             if self._is_closing or not self._is_qobject_alive(self):
@@ -355,6 +388,7 @@ class DoctorRemCardWidget(QWidget):
 
             self._add_patient_locked_by_other = False
             self._apply_add_patient_button_state()
+            self._apply_burn_calculator_button_state()
         except RuntimeError as exc:
             logger.warning("Failed to refresh add-patient button lock state (doctor): %s", exc)
         except Exception as exc:
@@ -834,6 +868,8 @@ class DoctorRemCardWidget(QWidget):
             and snapshot_signature == self._last_applied_card_snapshot_signature
         ):
             self._card_snapshot_cache = snapshot
+            self._burn_patient_hint = snapshot.get("patient") or self._burn_patient_hint
+            self._apply_burn_calculator_button_state()
             if snapshot.get("balance_runtime") is not None:
                 self._balance_runtime_cache = snapshot.get("balance_runtime")
                 self._balance_runtime_provisional = False
@@ -864,6 +900,8 @@ class DoctorRemCardWidget(QWidget):
             )
             return
         self._card_snapshot_cache = snapshot
+        self._burn_patient_hint = snapshot.get("patient") or self._burn_patient_hint
+        self._apply_burn_calculator_button_state()
         self._last_applied_card_snapshot_signature = snapshot_signature
         if snapshot.get("balance_runtime") is not None:
             self._balance_runtime_cache = snapshot.get("balance_runtime")
@@ -2068,6 +2106,7 @@ class DoctorRemCardWidget(QWidget):
         self.current_date = date
         self._balance_patient_period_manual_mode = bool(balance_patient_period_manual_mode)
         self._card_snapshot_cache = None
+        self._burn_patient_hint = None
         self._balance_runtime_cache = None
         self._balance_runtime_provisional = False
         try:
@@ -2076,6 +2115,9 @@ class DoctorRemCardWidget(QWidget):
             card_start_dt, card_end_dt = date, None
         cached_card_snapshot = self._get_cached_patient_card_snapshot(admission_id, date)
         cached_vitals_snapshot = cached_card_snapshot or self._get_cached_patient_vitals_snapshot(admission_id, date)
+        if isinstance(cached_vitals_snapshot, dict):
+            self._burn_patient_hint = cached_vitals_snapshot.get("patient")
+        self._apply_burn_calculator_button_state()
         return card_start_dt, card_end_dt, cached_card_snapshot, cached_vitals_snapshot
 
     def _sync_patient_card_layout_context(
@@ -2226,6 +2268,8 @@ class DoctorRemCardWidget(QWidget):
         """Заполняет 4б/4в данными уже отрисованной W1-строки до показа карты."""
         if not patient or not hasattr(self, "layout_manager"):
             return
+        self._burn_patient_hint = patient
+        self._apply_burn_calculator_button_state()
         layout = self.layout_manager
         runtime = dict(getattr(patient, "_w1_runtime_snapshot", None) or {})
         try:
@@ -2372,6 +2416,7 @@ class DoctorRemCardWidget(QWidget):
         self.sector8_panel.archive_clicked.connect(self.on_global_archive_clicked)
         self.sector8_panel.refresh_clicked.connect(self.on_refresh_beds_clicked)
         self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
+        self.sector8_panel.burn_calc_clicked.connect(self.on_burn_calculator_clicked)
         self.sector8_panel.electrolytes_calc_clicked.connect(self.on_electrolyte_calculator_clicked)
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
         self.sector8_panel.user_report_clicked.connect(self.on_user_report_clicked)
@@ -2385,6 +2430,7 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self.layout_manager, "selection_mode_changed"):
             self.layout_manager.selection_mode_changed.connect(self._on_selection_mode_changed)
             self._on_selection_mode_changed(getattr(self.layout_manager, "current_mode", "beds"))
+        self._apply_burn_calculator_button_state()
 
         # Динамические W1-экраны shell подключаются без создания полной карты.
         self._wire_dynamic_views()
@@ -2722,6 +2768,7 @@ class DoctorRemCardWidget(QWidget):
         if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
             self._release_add_patient_lock()
         self._refresh_add_patient_button_lock_state()
+        self._apply_burn_calculator_button_state()
 
     def _schedule_card_ui_prewarm(self):
         if self._card_ui_prewarm_started or self._card_ui_prewarm_done:
@@ -3846,6 +3893,155 @@ class DoctorRemCardWidget(QWidget):
         dialog = InfusionCalculatorDialog(parent=self)
         dialog.exec()
 
+    def on_burn_calculator_clicked(self):
+        from rem_card.services.burn_infusion_calculator import is_acute_burn_mkb
+        from .components.burn_infusion_calculator import BurnInfusionCalculatorDialog
+
+        patient = self._burn_patient_for_context(load_if_missing=True)
+        if patient is None:
+            CustomMessageBox.information(self, "Калькулятор ожогов", "Не удалось загрузить данные пациента.")
+            return
+        diagnosis_value = " ".join(
+            filter(
+                None,
+                (
+                    str(self._electrolyte_patient_value(patient, "mkb_code") or "").strip(),
+                    str(self._electrolyte_patient_value(patient, "diagnosis_text") or "").strip(),
+                ),
+            )
+        )
+        if self._selection_mode != "card" or not is_acute_burn_mkb(diagnosis_value):
+            CustomMessageBox.information(
+                self,
+                "Калькулятор ожогов",
+                "Калькулятор доступен из карты пациента при диагнозе T20–T25, T27 или T29–T32.",
+            )
+            self._apply_burn_calculator_button_state()
+            return
+
+        dialog = BurnInfusionCalculatorDialog(
+            parent=self,
+            patient_context=self._build_burn_calculator_context(patient),
+        )
+        dialog.exec()
+
+    def _burn_patient_for_context(self, *, load_if_missing: bool):
+        snapshot = self._card_snapshot_cache or {}
+        patient = snapshot.get("patient") or self._burn_patient_hint
+        if patient is None and load_if_missing and self.admission_id and hasattr(self.service, "get_patient"):
+            try:
+                patient = self.service.get_patient(int(self.admission_id))
+            except Exception as exc:
+                logger.warning("Burn calculator: failed to load patient context: %s", exc)
+        if patient is not None:
+            self._burn_patient_hint = patient
+        return patient
+
+    def _build_burn_calculator_context(self, patient) -> dict:
+        context: dict = {}
+        display_name = ""
+        if hasattr(patient, "get_display_name"):
+            try:
+                display_name = str(patient.get_display_name() or "").strip()
+            except Exception:
+                display_name = ""
+        if not display_name:
+            display_name = str(self._electrolyte_patient_value(patient, "full_name") or "").strip()
+        if display_name:
+            context["display_name"] = display_name
+
+        for source_key, target_key in (
+            ("history_number", "history_number"),
+            ("mkb_code", "mkb_code"),
+            ("diagnosis_text", "diagnosis_text"),
+        ):
+            value = self._electrolyte_patient_value(patient, source_key)
+            if value not in (None, ""):
+                context[target_key] = value
+
+        age_years = self._burn_context_age_years(patient)
+        if age_years is not None:
+            context["age_years"] = age_years
+        weight_kg = self._electrolyte_context_weight_kg(int(self.admission_id))
+        if weight_kg is not None:
+            context["weight_kg"] = weight_kg
+            context["weight_source"] = "карты поступления/перевода"
+        context.update(self._burn_context_recent_diuresis(int(self.admission_id)))
+        return context
+
+    def _burn_context_age_years(self, patient) -> float | None:
+        if patient is None:
+            return None
+        try:
+            from rem_card.app.patient_age import calculate_age_components
+
+            components = calculate_age_components(
+                self._electrolyte_patient_value(patient, "birth_date"),
+                datetime.now(),
+            )
+            if components is not None:
+                return round(
+                    float(components.years) + float(components.months) / 12.0 + float(components.days) / 365.25,
+                    2,
+                )
+        except Exception:
+            pass
+        age = self._electrolyte_patient_value(patient, "age")
+        if age in (None, ""):
+            return None
+        try:
+            number = float(age)
+        except Exception:
+            return None
+        unit = str(self._electrolyte_patient_value(patient, "age_unit") or "").casefold()
+        if "меся" in unit:
+            return round(number / 12.0, 2)
+        months = self._electrolyte_patient_value(patient, "age_months")
+        try:
+            return round(number + float(months or 0) / 12.0, 2)
+        except Exception:
+            return number
+
+    def _burn_context_recent_diuresis(self, admission_id: int) -> dict:
+        fluid_service = getattr(self.service, "fluid_service", None)
+        if fluid_service is None or not hasattr(fluid_service, "get_fluids_in_bounds"):
+            return {}
+        now = datetime.now()
+        try:
+            fluids = fluid_service.get_fluids_in_bounds(admission_id, now - timedelta(hours=3), now) or []
+        except Exception as exc:
+            logger.warning("Burn calculator: failed to load recent diuresis: %s", exc)
+            return {}
+        if not fluids:
+            return {}
+        last_hour_start = now - timedelta(hours=1)
+        last_hour = 0.0
+        total_three_hours = 0.0
+        has_last_hour = False
+        timestamps = []
+        for fluid in fluids:
+            urine = float(getattr(fluid, "urine", 0.0) or 0.0)
+            total_three_hours += urine
+            timestamp = getattr(fluid, "timestamp", None)
+            if timestamp is not None:
+                timestamps.append(timestamp)
+                try:
+                    if timestamp >= last_hour_start:
+                        last_hour += urine
+                        has_last_hour = True
+                except TypeError:
+                    pass
+        context = {}
+        try:
+            has_three_hour_coverage = bool(timestamps) and min(timestamps) <= now - timedelta(hours=2)
+        except TypeError:
+            has_three_hour_coverage = False
+        if has_three_hour_coverage:
+            context["urine_average_3h_ml"] = round(total_three_hours / 3.0, 1)
+        if has_last_hour:
+            context["urine_last_hour_ml"] = round(last_hour, 1)
+        return context
+
     def on_electrolyte_calculator_clicked(self):
         from .components.electrolyte_calculator import ElectrolyteCalculatorDialog
 
@@ -4250,6 +4446,9 @@ class DoctorRemCardWidget(QWidget):
         try:
             snapshot = self._card_snapshot_cache or {}
             patient = snapshot.get("patient")
+            if patient is not None:
+                self._burn_patient_hint = patient
+            self._apply_burn_calculator_button_state()
             if patient and hasattr(self.layout_manager, 'sector_4b'):
                 self._update_sector_4b_patient_info(patient, self._current_date)
             if hasattr(self.layout_manager, 'sector_4v'):

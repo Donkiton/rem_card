@@ -20,6 +20,7 @@ class Sector8Panel(QWidget):
     archive_clicked = Signal()
     refresh_clicked = Signal()
     calc_clicked = Signal()
+    burn_calc_clicked = Signal()
     electrolytes_calc_clicked = Signal()
     add_patient_clicked = Signal()
     user_report_clicked = Signal()
@@ -95,6 +96,17 @@ class Sector8Panel(QWidget):
         self.btn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_calc.clicked.connect(self.calc_clicked.emit)
 
+        # Кнопка калькулятора инфузии при ожогах (только из подходящей карты пациента)
+        self.btn_burn_calc = QPushButton(" Ожоги", self)
+        burn_icon = os.path.join(self.icon_dir, "operblock_drop_blue.svg")
+        self.btn_burn_calc.setIcon(QIcon(burn_icon))
+        self.btn_burn_calc.setIconSize(QSize(18, 18))
+        self.btn_burn_calc.setMinimumHeight(32)
+        self.btn_burn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_burn_calc.setEnabled(False)
+        self.btn_burn_calc.setToolTip("Калькулятор доступен из карты пациента с острым ожоговым диагнозом")
+        self.btn_burn_calc.clicked.connect(self.burn_calc_clicked.emit)
+
         # Кнопка Электролиты
         self.btn_electrolytes_calc = QPushButton(" Электролиты", self)
         electrolytes_icon = os.path.join(self.icon_dir, "microelements.png")
@@ -137,6 +149,7 @@ class Sector8Panel(QWidget):
             "user_reports": self.btn_user_reports,
             "add_patient": self.btn_add_patient,
             "calc": self.btn_calc,
+            "burn_calc": self.btn_burn_calc,
             "electrolytes_calc": self.btn_electrolytes_calc,
             "settings": self.btn_settings,
             "back": self.btn_back,
@@ -203,6 +216,20 @@ class Sector8Panel(QWidget):
         except Exception:
             pass
         button.setEnabled(enabled)
+
+    def set_burn_calc_enabled(self, enabled: bool, tooltip: str = ""):
+        button = getattr(self, "btn_burn_calc", None)
+        if button is None:
+            return
+        try:
+            import shiboken6  # type: ignore
+
+            if not shiboken6.isValid(button):
+                return
+        except Exception:
+            pass
+        button.setEnabled(bool(enabled))
+        button.setToolTip(str(tooltip or ""))
 
     def refresh_user_reports_count(self):
         button = getattr(self, "btn_user_reports", None)

@@ -50,6 +50,7 @@ class DisplaySettingsSector8SidesTest(unittest.TestCase):
         self.assertEqual(ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_LEFT), ["user_report"])
         right_ids = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_RIGHT)
         self.assertIn("add_patient", right_ids)
+        self.assertIn("burn_calc", right_ids)
         self.assertIn("archive", right_ids)
         self.assertNotIn("user_report", right_ids)
 
