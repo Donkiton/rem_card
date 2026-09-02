@@ -373,6 +373,12 @@ class DoctorRemCardWidget(QWidget):
         )
         panel.set_burn_calc_enabled(enabled, tooltip)
 
+    def _sync_burn_patient_from_snapshot(self, snapshot: dict):
+        patient = snapshot.get("patient")
+        if patient is not None:
+            self._burn_patient_hint = patient
+        self._apply_burn_calculator_button_state()
+
     def _refresh_add_patient_button_lock_state(self):
         try:
             if self._is_closing or not self._is_qobject_alive(self):
@@ -868,8 +874,7 @@ class DoctorRemCardWidget(QWidget):
             and snapshot_signature == self._last_applied_card_snapshot_signature
         ):
             self._card_snapshot_cache = snapshot
-            self._burn_patient_hint = snapshot.get("patient") or self._burn_patient_hint
-            self._apply_burn_calculator_button_state()
+            self._sync_burn_patient_from_snapshot(snapshot)
             if snapshot.get("balance_runtime") is not None:
                 self._balance_runtime_cache = snapshot.get("balance_runtime")
                 self._balance_runtime_provisional = False
@@ -900,8 +905,7 @@ class DoctorRemCardWidget(QWidget):
             )
             return
         self._card_snapshot_cache = snapshot
-        self._burn_patient_hint = snapshot.get("patient") or self._burn_patient_hint
-        self._apply_burn_calculator_button_state()
+        self._sync_burn_patient_from_snapshot(snapshot)
         self._last_applied_card_snapshot_signature = snapshot_signature
         if snapshot.get("balance_runtime") is not None:
             self._balance_runtime_cache = snapshot.get("balance_runtime")
@@ -4446,9 +4450,7 @@ class DoctorRemCardWidget(QWidget):
         try:
             snapshot = self._card_snapshot_cache or {}
             patient = snapshot.get("patient")
-            if patient is not None:
-                self._burn_patient_hint = patient
-            self._apply_burn_calculator_button_state()
+            self._sync_burn_patient_from_snapshot(snapshot)
             if patient and hasattr(self.layout_manager, 'sector_4b'):
                 self._update_sector_4b_patient_info(patient, self._current_date)
             if hasattr(self.layout_manager, 'sector_4v'):
