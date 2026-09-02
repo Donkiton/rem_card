@@ -42,6 +42,7 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         },
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
+        {"id": "burn_calc", "label": "Ожоги", "default_visible": True, "can_hide": True},
         {"id": "electrolytes_calc", "label": "Электролиты", "default_visible": True, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
