@@ -12,7 +12,7 @@ PACKAGE_PARENT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from PySide6.QtCore import QDateTime  # noqa: E402
+from PySide6.QtCore import QDateTime, QSettings  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from rem_card.ui.shared.components.burn_infusion_calculator import (  # noqa: E402
@@ -64,4 +64,110 @@ def test_dialog_prefills_context_and_renders_reference_example():
 
     dialog.close()
     dialog.deleteLater()
+    app.processEvents()
+
+
+def test_dialog_is_resizable_and_restores_saved_geometry(tmp_path, monkeypatch):
+    app = application()
+    settings = QSettings(str(tmp_path / "burn-calculator.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(BurnInfusionCalculatorDialog, "_settings", lambda _self: settings)
+
+    first = BurnInfusionCalculatorDialog()
+    first.resize(1040, 730)
+    assert first.isSizeGripEnabled()
+    assert first.maximumWidth() > first.minimumWidth()
+    assert first.maximumHeight() > first.minimumHeight()
+    saved_geometry = first.saveGeometry()
+    first.accept()
+    assert settings.value(first._GEOMETRY_SETTINGS_KEY) == saved_geometry
+
+    restored = BurnInfusionCalculatorDialog()
+    # Offscreen Qt clamps widths to its 800 px virtual screen, while the dialog
+    # intentionally keeps a safe 900 px minimum. Height remains directly verifiable.
+    assert restored.size().width() >= restored.minimumWidth()
+    assert restored.size().height() == 730
+    restored.close()
+
+    settings.clear()
+    app.processEvents()
+
+
+def test_dialog_formats_age_and_uses_automatic_adult_reduction():
+    app = application()
+    dialog = BurnInfusionCalculatorDialog(patient_context={"age_years": 56.5, "weight_kg": 80})
+
+    assert dialog.age_spin.text() == "56 лет"
+    for value, expected in ((0.5, "6 месяцев"), (1, "1 год"), (2, "2 года"), (5, "5 лет"), (21, "21 год")):
+        dialog.age_spin.setValue(value)
+        assert dialog.age_spin.text() == expected
+    assert dialog.age_spin.valueFromText("6 месяцев") == 0.5
+
+    dialog.age_spin.setValue(56.5)
+    assert "1,75 раза" in dialog.patient_profile_label.text()
+    assert dialog.pediatric_details_label.isHidden()
+
+    dialog.injury_datetime_edit.setDateTime(QDateTime(datetime.now() - timedelta(hours=3)))
+    dialog.total_tbsa_spin.setValue(20)
+    dialog.superficial_tbsa_spin.setValue(10)
+    dialog.deep_tbsa_spin.setValue(10)
+    dialog._calculate()
+
+    assert dialog._last_result is not None
+    assert dialog._last_result.age_reduction_divisor == 1.75
+    dialog.close()
+    app.processEvents()
+
+
+def test_dialog_shows_complete_pediatric_profile_and_dashes_for_missing_data():
+    app = application()
+    empty = BurnInfusionCalculatorDialog()
+    assert empty.age_spin.text() == "—"
+    assert empty.weight_spin.text() == "—"
+    assert empty.urine_last_hour_spin.text() == "—"
+    assert empty.urine_average_spin.text() == "—"
+    empty.close()
+
+    child = BurnInfusionCalculatorDialog(patient_context={"age_years": 4.5, "weight_kg": 20})
+    assert child.age_spin.text() == "4 года"
+    assert child.patient_profile_label.text() == "Ребёнок · 3 мл/кг × площадь ожога"
+    assert not child.pediatric_details_label.isHidden()
+    assert "2–5 лет" in child.pediatric_details_label.text()
+    assert "80 мл/кг/сут" in child.pediatric_details_label.text()
+    assert "1 600 мл/сут" in child.pediatric_details_label.text()
+
+    child.injury_datetime_edit.setDateTime(QDateTime(datetime.now() - timedelta(hours=2)))
+    child.total_tbsa_spin.setValue(20)
+    child.superficial_tbsa_spin.setValue(10)
+    child.deep_tbsa_spin.setValue(10)
+    child._calculate()
+    assert child._last_result is not None
+    assert child._last_result.burn_formula_ml == 1200
+    assert child._last_result.maintenance_ml == 1600
+    assert child._last_result.total_ml == 2800
+    assert "Ожоговая в/в составляющая" in child.breakdown_label.text()
+    assert "Физиологическая потребность ребёнка" in child.breakdown_label.text()
+    assert "Суммарный ориентир жидкостной терапии" in child.current_card[2].text()
+    assert "Суммарный ориентир жидкостной терапии" in child._result_as_text()
+
+    child.close()
+    app.processEvents()
+
+
+def test_dialog_preserves_one_month_boundary_for_pediatric_formula():
+    app = application()
+    infant = BurnInfusionCalculatorDialog(patient_context={"age_years": 1 / 12, "weight_kg": 5})
+
+    assert infant.age_spin.text() == "1 месяц"
+    assert "1 месяц–1 год" in infant.pediatric_details_label.text()
+    assert "120 мл/кг/сут" in infant.pediatric_details_label.text()
+
+    infant.injury_datetime_edit.setDateTime(QDateTime(datetime.now() - timedelta(hours=1)))
+    infant.total_tbsa_spin.setValue(10)
+    infant.superficial_tbsa_spin.setValue(5)
+    infant.deep_tbsa_spin.setValue(5)
+    infant._calculate()
+    assert infant._last_result is not None
+    assert infant._last_result.maintenance_ml == 600
+
+    infant.close()
     app.processEvents()

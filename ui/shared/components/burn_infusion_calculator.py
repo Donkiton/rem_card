@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
+import re
 
 from PySide6.QtCore import QDateTime, Qt
+from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
-    QComboBox,
     QDateTimeEdit,
     QDoubleSpinBox,
     QFrame,
@@ -31,9 +33,13 @@ from rem_card.services.burn_infusion_calculator import (
     MODE_DAY_2_3,
     MODE_FIRST_24H,
     MODE_POST_SHOCK,
+    OLDER_AGE_REDUCTION_DIVISOR,
+    PEDIATRIC_AGE_LIMIT_YEARS,
     calculate_burn_infusion,
+    pediatric_maintenance_rule,
 )
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 from rem_card.ui.styles.theme import (
     BG_CARD,
     BG_LIGHT,
@@ -63,21 +69,78 @@ def _fmt_ml(value: float) -> str:
     return f"{_fmt_number(value)} мл"
 
 
-class BurnInfusionCalculatorDialog(BaseStyledDialog):
+def _pluralize_ru(value: int, one: str, few: str, many: str) -> str:
+    number = abs(int(value)) % 100
+    last_digit = number % 10
+    if 11 <= number <= 19:
+        return many
+    if last_digit == 1:
+        return one
+    if 2 <= last_digit <= 4:
+        return few
+    return many
+
+
+class _PatientAgeSpinBox(QDoubleSpinBox):
+    """Хранит точный возраст для клинических границ, но показывает полные годы."""
+
+    def textFromValue(self, value: float) -> str:
+        if value < 0.0:
+            return "—"
+        if value < 1.0:
+            months = max(0, int(math.floor(value * 12.0 + 1e-4)))
+            if months == 0:
+                return "меньше месяца"
+            return f"{months} {_pluralize_ru(months, 'месяц', 'месяца', 'месяцев')}"
+        years = int(math.floor(value + 1e-6))
+        return f"{years} {_pluralize_ru(years, 'год', 'года', 'лет')}"
+
+    def valueFromText(self, text: str) -> float:
+        normalized = str(text or "").strip().casefold().replace(",", ".")
+        match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+        if match is None:
+            return self.minimum()
+        value = float(match.group(0))
+        if "меся" in normalized:
+            value /= 12.0
+        return value
+
+    def validate(self, text: str, pos: int):
+        normalized = str(text or "").strip().casefold()
+        if not normalized or normalized == "—":
+            return QValidator.Intermediate, text, pos
+        if re.fullmatch(r"\d+(?:[.,]\d+)?(?:\s*(?:лет|год(?:а)?|месяц(?:а|ев)?))?", normalized):
+            value = self.valueFromText(normalized)
+            state = QValidator.Acceptable if self.minimum() <= value <= self.maximum() else QValidator.Invalid
+            return state, text, pos
+        if re.fullmatch(r"\d+(?:[.,]\d*)?\s*[а-яё]*", normalized):
+            return QValidator.Intermediate, text, pos
+        return QValidator.Invalid, text, pos
+
+
+class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     """Расчет инфузии при ожогах по КР РФ 2024 (decision support)."""
+
+    _GEOMETRY_SETTINGS_KEY = "burn_infusion/calculator_dialog_geometry_v1"
 
     def __init__(self, parent=None, patient_context: dict | None = None):
         super().__init__("Калькулятор инфузионной терапии при ожогах", parent)
+        self._init_saved_frameless_dialog(
+            self._GEOMETRY_SETTINGS_KEY,
+            drag_area_height=32,
+        )
         self._patient_context = dict(patient_context or {})
         self._last_result: BurnInfusionResult | None = None
         self.resize(1120, 820)
         self.setMinimumSize(900, 680)
+        self.setSizeGripEnabled(True)
         self._setup_ui()
         self._apply_styles()
         self._apply_patient_context()
         self._update_age_controls()
         self._update_elapsed_label()
         self._show_empty_result()
+        self._restore_saved_geometry()
 
     def _setup_ui(self) -> None:
         self.content_layout.setContentsMargins(14, 10, 14, 14)
@@ -157,32 +220,40 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
         layout.setHorizontalSpacing(10)
         layout.setVerticalSpacing(8)
 
-        self.age_spin = self._spin(0.0, 120.0, 1, " года")
-        self.age_spin.setSpecialValueText("не указан")
-        self.age_spin.setAccessibleName("Возраст пациента в годах")
+        self.age_spin = _PatientAgeSpinBox()
+        self.age_spin.setRange(-1.0, 120.0)
+        self.age_spin.setDecimals(6)
+        self.age_spin.setSingleStep(1.0)
+        self.age_spin.setSpecialValueText("—")
+        self.age_spin.setValue(-1.0)
+        self.age_spin.setMinimumHeight(30)
+        self.age_spin.setAccessibleName("Возраст пациента в полных годах или месяцах")
         self.age_spin.valueChanged.connect(self._update_age_controls)
         self.weight_spin = self._spin(0.0, 500.0, 1, " кг")
-        self.weight_spin.setSpecialValueText("не указана")
+        self.weight_spin.setSpecialValueText("—")
         self.weight_spin.setAccessibleName("Масса пациента в килограммах")
+        self.weight_spin.valueChanged.connect(self._update_age_controls)
 
-        self.age_reduction_combo = QComboBox()
-        self.age_reduction_combo.setAccessibleName("Коэффициент снижения объема для возраста старше 50 лет")
-        self.age_reduction_combo.addItem("выберите", None)
-        self.age_reduction_combo.addItem("в 1,5 раза", 1.5)
-        self.age_reduction_combo.addItem("в 1,75 раза", 1.75)
-        self.age_reduction_combo.addItem("в 2 раза", 2.0)
+        self.patient_profile_label = QLabel("—")
+        self.patient_profile_label.setObjectName("BurnProfileValue")
+        self.patient_profile_label.setWordWrap(True)
+        self.patient_profile_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        self.pediatric_details_label = QLabel("")
+        self.pediatric_details_label.setObjectName("BurnPediatricDetails")
+        self.pediatric_details_label.setWordWrap(True)
+        self.pediatric_details_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.pediatric_details_label.hide()
 
         self._add_labeled(layout, 0, "Возраст", self.age_spin)
         self._add_labeled(layout, 1, "Масса", self.weight_spin)
-        self.age_reduction_label = QLabel("Снижение после 50 лет")
-        self.age_reduction_label.setObjectName("BurnFieldLabel")
-        layout.addWidget(self.age_reduction_label, 2, 0)
-        layout.addWidget(self.age_reduction_combo, 2, 1)
+        self._add_labeled(layout, 2, "Расчётная группа", self.patient_profile_label)
+        layout.addWidget(self.pediatric_details_label, 3, 0, 1, 2)
 
         self.weight_source_label = QLabel("")
         self.weight_source_label.setObjectName("BurnHintLabel")
         self.weight_source_label.setWordWrap(True)
-        layout.addWidget(self.weight_source_label, 3, 0, 1, 2)
+        layout.addWidget(self.weight_source_label, 4, 0, 1, 2)
         layout.setColumnStretch(1, 1)
         return group
 
@@ -236,9 +307,9 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
 
         self.infused_spin = self._spin(0.0, 100000.0, 0, " мл")
         self.infused_spin.setAccessibleName("Введенный объем с начала расчетного периода")
-        self.urine_last_hour_spin = self._optional_spin("нет данных", " мл/ч")
+        self.urine_last_hour_spin = self._optional_spin("—", " мл/ч")
         self.urine_last_hour_spin.setAccessibleName("Диурез за последний час")
-        self.urine_average_spin = self._optional_spin("нет данных", " мл/ч")
+        self.urine_average_spin = self._optional_spin("—", " мл/ч")
         self.urine_average_spin.setAccessibleName("Средний диурез за три часа")
 
         self._add_labeled(layout, 0, "Уже введено", self.infused_spin)
@@ -481,11 +552,29 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
             self.urine_average_spin.setValue(float(average))
 
     def _update_age_controls(self) -> None:
-        older = self.age_spin.value() > 50.0
-        self.age_reduction_label.setEnabled(older)
-        self.age_reduction_combo.setEnabled(older)
-        if not older:
-            self.age_reduction_combo.setCurrentIndex(0)
+        age = float(self.age_spin.value())
+        self.pediatric_details_label.hide()
+        if age + 1e-6 < (1.0 / 12.0):
+            self.patient_profile_label.setText("—")
+            return
+        if age < PEDIATRIC_AGE_LIMIT_YEARS:
+            rate, band = pediatric_maintenance_rule(age)
+            weight = float(self.weight_spin.value())
+            total = f" · {_fmt_ml(rate * weight)}/сут" if weight >= 0.5 else ""
+            self.patient_profile_label.setText("Ребёнок · 3 мл/кг × площадь ожога")
+            self.pediatric_details_label.setText(
+                f"Физиологическая потребность ({band}): {rate:g} мл/кг/сут{total}. "
+                "Добавляется к ожоговой составляющей; при возможности вводится энтерально через 2 часа "
+                "после поступления и далее каждые 3 часа, включая ночное время."
+            )
+            self.pediatric_details_label.show()
+            return
+        if age > 50.0:
+            self.patient_profile_label.setText(
+                f"Взрослый · объём автоматически уменьшается в {_fmt_number(OLDER_AGE_REDUCTION_DIVISOR, 2)} раза"
+            )
+            return
+        self.patient_profile_label.setText("Взрослый · 4 мл/кг × площадь ожога")
 
     def _update_elapsed_label(self) -> None:
         injury = self.injury_datetime_edit.dateTime().toPython()
@@ -506,7 +595,6 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
         return None if spin.value() < 0.0 else float(spin.value())
 
     def _build_input(self) -> BurnInfusionInput:
-        age_divisor = self.age_reduction_combo.currentData() if self.age_spin.value() > 50.0 else None
         return BurnInfusionInput(
             age_years=float(self.age_spin.value()),
             weight_kg=float(self.weight_spin.value()),
@@ -520,7 +608,6 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
             infused_ml=float(self.infused_spin.value()),
             urine_last_hour_ml=self._optional_value(self.urine_last_hour_spin),
             urine_average_3h_ml=self._optional_value(self.urine_average_spin),
-            older_age_reduction_divisor=age_divisor,
         )
 
     def _calculate(self) -> None:
@@ -540,9 +627,10 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
     def _render_result(self, result: BurnInfusionResult) -> None:
         self.period_label.setText(result.period_label)
         self.total_value_label.setText(_fmt_ml(result.total_ml))
-        breakdown = [f"Базовая формула: {_fmt_ml(result.burn_formula_ml)}"]
+        base_label = "Ожоговая в/в составляющая" if result.maintenance_ml else "Базовая формула"
+        breakdown = [f"{base_label}: {_fmt_ml(result.burn_formula_ml)}"]
         if result.maintenance_ml:
-            breakdown.append(f"Физиологическая потребность: {_fmt_ml(result.maintenance_ml)}")
+            breakdown.append(f"Физиологическая потребность ребёнка: {_fmt_ml(result.maintenance_ml)}")
         if result.inhalation_extra_ml:
             breakdown.append(f"Ингаляционная травма: +{_fmt_ml(result.inhalation_extra_ml)}")
         if result.electrical_extra_ml:
@@ -552,14 +640,20 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
         self.timeline_progress.setValue(max(0, min(240, int(round(result.elapsed_hours * 10)))))
         self.timeline_now_label.setText(f"С момента травмы: {_fmt_number(result.elapsed_hours, 1)} ч")
         self.current_card[1].setText(_fmt_ml(result.current_interval_remaining_ml))
+        rate_label = (
+            "Суммарный ориентир жидкостной терапии" if result.maintenance_ml else "Ориентировочный темп"
+        )
         self.current_card[2].setText(
-            f"{result.current_interval_label}\nОриентировочный темп: {_fmt_ml(result.recommended_rate_ml_h)}/ч"
+            f"{result.current_interval_label}\n{rate_label}: {_fmt_ml(result.recommended_rate_ml_h)}/ч"
         )
         if result.next_interval_rate_ml_h is not None and result.next_16h_ml is not None:
             self.next_card[0].setVisible(True)
             self.next_card[1].setText(_fmt_ml(result.next_16h_ml))
+            next_rate_label = (
+                "Средний суммарный ориентир" if result.maintenance_ml else "Средний темп"
+            )
             self.next_card[2].setText(
-                f"Следующие 16 часов\nСредний темп: {_fmt_ml(result.next_interval_rate_ml_h)}/ч"
+                f"Следующие 16 часов\n{next_rate_label}: {_fmt_ml(result.next_interval_rate_ml_h)}/ч"
             )
         else:
             self.next_card[0].setVisible(False)
@@ -601,7 +695,6 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
         self.urine_average_spin.setValue(-1.0)
         self.injury_datetime_edit.setDateTime(QDateTime.currentDateTime())
         self.mode_buttons[MODE_FIRST_24H].setChecked(True)
-        self.age_reduction_combo.setCurrentIndex(0)
         self._apply_patient_context()
         self._last_result = None
         self.copy_button.setEnabled(False)
@@ -612,11 +705,14 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
         result = self._last_result
         if result is None:
             return ""
+        rate_label = (
+            "Суммарный ориентир жидкостной терапии" if result.maintenance_ml else "Ориентировочный темп"
+        )
         lines = [
             "Калькулятор инфузионной терапии при ожогах",
             f"{result.period_label}: {_fmt_ml(result.total_ml)}",
             f"Осталось: {_fmt_ml(result.remaining_ml)}",
-            f"Ориентировочный темп: {_fmt_ml(result.recommended_rate_ml_h)}/ч",
+            f"{rate_label}: {_fmt_ml(result.recommended_rate_ml_h)}/ч",
             "",
             "Трассировка:",
             *result.calculation_trace,
@@ -678,6 +774,22 @@ class BurnInfusionCalculatorDialog(BaseStyledDialog):
             }}
             QLabel#BurnFieldLabel, QLabel#BurnElapsedLabel {{
                 color: {TEXT_SECONDARY};
+                font-weight: 400;
+            }}
+            QLabel#BurnProfileValue {{
+                min-height: 30px;
+                color: {TEXT_PRIMARY};
+                background: {BG_LIGHT};
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: 5px;
+                padding: 0 8px;
+            }}
+            QLabel#BurnPediatricDetails {{
+                color: {TEXT_SECONDARY};
+                background: {BG_LIGHT};
+                border-left: 3px solid {COLOR_PRIMARY};
+                border-radius: 4px;
+                padding: 7px 9px;
                 font-weight: 400;
             }}
             QDoubleSpinBox, QDateTimeEdit, QComboBox {{

@@ -1513,7 +1513,7 @@ class NurseMainWidget(QWidget):
         self.sector8_panel.archive_clicked.connect(self.on_global_archive_clicked)
         self.sector8_panel.refresh_clicked.connect(self.force_refresh_everywhere)
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
-        self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
+        self.sector8_panel.calculations_clicked.connect(self.on_calculations_clicked)
         self.sector8_panel.settings_clicked.connect(self.on_settings_clicked)
         self.sector8_panel.user_report_clicked.connect(self.on_user_report_clicked)
         self.sector8_panel.user_reports_clicked.connect(self.on_user_reports_clicked)
@@ -2537,11 +2537,116 @@ class NurseMainWidget(QWidget):
         self.report_worker = controller.full_worker
 
     @log_execution_time(threshold_ms=50)
-    def on_calculator_clicked(self):
+    def on_calculations_clicked(self):
+        from rem_card.services.burn_infusion_calculator import is_acute_burn_mkb
+        from rem_card.ui.shared.components.calculation_launcher import (
+            CALCULATION_BURNS,
+            CALCULATION_ELECTROLYTES,
+            CALCULATION_INFUSION,
+            run_calculation_launcher,
+        )
+        from rem_card.ui.shared.patient_calculator_context import patient_diagnosis_value
+
+        patient = self._calculator_patient(load_if_missing=True)
+        in_patient_card = self._resolve_selection_mode() == "card" and bool(
+            getattr(self.layout_manager, "current_admission_id", None)
+        )
+        if not in_patient_card:
+            burn_enabled = False
+            burn_reason = "Калькулятор доступен только из карты пациента"
+        elif patient is None:
+            burn_enabled = False
+            burn_reason = "Не удалось загрузить диагноз пациента"
+        else:
+            burn_enabled = is_acute_burn_mkb(patient_diagnosis_value(patient))
+            burn_reason = (
+                "Открыть калькулятор инфузии при ожогах"
+                if burn_enabled
+                else "Диагноз не относится к острым ожогам T20–T25, T27, T29–T32"
+            )
+
+        calculation, anchor_center = run_calculation_launcher(
+            self,
+            burn_enabled=burn_enabled,
+            burn_disabled_reason=burn_reason,
+        )
+        handler = {
+            CALCULATION_INFUSION: self.on_calculator_clicked,
+            CALCULATION_ELECTROLYTES: self.on_electrolyte_calculator_clicked,
+            CALCULATION_BURNS: self.on_burn_calculator_clicked,
+        }.get(calculation)
+        if handler is not None:
+            # Не создаём второй модальный цикл внутри только что завершённого:
+            # сначала даём Qt уничтожить окно выбора и его native handle.
+            QTimer.singleShot(
+                0,
+                lambda callback=handler, center=anchor_center: callback(anchor_center=center),
+            )
+
+    @log_execution_time(threshold_ms=50)
+    def on_calculator_clicked(self, *, anchor_center=None):
         from rem_card.ui.shared.components.infusion_calculator import InfusionCalculatorDialog
+        from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
 
         dialog = InfusionCalculatorDialog(parent=self)
-        dialog.exec()
+        exec_calculation_dialog(dialog, anchor_center)
+
+    def on_electrolyte_calculator_clicked(self, *, anchor_center=None):
+        from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
+        from rem_card.ui.shared.components.electrolyte_calculator import ElectrolyteCalculatorDialog
+        from rem_card.ui.shared.patient_calculator_context import build_electrolyte_context
+
+        admission_id = getattr(self.layout_manager, "current_admission_id", None)
+        patient = self._calculator_patient(load_if_missing=True)
+        context = (
+            build_electrolyte_context(self.remcard_service, int(admission_id), patient)
+            if admission_id and patient is not None
+            else {}
+        )
+        dialog = ElectrolyteCalculatorDialog(parent=self, patient_context=context)
+        exec_calculation_dialog(dialog, anchor_center)
+
+    def on_burn_calculator_clicked(self, *, anchor_center=None):
+        from rem_card.services.burn_infusion_calculator import is_acute_burn_mkb
+        from rem_card.ui.shared.components.burn_infusion_calculator import BurnInfusionCalculatorDialog
+        from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from rem_card.ui.shared.patient_calculator_context import (
+            build_burn_context,
+            patient_diagnosis_value,
+        )
+
+        admission_id = getattr(self.layout_manager, "current_admission_id", None)
+        patient = self._calculator_patient(load_if_missing=True)
+        if (
+            self._resolve_selection_mode() != "card"
+            or not admission_id
+            or patient is None
+            or not is_acute_burn_mkb(patient_diagnosis_value(patient))
+        ):
+            CustomMessageBox.information(
+                self,
+                "Калькулятор ожогов",
+                "Калькулятор доступен из карты пациента при диагнозе T20–T25, T27 или T29–T32.",
+            )
+            return
+
+        dialog = BurnInfusionCalculatorDialog(
+            parent=self,
+            patient_context=build_burn_context(self.remcard_service, int(admission_id), patient),
+        )
+        exec_calculation_dialog(dialog, anchor_center)
+
+    def _calculator_patient(self, *, load_if_missing: bool):
+        snapshot = self._card_snapshot_cache or {}
+        patient = snapshot.get("patient")
+        admission_id = getattr(self.layout_manager, "current_admission_id", None)
+        if patient is None and load_if_missing and admission_id:
+            try:
+                patient = self.remcard_service.get_patient(int(admission_id))
+            except Exception as exc:
+                logger.warning("Calculator context: failed to load patient: %s", exc)
+        return patient
 
     @log_execution_time(threshold_ms=50)
     def auto_refresh(self, force=False):

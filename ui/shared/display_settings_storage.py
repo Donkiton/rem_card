@@ -12,7 +12,7 @@ from rem_card.ui.styles.theme_storage import get_style_settings_path
 
 
 DISPLAY_SETTINGS_ENV = "REMCARD_DISPLAY_SETTINGS_PATH"
-DISPLAY_SETTINGS_VERSION = 2
+DISPLAY_SETTINGS_VERSION = 3
 DISPLAY_SETTINGS_RELATIVE_PATH = os.path.join("settings", "display_settings", "display_settings.json")
 W1A_UPCOMING_ORDERS_DEFAULT_ENABLED = True
 W1B_LOWER_SECTOR_DEFAULT_ENABLED = True
@@ -41,9 +41,7 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
             "default_side": SECTOR8_BUTTON_SIDE_LEFT,
         },
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
-        {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
-        {"id": "burn_calc", "label": "Ожоги", "default_visible": True, "can_hide": True},
-        {"id": "electrolytes_calc", "label": "Электролиты", "default_visible": True, "can_hide": True},
+        {"id": "calculations", "label": "Расчёт", "default_visible": True, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
@@ -66,7 +64,7 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
             "default_side": SECTOR8_BUTTON_SIDE_LEFT,
         },
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
-        {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
+        {"id": "calculations", "label": "Расчёт", "default_visible": True, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
@@ -292,6 +290,71 @@ def _normalize_section(
     return result
 
 
+def _migrate_calculation_button_section(data: Any, role: str) -> dict[str, Any]:
+    """Объединяет прежние отдельные калькуляторы в единый пункт «Расчёт»."""
+
+    if not isinstance(data, dict):
+        return {}
+    migrated = deepcopy(data)
+    if role not in {"doctor", "nurse"}:
+        return migrated
+
+    legacy_ids = ("calc", "electrolytes_calc", "burn_calc")
+    raw_order = migrated.get("order")
+    raw_visible = migrated.get("visible")
+    raw_side = migrated.get("side")
+    order = list(raw_order) if isinstance(raw_order, list) else []
+    visible = dict(raw_visible) if isinstance(raw_visible, dict) else {}
+    side = dict(raw_side) if isinstance(raw_side, dict) else {}
+
+    has_new = (
+        "calculations" in order
+        or "calculations" in visible
+        or "calculations" in side
+    )
+    has_legacy = any(
+        item_id in order or item_id in visible or item_id in side
+        for item_id in legacy_ids
+    )
+    if has_new or not has_legacy:
+        return migrated
+
+    migrated_order: list[Any] = []
+    inserted = False
+    for item_id in order:
+        item_text = str(item_id)
+        if item_text in legacy_ids:
+            if not inserted:
+                migrated_order.append("calculations")
+                inserted = True
+            continue
+        migrated_order.append(item_id)
+    if inserted:
+        migrated["order"] = migrated_order
+
+    configured_visibility = [
+        bool(visible[item_id])
+        for item_id in legacy_ids
+        if item_id in visible
+    ]
+    if configured_visibility:
+        visible["calculations"] = any(configured_visibility)
+    for item_id in legacy_ids:
+        visible.pop(item_id, None)
+    migrated["visible"] = visible
+
+    side_source = next(
+        (str(item_id) for item_id in order if str(item_id) in legacy_ids and str(item_id) in side),
+        next((item_id for item_id in legacy_ids if item_id in side), None),
+    )
+    if side_source is not None:
+        side["calculations"] = side[side_source]
+    for item_id in legacy_ids:
+        side.pop(item_id, None)
+    migrated["side"] = side
+    return migrated
+
+
 def _normalize_w1a_upcoming_orders_section(data: Any, *, base_section: Any = None) -> dict[str, Any]:
     if not isinstance(data, dict):
         data = {}
@@ -320,11 +383,13 @@ def normalize_role_display_settings(role: str | None, data: Any, base_settings: 
         data = {}
     if not isinstance(base_settings, dict):
         base_settings = {}
+    sector8_data = _migrate_calculation_button_section(data.get("sector8_buttons"), role_key)
+    sector8_base = _migrate_calculation_button_section(base_settings.get("sector8_buttons"), role_key)
     return {
         "sector8_buttons": _normalize_section(
-            data.get("sector8_buttons"),
+            sector8_data,
             SECTOR8_BUTTONS[role_key],
-            base_section=base_settings.get("sector8_buttons"),
+            base_section=sector8_base,
             include_side=True,
         ),
         "remcard_tabs": _normalize_section(
