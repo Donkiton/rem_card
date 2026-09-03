@@ -102,6 +102,7 @@ RUNTIME_BACKUP_MAX_TOTAL_BYTES = max(
 )
 RUNTIME_BACKUP_RETENTION_DAYS = max(3, int(os.environ.get("REMCARD_RUNTIME_BACKUP_RETENTION_DAYS", "21")))
 PERIODIC_BACKUP_INTERVAL_SEC = 10 * 60
+PERIODIC_BACKUP_RETRY_SEC = 30.0
 AUTO_ROTATION_DB_LOCK_RETRY_DELAYS_SEC = (0.5, 1.5)
 RUNTIME_AUTO_BACKUPS_ENABLED = os.environ.get("REMCARD_RUNTIME_AUTO_BACKUPS", "").strip().lower() in {
     "1",
@@ -316,6 +317,8 @@ class DatabaseManager:
         self.baza_dir = self.runtime_context.baza_dir
         self._periodic_backup_interval_sec = PERIODIC_BACKUP_INTERVAL_SEC
         self._last_backup_ts = time.time()
+        self._periodic_backup_lock = threading.Lock()
+        self._periodic_backup_timer: Optional[threading.Timer] = None
         self._startup_ts = time.time()
         self._integrity_stop_evt = threading.Event()
         self._integrity_thread: Optional[threading.Thread] = None
@@ -1924,7 +1927,7 @@ class DatabaseManager:
                     for statement in operation.statements:
                         cursor.execute(statement.sql, tuple(statement.params))
 
-                self._maybe_create_periodic_backup(source=f"outbox_replay:{operation.source}")
+                self._request_periodic_backup(source=f"outbox_replay:{operation.source}")
                 self._after_write_committed()
         return True
 
@@ -2994,12 +2997,60 @@ class DatabaseManager:
                     return
         self._create_named_backup(prefix="shutdown", source="close")
 
-    def _maybe_create_periodic_backup(self, source: str = "write"):
-        if not RUNTIME_AUTO_BACKUPS_ENABLED:
+    def _request_periodic_backup(self, source: str = "write") -> None:
+        if not RUNTIME_AUTO_BACKUPS_ENABLED or self._closed:
             return
+        if time.time() - self._last_backup_ts < self._periodic_backup_interval_sec:
+            return
+        # Запись только планирует обслуживание: её active_write и очередь
+        # должны освободиться до проверки возможности резервного копирования.
+        with self._periodic_backup_lock:
+            if not self._closed and self._periodic_backup_timer is None:
+                self._schedule_periodic_backup_locked(source)
+
+    def _schedule_periodic_backup_locked(self, source: str) -> None:
+        timer = threading.Timer(PERIODIC_BACKUP_RETRY_SEC, self._run_pending_periodic_backup, args=(source,))
+        timer.daemon = True
+        timer.name = "RemCardPeriodicBackup"
+        self._periodic_backup_timer = timer
+        try:
+            timer.start()
+        except RuntimeError:
+            self._periodic_backup_timer = None
+            logger.exception("Failed to schedule periodic backup (%s)", source)
+
+    def _run_pending_periodic_backup(self, source: str) -> None:
+        finished = False
+        try:
+            # Не ставим обслуживание впереди уже выполняющейся записи.
+            if self._central_io_lock.acquire(blocking=False):
+                try:
+                    if self._closed:
+                        finished = True
+                    else:
+                        finished = self._maybe_create_periodic_backup(source)
+                finally:
+                    self._central_io_lock.release()
+        except Exception:
+            logger.exception("Periodic backup attempt failed (%s)", source)
+        finally:
+            with self._periodic_backup_lock:
+                self._periodic_backup_timer = None
+                if not finished and not self._closed and RUNTIME_AUTO_BACKUPS_ENABLED:
+                    self._schedule_periodic_backup_locked(source)
+
+    def _cancel_periodic_backup(self) -> None:
+        with self._periodic_backup_lock:
+            if self._periodic_backup_timer is not None:
+                self._periodic_backup_timer.cancel()
+                self._periodic_backup_timer = None
+
+    def _maybe_create_periodic_backup(self, source: str = "write") -> bool:
+        if not RUNTIME_AUTO_BACKUPS_ENABLED:
+            return True
         now = time.time()
         if now - self._last_backup_ts < self._periodic_backup_interval_sec:
-            return
+            return True
         reason, fields = self._maintenance_defer_reason(
             "periodic_backup",
             source=str(source or "write"),
@@ -3047,8 +3098,8 @@ class DatabaseManager:
                     source=str(source or "write"),
                     reason=reason,
                 )
-            return
-        self._create_named_backup(prefix="periodic", source=source)
+            return False
+        return bool(self._create_named_backup(prefix="periodic", source=source))
 
     def _rotate_backups(self):
         files = self._list_runtime_backups()
@@ -3132,7 +3183,7 @@ class DatabaseManager:
                             wrapped_cursor = RecordingCursor(cursor, statement_sink) if outer_transaction else cursor
                             yield wrapped_cursor
                     if conn and not self._closed and outer_transaction:
-                        self._maybe_create_periodic_backup(source=source)
+                        self._request_periodic_backup(source=source)
                         self._after_write_committed()
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
             if is_database_unavailable_error(exc):
@@ -3212,7 +3263,7 @@ class DatabaseManager:
                     conn = self._remcard_conn
                     cursor = self.write_controller.execute(conn, query, params, source=source)
                     if conn and not self._closed and not self._in_current_thread_remcard_transaction():
-                        self._maybe_create_periodic_backup(source=source)
+                        self._request_periodic_backup(source=source)
                         self._after_write_committed()
             return cursor
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
@@ -3227,7 +3278,7 @@ class DatabaseManager:
                         with self._central_io_lock:
                             cursor = self.write_controller.execute(self._remcard_conn, query, params, source=f"{source}:reconnect")
                             if self._remcard_conn and not self._in_current_thread_remcard_transaction():
-                                self._maybe_create_periodic_backup(source=f"{source}:reconnect")
+                                self._request_periodic_backup(source=f"{source}:reconnect")
                                 self._after_write_committed()
                     return cursor
                 except Exception:
@@ -3513,6 +3564,7 @@ class DatabaseManager:
         io_timeout_sec = SHUTDOWN_CENTRAL_IO_LOCK_TIMEOUT_SEC if timeout_sec is None else max(0.1, float(timeout_sec))
         logger.info("Database shutdown started")
         try:
+            self._cancel_periodic_backup()
             self._startup_quickcheck_stop_evt.set()
             if self._startup_quickcheck_thread and self._startup_quickcheck_thread.is_alive():
                 self._startup_quickcheck_thread.join(timeout=1.5)
