@@ -345,14 +345,16 @@ class DoctorRemCardWidget(QWidget):
         panel = getattr(self, "sector8_panel", None)
         if not self._is_qobject_alive(panel):
             return
-        if self._selection_mode != "card" or not self.admission_id:
-            panel.set_burn_calc_enabled(False, "Калькулятор доступен только из карты пациента")
-            return
+        enabled, tooltip = self._burn_calculator_availability(load_if_missing=False)
+        panel.set_burn_calc_enabled(enabled, tooltip)
 
-        patient = self._burn_patient_for_context(load_if_missing=False)
+    def _burn_calculator_availability(self, *, load_if_missing: bool) -> tuple[bool, str]:
+        if self._selection_mode != "card" or not self.admission_id:
+            return False, "Калькулятор доступен только из карты пациента"
+
+        patient = self._burn_patient_for_context(load_if_missing=load_if_missing)
         if patient is None:
-            panel.set_burn_calc_enabled(False, "Ожидается загрузка диагноза пациента")
-            return
+            return False, "Не удалось загрузить диагноз пациента"
 
         from rem_card.services.burn_infusion_calculator import is_acute_burn_mkb
 
@@ -371,7 +373,7 @@ class DoctorRemCardWidget(QWidget):
             if enabled
             else "Диагноз не относится к острым ожогам T20–T25, T27, T29–T32"
         )
-        panel.set_burn_calc_enabled(enabled, tooltip)
+        return enabled, tooltip
 
     def _sync_burn_patient_from_snapshot(self, snapshot: dict):
         patient = snapshot.get("patient")
@@ -2419,9 +2421,7 @@ class DoctorRemCardWidget(QWidget):
         self.btn_settings.clicked.connect(self.on_settings_clicked)
         self.sector8_panel.archive_clicked.connect(self.on_global_archive_clicked)
         self.sector8_panel.refresh_clicked.connect(self.on_refresh_beds_clicked)
-        self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
-        self.sector8_panel.burn_calc_clicked.connect(self.on_burn_calculator_clicked)
-        self.sector8_panel.electrolytes_calc_clicked.connect(self.on_electrolyte_calculator_clicked)
+        self.sector8_panel.calculations_clicked.connect(self.on_calculations_clicked)
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
         self.sector8_panel.user_report_clicked.connect(self.on_user_report_clicked)
         self.sector8_panel.user_reports_clicked.connect(self.on_user_reports_clicked)
@@ -3891,15 +3891,46 @@ class DoctorRemCardWidget(QWidget):
         except Exception as exc:
             logger.warning("Force refresh: journal refresh failed: %s", exc)
 
-    def on_calculator_clicked(self):
+    def on_calculations_clicked(self):
+        from rem_card.ui.shared.components.calculation_launcher import (
+            CALCULATION_BURNS,
+            CALCULATION_ELECTROLYTES,
+            CALCULATION_INFUSION,
+            run_calculation_launcher,
+        )
+
+        burn_enabled, burn_reason = self._burn_calculator_availability(load_if_missing=True)
+        self.sector8_panel.set_burn_calc_enabled(burn_enabled, burn_reason)
+        calculation, anchor_center = run_calculation_launcher(
+            self,
+            burn_enabled=burn_enabled,
+            burn_disabled_reason=burn_reason,
+        )
+        handler = {
+            CALCULATION_INFUSION: self.on_calculator_clicked,
+            CALCULATION_ELECTROLYTES: self.on_electrolyte_calculator_clicked,
+            CALCULATION_BURNS: self.on_burn_calculator_clicked,
+        }.get(calculation)
+        if handler is not None:
+            # Возвращаем управление основному event loop, чтобы Qt успел
+            # полностью закрыть launcher перед созданием следующего native окна.
+            QTimer.singleShot(
+                0,
+                lambda callback=handler, center=anchor_center: callback(anchor_center=center),
+            )
+
+    def on_calculator_clicked(self, *, anchor_center=None):
         from .components.infusion_calculator import InfusionCalculatorDialog
+        from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
+
         # Чистый запуск без передачи веса пациента (калькулятор стартует с 0)
         dialog = InfusionCalculatorDialog(parent=self)
-        dialog.exec()
+        exec_calculation_dialog(dialog, anchor_center)
 
-    def on_burn_calculator_clicked(self):
+    def on_burn_calculator_clicked(self, *, anchor_center=None):
         from rem_card.services.burn_infusion_calculator import is_acute_burn_mkb
         from .components.burn_infusion_calculator import BurnInfusionCalculatorDialog
+        from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
 
         patient = self._burn_patient_for_context(load_if_missing=True)
         if patient is None:
@@ -3927,7 +3958,7 @@ class DoctorRemCardWidget(QWidget):
             parent=self,
             patient_context=self._build_burn_calculator_context(patient),
         )
-        dialog.exec()
+        exec_calculation_dialog(dialog, anchor_center)
 
     def _burn_patient_for_context(self, *, load_if_missing: bool):
         snapshot = self._card_snapshot_cache or {}
@@ -3986,7 +4017,7 @@ class DoctorRemCardWidget(QWidget):
             if components is not None:
                 return round(
                     float(components.years) + float(components.months) / 12.0 + float(components.days) / 365.25,
-                    2,
+                    6,
                 )
         except Exception:
             pass
@@ -3999,10 +4030,10 @@ class DoctorRemCardWidget(QWidget):
             return None
         unit = str(self._electrolyte_patient_value(patient, "age_unit") or "").casefold()
         if "меся" in unit:
-            return round(number / 12.0, 2)
+            return round(number / 12.0, 6)
         months = self._electrolyte_patient_value(patient, "age_months")
         try:
-            return round(number + float(months or 0) / 12.0, 2)
+            return round(number + float(months or 0) / 12.0, 6)
         except Exception:
             return number
 
@@ -4046,14 +4077,15 @@ class DoctorRemCardWidget(QWidget):
             context["urine_last_hour_ml"] = round(last_hour, 1)
         return context
 
-    def on_electrolyte_calculator_clicked(self):
+    def on_electrolyte_calculator_clicked(self, *, anchor_center=None):
         from .components.electrolyte_calculator import ElectrolyteCalculatorDialog
+        from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
 
         dialog = ElectrolyteCalculatorDialog(
             parent=self,
             patient_context=self._build_electrolyte_calculator_context(),
         )
-        dialog.exec()
+        exec_calculation_dialog(dialog, anchor_center)
 
     def _build_electrolyte_calculator_context(self) -> dict:
         admission_id = getattr(self, "admission_id", None)

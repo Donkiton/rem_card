@@ -20,7 +20,7 @@ class NurseSector8Panel(QWidget):
     refresh_clicked = Signal()
     add_patient_clicked = Signal()
     archive_clicked = Signal()
-    calc_clicked = Signal()
+    calculations_clicked = Signal()
     settings_clicked = Signal()
     user_report_clicked = Signal()
     user_reports_clicked = Signal()
@@ -87,14 +87,14 @@ class NurseSector8Panel(QWidget):
         self.btn_add_patient.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_add_patient.clicked.connect(self.add_patient_clicked.emit)
 
-        # Кнопка Калькулятор
-        self.btn_calc = QPushButton(" Калькулятор", self)
+        # Единая точка входа в клинические калькуляторы
+        self.btn_calculations = QPushButton(" Расчёт", self)
         calc_icon = os.path.join(self.icon_dir, "calc.png")
-        self.btn_calc.setIcon(QIcon(calc_icon))
-        self.btn_calc.setIconSize(QSize(18, 18))
-        self.btn_calc.setMinimumHeight(32)
-        self.btn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.btn_calc.clicked.connect(self.calc_clicked.emit)
+        self.btn_calculations.setIcon(QIcon(calc_icon))
+        self.btn_calculations.setIconSize(QSize(18, 18))
+        self.btn_calculations.setMinimumHeight(32)
+        self.btn_calculations.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_calculations.clicked.connect(self.calculations_clicked.emit)
 
         # Кнопка Настройки
         self.btn_settings = QPushButton(" Настройки", self)
@@ -128,7 +128,7 @@ class NurseSector8Panel(QWidget):
             "user_report": self.btn_user_report,
             "user_reports": self.btn_user_reports,
             "add_patient": self.btn_add_patient,
-            "calc": self.btn_calc,
+            "calculations": self.btn_calculations,
             "settings": self.btn_settings,
             "back": self.btn_back,
             "exit": self.btn_exit,

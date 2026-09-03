@@ -7,6 +7,8 @@ import re
 
 CLINICAL_RECOMMENDATION_ID = "687_3"
 CLINICAL_RECOMMENDATION_YEAR = 2024
+PEDIATRIC_AGE_LIMIT_YEARS = 18.0
+OLDER_AGE_REDUCTION_DIVISOR = 1.75
 
 # Острые состояния из области применения КР, для которых калькулятор может быть
 # предложен в карте пациента. L55 (солнечный ожог) и T95 (последствия ожогов)
@@ -46,19 +48,23 @@ def is_acute_burn_mkb(value: object) -> bool:
     return any(family in ACUTE_BURN_MKB_FAMILIES for family in extract_mkb_families(value))
 
 
-def pediatric_maintenance_ml_per_kg(age_years: float) -> float:
+def pediatric_maintenance_rule(age_years: float) -> tuple[float, str]:
     age = float(age_years)
-    if age < (1.0 / 12.0) or age >= 18.0:
+    if age + 1e-6 < (1.0 / 12.0) or age >= PEDIATRIC_AGE_LIMIT_YEARS:
         raise ValueError("Физиологическая потребность по детской таблице задана для возраста от 1 месяца до 18 лет.")
     if age < 1.0:
-        return 120.0
+        return 120.0, "1 месяц–1 год"
     if age < 2.0:
-        return 100.0
+        return 100.0, "1–2 года"
     if age < 5.0:
-        return 80.0
+        return 80.0, "2–5 лет"
     if age < 10.0:
-        return 60.0
-    return 50.0
+        return 60.0, "5–10 лет"
+    return 50.0, "10–18 лет"
+
+
+def pediatric_maintenance_ml_per_kg(age_years: float) -> float:
+    return pediatric_maintenance_rule(age_years)[0]
 
 
 @dataclass(frozen=True)
@@ -75,7 +81,6 @@ class BurnInfusionInput:
     infused_ml: float = 0.0
     urine_last_hour_ml: float | None = None
     urine_average_3h_ml: float | None = None
-    older_age_reduction_divisor: float | None = None
 
 
 @dataclass(frozen=True)
@@ -102,8 +107,9 @@ class BurnInfusionResult:
     calculation_trace: tuple[str, ...]
 
 
-def _validate_input(data: BurnInfusionInput, *, now: datetime, mode: str) -> None:
-    if not (1.0 / 12.0 <= float(data.age_years) <= 120.0):
+def _validate_input(data: BurnInfusionInput, *, now: datetime) -> None:
+    age = float(data.age_years)
+    if age + 1e-6 < 1.0 / 12.0 or age > 120.0:
         raise ValueError("Возраст должен быть от 1 месяца до 120 лет.")
     if not (0.5 <= float(data.weight_kg) <= 500.0):
         raise ValueError("Масса должна быть от 0,5 до 500 кг.")
@@ -125,25 +131,25 @@ def _validate_input(data: BurnInfusionInput, *, now: datetime, mode: str) -> Non
     for value in (data.urine_last_hour_ml, data.urine_average_3h_ml):
         if value is not None and float(value) < 0.0:
             raise ValueError("Диурез не может быть отрицательным.")
-    if float(data.age_years) > 50.0 and mode in {MODE_FIRST_24H, MODE_DAY_2_3}:
-        divisor = data.older_age_reduction_divisor
-        if divisor is None or not (1.5 <= float(divisor) <= 2.0):
-            raise ValueError("Для пациента старше 50 лет выберите коэффициент снижения объема от 1,5 до 2,0.")
 
 
 def _first_day_components(data: BurnInfusionInput) -> tuple[float, float, float, float, float, float | None, tuple[str, ...]]:
     age = float(data.age_years)
     weight = float(data.weight_kg)
     tbsa_for_formula = min(float(data.total_tbsa_percent), 50.0)
-    pediatric = age < 18.0
+    pediatric = age < PEDIATRIC_AGE_LIMIT_YEARS
     factor = 3.0 if pediatric else 4.0
     burn_formula = factor * weight * tbsa_for_formula
-    maintenance = pediatric_maintenance_ml_per_kg(age) * weight if pediatric else 0.0
+    maintenance_rate = 0.0
+    maintenance_band = ""
+    if pediatric:
+        maintenance_rate, maintenance_band = pediatric_maintenance_rule(age)
+    maintenance = maintenance_rate * weight
     formula_subtotal = burn_formula + maintenance
     inhalation_extra = formula_subtotal * 0.15 if data.inhalation_injury else 0.0
     electrical_extra = formula_subtotal * 0.50 if data.electrical_burn else 0.0
     total_before_age_reduction = formula_subtotal + inhalation_extra + electrical_extra
-    age_divisor = float(data.older_age_reduction_divisor) if age > 50.0 else None
+    age_divisor = OLDER_AGE_REDUCTION_DIVISOR if age > 50.0 else None
     total = total_before_age_reduction / age_divisor if age_divisor else total_before_age_reduction
 
     trace = [
@@ -151,19 +157,22 @@ def _first_day_components(data: BurnInfusionInput) -> tuple[float, float, float,
         f"Ожоговая составляющая: {factor:g} мл × {weight:g} кг × {tbsa_for_formula:g}% = {burn_formula:.0f} мл",
     ]
     if pediatric:
-        trace.append(f"Физиологическая потребность ребенка: {maintenance:.0f} мл/сут")
+        trace.append(
+            "Физиологическая потребность ребёнка "
+            f"({maintenance_band}): {maintenance_rate:g} мл/кг/сут × {weight:g} кг = {maintenance:.0f} мл/сут"
+        )
     if data.inhalation_injury:
         trace.append(f"Ингаляционная травма: +15% = {inhalation_extra:.0f} мл")
     if data.electrical_burn:
         trace.append(f"Электротравма: +50% = {electrical_extra:.0f} мл")
     if age_divisor:
-        trace.append(f"Возраст старше 50 лет: объем уменьшен в {age_divisor:g} раза")
+        trace.append("Возраст старше 50 лет: объём автоматически уменьшен в 1,75 раза")
     trace.append(f"Расчетный объем первых суток: {total:.0f} мл")
     return total, burn_formula, maintenance, inhalation_extra, electrical_extra, age_divisor, tuple(trace)
 
 
 def _urine_targets(data: BurnInfusionInput) -> tuple[float, float | None]:
-    if float(data.age_years) >= 18.0:
+    if float(data.age_years) >= PEDIATRIC_AGE_LIMIT_YEARS:
         return 0.5, 1.0
     if float(data.weight_kg) <= 30.0:
         return 1.0, 2.0
@@ -178,7 +187,7 @@ def _monitoring_warnings(
 ) -> list[str]:
     warnings: list[str] = []
     weight = float(data.weight_kg)
-    upper_for_reduction = 1.0 if float(data.age_years) >= 18.0 else 2.0
+    upper_for_reduction = 1.0 if float(data.age_years) >= PEDIATRIC_AGE_LIMIT_YEARS else 2.0
     for label, urine_ml in (
         ("за последний час", data.urine_last_hour_ml),
         ("в среднем за 3 часа", data.urine_average_3h_ml),
@@ -208,7 +217,7 @@ def calculate_burn_infusion(
     if mode not in SUPPORTED_MODES:
         raise ValueError("Неизвестный режим расчета инфузии.")
     current_time = now or datetime.now()
-    _validate_input(data, now=current_time, mode=mode)
+    _validate_input(data, now=current_time)
 
     elapsed_hours = max(0.0, (current_time - data.injury_datetime).total_seconds() / 3600.0)
     target_min, target_max = _urine_targets(data)
@@ -216,7 +225,7 @@ def calculate_burn_infusion(
 
     if not data.burn_shock and mode in {MODE_FIRST_24H, MODE_DAY_2_3}:
         warnings.append("Ожоговый шок не отмечен: проверьте клинические показания к формульной инфузии.")
-    threshold = 10.0 if float(data.age_years) < 18.0 else 15.0
+    threshold = 10.0 if float(data.age_years) < PEDIATRIC_AGE_LIMIT_YEARS else 15.0
     if float(data.total_tbsa_percent) <= threshold and mode in {MODE_FIRST_24H, MODE_DAY_2_3}:
         warnings.append(
             f"Площадь не превышает порог плановой внутривенной терапии по КР ({threshold:g}%); оцените возможность оральной регидратации."
@@ -366,8 +375,11 @@ __all__ = [
     "MODE_DAY_2_3",
     "MODE_FIRST_24H",
     "MODE_POST_SHOCK",
+    "OLDER_AGE_REDUCTION_DIVISOR",
+    "PEDIATRIC_AGE_LIMIT_YEARS",
     "calculate_burn_infusion",
     "extract_mkb_families",
     "is_acute_burn_mkb",
     "pediatric_maintenance_ml_per_kg",
+    "pediatric_maintenance_rule",
 ]

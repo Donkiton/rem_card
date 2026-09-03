@@ -19,9 +19,7 @@ class Sector8Panel(QWidget):
     exit_clicked = Signal()
     archive_clicked = Signal()
     refresh_clicked = Signal()
-    calc_clicked = Signal()
-    burn_calc_clicked = Signal()
-    electrolytes_calc_clicked = Signal()
+    calculations_clicked = Signal()
     add_patient_clicked = Signal()
     user_report_clicked = Signal()
     user_reports_clicked = Signal()
@@ -87,34 +85,16 @@ class Sector8Panel(QWidget):
         self.btn_add_patient.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_add_patient.clicked.connect(self.add_patient_clicked.emit)
 
-        # Кнопка Калькулятор
-        self.btn_calc = QPushButton(" Калькулятор", self)
+        # Единая точка входа в клинические калькуляторы
+        self.btn_calculations = QPushButton(" Расчёт", self)
         calc_icon = os.path.join(self.icon_dir, "calc.png")
-        self.btn_calc.setIcon(QIcon(calc_icon))
-        self.btn_calc.setIconSize(QSize(18, 18))
-        self.btn_calc.setMinimumHeight(32)
-        self.btn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.btn_calc.clicked.connect(self.calc_clicked.emit)
-
-        # Кнопка калькулятора инфузии при ожогах (только из подходящей карты пациента)
-        self.btn_burn_calc = QPushButton(" Ожоги", self)
-        burn_icon = os.path.join(self.icon_dir, "fire.png")
-        self.btn_burn_calc.setIcon(QIcon(burn_icon))
-        self.btn_burn_calc.setIconSize(QSize(18, 18))
-        self.btn_burn_calc.setMinimumHeight(32)
-        self.btn_burn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.btn_burn_calc.setEnabled(False)
-        self.btn_burn_calc.setToolTip("Калькулятор доступен из карты пациента с острым ожоговым диагнозом")
-        self.btn_burn_calc.clicked.connect(self.burn_calc_clicked.emit)
-
-        # Кнопка Электролиты
-        self.btn_electrolytes_calc = QPushButton(" Электролиты", self)
-        electrolytes_icon = os.path.join(self.icon_dir, "microelements.png")
-        self.btn_electrolytes_calc.setIcon(QIcon(electrolytes_icon))
-        self.btn_electrolytes_calc.setIconSize(QSize(18, 18))
-        self.btn_electrolytes_calc.setMinimumHeight(32)
-        self.btn_electrolytes_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.btn_electrolytes_calc.clicked.connect(self.electrolytes_calc_clicked.emit)
+        self.btn_calculations.setIcon(QIcon(calc_icon))
+        self.btn_calculations.setIconSize(QSize(18, 18))
+        self.btn_calculations.setMinimumHeight(32)
+        self.btn_calculations.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_calculations.clicked.connect(self.calculations_clicked.emit)
+        self._burn_calc_enabled = False
+        self._burn_calc_tooltip = "Калькулятор доступен только из карты пациента"
 
         # 2. Кнопка Назад
         self.btn_back = QPushButton(" Назад", self)
@@ -148,9 +128,7 @@ class Sector8Panel(QWidget):
             "user_report": self.btn_user_report,
             "user_reports": self.btn_user_reports,
             "add_patient": self.btn_add_patient,
-            "calc": self.btn_calc,
-            "burn_calc": self.btn_burn_calc,
-            "electrolytes_calc": self.btn_electrolytes_calc,
+            "calculations": self.btn_calculations,
             "settings": self.btn_settings,
             "back": self.btn_back,
             "exit": self.btn_exit,
@@ -218,18 +196,11 @@ class Sector8Panel(QWidget):
         button.setEnabled(enabled)
 
     def set_burn_calc_enabled(self, enabled: bool, tooltip: str = ""):
-        button = getattr(self, "btn_burn_calc", None)
-        if button is None:
-            return
-        try:
-            import shiboken6  # type: ignore
+        self._burn_calc_enabled = bool(enabled)
+        self._burn_calc_tooltip = str(tooltip or "")
 
-            if not shiboken6.isValid(button):
-                return
-        except Exception:
-            pass
-        button.setEnabled(bool(enabled))
-        button.setToolTip(str(tooltip or ""))
+    def burn_calc_state(self) -> tuple[bool, str]:
+        return bool(self._burn_calc_enabled), str(self._burn_calc_tooltip or "")
 
     def refresh_user_reports_count(self):
         button = getattr(self, "btn_user_reports", None)

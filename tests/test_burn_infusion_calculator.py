@@ -88,16 +88,33 @@ class BurnInfusionCalculatorTests(unittest.TestCase):
         self.assertEqual(result.urine_target_min_ml_kg_h, 1.0)
         self.assertEqual(result.urine_target_max_ml_kg_h, 2.0)
 
-    def test_patient_over_fifty_requires_explicit_reduction(self):
-        data = self._adult_input(age_years=68)
-        with self.assertRaisesRegex(ValueError, "коэффициент снижения"):
-            calculate_burn_infusion(data, now=self.now)
+    def test_patient_over_fifty_uses_automatic_reduction(self):
+        reduced = calculate_burn_infusion(self._adult_input(age_years=68), now=self.now)
 
-        reduced = calculate_burn_infusion(
-            self._adult_input(age_years=68, older_age_reduction_divisor=2.0),
-            now=self.now,
-        )
-        self.assertAlmostEqual(reduced.total_ml, 6440)
+        self.assertAlmostEqual(reduced.age_reduction_divisor, 1.75)
+        self.assertAlmostEqual(reduced.total_ml, 12880 / 1.75)
+        self.assertTrue(any("автоматически уменьшен в 1,75 раза" in line for line in reduced.calculation_trace))
+
+    def test_pediatric_maintenance_age_bands(self):
+        for age, expected in (
+            (1 / 12, 120),
+            (0.99, 120),
+            (1, 100),
+            (1.99, 100),
+            (2, 80),
+            (4.99, 80),
+            (5, 60),
+            (9.99, 60),
+            (10, 50),
+            (17.99, 50),
+        ):
+            with self.subTest(age=age):
+                self.assertEqual(pediatric_maintenance_ml_per_kg(age), expected)
+
+        with self.assertRaises(ValueError):
+            pediatric_maintenance_ml_per_kg(0.05)
+        with self.assertRaises(ValueError):
+            pediatric_maintenance_ml_per_kg(18)
 
     def test_zero_burn_area_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "площадь ожога больше 0%"):
