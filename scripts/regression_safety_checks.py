@@ -6224,6 +6224,14 @@ def _check_patient_status_error_refreshes_checked_state(temp_root: str) -> tuple
                 )
             ]
 
+        def get_movement_snapshot(self, admission_id, shift_start, shift_end):
+            events = self.get_events(admission_id)
+            return {
+                "admission_id": admission_id, "events": events, "version": self.reads,
+                "is_archive": False, "late_state": {}, "total_events": len(events),
+                "current_status": events[0],
+            }
+
         def get_latest_change_id(self, admission_id=None, include_global=True):
             return self.reads
 
@@ -6247,7 +6255,7 @@ def _check_patient_status_error_refreshes_checked_state(temp_root: str) -> tuple
     service = FakeStatusService()
     try:
         widget.set_patient(1, service)
-        app.processEvents()
+        _wait_for_movement_snapshot(widget, app)
         if not widget.btn_active.isChecked() or widget.btn_out.isChecked():
             return False, "initial status buttons did not reflect active DB status"
 
@@ -6262,7 +6270,7 @@ def _check_patient_status_error_refreshes_checked_state(temp_root: str) -> tuple
             return False, "SectorEvents did not enter pending disabled state"
 
         service.on_error(RuntimeError("forced status failure"))
-        app.processEvents()
+        _wait_for_movement_snapshot(widget, app)
         if not widget.content_area.isEnabled():
             return False, "SectorEvents did not re-enable after status write error"
         if not widget.btn_active.isChecked() or widget.btn_out.isChecked():
@@ -8905,6 +8913,15 @@ def _check_full_report_bulk_collector_prefetches_once(temp_root: str) -> tuple[b
     return True, "ok"
 
 
+def _wait_for_movement_snapshot(widget, app):
+    deadline = time.monotonic() + 5.0
+    while widget._refresh_pending or widget._refresh_worker is not None:
+        if time.monotonic() >= deadline:
+            raise AssertionError("movement snapshot did not finish")
+        app.processEvents()
+        time.sleep(0.005)
+
+
 def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
@@ -8927,6 +8944,15 @@ def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
         def __init__(self, events):
             self.events = events
             self.calls = []
+
+        def get_movement_snapshot(self, admission_id, shift_start, shift_end):
+            events = self.get_events_in_range(admission_id, shift_start, shift_end)
+            return {
+                "admission_id": admission_id, "events": events, "version": 1,
+                "is_archive": shift_end < fixed_now, "late_state": {},
+                "total_events": len(events),
+                "current_status": next((event for event in events if event.end_time is None), None),
+            }
 
         def get_events_in_range(self, admission_id, shift_start, shift_end):
             self.calls.append(("range", admission_id, shift_start.isoformat(), shift_end.isoformat()))
@@ -8979,6 +9005,7 @@ def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
         widget.shift_start = shift_start
         widget.shift_end = shift_end
         widget.refresh(force=True)
+        _wait_for_movement_snapshot(widget, app)
         rows = []
         for i in range(widget.history_list_layout.count() - 1):
             row = widget.history_list_layout.itemAt(i).widget()
@@ -15475,6 +15502,18 @@ def _check_lazy_section_snapshot_caches(temp_root: str) -> tuple[bool, str]:
             _ = include_global
             return int(self.version.get(int(admission_id or 0), 1))
 
+        def get_observed_change_state(self):
+            return {"change_id": max(self.version.values(), default=1)}
+
+        def get_movement_snapshot(self, admission_id, shift_start, shift_end):
+            events = self.get_events_in_range(admission_id, shift_start, shift_end)
+            return {
+                "admission_id": admission_id, "events": events,
+                "version": self.get_latest_change_id(admission_id),
+                "is_archive": shift_end < datetime.now(), "late_state": {},
+                "total_events": len(events), "current_status": None,
+            }
+
         def get_events_in_range(self, admission_id, shift_start, shift_end):
             self.calls.append(("range", int(admission_id), shift_start.isoformat(), shift_end.isoformat()))
             return []
@@ -15520,16 +15559,22 @@ def _check_lazy_section_snapshot_caches(temp_root: str) -> tuple[bool, str]:
         events_widget.shift_start = shift_start
         events_widget.shift_end = shift_end
         events_widget.set_patient(1, events_service)
+        _wait_for_movement_snapshot(events_widget, app)
         events_widget.set_patient(2, events_service)
+        _wait_for_movement_snapshot(events_widget, app)
         events_widget.set_patient(1, events_service)
+        _wait_for_movement_snapshot(events_widget, app)
         event_patient_calls = [call[1] for call in events_service.calls]
         if event_patient_calls != [1, 2]:
             return False, f"events hot-cache should avoid repeated DB load, calls={events_service.calls}"
 
         for admission_id in range(3, 11):
             events_widget.set_patient(admission_id, events_service)
+            _wait_for_movement_snapshot(events_widget, app)
         events_widget.set_patient(1, events_service)
+        _wait_for_movement_snapshot(events_widget, app)
         events_widget.set_patient(11, events_service)
+        _wait_for_movement_snapshot(events_widget, app)
         event_keys = list(events_widget._snapshot_cache.keys())
         if len(event_keys) != 10 or not any(key[0] == 1 for key in event_keys) or any(key[0] == 2 for key in event_keys):
             return False, f"events LRU cache mismatch: {event_keys}"
