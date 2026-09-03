@@ -1247,13 +1247,8 @@ class DoctorRemCardWidget(QWidget):
 
     def _refresh_status_from_db(self) -> None:
         try:
-            if hasattr(self.layout_manager, "set_current_status_dto"):
-                self.layout_manager.set_current_status_dto(None)
             if hasattr(self.layout_manager, "refresh_current_status"):
                 self.layout_manager.refresh_current_status()
-            events_sector = getattr(self.layout_manager, "sector_events", None)
-            if events_sector is not None and hasattr(events_sector, "refresh"):
-                events_sector.refresh(force=True)
         except Exception:
             logger.exception("Doctor status partial refresh failed")
 
