@@ -12,7 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
-from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
+from rem_card.app.sqlite_shared import FileWriteLock, configure_connection, describe_sqlite_lock_holder
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
@@ -45,7 +45,8 @@ class LocalReplicaRotationBusy(LocalReplicaWorkerError):
 
 
 class LocalReplicaSnapshotBusy(LocalReplicaWorkerError):
-    def __init__(self):
+    def __init__(self, gate_diagnostics: dict | None = None):
+        self.gate_diagnostics = dict(gate_diagnostics or {})
         super().__init__(
             "Обновление локальной реплики отложено: другой клиент уже "
             "копирует центральную базу."
@@ -382,7 +383,7 @@ def _sync_snapshot_with_network_lease(
                 owner_id=owner_id,
                 source="local_replica_snapshot_gate",
             ):
-                raise LocalReplicaSnapshotBusy()
+                raise LocalReplicaSnapshotBusy(describe_sqlite_lock_holder(snapshot_gate_path))
             snapshot_gate_acquired = True
             if writer_lock_path and os.path.exists(writer_lock_path):
                 raise LocalReplicaWriterBusy()
@@ -409,6 +410,7 @@ def _send_error(pipe, exc: Exception) -> None:
                 "ok": False,
                 "error_class": type(exc).__name__,
                 "error": str(exc),
+                "gate_diagnostics": getattr(exc, "gate_diagnostics", {}),
             }
         )
     except Exception:
@@ -599,7 +601,7 @@ class LocalReplicaWorkerClient:
                 if remote_error_class == LocalReplicaRotationBusy.__name__:
                     raise LocalReplicaRotationBusy()
                 if remote_error_class == LocalReplicaSnapshotBusy.__name__:
-                    raise LocalReplicaSnapshotBusy()
+                    raise LocalReplicaSnapshotBusy(response.get("gate_diagnostics"))
                 if remote_error_class == LocalReplicaWriterBusy.__name__:
                     raise LocalReplicaWriterBusy()
                 raise LocalReplicaWorkerError(

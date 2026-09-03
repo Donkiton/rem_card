@@ -1,5 +1,5 @@
 from typing import Dict, List, Tuple, Optional, Callable, Any, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from ..data.dao.patient_status_dao import PatientStatusDAO
 from ..data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
 from .ventilation_service import VentilationService
@@ -287,6 +287,39 @@ class PatientStatusService:
     def get_events(self, admission_id: int) -> List[PatientStatusEventDTO]:
         """Р’РѕР·РІСЂР°С‰Р°РµС‚ РёСЃС‚РѕСЂРёСЋ СЃРѕР±С‹С‚РёР№."""
         return self.status_dao.get_events(admission_id)
+
+    def get_movement_snapshot(self, admission_id: int, shift_start=None, shift_end=None) -> dict:
+        """Load all movement controls from one pinned source, outside the UI thread."""
+        db = self.status_dao.db
+        with db.snapshot_read_scope("movement", force_central=True):
+            version = db.get_latest_change_id(admission_id=admission_id, include_global=False)
+            all_events = self.get_events(admission_id)
+            current = next((event for event in all_events if event.end_time is None), None)
+            now = datetime.now()
+            is_archive = bool(shift_start and shift_end and shift_end < now)
+            late_state = self.get_late_outcome_card_state(
+                admission_id, shift_start, reference_dt=now,
+            ) if is_archive else {}
+            events = all_events
+            if shift_start and shift_end:
+                start = shift_start.replace(microsecond=0)
+                end = shift_end.replace(microsecond=0)
+                events = [event for event in all_events if (
+                    event.start_time.replace(microsecond=0) < end
+                    and (event.end_time is None or event.end_time.replace(microsecond=0) > start)
+                ) or (
+                    is_archive and late_state.get("eligible")
+                    and event.status in (PatientStatus.TRANSFERRED, PatientStatus.DEAD)
+                    and event.start_time >= shift_end
+                    and event.created_at is not None and event.created_at >= shift_end
+                    and event.start_time <= event.created_at.replace(second=0, microsecond=0) + timedelta(hours=2)
+                )]
+            return {
+                "admission_id": admission_id,
+                "version": version, "events": events, "is_archive": is_archive,
+                "current_status": current, "total_events": len(all_events),
+                "late_state": late_state,
+            }
 
     def get_events_in_range(self, admission_id: int, start: datetime, end: datetime) -> List[PatientStatusEventDTO]:
         """Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃРѕР±С‹С‚РёСЏ, РїРµСЂРµСЃРµРєР°СЋС‰РёРµСЃСЏ СЃ Р·Р°РґР°РЅРЅС‹Рј РёРЅС‚РµСЂРІР°Р»РѕРј РІСЂРµРјРµРЅРё."""

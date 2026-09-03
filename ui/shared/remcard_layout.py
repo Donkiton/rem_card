@@ -657,7 +657,7 @@ class RemCardLayoutManager(QWidget):
 
         self.sector_events = SectorEvents()
         self.sector_events.role = self.role
-        self.sector_events.status_changed.connect(self.refresh_current_status)
+        self.sector_events.snapshot_ready.connect(self._apply_movement_status)
         for handler in self._events_status_handlers:
             self.sector_events.status_changed.connect(handler)
         self._events_status_handlers.clear()
@@ -1000,10 +1000,12 @@ class RemCardLayoutManager(QWidget):
         adm_id = getattr(self, 'current_admission_id', None)
         if not adm_id: return
         
-        status_dto = self._current_status_dto
-        if status_dto is None:
-            status_dto = self.patient_status_service.get_current_status(adm_id)
-        self.sector_4b.update_status(status_dto)
+        self.ensure_events_sector().refresh(force=True)
+
+    def _apply_movement_status(self, snapshot):
+        if snapshot.get("admission_id") != getattr(self, "current_admission_id", None):
+            return
+        self.set_current_status_dto(snapshot.get("current_status"))
 
     def set_current_status_dto(self, status_dto):
         self._current_status_dto = status_dto

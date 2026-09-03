@@ -57,6 +57,8 @@ class LocalReplicaSync:
     """Неблокирующая локальная read-only реплика сетевой SQLite."""
 
     FAILURE_BACKOFF_SEC = (15.0, 30.0, 60.0, 300.0)
+    SNAPSHOT_BLOCKED_WARNING_SEC = 60.0
+    SNAPSHOT_BLOCKED_REPEAT_SEC = 300.0
 
     def __init__(
         self,
@@ -86,6 +88,9 @@ class LocalReplicaSync:
         self._fast_sync_evt = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._local_conn: Optional[sqlite3.Connection] = None
+        self._snapshot_blocked_since = None
+        self._snapshot_blocked_reported_at = None
+        self._snapshot_blocked_reason = ""
         self._worker_client = worker_client or LocalReplicaWorkerClient(
             central_db_path=self.central_db_path,
             rotation_lock_path=self.rotation_lock_path,
@@ -245,12 +250,17 @@ class LocalReplicaSync:
                     "Local replica sync recovered after %s failed attempts.",
                     recovered_after,
                 )
+            self._reset_snapshot_blocked()
             return True
         except (
             LocalReplicaRotationBusy,
             LocalReplicaSnapshotBusy,
             LocalReplicaWriterBusy,
         ) as exc:
+            if isinstance(exc, LocalReplicaSnapshotBusy):
+                self._record_snapshot_blocked(exc)
+            else:
+                self._reset_snapshot_blocked()
             reason = {
                 LocalReplicaRotationBusy: "rotation_busy",
                 LocalReplicaSnapshotBusy: "snapshot_busy",
@@ -278,6 +288,7 @@ class LocalReplicaSync:
             )
             return False
         except Exception as exc:
+            self._reset_snapshot_blocked()
             with self._lock:
                 self.last_sync_error = str(exc)
                 self.last_sync_error_class = str(
@@ -335,6 +346,39 @@ class LocalReplicaSync:
         finally:
             self._remove_replica_with_sidecars(temp_path)
             self._sync_lock.release()
+
+    def _reset_snapshot_blocked(self) -> None:
+        self._snapshot_blocked_since = None
+        self._snapshot_blocked_reported_at = None
+        self._snapshot_blocked_reason = ""
+
+    def _record_snapshot_blocked(self, exc: LocalReplicaSnapshotBusy) -> None:
+        """Report sustained contention without changing lock ownership or outage state."""
+        now = time.monotonic()
+        details = exc.gate_diagnostics
+        reason = str(details.get("reason") or "unknown")
+        if self._snapshot_blocked_since is None or reason != self._snapshot_blocked_reason:
+            self._snapshot_blocked_since = now
+            self._snapshot_blocked_reported_at = None
+            self._snapshot_blocked_reason = reason
+        elapsed = now - self._snapshot_blocked_since
+        if elapsed < self.SNAPSHOT_BLOCKED_WARNING_SEC:
+            return
+        if self._snapshot_blocked_reported_at is not None and now - self._snapshot_blocked_reported_at < self.SNAPSHOT_BLOCKED_REPEAT_SEC:
+            return
+        self._snapshot_blocked_reported_at = now
+        record_metric(
+            "local_replica_snapshot_blocked", 1, blocked_sec=round(elapsed, 1),
+            reason=reason, holder_host=details.get("holder_host", ""),
+            holder_pid=details.get("holder_pid"),
+        )
+        self.logger.warning(
+            "Локальная копия не обновляется %.0f с: общая блокировка снимка; "
+            "reason=%s holder=%s/%s. Ожидание снимка не переключает приложение в автономный режим. "
+            "Для нечитаемой или оставшейся блокировки требуется проверка администратором "
+            "после остановки всех клиентов; автоматически блокировка не удаляется.",
+            elapsed, reason, details.get("holder_host", ""), details.get("holder_pid"),
+        )
 
     def _worker(self) -> None:
         while not self._stop_evt.is_set():
