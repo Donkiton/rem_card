@@ -4,9 +4,11 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from datetime import datetime, timedelta
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QScrollArea, QFrame, QLineEdit, QDateTimeEdit, QApplication, QDialog)
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QColor
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.shared.async_call import AsyncCallThread
+from rem_card.app.logger import logger
 from rem_card.data.dto.remcard_dto import PatientStatus
 from rem_card.ui.rem_card_sectors.s_print.movement import movement_comment_text
 from rem_card.ui.rem_card_sectors.outcome_dialogs import (
@@ -28,6 +30,7 @@ def _movement_comment_text(status, reason_text):
 
 class SectorEvents(BaseSectorWidget):
     status_changed = Signal()
+    snapshot_ready = Signal(object)
     SNAPSHOT_CACHE_LIMIT = 10
 
     def __init__(self, parent=None):
@@ -45,6 +48,15 @@ class SectorEvents(BaseSectorWidget):
         self._current_status = None
         self._status_write_pending = False
         self._snapshot_cache = OrderedDict()
+        self._refresh_generation = 0
+        self._refresh_worker = None
+        self._refresh_request = None
+        self._refresh_pending = False
+        self._refresh_closed = False
+        self._refresh_retry_count = 0
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self._start_snapshot_refresh)
         self._outcome_report_controller = None
         self._outcome_report_controller_service = None
 
@@ -219,11 +231,18 @@ class SectorEvents(BaseSectorWidget):
         self.btn_dead.setChecked(self._current_status == PatientStatus.DEAD)
 
     def _set_status_write_pending(self, pending: bool):
+        if pending:
+            self._invalidate_refresh_context()
+            self._snapshot_cache.pop(self._cache_key(), None)
         self._status_write_pending = bool(pending)
         self.content_area.setEnabled(not self._status_write_pending)
 
     def set_patient(self, admission_id, status_service):
         context_changed = admission_id != self.admission_id or status_service is not self.status_service
+        if context_changed:
+            self._invalidate_refresh_context()
+        if status_service is not self.status_service:
+            self._snapshot_cache.clear()
         self.admission_id = admission_id
         self.status_service = status_service
         if context_changed and not self._get_cached_snapshot():
@@ -233,6 +252,8 @@ class SectorEvents(BaseSectorWidget):
     def set_shift_context(self, shift_date, shift_start, shift_end):
         """Устанавливает временные границы для фильтрации событий."""
         context_changed = shift_start != self.shift_start or shift_end != self.shift_end
+        if context_changed:
+            self._invalidate_refresh_context()
         self.shift_date = shift_date
         self.shift_start = shift_start
         self.shift_end = shift_end
@@ -258,26 +279,6 @@ class SectorEvents(BaseSectorWidget):
         if self.history_list_container.isAncestorOf(focused_widget):
             return True
         return focused_widget == self.edit_reason_text
-
-    def _load_events_for_refresh(self):
-        if not (self.shift_start and self.shift_end):
-            return self.status_service.get_events(self.admission_id), False
-
-        events = self.status_service.get_events_in_range(self.admission_id, self.shift_start, self.shift_end)
-        is_archive = self.shift_end < datetime.now()
-        if is_archive:
-            state = self._late_outcome_card_state()
-            if state.get("eligible"):
-                known_ids = {int(event.id) for event in events if event.id is not None}
-                for event in self.status_service.get_events(self.admission_id):
-                    if event.id is not None and int(event.id) in known_ids:
-                        continue
-                    if self._belongs_to_late_outcome_extension(event):
-                        events.append(event)
-                events.sort(key=lambda event: (event.start_time, int(event.id or 0)))
-        from rem_card.app.logger import logger
-        logger.debug(f"[SectorEvents] Refreshing for {self.shift_start.strftime('%d.%m %H:%M')}. Found {len(events)} events. Archive: {is_archive}")
-        return events, is_archive
 
     def _late_outcome_card_state(self, reference_dt=None):
         if not (
@@ -320,49 +321,6 @@ class SectorEvents(BaseSectorWidget):
         shift_end = self.shift_end.isoformat() if self.shift_end else None
         return (int(self.admission_id), shift_start, shift_end, str(self.role or ""))
 
-    def _current_change_id(self):
-        if not self.status_service or not self.admission_id:
-            return None
-        observed_change_id = self._observed_change_id()
-        if observed_change_id is not None:
-            return observed_change_id
-        if hasattr(self.status_service, "get_latest_change_id"):
-            try:
-                return int(
-                    self.status_service.get_latest_change_id(
-                        admission_id=int(self.admission_id),
-                        include_global=False,
-                    )
-                    or 0
-                )
-            except TypeError:
-                try:
-                    return int(self.status_service.get_latest_change_id(admission_id=int(self.admission_id)) or 0)
-                except Exception:
-                    return None
-            except Exception:
-                return None
-        data_service = getattr(self.status_service, "data_service", None)
-        if data_service is not None and hasattr(data_service, "get_latest_change_id"):
-            try:
-                return int(
-                    data_service.get_latest_change_id(
-                        admission_id=int(self.admission_id),
-                        include_global=False,
-                    )
-                    or 0
-                )
-            except Exception:
-                return None
-        status_dao = getattr(self.status_service, "status_dao", None)
-        db = getattr(status_dao, "db", None)
-        if db is not None and hasattr(db, "get_latest_change_id"):
-            try:
-                return int(db.get_latest_change_id(admission_id=int(self.admission_id), include_global=False) or 0)
-            except Exception:
-                return None
-        return None
-
     def _observed_change_id(self):
         getter = getattr(self.status_service, "get_observed_change_state", None)
         if not callable(getter):
@@ -387,23 +345,23 @@ class SectorEvents(BaseSectorWidget):
             self._snapshot_cache.move_to_end(key)
         return snapshot
 
+    def _context_is_archive(self):
+        return bool(self.shift_start and self.shift_end and self.shift_end < datetime.now())
+
     def _is_cached_snapshot_current(self, snapshot):
+        if bool(snapshot.get("is_archive")) != self._context_is_archive():
+            return False
         cached_version = snapshot.get("version") if snapshot else None
         if cached_version is None:
             return False
-        current_version = self._current_change_id()
+        current_version = self._observed_change_id()
         return current_version is not None and int(current_version) <= int(cached_version)
 
-    def _store_snapshot(self, events, is_archive):
+    def _store_snapshot(self, snapshot):
         key = self._cache_key()
         if key is None:
             return
-        self._snapshot_cache[key] = {
-            "key": key,
-            "version": self._current_change_id(),
-            "events": list(events or []),
-            "is_archive": bool(is_archive),
-        }
+        self._snapshot_cache[key] = dict(snapshot)
         self._snapshot_cache.move_to_end(key)
         while len(self._snapshot_cache) > self.SNAPSHOT_CACHE_LIMIT:
             self._snapshot_cache.popitem(last=False)
@@ -660,52 +618,131 @@ class SectorEvents(BaseSectorWidget):
             self.history_list_layout.insertWidget(0, self._build_event_row(event, is_archive))
         return current_ev
 
-    def _update_refresh_controls(self, current_ev, events, is_archive):
+    def _update_refresh_controls(self, current_ev, events, is_archive, *, snapshot):
         current_status = current_ev.status if current_ev else None
-        total_events = len(events)
-        if not is_archive and self.status_service and self.admission_id:
-            try:
-                active_event = self.status_service.get_current_status(self.admission_id)
-                if active_event is not None:
-                    current_status = active_event.status
-                total_events = len(self.status_service.get_events(self.admission_id))
-            except Exception:
-                total_events = len(events)
-
-        self._update_buttons_state(current_status, is_archive)
+        if not is_archive and snapshot.get("current_status") is not None:
+            current_status = snapshot["current_status"].status
+        late_allowed = bool(snapshot.get("late_state", {}).get("eligible"))
+        self._update_buttons_state(current_status, is_archive, late_allowed=late_allowed)
         can_rollback_late_outcome = bool(
-            is_archive
-            and current_ev is not None
-            and self._late_outcome_card_state().get("eligible")
+            is_archive and current_ev is not None and late_allowed
             and self._is_late_outcome_for_current_card(current_ev)
         )
+        total_events = len(events) if is_archive else snapshot.get("total_events", len(events))
         self.btn_rollback.setEnabled(
-            total_events > 1
+            total_events > 1 and not self._status_write_pending
             and (not is_archive or can_rollback_late_outcome)
         )
 
-    def refresh(self, force=False):
-        if self._should_skip_refresh(force):
-            return
+    def _invalidate_refresh_context(self):
+        self._refresh_generation += 1
+        self._refresh_pending = False
+        self._refresh_retry_count = 0
+        self._refresh_timer.stop()
 
+    def refresh(self, force=False):
+        if self._refresh_closed or self._should_skip_refresh(force):
+            return
         cached = self._get_cached_snapshot()
-        if cached and not force:
+        if cached and not force and bool(cached.get("is_archive")) == self._context_is_archive():
             self._apply_snapshot(cached)
             if self._is_cached_snapshot_current(cached):
                 return
         elif not cached:
             self._set_loading_state()
+        # Ordinary navigation can reuse an in-flight request. A data change
+        # invalidates it, and a burst of changes schedules just one successor.
+        if not force and (self._refresh_pending or (
+            self._refresh_request is not None
+            and self._refresh_request["generation"] == self._refresh_generation
+            and self._request_is_current(self._refresh_request)
+        )):
+            return
+        self._refresh_generation += 1
+        self._refresh_pending = True
+        self._refresh_retry_count = 0
+        self._refresh_timer.start(120)
 
-        events, is_archive = self._load_events_for_refresh()
-        self._store_snapshot(events, is_archive)
-        self._apply_snapshot({"events": events, "is_archive": is_archive})
+    def _start_snapshot_refresh(self):
+        if self._refresh_closed or not self._refresh_pending or self._refresh_worker is not None:
+            return
+        if not self.admission_id or self.status_service is None or self._status_write_pending:
+            return
+        request = {
+            "generation": self._refresh_generation, "key": self._cache_key(),
+            "service": self.status_service, "admission_id": self.admission_id,
+            "shift_start": self.shift_start, "shift_end": self.shift_end,
+        }
+        self._refresh_pending = False
+        self._refresh_request = request
+        # Capture only the service and immutable context; the worker never
+        # reads QWidget state and can finish safely after widget destruction.
+        worker = AsyncCallThread(
+            request["service"].get_movement_snapshot,
+            request["admission_id"], request["shift_start"], request["shift_end"],
+        )
+        self._refresh_worker = worker
+        worker.succeeded.connect(self._on_snapshot_loaded)
+        worker.failed.connect(self._on_snapshot_failed)
+        worker.finished.connect(self._on_snapshot_finished)
+        worker.start()
+
+    def _request_is_current(self, request):
+        return bool(
+            not self._refresh_closed and request
+            and request["generation"] == self._refresh_generation
+            and request["key"] == self._cache_key()
+            and request["service"] is self.status_service
+        )
+
+    @Slot(object)
+    def _on_snapshot_loaded(self, snapshot):
+        if not self._request_is_current(self._refresh_request):
+            return
+        if bool(snapshot.get("is_archive")) != self._context_is_archive():
+            self.refresh(force=True)
+            return
+        self._store_snapshot(snapshot)
+        self._refresh_retry_count = 0
+        # Do not replace an editor that the clinician started using during IO.
+        if not self._is_editing_time and not self._status_write_pending and not self._is_focus_blocking_refresh():
+            self._apply_snapshot(snapshot)
+            self.snapshot_ready.emit(snapshot)
+
+    @Slot(object)
+    def _on_snapshot_failed(self, exc):
+        if not self._request_is_current(self._refresh_request):
+            return
+        self._refresh_retry_count += 1
+        logger.warning("[MovementSync] snapshot load failed retry=%s: %s", self._refresh_retry_count, exc)
+        if not self._get_cached_snapshot():
+            self._set_loading_state("Не удалось обновить события. Повторяем загрузку...")
+        self._refresh_pending = True
+
+    @Slot()
+    def _on_snapshot_finished(self):
+        self._refresh_worker = None
+        self._refresh_request = None
+        if self._refresh_pending and not self._refresh_closed:
+            self._refresh_timer.start(30000 if self._refresh_retry_count > 2 else 120)
+
+    def closeEvent(self, event):
+        self._refresh_closed = True
+        self._invalidate_refresh_context()
+        super().closeEvent(event)
+
+    def showEvent(self, event):
+        if self._refresh_closed:
+            self._refresh_closed = False
+            self.refresh(force=True)
+        super().showEvent(event)
 
     def _apply_snapshot(self, snapshot):
         events = list(snapshot.get("events") or [])
         is_archive = bool(snapshot.get("is_archive"))
         self._clear_history_rows()
         current_ev = self._populate_history_rows(events, is_archive)
-        self._update_refresh_controls(current_ev, events, is_archive)
+        self._update_refresh_controls(current_ev, events, is_archive, snapshot=snapshot)
 
     def _schedule_post_status_refresh(self, *, emit_status_changed: bool = True, delay_ms: int = 150):
         if emit_status_changed:
@@ -730,7 +767,7 @@ class SectorEvents(BaseSectorWidget):
 
         QTimer.singleShot(delay_ms, apply_refresh)
 
-    def _update_buttons_state(self, current_status, is_archive=False):
+    def _update_buttons_state(self, current_status, is_archive=False, *, late_allowed=False):
         self._current_status = current_status
         self._restore_status_button_state()
         
@@ -739,7 +776,7 @@ class SectorEvents(BaseSectorWidget):
         late_outcome_allowed = bool(
             is_archive
             and not is_final
-            and self._late_outcome_card_state().get("eligible")
+            and late_allowed
         )
 
         for btn in self._status_buttons():
@@ -849,7 +886,7 @@ class SectorEvents(BaseSectorWidget):
             expected_active_revision=expected_active_revision,
         ):
             self.edit_reason_text.clear()
-            self.refresh()
+            self.refresh(force=True)
             self.status_changed.emit()
         else:
             self.refresh(force=True)
@@ -1262,7 +1299,7 @@ class SectorEvents(BaseSectorWidget):
                 expected_active_event_id=expected_active_event_id,
                 expected_active_revision=expected_active_revision,
             ):
-                self.refresh()
+                self.refresh(force=True)
                 self.status_changed.emit()
             else:
                 CustomMessageBox.warning(self, "Ошибка", "Не удалось отменить перемещение (возможно, это начальный статус).")

@@ -302,7 +302,7 @@ def test_archive_card_enables_only_terminal_outcome_buttons():
         sector.shift_start = shift_end - timedelta(days=1)
         sector.shift_end = shift_end
         sector._late_outcome_card_state = lambda reference_dt=None: {"eligible": True}
-        sector._update_buttons_state(PatientStatus.ACTIVE, is_archive=True)
+        sector._update_buttons_state(PatientStatus.ACTIVE, is_archive=True, late_allowed=True)
 
         assert sector.btn_trans.isEnabled() is True
         assert sector.btn_dead.isEnabled() is True
@@ -315,7 +315,10 @@ def test_archive_card_enables_only_terminal_outcome_buttons():
             start_time=shift_end + timedelta(hours=1),
             created_at=shift_end + timedelta(minutes=10),
         )
-        sector._update_refresh_controls(late_outcome, [object(), late_outcome], is_archive=True)
+        sector._update_refresh_controls(
+            late_outcome, [object(), late_outcome], is_archive=True,
+            snapshot={"late_state": {"eligible": True}},
+        )
         assert sector.btn_rollback.isEnabled() is True
     finally:
         sector.close()
