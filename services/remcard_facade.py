@@ -1600,15 +1600,15 @@ class RemCardService(QObject):
         return dates
 
     def is_timestamp_valid(self, admission_id: int, dt: datetime) -> Tuple[bool, str]:
-        """РџСЂРѕРІРµСЂСЏРµС‚, РІР°Р»РёРґРЅР° Р»Рё РґР°С‚Р° РґР»СЏ СЃРѕР·РґР°РЅРёСЏ РєР°СЂС‚С‹."""
+        """Проверяет, допустимы ли дата и время записи для пациента."""
         patient = self.get_patient(admission_id)
         if not patient:
-            return False, "РџР°С†РёРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ"
+            return False, "Пациент не найден"
             
-        # РџСЂРѕРІРµСЂРєР° РЅР° РґР°С‚Сѓ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ
+        # Проверка на дату поступления
         if patient.admission_datetime and dt < patient.admission_datetime:
             adm_str = patient.admission_datetime.strftime("%d.%m.%Y %H:%M")
-            return False, f"Р”Р°С‚Р° РєР°СЂС‚С‹ ({dt.strftime('%d.%m.%Y %H:%M')}) РЅРµ РјРѕР¶РµС‚ Р±С‹С‚СЊ СЂР°РЅСЊС€Рµ РґР°С‚С‹ РїРѕСЃС‚СѓРїР»РµРЅРёСЏ ({adm_str})"
+            return False, f"Дата и время записи ({dt.strftime('%d.%m.%Y %H:%M')}) не могут быть раньше поступления пациента ({adm_str})"
             
         return True, "OK"
 
