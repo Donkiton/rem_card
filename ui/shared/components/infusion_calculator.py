@@ -1,8 +1,8 @@
 import os
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                                QPushButton, QFrame, QDoubleSpinBox, QRadioButton, 
-                               QButtonGroup, QGroupBox, QGridLayout)
-from PySide6.QtCore import Qt, QSignalBlocker, QPoint, QEvent
+                               QButtonGroup, QGroupBox, QGridLayout, QApplication)
+from PySide6.QtCore import Qt, QSignalBlocker, QPoint, QEvent, QSettings
 from PySide6.QtGui import QPixmap
 
 from ...styles.shared_styles import (
@@ -14,6 +14,8 @@ from ...styles.shared_styles import (
 )
 
 class InfusionCalculatorDialog(QDialog):
+    SETTINGS_POSITION_KEY = "InfusionCalculator/position"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -30,9 +32,56 @@ class InfusionCalculatorDialog(QDialog):
         # Переменные для перетаскивания безрамочного окна
         self._is_dragging = False
         self._drag_pos = QPoint()
+        self._position_initialized = False
 
         self.init_ui()
         self.recalc()
+
+    def _settings(self):
+        return QSettings("MyHospital", "RemCard")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._position_initialized:
+            return
+        # Центрируем по фактическому размеру содержимого, а не по размеру
+        # ещё не показанного диалога или компактного меню выбора.
+        self.adjustSize()
+        position = self._settings().value(self.SETTINGS_POSITION_KEY)
+        screen = QApplication.screenAt(position) if isinstance(position, QPoint) else None
+        if screen is None:
+            position = None
+            parent = self.parentWidget()
+            if parent is not None:
+                screen = QApplication.screenAt(parent.mapToGlobal(parent.rect().center()))
+            if screen is None:
+                screen = QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            frame = self.frameGeometry()
+            if position is None:
+                frame.moveCenter(area.center())
+                position = frame.topLeft()
+            # После смены монитора/разрешения оставляем окно в рабочей области.
+            self.move(
+                max(area.left(), min(position.x(), area.right() - frame.width() + 1)),
+                max(area.top(), min(position.y(), area.bottom() - frame.height() + 1)),
+            )
+        self._position_initialized = True
+
+    def _save_position(self):
+        if self._position_initialized:
+            settings = self._settings()
+            settings.setValue(self.SETTINGS_POSITION_KEY, self.pos())
+            settings.sync()
+
+    def done(self, result):
+        self._save_position()
+        super().done(result)
+
+    def closeEvent(self, event):
+        self._save_position()
+        super().closeEvent(event)
 
     def init_ui(self):
         apply_custom_dialog_style(self)
@@ -275,6 +324,8 @@ class InfusionCalculatorDialog(QDialog):
                     self.move(event.globalPosition().toPoint() - self._drag_pos)
                     return True
             elif event.type() == QEvent.MouseButtonRelease:
+                if self._is_dragging:
+                    self._save_position()
                 self._is_dragging = False
                 return True
         return super().eventFilter(obj, event)

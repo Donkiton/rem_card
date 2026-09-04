@@ -3920,7 +3920,8 @@ class DoctorRemCardWidget(QWidget):
 
         # Чистый запуск без передачи веса пациента (калькулятор стартует с 0)
         dialog = InfusionCalculatorDialog(parent=self)
-        exec_calculation_dialog(dialog, anchor_center)
+        # Этот калькулятор сам восстанавливает сохранённую позицию окна.
+        exec_calculation_dialog(dialog)
 
     def on_burn_calculator_clicked(self, *, anchor_center=None):
         from rem_card.services.burn_infusion_calculator import is_acute_burn_mkb
@@ -3968,109 +3969,11 @@ class DoctorRemCardWidget(QWidget):
         return patient
 
     def _build_burn_calculator_context(self, patient) -> dict:
-        context: dict = {}
-        display_name = ""
-        if hasattr(patient, "get_display_name"):
-            try:
-                display_name = str(patient.get_display_name() or "").strip()
-            except Exception:
-                display_name = ""
-        if not display_name:
-            display_name = str(self._electrolyte_patient_value(patient, "full_name") or "").strip()
-        if display_name:
-            context["display_name"] = display_name
+        from rem_card.ui.shared.patient_calculator_context import build_burn_context
 
-        for source_key, target_key in (
-            ("history_number", "history_number"),
-            ("mkb_code", "mkb_code"),
-            ("diagnosis_text", "diagnosis_text"),
-        ):
-            value = self._electrolyte_patient_value(patient, source_key)
-            if value not in (None, ""):
-                context[target_key] = value
-
-        age_years = self._burn_context_age_years(patient)
-        if age_years is not None:
-            context["age_years"] = age_years
-        weight_kg = self._electrolyte_context_weight_kg(int(self.admission_id))
-        if weight_kg is not None:
-            context["weight_kg"] = weight_kg
-            context["weight_source"] = "карты поступления/перевода"
-        context.update(self._burn_context_recent_diuresis(int(self.admission_id)))
-        return context
-
-    def _burn_context_age_years(self, patient) -> float | None:
-        if patient is None:
-            return None
-        try:
-            from rem_card.app.patient_age import calculate_age_components
-
-            components = calculate_age_components(
-                self._electrolyte_patient_value(patient, "birth_date"),
-                datetime.now(),
-            )
-            if components is not None:
-                return round(
-                    float(components.years) + float(components.months) / 12.0 + float(components.days) / 365.25,
-                    6,
-                )
-        except Exception:
-            pass
-        age = self._electrolyte_patient_value(patient, "age")
-        if age in (None, ""):
-            return None
-        try:
-            number = float(age)
-        except Exception:
-            return None
-        unit = str(self._electrolyte_patient_value(patient, "age_unit") or "").casefold()
-        if "меся" in unit:
-            return round(number / 12.0, 6)
-        months = self._electrolyte_patient_value(patient, "age_months")
-        try:
-            return round(number + float(months or 0) / 12.0, 6)
-        except Exception:
-            return number
-
-    def _burn_context_recent_diuresis(self, admission_id: int) -> dict:
-        fluid_service = getattr(self.service, "fluid_service", None)
-        if fluid_service is None or not hasattr(fluid_service, "get_fluids_in_bounds"):
-            return {}
-        now = datetime.now()
-        try:
-            fluids = fluid_service.get_fluids_in_bounds(admission_id, now - timedelta(hours=3), now) or []
-        except Exception as exc:
-            logger.warning("Burn calculator: failed to load recent diuresis: %s", exc)
-            return {}
-        if not fluids:
-            return {}
-        last_hour_start = now - timedelta(hours=1)
-        last_hour = 0.0
-        total_three_hours = 0.0
-        has_last_hour = False
-        timestamps = []
-        for fluid in fluids:
-            urine = float(getattr(fluid, "urine", 0.0) or 0.0)
-            total_three_hours += urine
-            timestamp = getattr(fluid, "timestamp", None)
-            if timestamp is not None:
-                timestamps.append(timestamp)
-                try:
-                    if timestamp >= last_hour_start:
-                        last_hour += urine
-                        has_last_hour = True
-                except TypeError:
-                    pass
-        context = {}
-        try:
-            has_three_hour_coverage = bool(timestamps) and min(timestamps) <= now - timedelta(hours=2)
-        except TypeError:
-            has_three_hour_coverage = False
-        if has_three_hour_coverage:
-            context["urine_average_3h_ml"] = round(total_three_hours / 3.0, 1)
-        if has_last_hour:
-            context["urine_last_hour_ml"] = round(last_hour, 1)
-        return context
+        return build_burn_context(
+            self.service, int(self.admission_id), patient, shift_date=self._current_date
+        )
 
     def on_electrolyte_calculator_clicked(self, *, anchor_center=None):
         from .components.electrolyte_calculator import ElectrolyteCalculatorDialog
