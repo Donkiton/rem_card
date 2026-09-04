@@ -2589,7 +2589,8 @@ class NurseMainWidget(QWidget):
         from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
 
         dialog = InfusionCalculatorDialog(parent=self)
-        exec_calculation_dialog(dialog, anchor_center)
+        # Этот калькулятор сам восстанавливает сохранённую позицию окна.
+        exec_calculation_dialog(dialog)
 
     def on_electrolyte_calculator_clicked(self, *, anchor_center=None):
         from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
@@ -2633,7 +2634,9 @@ class NurseMainWidget(QWidget):
 
         dialog = BurnInfusionCalculatorDialog(
             parent=self,
-            patient_context=build_burn_context(self.remcard_service, int(admission_id), patient),
+            patient_context=build_burn_context(
+                self.remcard_service, int(admission_id), patient, shift_date=self._current_date
+            ),
         )
         exec_calculation_dialog(dialog, anchor_center)
 

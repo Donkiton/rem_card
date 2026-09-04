@@ -305,8 +305,10 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         layout.setHorizontalSpacing(10)
         layout.setVerticalSpacing(8)
 
-        self.infused_spin = self._spin(0.0, 100000.0, 0, " мл")
-        self.infused_spin.setAccessibleName("Введенный объем с начала расчетного периода")
+        self.infused_spin = self._spin(-1.0, 100000.0, 0, " мл")
+        self.infused_spin.setSpecialValueText("—")
+        self.infused_spin.setValue(0.0)
+        self.infused_spin.setAccessibleName("Введённый объём за сутки карты, можно скорректировать вручную")
         self.urine_last_hour_spin = self._optional_spin("—", " мл/ч")
         self.urine_last_hour_spin.setAccessibleName("Диурез за последний час")
         self.urine_average_spin = self._optional_spin("—", " мл/ч")
@@ -315,6 +317,14 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self._add_labeled(layout, 0, "Уже введено", self.infused_spin)
         self._add_labeled(layout, 1, "Диурез за последний час", self.urine_last_hour_spin)
         self._add_labeled(layout, 2, "Средний диурез за 3 часа", self.urine_average_spin)
+        self.infused_source_label = QLabel("")
+        self.infused_source_label.setObjectName("BurnMonitoringHint")
+        self.infused_source_label.setWordWrap(True)
+        layout.addWidget(self.infused_source_label, 3, 0, 1, 2)
+        urine_hint = QLabel("Среднее за 3 часа = сумма / 3; незаполненные часы учитываются как 0.")
+        urine_hint.setObjectName("BurnMonitoringHint")
+        urine_hint.setWordWrap(True)
+        layout.addWidget(urine_hint, 4, 0, 1, 2)
         layout.setColumnStretch(1, 1)
         return group
 
@@ -544,6 +554,13 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         else:
             self.weight_source_label.setText("Актуальная масса в карте не найдена — заполните вручную.")
 
+        infused = context.get("infused_ml")
+        if infused is not None:
+            self.infused_spin.setValue(float(infused))
+        elif context.get("infused_load_failed"):
+            self.infused_spin.setValue(-1.0)
+        self.infused_source_label.setText(str(context.get("infused_source") or ""))
+
         last_hour = context.get("urine_last_hour_ml")
         if last_hour is not None:
             self.urine_last_hour_spin.setValue(float(last_hour))
@@ -595,6 +612,8 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         return None if spin.value() < 0.0 else float(spin.value())
 
     def _build_input(self) -> BurnInfusionInput:
+        if self.infused_spin.value() < 0:
+            raise ValueError("Укажите уже введённый объём: данные из назначений не загружены.")
         return BurnInfusionInput(
             age_years=float(self.age_spin.value()),
             weight_kg=float(self.weight_spin.value()),
@@ -773,6 +792,10 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
                 padding: 0 5px;
             }}
             QLabel#BurnFieldLabel, QLabel#BurnElapsedLabel {{
+                color: {TEXT_SECONDARY};
+                font-weight: 400;
+            }}
+            QLabel#BurnMonitoringHint {{
                 color: {TEXT_SECONDARY};
                 font-weight: 400;
             }}

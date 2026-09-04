@@ -131,7 +131,7 @@ def build_electrolyte_context(service, admission_id: int, patient) -> dict:
     return context
 
 
-def build_burn_context(service, admission_id: int, patient) -> dict:
+def build_burn_context(service, admission_id: int, patient, *, shift_date=None, now=None) -> dict:
     context: dict = {}
     display_name = ""
     if hasattr(patient, "get_display_name"):
@@ -156,25 +156,44 @@ def build_burn_context(service, admission_id: int, patient) -> dict:
         context["weight_kg"] = weight
         context["weight_source"] = "карты поступления/перевода"
 
+    now = now or datetime.now()
+    context.update(burn_recent_diuresis(service, admission_id, now=now))
+    from rem_card.services.burn_monitoring import load_burn_infused_volume
+    from rem_card.services.shift_service import ShiftService
+
+    start, end = ShiftService.get_day_period(shift_date or now)
+    end = min(end, now)
+    admission = patient_value(patient, "admission_datetime")
+    if isinstance(admission, datetime):
+        start = max(start, admission)
+    try:
+        context["infused_ml"] = load_burn_infused_volume(service, admission_id, start, end)
+        context["infused_source"] = (
+            f"Выполненные назначения: {start:%d.%m %H:%M}–{end:%d.%m %H:%M}. "
+            "Если период расчёта отличается, скорректируйте объём."
+        )
+    except Exception as exc:
+        logger.warning("Burn calculator: failed to load infused volume: %s", exc)
+        context["infused_load_failed"] = True
+        context["infused_source"] = "Не удалось загрузить введённый объём из назначений. Укажите вручную."
+    return context
+
+
+def burn_recent_diuresis(service, admission_id: int, *, now: datetime | None = None) -> dict:
+    context: dict = {}
     fluid_service = getattr(service, "fluid_service", None)
     if fluid_service is None or not hasattr(fluid_service, "get_fluids_in_bounds"):
         return context
-    now = datetime.now()
+    now = now or datetime.now()
     try:
         fluids = fluid_service.get_fluids_in_bounds(admission_id, now - timedelta(hours=3), now) or []
     except Exception as exc:
         logger.warning("Calculator context: failed to load recent diuresis: %s", exc)
         return context
-    if not fluids:
-        return context
-
-    timestamps = [patient_value(item, "timestamp") for item in fluids if patient_value(item, "timestamp")]
     total = sum(float(patient_value(item, "urine") or 0.0) for item in fluids)
-    try:
-        if timestamps and min(timestamps) <= now - timedelta(hours=2):
-            context["urine_average_3h_ml"] = round(total / 3.0, 1)
-    except TypeError:
-        pass
+    # Для этого блока отсутствие записи за час считается нулевым диурезом.
+    # Делитель всегда 3, а не количество заполненных часов.
+    context["urine_average_3h_ml"] = round(total / 3.0, 1)
     last_hour = []
     for item in fluids:
         timestamp = patient_value(item, "timestamp")
@@ -185,11 +204,10 @@ def build_burn_context(service, admission_id: int, patient) -> dict:
                 last_hour.append(item)
         except TypeError:
             continue
-    if last_hour:
-        context["urine_last_hour_ml"] = round(
-            sum(float(patient_value(item, "urine") or 0.0) for item in last_hour),
-            1,
-        )
+    context["urine_last_hour_ml"] = round(
+        sum(float(patient_value(item, "urine") or 0.0) for item in last_hour),
+        1,
+    )
     return context
 
 

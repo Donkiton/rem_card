@@ -171,3 +171,52 @@ def test_dialog_preserves_one_month_boundary_for_pediatric_formula():
 
     infant.close()
     app.processEvents()
+
+
+def test_dialog_prefills_and_resets_monitoring_from_card(tmp_path, monkeypatch):
+    app = application()
+    settings = QSettings(str(tmp_path / "monitoring.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(BurnInfusionCalculatorDialog, "_settings", lambda self: settings)
+    dialog = BurnInfusionCalculatorDialog(patient_context={
+        "age_years": 42, "weight_kg": 80,
+        "infused_ml": 250, "urine_last_hour_ml": 100, "urine_average_3h_ml": 200,
+        "infused_source": "Выполненные назначения: 04.09 08:00–04.09 13:30.",
+    })
+    assert dialog.infused_spin.value() == 250
+    assert dialog.urine_last_hour_spin.value() == 100
+    assert dialog.urine_average_spin.value() == 200
+    assert "08:00" in dialog.infused_source_label.text()
+    dialog.injury_datetime_edit.setDateTime(QDateTime(datetime.now() - timedelta(hours=3)))
+    dialog.total_tbsa_spin.setValue(20)
+    dialog._calculate()
+    assert dialog._last_result is not None
+    assert dialog._last_result.remaining_ml == dialog._last_result.total_ml - 250
+    dialog.infused_spin.setValue(1000)
+    dialog._reset_form()
+    assert dialog.infused_spin.value() == 250
+    assert dialog.urine_average_spin.value() == 200
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()
+
+
+def test_dialog_requires_manual_volume_after_read_failure(tmp_path, monkeypatch):
+    app = application()
+    settings = QSettings(str(tmp_path / "monitoring-error.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(BurnInfusionCalculatorDialog, "_settings", lambda self: settings)
+    dialog = BurnInfusionCalculatorDialog(patient_context={
+        "age_years": 42, "weight_kg": 80, "infused_load_failed": True,
+        "infused_source": "Не удалось загрузить введённый объём. Укажите вручную.",
+    })
+    assert dialog.infused_spin.text() == "—"
+    dialog._calculate()
+    assert dialog._last_result is None
+    assert "не загружены" in dialog.validation_label.text()
+    dialog.infused_spin.setValue(250)
+    dialog.injury_datetime_edit.setDateTime(QDateTime(datetime.now() - timedelta(hours=3)))
+    dialog.total_tbsa_spin.setValue(20)
+    dialog._calculate()
+    assert dialog._last_result is not None
+    dialog.close()
+    dialog.deleteLater()
+    app.processEvents()

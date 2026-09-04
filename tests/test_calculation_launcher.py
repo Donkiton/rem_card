@@ -6,13 +6,15 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 
 
-def _run_qt_script(source: str) -> subprocess.CompletedProcess[str]:
+def _run_qt_script(source: str, platform: str = "offscreen") -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
-    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["QT_QPA_PLATFORM"] = platform
     return subprocess.run(
         [sys.executable, "-c", textwrap.dedent(source)],
         cwd=PROJECT_DIR,
@@ -65,7 +67,8 @@ def test_repeated_launcher_and_infusion_dialogs_are_destroyed():
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path.cwd().parent))
-        from PySide6.QtCore import QCoreApplication, QEvent, QTimer
+        from tempfile import TemporaryDirectory
+        from PySide6.QtCore import QCoreApplication, QEvent, QSettings, QTimer
         from PySide6.QtWidgets import QApplication, QDialog, QWidget
         from rem_card.ui.shared.components.calculation_launcher import (
             exec_calculation_dialog,
@@ -73,6 +76,10 @@ def test_repeated_launcher_and_infusion_dialogs_are_destroyed():
         )
         from rem_card.ui.shared.components.infusion_calculator import InfusionCalculatorDialog
 
+        settings_dir = TemporaryDirectory()
+        InfusionCalculatorDialog._settings = lambda self: QSettings(
+            str(Path(settings_dir.name) / "settings.ini"), QSettings.IniFormat
+        )
         app = QApplication.instance() or QApplication([])
         host = QWidget()
         host.resize(900, 700)
@@ -100,3 +107,71 @@ def test_repeated_launcher_and_infusion_dialogs_are_destroyed():
 
     assert completed.returncode == 0, completed.stderr
     assert "completed" in completed.stdout
+
+
+@pytest.mark.parametrize("platform", ["offscreen"] + (["windows"] if sys.platform == "win32" else []))
+def test_infusion_position_is_centered_and_persisted_between_processes(tmp_path, platform):
+    setup = f"""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path.cwd().parent))
+        from PySide6.QtCore import QPoint, QSettings, Qt
+        from PySide6.QtWidgets import QApplication, QWidget
+        from PySide6.QtTest import QTest
+        from rem_card.ui.shared.components.infusion_calculator import InfusionCalculatorDialog
+
+        app = QApplication([])
+        InfusionCalculatorDialog._settings = lambda self: QSettings(
+            {str(tmp_path / 'position.ini')!r}, QSettings.IniFormat
+        )
+        host = QWidget()
+        host.setGeometry(0, 0, 200, 100)
+        host.show()
+        dialog = InfusionCalculatorDialog(host)
+        dialog.show()
+        app.processEvents()
+        area = app.primaryScreen().availableGeometry()
+    """
+    phases = [
+        """
+        assert (dialog.frameGeometry().center() - area.center()).manhattanLength() <= 2
+        assert area.contains(dialog.frameGeometry())
+        # Сохраняем непосредственно после перетаскивания, до закрытия окна.
+        title = dialog.findChild(QWidget, "DialogTitleBar")
+        start = QPoint(10, 10)
+        original_position = dialog.pos()
+        QTest.mousePress(title, Qt.LeftButton, pos=start)
+        QTest.mouseMove(title, start + QPoint(35, 20))
+        QTest.mouseRelease(title, Qt.LeftButton, pos=start + QPoint(35, 20))
+        assert dialog.pos() != original_position
+        assert dialog._settings().value(dialog.SETTINGS_POSITION_KEY) == dialog.pos()
+        # Программное перемещение тоже сохраняется при закрытии.
+        dialog.move(area.topLeft() + QPoint(15, 20))
+        dialog.accept()
+        """,
+        """
+        assert dialog.pos() == area.topLeft() + QPoint(15, 20)
+        dialog.move(area.topLeft() + QPoint(30, 40))
+        dialog.reject()
+        another = InfusionCalculatorDialog(host)
+        another.show()
+        app.processEvents()
+        assert another.pos() == area.topLeft() + QPoint(30, 40)
+        another.close()
+        settings = another._settings()
+        settings.setValue(another.SETTINGS_POSITION_KEY, QPoint(-100000, -100000))
+        settings.sync()
+        """,
+        """
+        assert (dialog.frameGeometry().center() - area.center()).manhattanLength() <= 2
+        assert area.contains(dialog.frameGeometry())
+        dialog.close()
+        """,
+    ]
+    for phase in phases:
+        completed = _run_qt_script(
+            textwrap.dedent(setup) + textwrap.dedent(phase) + '\nprint("completed")\n',
+            platform=platform,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        assert "completed" in completed.stdout

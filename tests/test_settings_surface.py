@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -12,7 +14,7 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from PySide6.QtCore import QPoint, QSettings, Qt  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QSettings, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
@@ -43,6 +45,19 @@ from rem_card.ui.styles.theme_manager import get_theme_manager  # noqa: E402
 
 def application() -> QApplication:
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def file_dialog_parent():
+    app = application()
+    parent = QWidget()
+    yield parent
+    # close() только скрывает QFileDialog. Его QFileSystemWatcher должен
+    # удалиться здесь, в GUI-потоке, а не при последующей фоновой сборке мусора.
+    parent.close()
+    parent.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
 
 
 def test_settings_surface_assigns_one_primary_and_semantic_danger_button():
@@ -204,9 +219,9 @@ def test_complex_templates_editor_uses_fixed_shared_header():
     app.processEvents()
 
 
-def test_settings_file_dialog_uses_non_native_shared_surface():
+def test_settings_file_dialog_uses_non_native_shared_surface(file_dialog_parent):
     app = application()
-    dialog = QFileDialog()
+    dialog = QFileDialog(file_dialog_parent)
 
     prepare_settings_file_dialog(dialog)
 
@@ -218,13 +233,14 @@ def test_settings_file_dialog_uses_non_native_shared_surface():
     app.processEvents()
 
 
-def test_persistent_save_dialog_is_russian_full_width_and_restores_state(tmp_path):
+def test_persistent_save_dialog_is_russian_full_width_and_restores_state(tmp_path, file_dialog_parent):
     app = application()
     key = "tests/persistent_save_dialog"
     settings = QSettings("MyHospital", "RemCard")
     settings.remove(key)
 
     dialog = PersistentSaveFileDialog(
+        file_dialog_parent,
         title="Сохранить отчёт",
         directory=str(tmp_path),
         name_filter="PDF (*.pdf)",
@@ -263,6 +279,7 @@ def test_persistent_save_dialog_is_russian_full_width_and_restores_state(tmp_pat
     dialog.close()
 
     restored = PersistentSaveFileDialog(
+        file_dialog_parent,
         title="Сохранить отчёт",
         directory=str(tmp_path),
         name_filter="PDF (*.pdf)",
@@ -286,9 +303,10 @@ def test_persistent_save_dialog_is_russian_full_width_and_restores_state(tmp_pat
     settings.sync()
 
 
-def test_persistent_save_dialog_saves_state_only_once_when_done_closes_it(tmp_path):
+def test_persistent_save_dialog_saves_state_only_once_when_done_closes_it(tmp_path, file_dialog_parent):
     app = application()
     dialog = PersistentSaveFileDialog(
+        file_dialog_parent,
         title="Сохранить статистический отчёт",
         directory=str(tmp_path),
         name_filter="PDF (*.pdf)",
@@ -312,9 +330,10 @@ def test_persistent_save_dialog_saves_state_only_once_when_done_closes_it(tmp_pa
     assert calls == 1
 
 
-def test_persistent_save_dialog_custom_title_controls_window(tmp_path):
+def test_persistent_save_dialog_custom_title_controls_window(tmp_path, file_dialog_parent):
     app = application()
     dialog = PersistentSaveFileDialog(
+        file_dialog_parent,
         title="Сохранить статистический отчёт",
         directory=str(tmp_path),
         name_filter="PDF (*.pdf)",
