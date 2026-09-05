@@ -931,7 +931,11 @@ def main(argv: list[str] | None = None):
             f"[regression] start total={total} timeout_s={timeout_s:g}",
             quiet=bool(args.quiet_progress),
         )
-        for index, (name, fn) in enumerate(checks, start=1):
+        for index, entry in enumerate(checks, start=1):
+            # Явные индексы отделяют публичное имя от ссылки на функцию.
+            # Вложенная распаковка enumerate теряет это различие в CodeQL.
+            name = entry[0]
+            fn = entry[1]
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 failures += 1
                 result_items.append(

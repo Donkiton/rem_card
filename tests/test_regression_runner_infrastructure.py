@@ -57,6 +57,32 @@ def test_fast_profile_is_default_and_exhaustive_remains_available():
     assert exhaustive.json_detail == "all"
 
 
+def test_progress_outputs_registry_name_without_formatting_check_callable(monkeypatch, tmp_path, capsys):
+    called = []
+
+    class CheckCallable:
+        def __repr__(self):
+            raise AssertionError("Ссылка на функцию не должна попадать в лог")
+
+        def __call__(self, root):
+            called.append(Path(root).name)
+            return True, "ok"
+
+    monkeypatch.setattr(regression, "get_checks", lambda: [("public_check_name", CheckCallable())])
+    monkeypatch.setattr(regression, "_cleanup_orphan_direct_temp_roots", lambda: None)
+    monkeypatch.setattr(regression, "_make_temp_root", lambda: str(tmp_path))
+    monkeypatch.setattr(regression, "_prepare_import_environment", lambda _root: None)
+    monkeypatch.setattr(regression, "_rmtree_regression_root", lambda _root: "")
+    monkeypatch.setattr(regression, "_cleanup_check_resources", lambda: [])
+    with pytest.raises(SystemExit) as raised:
+        regression.main(["--profile", "exhaustive", "--timeout-s", "0"])
+    assert raised.value.code == 0
+    assert called == ["public_check_name"]
+    output = capsys.readouterr().out
+    assert "[regression] 1/1 public_check_name start" in output
+    assert "[regression] 1/1 public_check_name ok" in output
+
+
 def test_worker_shards_cover_registry_once_without_overlap():
     checks = [(f"check_{index}", object()) for index in range(37)]
     shards = [
