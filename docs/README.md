@@ -1,6 +1,6 @@
 # Документация
 
-Обновлено: 2026-07-14.
+Обновлено: 2026-09-05. Обзор возможностей текущего `main` и быстрый запуск — в [README проекта](../README.md).
 
 ## Действующие регламенты
 
@@ -15,6 +15,11 @@
 - `settings_db.md` - центральная settings DB, release snapshot и legacy import настроек.
 - `db_safety_contract.md` - инварианты сетевой SQLite-БД, backup, миграции, recovery.
 - `source_of_truth_and_sync_contract.md` - источник истины, путь записи, local replica, snapshots, cache и доставка изменений на второй компьютер.
+- [testing.md](testing.md) - единый runner локальных проверок и CI, группы core/ui/quality/regression, изоляция и проверка полноты отчётов.
+- [analytics_clinical_contract.md](analytics_clinical_contract.md) - периоды, источники, определения показателей, когорты и детализация аналитики РАО и оперблока.
+- [analytics_implementation_matrix.md](analytics_implementation_matrix.md) - состав реализованной аналитики и результаты проверок на момент её внедрения.
+- [runtime_log_storage.md](runtime_log_storage.md) - сегменты технических логов, сроки хранения, бюджет объёма и границы автоматической очистки.
+- [medical_audit_log.md](medical_audit_log.md) - отдельный аудит изменений медицинских таблиц и его ограничения.
 - `crash_reporting.md` - размещение обычных логов, структурированные аварийные отчёты, обработка и срок хранения 180 дней.
 - `metric_aggregation.md` - минутные сводки штатных метрик, сохранение аномалий, временная диагностика и независимый откат второго этапа.
 - `compact_text_logging.md` - компактные текстовые INFO, breadcrumbs, повторные ошибки, hang-дампы и независимый откат третьего этапа.
