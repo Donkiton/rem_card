@@ -14,6 +14,7 @@ refactored in separate, focused tasks.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -49,6 +50,16 @@ def _is_skipped(path: Path) -> bool:
     return any(part in SKIP_DIR_NAMES for part in path.parts)
 
 
+def _project_files():
+    # Исключаем виртуальное окружение и сборки до обхода их содержимого.
+    for directory, dirs, files in os.walk(PROJECT_ROOT):
+        dirs[:] = sorted(name for name in dirs if name not in SKIP_DIR_NAMES)
+        for name in sorted(files):
+            path = Path(directory, name)
+            if not _is_skipped(path) and path.is_file():
+                yield path
+
+
 def _run_flake8_static_analysis() -> dict[str, Any]:
     command = [
         sys.executable,
@@ -79,9 +90,7 @@ def _run_flake8_static_analysis() -> dict[str, Any]:
 def _scan_bom() -> dict[str, Any]:
     started = time.perf_counter()
     offenders: list[str] = []
-    for path in PROJECT_ROOT.rglob("*"):
-        if not path.is_file() or _is_skipped(path):
-            continue
+    for path in _project_files():
         try:
             with path.open("rb") as handle:
                 if handle.read(3) == b"\xef\xbb\xbf":
@@ -115,8 +124,8 @@ def _scan_complexity_f() -> dict[str, Any]:
 
     blocks: list[dict[str, Any]] = []
     parse_errors: list[dict[str, str]] = []
-    for path in PROJECT_ROOT.rglob("*.py"):
-        if _is_skipped(path):
+    for path in _project_files():
+        if path.suffix != ".py":
             continue
         rel_path = _rel(path)
         try:

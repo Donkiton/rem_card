@@ -23,6 +23,13 @@ from rem_card.app import runtime_paths
 
 @pytest.fixture(autouse=True)
 def isolated_logs(tmp_path, monkeypatch):
+    from rem_card.app import local_metrics
+
+    # Уже работающий поток приложения может дописать накопленные метрики.
+    # Его каталог не должен совпадать с фикстурой, где тест перечисляет файлы
+    # и проверяет точное содержимое. Дожидаемся текущей записи перед подменой.
+    with local_metrics._METRICS_LOCK:
+        monkeypatch.setattr(local_metrics, "get_writable_runtime_logs_dir", lambda: str(tmp_path / "background_metrics"))
     storage.close_log_writers()
     monkeypatch.setenv("REMCARD_LOG_STORAGE_ENABLED", "1")
     monkeypatch.setenv("REMCARD_LOG_MAX_FILE_BYTES", "1048576")
@@ -61,6 +68,28 @@ def test_rotation_preserves_utf8_records_and_readable_suffixes(tmp_path, monkeyp
     assert all(path.stat().st_size <= 150 for path in paths)
     assert sum("_active." in path.name for path in paths) == 1
     assert read_jsonl(root) == expected
+
+
+def test_log_fixture_separates_background_app_metrics_from_storage_assertions(tmp_path, monkeypatch):
+    from rem_card.app import local_metrics
+
+    monkeypatch.setenv("REMCARD_LOG_MAX_FILE_BYTES", "150")
+    root = tmp_path / "logs"
+    expected = [{"metric": "проверка", "value": index} for index in range(24)]
+    storage.append_log_lines(root, "metrics", (json.dumps(row, ensure_ascii=False) + "\n" for row in expected), extension="jsonl")
+    paths = list(root.glob("metrics_*.jsonl"))
+
+    # Воспроизводим запись накопленной ранее метрики строго между glob и stat.
+    # Это тот же путь записи, который вызывает фоновый _metrics_worker.
+    thread = threading.Thread(target=local_metrics._write_payloads, args=([
+        {"metric": "unrelated_background_metric", "value": "x" * 200},
+    ],))
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert all(path.stat().st_size <= 150 for path in paths)
+    assert read_jsonl(root) == expected
+    assert any(row.get("metric") == "unrelated_background_metric" for row in read_jsonl(tmp_path / "background_metrics"))
 
 
 def test_midnight_rotates_even_without_restart(tmp_path, monkeypatch):
