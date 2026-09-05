@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from rem_card.app.sqlite_shared import SQLiteWriteController, configure_connection
 
@@ -111,7 +113,6 @@ class SQLiteWriteCommitRetryTest(unittest.TestCase):
             retry_delay_ms=50,
         )
         body_calls = 0
-        started = time.perf_counter()
         try:
             with (
                 patch(
@@ -140,13 +141,16 @@ class SQLiteWriteCommitRetryTest(unittest.TestCase):
                             "INSERT INTO clinical_events(value) VALUES ('no-save')"
                         )
 
-            elapsed = time.perf_counter() - started
-            self.assertLess(elapsed, 0.75)
+            # Здесь проверяем настоящий SQLite, откат и однократность записи.
+            # Время всей транзакции включает файловый lock, ОС и завершение;
+            # предел COMMIT проверяется отдельно управляемыми часами ниже.
             self.assertEqual(body_calls, 1)
             self.assertFalse(writer.in_transaction)
             metric_names = [call.args[0] for call in metric.call_args_list]
             self.assertIn("sqlite_write_commit_retry", metric_names)
             self.assertIn("sqlite_write_commit_timeout", metric_names)
+            timeout_call = next(call for call in metric.call_args_list if call.args[0] == "sqlite_write_commit_timeout")
+            self.assertEqual(timeout_call.kwargs["timeout_ms"], 300)
 
             reader.execute("ROLLBACK")
             rows = writer.execute(
@@ -162,3 +166,42 @@ class SQLiteWriteCommitRetryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_commit_retry_cannot_start_after_deadline_or_exceed_remaining_budget(tmp_path):
+    from rem_card.app import sqlite_shared
+
+    clock = SimpleNamespace(now=0.0)
+    attempts = []
+    budgets = []
+
+    def sleep(seconds):
+        assert seconds >= 0
+        clock.now += seconds
+
+    class BusyConnection:
+        busy_timeout_ms = 50
+
+        def execute(self, sql):
+            if sql.startswith("PRAGMA busy_timeout"):
+                self.busy_timeout_ms = int(sql.split("=")[1])
+                budgets.append((clock.now, self.busy_timeout_ms))
+                return
+            assert sql == "COMMIT"
+            attempts.append(clock.now)
+            clock.now += self.busy_timeout_ms / 1000
+            raise sqlite3.OperationalError("database is locked")
+
+    controller = SQLiteWriteController(str(tmp_path / "db"), str(tmp_path / "lock"), "test", retry_delay_ms=50)
+    state = SimpleNamespace(deadline=0.3, source="test", metric_context={}, timeout_ms=300, is_interactive_write=True)
+    with (
+        patch.object(sqlite_shared, "time", SimpleNamespace(perf_counter=lambda: clock.now, sleep=sleep)),
+        patch.object(sqlite_shared, "record_metric") as metric,
+    ):
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            controller._commit_transaction(BusyConnection(), state)
+    assert len(attempts) > 1
+    assert all(start < state.deadline for start in attempts)
+    assert clock.now <= state.deadline + 1e-9
+    assert budgets and all(timeout <= (state.deadline - start) * 1000 + 1e-6 for start, timeout in budgets)
+    assert sum(call.args[0] == "sqlite_write_commit_timeout" for call in metric.call_args_list) == 1

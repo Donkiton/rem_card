@@ -39,6 +39,9 @@ LIVE_DB_COPY_ALLOWLIST = {
     "app/paths.py",
     "app/updater_main.py",
     "scripts/regression_safety_checks.py",
+    # Создание закрытой временной фикстуры; ранее находилось в общем runner.
+    "scripts/regression_checks/backup.py",
+    "scripts/regression_checks/emergency_standby.py",
 }
 
 

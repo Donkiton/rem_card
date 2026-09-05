@@ -2,58 +2,142 @@ name: Tests
 
 on:
   pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - edited
-      - ready_for_review
-    branches:
-      - main
+    types: [opened, reopened, synchronize, edited]
+    branches: [main]
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  # Изменение описания ждёт текущий прогон и может использовать его отчёт.
+  cancel-in-progress: ${{ github.event.action != 'edited' }}
+
+env:
+  PYTHONUTF8: "1"
+  QT_QPA_PLATFORM: offscreen
 
 jobs:
-  tests:
-    runs-on: windows-latest
-    env:
-      PYTHONUTF8: "1"
-      QT_QPA_PLATFORM: offscreen
+  plan:
+    name: План проверок
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      reuse: ${{ steps.plan.outputs.reuse }}
+      verified_run: ${{ steps.plan.outputs.verified_run }}
     steps:
-      - name: Получить исходный код
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - id: plan
+        run: python -m scripts.ci.github plan
+        env:
+          GH_TOKEN: ${{ github.token }}
 
-      - name: Настроить Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+  quality:
+    name: Качество и архитектура
+    needs: plan
+    if: needs.plan.outputs.reuse != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: ./.github/actions/setup-tests
+      - run: python scripts/run_ci_checks.py quality --timeout-s 300
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
         with:
-          python-version: "3.11"
-          cache: pip
+          name: ci-quality
+          path: tmp/ci-reports
+          retention-days: 14
+          if-no-files-found: error
 
-      - name: Установить зависимости
-        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+  core:
+    name: Логика и данные
+    needs: plan
+    if: needs.plan.outputs.reuse != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: ./.github/actions/setup-tests
+      - run: python scripts/run_ci_checks.py core
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ci-core
+          path: tmp/ci-reports
+          retention-days: 14
+          if-no-files-found: error
 
-      - name: Настроить часовой пояс
-        run: tzutil /s "Vladivostok Standard Time"
+  ui:
+    name: Интерфейс Qt
+    needs: plan
+    if: needs.plan.outputs.reuse != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: ./.github/actions/setup-tests
+      - run: python scripts/run_ci_checks.py ui
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ci-ui
+          path: tmp/ci-reports
+          retention-days: 14
+          if-no-files-found: error
 
-      - name: Запустить тесты
-        run: python -m pytest -q
+  regression:
+    name: Safety-регрессии
+    needs: plan
+    if: needs.plan.outputs.reuse != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: ./.github/actions/setup-tests
+      - run: python scripts/run_ci_checks.py regression
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ci-regression
+          path: tmp/ci-reports
+          retention-days: 14
+          if-no-files-found: error
 
-      - name: Проверить качество исходного кода
-        run: python scripts/code_quality_checks.py
-
-      - name: Проверить архитектурные ограничения
-        run: python scripts/architecture_safety_check.py
-
-      - name: Запустить расширенные safety-проверки
-        run: >-
-          python scripts/regression_safety_checks.py
-          --profile fast
-          --jobs 4
-          --timeout-s 900
-          --quiet-progress
-          --json-detail summary
+  tests:
+    name: tests
+    needs: [plan, quality, core, ui, regression]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Получить отчёты всех групп
+        if: needs.plan.outputs.reuse != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ci-*
+          path: tmp/ci-reports
+          merge-multiple: true
+      - name: Получить подтверждение предыдущего запуска
+        if: needs.plan.outputs.reuse == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-gate
+          path: tmp/ci-proof
+          run-id: ${{ needs.plan.outputs.verified_run }}
+          github-token: ${{ github.token }}
+      - name: Проверить результаты и полный состав тестов
+        run: python -m scripts.ci.github gate
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-gate
+          path: tmp/ci-proof/proof.json
+          retention-days: 14
+          if-no-files-found: error

@@ -13,6 +13,8 @@ import pytest
 
 from scripts import regression_safety_checks as regression
 from scripts import sanity_failfast_runner as sanity
+from scripts.regression_checks.registry import RegressionCheck
+from scripts.regression_checks.scheduling import partition_checks
 
 
 def _child_report_command(check_names: list[str], *, exit_code: int = 0) -> list[str]:
@@ -56,6 +58,32 @@ def test_fast_profile_is_default_and_exhaustive_remains_available():
     assert exhaustive.json_detail == "all"
 
 
+def test_progress_outputs_registry_name_without_formatting_check_callable(monkeypatch, tmp_path, capsys):
+    called = []
+
+    class CheckCallable:
+        def __repr__(self):
+            raise AssertionError("Ссылка на функцию не должна попадать в лог")
+
+        def __call__(self, root):
+            called.append(Path(root).name)
+            return True, "ok"
+
+    monkeypatch.setattr(regression, "get_checks", lambda: [RegressionCheck("public_check_name", CheckCallable())])
+    monkeypatch.setattr(regression, "_cleanup_orphan_direct_temp_roots", lambda: None)
+    monkeypatch.setattr(regression, "_make_temp_root", lambda: str(tmp_path))
+    monkeypatch.setattr(regression, "_prepare_import_environment", lambda _root: None)
+    monkeypatch.setattr(regression, "_rmtree_regression_root", lambda _root: "")
+    monkeypatch.setattr(regression, "_cleanup_check_resources", lambda: [])
+    with pytest.raises(SystemExit) as raised:
+        regression.main(["--profile", "exhaustive", "--timeout-s", "0"])
+    assert raised.value.code == 0
+    assert called == ["public_check_name"]
+    output = capsys.readouterr().out
+    assert "[regression] 1/1 public_check_name start" in output
+    assert "[regression] 1/1 public_check_name ok" in output
+
+
 def test_worker_shards_cover_registry_once_without_overlap():
     checks = [(f"check_{index}", object()) for index in range(37)]
     shards = [
@@ -69,6 +97,39 @@ def test_worker_shards_cover_registry_once_without_overlap():
     assert [name for name, _fn in shards[0]] == [f"check_{index}" for index in range(9)]
     with pytest.raises(ValueError):
         regression._select_worker_shard(checks, shard_index=4, shard_count=4)
+
+
+def test_duration_partition_preserves_order_and_improves_uneven_workload():
+    checks = [(str(index), object()) for index in range(12)]
+    estimates = {str(index): 1.0 if index < 9 else 12.0 for index in range(12)}
+    groups = partition_checks(checks, 4, estimates)
+    assert [item for group in groups for item in group] == checks
+    assert len(groups) == 4 and all(groups)
+    costs = [sum(estimates[name] for name, _ in group) for group in groups]
+    assert max(costs) == 12.0  # Равное деление по количеству давало 36 секунд.
+
+
+def test_duration_partition_is_optimal_for_small_exhaustive_cases():
+    from itertools import combinations, product
+
+    for weights in product((1, 3), repeat=5):
+        checks = [(str(i), object()) for i in range(5)]
+        estimates = {str(i): value for i, value in enumerate(weights)}
+        for count in range(1, 6):
+            groups = partition_checks(checks, count, estimates)
+            actual = max(sum(estimates[name] for name, _ in group) for group in groups)
+            alternatives = []
+            for cuts in combinations(range(1, 5), count - 1):
+                points = (0, *cuts, 5)
+                alternatives.append(max(sum(weights[a:b]) for a, b in zip(points, points[1:])))
+            assert actual == min(alternatives)
+            assert [item for group in groups for item in group] == checks
+
+
+def test_duration_partition_includes_new_unmeasured_checks():
+    checks = [("known", object()), ("new", object()), ("another", object())]
+    groups = partition_checks(checks, 2, {"known": 4.0})
+    assert [item for group in groups for item in group] == checks
 
 
 def test_worker_exit_one_with_complete_payload_is_a_test_failure_not_infrastructure_crash():

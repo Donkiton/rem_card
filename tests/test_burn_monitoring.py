@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from rem_card.data.dto.remcard_dto import OrderDTO
 from rem_card.services.burn_monitoring import load_burn_infused_volume
+from rem_card.services.burn_infusion_calculator import MODE_FIRST_24H, MODE_DAY_2_3, MODE_POST_SHOCK
 from rem_card.services.order_service import OrderService
 from rem_card.services.shift_service import ShiftService
 from rem_card.ui.shared.patient_calculator_context import build_burn_context, burn_recent_diuresis
@@ -165,3 +166,93 @@ def test_order_read_failure_is_not_reported_as_zero(service):
     assert result["infused_load_failed"]
     assert "infused_ml" not in result
     assert "вручную" in result["infused_source"]
+    assert result["urine_average_3h_ml"] == 0
+
+
+def test_card_day_and_burn_day_volumes_do_not_mix(service):
+    service.db.execute("INSERT INTO orders VALUES (3, 7, 'active')")
+    service.orders.append(OrderDTO(id=3, admission_id=7, comment="250 ml", is_committed=1,
+                                   created_at=START - timedelta(days=1)))
+    add_mark(service, -1, order_id=3)
+    add_mark(service, 1)
+    context = build_burn_context(service, 7, {}, shift_date=START, now=NOW)
+    assert context["infused_ml"] == 250
+    assert "period_infused_ml" not in context
+    loaded = context["monitoring_loader"](injury=START - timedelta(hours=2), mode=MODE_FIRST_24H, now=NOW)
+    assert loaded["infused_ml"] == 250
+    assert loaded["period_infused_ml"] == 500
+    assert loaded["period_start"] == START - timedelta(hours=2)
+
+
+@pytest.mark.parametrize("active,expected", [(False, 250), (True, 750)])
+def test_terminal_status_clips_chain_but_returned_patient_ignores_old_transfer(service, active, expected):
+    service.orders[0].comment = "750 ml"
+    service.orders[0].duration_min = 180
+    add_mark(service, 1, role="start", chain="a")
+    add_mark(service, 2, mark="", role="body", chain="a")
+    add_mark(service, 3, mark="", role="end", chain="a")
+    terminal = START + timedelta(hours=2)
+    service.get_current_status = lambda _: SimpleNamespace(
+        start_time=terminal, status=SimpleNamespace(is_outcome=lambda: not active),
+    )
+    context = build_burn_context(service, 7, {"transfer_datetime": terminal}, now=NOW)
+    assert context["infused_ml"] == expected
+    assert context["as_of"] == (NOW if active else terminal)
+
+
+def test_admission_clips_actual_infusion(service):
+    add_mark(service, 1)
+    add_mark(service, 3)
+    context = build_burn_context(service, 7, {"admission_datetime": START + timedelta(hours=2)}, now=NOW)
+    assert context["infused_ml"] == 250
+
+
+def test_historical_card_urine_and_calculation_share_the_same_time(service):
+    card_end = START + timedelta(days=1)
+    service.fluids.extend([
+        SimpleNamespace(timestamp=card_end - timedelta(minutes=30), urine=100),
+        SimpleNamespace(timestamp=card_end + timedelta(days=1, minutes=-30), urine=900),
+    ])
+    context = build_burn_context(service, 7, {}, shift_date=START, now=card_end + timedelta(days=1))
+    assert context["as_of"] == card_end
+    assert context["urine_last_hour_ml"] == 100
+    assert context["urine_average_3h_ml"] == 33.3
+
+
+@pytest.mark.parametrize("value", ["bad", float("nan"), float("inf"), -1])
+def test_invalid_urine_is_unavailable_not_zero(service, value):
+    service.fluids.append(SimpleNamespace(timestamp=NOW - timedelta(minutes=30), urine=value))
+    context = build_burn_context(service, 7, {}, now=NOW)
+    assert context["infused_ml"] == 0
+    assert "urine_last_hour_ml" not in context
+    assert "не загружен" in context["urine_error"]
+
+
+@pytest.mark.parametrize("hours,mode", [(30, MODE_DAY_2_3), (54, MODE_DAY_2_3), (80, MODE_POST_SHOCK)])
+def test_selected_period_excludes_previous_treatment_day(service, hours, mode):
+    add_mark(service, 1)
+    add_mark(service, 3)
+    context = build_burn_context(service, 7, {}, shift_date=START, now=NOW)
+    loaded = context["monitoring_loader"](injury=NOW - timedelta(hours=hours), mode=mode, now=NOW)
+    assert loaded["period_infused_ml"] == 500
+    assert loaded["period_end"] - loaded["period_start"] == timedelta(days=1)
+
+
+def test_oral_actual_only_is_loaded_on_demand_and_errors_are_unknown(service):
+    calls = []
+    def oral_events(admission_id, shift):
+        calls.append(shift)
+        return [SimpleNamespace(event_time=START + timedelta(hours=2), amount_ml=400),
+                SimpleNamespace(event_time=NOW + timedelta(hours=1), amount_ml=900)]
+    service.get_oral_intake_events = oral_events
+    context = build_burn_context(service, 7, {}, shift_date=START, now=NOW)
+    assert calls == []
+    loaded = context["monitoring_loader"](injury=START, mode=MODE_FIRST_24H, now=NOW, include_oral=True)
+    assert loaded["oral_ml"] == 400
+    assert calls == [START]
+    def fail(*args):
+        raise RuntimeError("unavailable")
+    service.get_oral_intake_events = fail
+    failed = context["monitoring_loader"](injury=START, mode=MODE_FIRST_24H, now=NOW, include_oral=True)
+    assert "oral_ml" not in failed
+    assert failed["oral_error"]
