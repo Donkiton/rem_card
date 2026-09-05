@@ -13,6 +13,7 @@ import pytest
 
 from scripts import regression_safety_checks as regression
 from scripts import sanity_failfast_runner as sanity
+from scripts.regression_checks.registry import RegressionCheck
 from scripts.regression_checks.scheduling import partition_checks
 
 
@@ -68,7 +69,7 @@ def test_progress_outputs_registry_name_without_formatting_check_callable(monkey
             called.append(Path(root).name)
             return True, "ok"
 
-    monkeypatch.setattr(regression, "get_checks", lambda: [("public_check_name", CheckCallable())])
+    monkeypatch.setattr(regression, "get_checks", lambda: [RegressionCheck("public_check_name", CheckCallable())])
     monkeypatch.setattr(regression, "_cleanup_orphan_direct_temp_roots", lambda: None)
     monkeypatch.setattr(regression, "_make_temp_root", lambda: str(tmp_path))
     monkeypatch.setattr(regression, "_prepare_import_environment", lambda _root: None)

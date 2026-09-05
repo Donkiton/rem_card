@@ -932,10 +932,9 @@ def main(argv: list[str] | None = None):
             quiet=bool(args.quiet_progress),
         )
         for index, entry in enumerate(checks, start=1):
-            # Явные индексы отделяют публичное имя от ссылки на функцию.
-            # Вложенная распаковка enumerate теряет это различие в CodeQL.
-            name = entry[0]
-            fn = entry[1]
+            # Имя для лога и исполняемая функция принадлежат разным полям.
+            name = entry.name
+            fn = entry.run
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 failures += 1
                 result_items.append(
