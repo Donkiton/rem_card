@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import json
+from math import isfinite
 
 from rem_card.app.logger import logger
 
@@ -26,13 +27,13 @@ def patient_diagnosis_value(patient) -> str:
     )
 
 
-def patient_age_years(patient, *, exact: bool) -> float | int | None:
+def patient_age_years(patient, *, exact: bool, now: datetime | None = None) -> float | int | None:
     if patient is None:
         return None
     try:
         from rem_card.app.patient_age import calculate_age_components
 
-        components = calculate_age_components(patient_value(patient, "birth_date"), datetime.now())
+        components = calculate_age_components(patient_value(patient, "birth_date"), now or datetime.now())
         if components is not None:
             if exact:
                 return round(
@@ -52,6 +53,8 @@ def patient_age_years(patient, *, exact: bool) -> float | int | None:
         number = float(age)
     except Exception:
         return None
+    if not isfinite(number):
+        return None
     unit = str(patient_value(patient, "age_unit") or "").casefold()
     months = patient_value(patient, "age_months")
     if "меся" in unit:
@@ -61,6 +64,8 @@ def patient_age_years(patient, *, exact: bool) -> float | int | None:
             years = number + float(months or 0) / 12.0
         except Exception:
             years = number
+    if not isfinite(years):
+        return None
     return round(years, 6) if exact else int(years)
 
 
@@ -132,7 +137,16 @@ def build_electrolyte_context(service, admission_id: int, patient) -> dict:
 
 
 def build_burn_context(service, admission_id: int, patient, *, shift_date=None, now=None) -> dict:
-    context: dict = {}
+    # Вызывается только после выбора «Ожоги». Никаких подписок, таймеров
+    # и предварительной загрузки при открытии обычной карты.
+    def load_monitoring(*, injury=None, mode=None, now=None, include_oral=False):
+        return _burn_monitoring_context(
+            service, admission_id, patient, shift_date=shift_date,
+            now=now, injury=injury, mode=mode, include_oral=include_oral,
+        )
+
+    context = load_monitoring(now=now)
+    context["monitoring_loader"] = load_monitoring
     display_name = ""
     if hasattr(patient, "get_display_name"):
         try:
@@ -148,7 +162,7 @@ def build_burn_context(service, admission_id: int, patient, *, shift_date=None, 
         value = patient_value(patient, key)
         if value not in (None, ""):
             context[key] = value
-    age_years = patient_age_years(patient, exact=True)
+    age_years = patient_age_years(patient, exact=True, now=context["as_of"])
     if age_years is not None:
         context["age_years"] = age_years
     weight = patient_weight_kg(service, admission_id)
@@ -156,26 +170,72 @@ def build_burn_context(service, admission_id: int, patient, *, shift_date=None, 
         context["weight_kg"] = weight
         context["weight_source"] = "карты поступления/перевода"
 
-    now = now or datetime.now()
-    context.update(burn_recent_diuresis(service, admission_id, now=now))
-    from rem_card.services.burn_monitoring import load_burn_infused_volume
+    return context
+
+
+def _burn_monitoring_context(service, admission_id, patient, *, shift_date, now, injury, mode, include_oral):
+    from rem_card.services.burn_monitoring import burn_period_bounds, load_burn_infused_volume, load_burn_oral_volume
     from rem_card.services.shift_service import ShiftService
 
-    start, end = ShiftService.get_day_period(shift_date or now)
-    end = min(end, now)
+    now = now or datetime.now()
+    card_start, card_end = ShiftService.get_day_period(shift_date or now)
+    end = min(card_end, now)
+    context = {"as_of": end, "loaded_at": datetime.now(), "card_start": card_start, "card_end": card_end}
+    start = card_start
     admission = patient_value(patient, "admission_datetime")
     if isinstance(admission, datetime):
         start = max(start, admission)
     try:
+        # Тот же приоритет исхода/перевода, что у баланса карты: при активном
+        # статусе старое transfer_datetime после возврата пациента игнорируется.
+        status_reader = getattr(service, "get_current_status", None)
+        status = status_reader(admission_id) if status_reader else None
+        terminal = patient_value(patient, "transfer_datetime")
+        if status is not None:
+            terminal = status.start_time if status.status.is_outcome() else None
+        if isinstance(terminal, datetime):
+            end = min(end, terminal)
+        context["as_of"] = end
         context["infused_ml"] = load_burn_infused_volume(service, admission_id, start, end)
         context["infused_source"] = (
-            f"Выполненные назначения: {start:%d.%m %H:%M}–{end:%d.%m %H:%M}. "
-            "Если период расчёта отличается, скорректируйте объём."
+            f"Выполненные назначения за сутки карты: {start:%d.%m %H:%M}–{end:%d.%m %H:%M}."
         )
     except Exception as exc:
         logger.warning("Burn calculator: failed to load infused volume: %s", exc)
         context["infused_load_failed"] = True
         context["infused_source"] = "Не удалось загрузить введённый объём из назначений. Укажите вручную."
+        context["period_error"] = "Объём за расчётный период не загружен. Укажите вручную."
+    context.update(burn_recent_diuresis(service, admission_id, now=end))
+    if not all(key in context for key in ("urine_last_hour_ml", "urine_average_3h_ml")):
+        context["urine_error"] = "Диурез не загружен. Укажите вручную или обновите данные."
+    if injury is not None:
+        period_start, period_end = burn_period_bounds(injury, mode, end, card_start)
+        context.update(period_start=period_start, period_end=period_end)
+        if context.get("infused_load_failed"):
+            if include_oral:
+                context["oral_error"] = "Энтеральное введение не загружено. Укажите вручную."
+            return context
+        effective_start = max(period_start, admission) if isinstance(admission, datetime) else period_start
+        effective_end = min(period_end, end)
+        if isinstance(admission, datetime) and period_start < admission:
+            context["period_source"] = (
+                f"В карте учтено введение с поступления {admission:%d.%m %H:%M}. "
+                "Объём до поступления при необходимости добавьте вручную."
+            )
+        try:
+            context["period_infused_ml"] = (
+                context["infused_ml"] if effective_start == start and effective_end == end
+                else load_burn_infused_volume(service, admission_id, effective_start, effective_end)
+            )
+        except Exception as exc:
+            logger.warning("Burn calculator: failed to load treatment-period volume: %s", exc)
+            context["period_error"] = "Объём за расчётный период не загружен. Укажите вручную."
+        if include_oral:
+            try:
+                context["oral_ml"] = load_burn_oral_volume(service, admission_id, effective_start, effective_end)
+            except Exception as exc:
+                logger.warning("Burn calculator: failed to load oral volume: %s", exc)
+                context["oral_error"] = "Энтеральное введение не загружено. Укажите вручную."
     return context
 
 
@@ -187,25 +247,21 @@ def burn_recent_diuresis(service, admission_id: int, *, now: datetime | None = N
     now = now or datetime.now()
     try:
         fluids = fluid_service.get_fluids_in_bounds(admission_id, now - timedelta(hours=3), now) or []
+        values = [(patient_value(item, "timestamp"), float(patient_value(item, "urine") or 0)) for item in fluids]
+        if any(not isfinite(value) or value < 0 or not isinstance(timestamp, datetime) for timestamp, value in values):
+            raise ValueError("Некорректная запись диуреза.")
+        values = [(timestamp, value) for timestamp, value in values if now - timedelta(hours=3) <= timestamp < now]
+        total = sum(value for _, value in values)
+        if not isfinite(total):
+            raise ValueError("Суммарный диурез слишком велик.")
     except Exception as exc:
         logger.warning("Calculator context: failed to load recent diuresis: %s", exc)
         return context
-    total = sum(float(patient_value(item, "urine") or 0.0) for item in fluids)
     # Для этого блока отсутствие записи за час считается нулевым диурезом.
     # Делитель всегда 3, а не количество заполненных часов.
     context["urine_average_3h_ml"] = round(total / 3.0, 1)
-    last_hour = []
-    for item in fluids:
-        timestamp = patient_value(item, "timestamp")
-        if timestamp is None:
-            continue
-        try:
-            if timestamp >= now - timedelta(hours=1):
-                last_hour.append(item)
-        except TypeError:
-            continue
     context["urine_last_hour_ml"] = round(
-        sum(float(patient_value(item, "urine") or 0.0) for item in last_hour),
+        sum(value for timestamp, value in values if timestamp >= now - timedelta(hours=1)),
         1,
     )
     return context
@@ -262,4 +318,4 @@ def _positive_float(value) -> float | None:
         number = float(str(value).replace(",", "."))
     except Exception:
         return None
-    return number if number > 0 else None
+    return number if isfinite(number) and number > 0 else None

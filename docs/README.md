@@ -23,6 +23,7 @@
 - `emergency_runbook.md` и `emergency_mode_smoke_checklist.md` - аварийный режим и ручной smoke.
 - `backup_restore_drill.md`, `network_stress_test_plan.md`, `performance_a_baseline.md` - проверки эксплуатации и производительности.
 - `operblock_ui_standards.md` - UI-стандарты оперблока.
+- `burn_infusion_calculator.md` - периоды мониторинга, загрузка по запросу и расчётные ориентиры ожогового калькулятора.
 
 Критичное правило release-процесса: вся приёмка выполняется на локальной/изолированной тестовой базе до сетевой production-публикации. После создания production `ready.ok` релиз доступен сразу всем клиентам этой базы; отдельного канареечного этапа внутри production нет.
 

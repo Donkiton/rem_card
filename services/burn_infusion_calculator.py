@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
+from math import isfinite
 import re
 
 
@@ -50,7 +51,7 @@ def is_acute_burn_mkb(value: object) -> bool:
 
 def pediatric_maintenance_rule(age_years: float) -> tuple[float, str]:
     age = float(age_years)
-    if age + 1e-6 < (1.0 / 12.0) or age >= PEDIATRIC_AGE_LIMIT_YEARS:
+    if not isfinite(age) or age + 1e-6 < (1.0 / 12.0) or age >= PEDIATRIC_AGE_LIMIT_YEARS:
         raise ValueError("Физиологическая потребность по детской таблице задана для возраста от 1 месяца до 18 лет.")
     if age < 1.0:
         return 120.0, "1 месяц–1 год"
@@ -81,6 +82,8 @@ class BurnInfusionInput:
     infused_ml: float = 0.0
     urine_last_hour_ml: float | None = None
     urine_average_3h_ml: float | None = None
+    oral_ml: float = 0.0
+    period_start: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -105,9 +108,28 @@ class BurnInfusionResult:
     urine_target_max_ml_kg_h: float | None
     warnings: tuple[str, ...]
     calculation_trace: tuple[str, ...]
+    schedule_difference_ml: float = 0.0
+    maintenance_floor_added_ml: float = 0.0
 
 
-def _validate_input(data: BurnInfusionInput, *, now: datetime) -> None:
+def _validate_input(data: BurnInfusionInput, *, now: datetime, mode: str) -> None:
+    for label, value in (
+        ("Возраст", data.age_years), ("Масса", data.weight_kg),
+        ("Общая площадь ожога", data.total_tbsa_percent),
+        ("Поверхностный ожог", data.superficial_tbsa_percent),
+        ("Глубокий ожог", data.deep_tbsa_percent),
+        ("Введённый объём", data.infused_ml), ("Энтеральное введение", data.oral_ml),
+        ("Диурез за час", data.urine_last_hour_ml),
+        ("Средний диурез", data.urine_average_3h_ml),
+    ):
+        if value is None and label in {"Диурез за час", "Средний диурез"}:
+            continue
+        try:
+            valid = isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            raise ValueError(f"{label}: требуется конечное числовое значение.")
     age = float(data.age_years)
     if age + 1e-6 < 1.0 / 12.0 or age > 120.0:
         raise ValueError("Возраст должен быть от 1 месяца до 120 лет.")
@@ -115,6 +137,8 @@ def _validate_input(data: BurnInfusionInput, *, now: datetime) -> None:
         raise ValueError("Масса должна быть от 0,5 до 500 кг.")
     if data.injury_datetime > now:
         raise ValueError("Дата и время травмы не могут быть позже текущего времени.")
+    if data.period_start is not None and not 0 <= (now - data.period_start).total_seconds() <= 86400:
+        raise ValueError("Время мониторинга должно находиться внутри выбранных суток расчёта.")
     for label, value in (
         ("Общая площадь ожога", data.total_tbsa_percent),
         ("Поверхностный ожог", data.superficial_tbsa_percent),
@@ -128,6 +152,12 @@ def _validate_input(data: BurnInfusionInput, *, now: datetime) -> None:
         raise ValueError("Сумма поверхностного и глубокого ожога не может превышать общую площадь.")
     if float(data.infused_ml) < 0.0:
         raise ValueError("Введенный объем не может быть отрицательным.")
+    if float(data.oral_ml) < 0.0:
+        raise ValueError("Энтеральное введение не может быть отрицательным.")
+    if mode == MODE_POST_SHOCK and abs(
+        float(data.superficial_tbsa_percent) + float(data.deep_tbsa_percent) - float(data.total_tbsa_percent)
+    ) > 0.05:
+        raise ValueError("После выхода из шока укажите поверхностную и глубокую площади для всей площади ожога.")
     for value in (data.urine_last_hour_ml, data.urine_average_3h_ml):
         if value is not None and float(value) < 0.0:
             raise ValueError("Диурез не может быть отрицательным.")
@@ -217,11 +247,20 @@ def calculate_burn_infusion(
     if mode not in SUPPORTED_MODES:
         raise ValueError("Неизвестный режим расчета инфузии.")
     current_time = now or datetime.now()
-    _validate_input(data, now=current_time)
+    _validate_input(data, now=current_time, mode=mode)
 
     elapsed_hours = max(0.0, (current_time - data.injury_datetime).total_seconds() / 3600.0)
     target_min, target_max = _urine_targets(data)
     warnings = _monitoring_warnings(data, target_min=target_min, target_max=target_max)
+    pediatric = float(data.age_years) < PEDIATRIC_AGE_LIMIT_YEARS
+    oral = float(data.oral_ml) if pediatric and mode != MODE_POST_SHOCK else 0.0
+    infused = float(data.infused_ml) + oral
+    if not isfinite(infused):
+        raise ValueError("Суммарный введённый объём слишком велик.")
+    input_trace = (
+        f"Фактически за расчётный период: в/в {data.infused_ml:.0f} мл; энтерально учтено {oral:.0f} мл",
+        "Базовый темп — ориентир формулы, не назначение. Коррекцию по клинической картине определяет врач.",
+    )
 
     if not data.burn_shock and mode in {MODE_FIRST_24H, MODE_DAY_2_3}:
         warnings.append("Ожоговый шок не отмечен: проверьте клинические показания к формульной инфузии.")
@@ -238,20 +277,25 @@ def calculate_burn_infusion(
             1.5 * float(data.deep_tbsa_percent) * float(data.weight_kg)
             + 0.5 * float(data.superficial_tbsa_percent) * float(data.weight_kg)
         )
-        remaining = max(0.0, total - float(data.infused_ml))
-        if float(data.infused_ml) > total:
+        remaining = max(0.0, total - infused)
+        if infused > total:
             warnings.append("Введенный объем превышает расчетный суточный объем выбранного периода.")
         trace = (
             f"Глубокий ожог: 1,5 мл × {data.deep_tbsa_percent:g}% × {data.weight_kg:g} кг",
             f"Поверхностный ожог: 0,5 мл × {data.superficial_tbsa_percent:g}% × {data.weight_kg:g} кг",
             f"Расчетный суточный объем после выхода из шока: {total:.0f} мл",
-        )
+        ) + input_trace
+        card_start = current_time.replace(hour=8, minute=0, second=0, microsecond=0)
+        if current_time < card_start:
+            card_start -= timedelta(days=1)
+        period_elapsed = (current_time - (data.period_start or card_start)).total_seconds() / 3600
+        difference = infused - total * period_elapsed / 24.0
         return BurnInfusionResult(
             mode=mode,
             period_label="После выхода из ожогового шока",
             total_ml=total,
             remaining_ml=remaining,
-            recommended_rate_ml_h=remaining / 24.0,
+            recommended_rate_ml_h=total / 24.0,
             burn_formula_ml=total,
             maintenance_ml=0.0,
             inhalation_extra_ml=0.0,
@@ -267,6 +311,7 @@ def calculate_burn_infusion(
             urine_target_max_ml_kg_h=target_max,
             warnings=tuple(warnings),
             calculation_trace=trace,
+            schedule_difference_ml=difference,
         )
 
     first_day_total, burn_formula, maintenance, inhalation_extra, electrical_extra, age_divisor, trace = (
@@ -281,22 +326,31 @@ def calculate_burn_infusion(
         day_number = 2 if elapsed_hours < 48.0 else 3
         fraction = 0.5 if day_number == 2 else (1.0 / 3.0)
         period_start = 24.0 if day_number == 2 else 48.0
-        hours_left = max(0.01, 24.0 - (elapsed_hours - period_start))
-        total = first_day_total * fraction
-        remaining = max(0.0, total - float(data.infused_ml))
-        if float(data.infused_ml) > total:
+        hours_left = 24.0 - (elapsed_hours - period_start)
+        formula_total = first_day_total * fraction
+        total = max(formula_total, maintenance) if pediatric else formula_total
+        floor_added = total - formula_total
+        remaining = max(0.0, total - infused)
+        if infused > total:
             warnings.append("Введенный объем превышает расчетный объем выбранных суток.")
         fraction_label = "1/2" if day_number == 2 else "1/3"
         day_trace = trace + (
-            f"{day_number}-и сутки: {fraction_label} от расчетного объема первых суток = {total:.0f} мл",
-            f"Осталось {remaining:.0f} мл на {hours_left:.1f} ч",
+            f"{day_number}-и сутки: {fraction_label} от расчетного объема первых суток = {formula_total:.0f} мл",
         )
+        if pediatric:
+            day_trace += (
+                f"Физпотребность как нижняя граница: {maintenance:.0f} мл/сут; добавлено до минимума {floor_added:.0f} мл",
+            )
+        day_trace += (
+            f"Итог выбранных суток: {total:.0f} мл",
+            f"Осталось {remaining:.0f} мл на {hours_left:.1f} ч",
+        ) + input_trace
         return BurnInfusionResult(
             mode=mode,
             period_label=f"{day_number}-и сутки ожоговой болезни",
             total_ml=total,
             remaining_ml=remaining,
-            recommended_rate_ml_h=remaining / hours_left,
+            recommended_rate_ml_h=total / 24.0,
             burn_formula_ml=burn_formula,
             maintenance_ml=maintenance,
             inhalation_extra_ml=inhalation_extra,
@@ -312,6 +366,8 @@ def calculate_burn_infusion(
             urine_target_max_ml_kg_h=target_max,
             warnings=tuple(warnings),
             calculation_trace=day_trace,
+            schedule_difference_ml=infused - total * (24.0 - hours_left) / 24.0,
+            maintenance_floor_added_ml=floor_added,
         )
 
     if elapsed_hours >= 24.0:
@@ -319,20 +375,19 @@ def calculate_burn_infusion(
 
     first_8h = first_day_total / 2.0
     next_16h = first_day_total / 2.0
-    infused = float(data.infused_ml)
     if elapsed_hours < 8.0:
-        hours_left = max(0.01, 8.0 - elapsed_hours)
         interval_label = "До конца первых 8 часов"
         interval_remaining = max(0.0, first_8h - infused)
-        current_rate = interval_remaining / hours_left
+        current_rate = first_8h / 8.0
+        expected = current_rate * elapsed_hours
         next_rate = next_16h / 16.0
         if infused > first_8h:
             warnings.append("Введенный объем превышает расчетную половину первых 8 часов.")
     else:
-        hours_left = max(0.01, 24.0 - elapsed_hours)
         interval_label = "До конца первых 24 часов"
         interval_remaining = max(0.0, first_day_total - infused)
-        current_rate = interval_remaining / hours_left
+        current_rate = next_16h / 16.0
+        expected = first_8h + current_rate * (elapsed_hours - 8.0)
         next_rate = None
     remaining = max(0.0, first_day_total - infused)
     if infused > first_day_total:
@@ -341,7 +396,7 @@ def calculate_burn_infusion(
         f"Первые 8 часов от момента травмы: {first_8h:.0f} мл",
         f"Следующие 16 часов: {next_16h:.0f} мл",
         f"Введено: {infused:.0f} мл; осталось: {remaining:.0f} мл",
-    )
+    ) + input_trace
     return BurnInfusionResult(
         mode=mode,
         period_label="Первые 24 часа",
@@ -363,6 +418,7 @@ def calculate_burn_infusion(
         urine_target_max_ml_kg_h=target_max,
         warnings=tuple(warnings),
         calculation_trace=first_day_trace,
+        schedule_difference_ml=infused - expected,
     )
 
 

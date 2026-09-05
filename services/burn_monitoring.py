@@ -2,10 +2,51 @@ from __future__ import annotations
 
 from copy import copy
 from datetime import datetime, timedelta
+from math import isfinite
 
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.services.balance_calculator import BalanceCalculator
 from rem_card.services.shift_service import ShiftService
+
+
+def burn_period_bounds(injury: datetime, mode: str, as_of: datetime, card_start: datetime) -> tuple[datetime, datetime]:
+    """Период вычитания введённого объёма, не зависящий от смены карты."""
+    from rem_card.services.burn_infusion_calculator import MODE_FIRST_24H, MODE_DAY_2_3, MODE_POST_SHOCK
+
+    elapsed = (as_of - injury).total_seconds() / 3600
+    if elapsed < 0:
+        raise ValueError("Время травмы позже времени данных мониторинга.")
+    if mode == MODE_POST_SHOCK:
+        return card_start, card_start + timedelta(days=1)
+    if mode == MODE_FIRST_24H:
+        if elapsed >= 24:
+            raise ValueError("Первые 24 часа завершены. Выберите режим 2–3-х суток.")
+        return injury, injury + timedelta(days=1)
+    if mode == MODE_DAY_2_3:
+        if not 24 <= elapsed < 72:
+            raise ValueError("Режим 2–3-х суток доступен от 24 до 72 часов после травмы.")
+        start = injury + timedelta(days=1 if elapsed < 48 else 2)
+        return start, start + timedelta(days=1)
+    raise ValueError("Неизвестный режим расчёта.")
+
+
+def load_burn_oral_volume(service, admission_id: int, start: datetime, end: datetime) -> float:
+    """Только фактическое оральное/энтеральное введение, без планов питания."""
+    if end <= start:
+        return 0.0
+    total = 0.0
+    shift_start, shift_end = ShiftService.get_day_period(start)
+    while shift_start < end:
+        for event in service.get_oral_intake_events(admission_id, shift_start):
+            if start <= event.event_time < end:
+                amount = float(event.amount_ml)
+                if not isfinite(amount) or amount < 0:
+                    raise ValueError("Некорректный объём энтерального введения.")
+                total += amount
+        shift_start, shift_end = shift_end, shift_end + timedelta(days=1)
+    if not isfinite(total):
+        raise ValueError("Суммарный объём энтерального введения слишком велик.")
+    return round(total, 1)
 
 
 def load_burn_infused_volume(service, admission_id: int, start: datetime, end: datetime) -> float:
@@ -66,4 +107,6 @@ def load_burn_infused_volume(service, admission_id: int, start: datetime, end: d
         )
         total += sum(sum(bucket.values()) for bucket in hourly.values())
         shift_start, shift_end = shift_end, shift_end + timedelta(days=1)
+    if not isfinite(total) or total < 0:
+        raise ValueError("Некорректный объём выполненных назначений.")
     return round(total, 1)

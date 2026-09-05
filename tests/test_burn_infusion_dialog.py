@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import os
 from pathlib import Path
 import sys
+import pytest
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -12,7 +13,7 @@ PACKAGE_PARENT = Path(__file__).resolve().parents[2]
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from PySide6.QtCore import QDateTime, QSettings  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QDateTime, QEvent, QSettings  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from rem_card.ui.shared.components.burn_infusion_calculator import (  # noqa: E402
@@ -22,6 +23,31 @@ from rem_card.ui.shared.components.burn_infusion_calculator import (  # noqa: E4
 
 def application() -> QApplication:
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def isolated_burn_dialog_settings(tmp_path, monkeypatch):
+    app = application()
+    settings = QSettings(str(tmp_path / "burn.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(BurnInfusionCalculatorDialog, "_settings", lambda self: settings)
+    yield
+    for widget in app.topLevelWidgets():
+        if isinstance(widget, BurnInfusionCalculatorDialog):
+            widget.close()
+            widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
+def filled_dialog(context=None):
+    now = datetime(2026, 9, 5, 14)
+    dialog = BurnInfusionCalculatorDialog(patient_context={
+        "age_years": 42, "weight_kg": 80, "as_of": now, **(context or {}),
+    })
+    dialog.injury_datetime_edit.setDateTime(QDateTime(now - timedelta(hours=3)))
+    dialog.total_tbsa_spin.setValue(35)
+    dialog.superficial_tbsa_spin.setValue(20)
+    dialog.deep_tbsa_spin.setValue(15)
+    return dialog
 
 
 def test_dialog_prefills_context_and_renders_reference_example():
@@ -220,3 +246,126 @@ def test_dialog_requires_manual_volume_after_read_failure(tmp_path, monkeypatch)
     dialog.close()
     dialog.deleteLater()
     app.processEvents()
+
+
+@pytest.mark.parametrize("change", [
+    lambda d: d.weight_spin.setValue(40), lambda d: d.age_spin.setValue(60),
+    lambda d: d.total_tbsa_spin.setValue(40), lambda d: d.deep_tbsa_spin.setValue(10),
+    lambda d: d.superficial_tbsa_spin.setValue(10), lambda d: d.infused_spin.setValue(500),
+    lambda d: d.urine_last_hour_spin.setValue(100), lambda d: d.urine_average_spin.setValue(200),
+    lambda d: d.inhalation_check.setChecked(True), lambda d: d.electrical_check.setChecked(True),
+    lambda d: d.burn_shock_check.setChecked(False),
+    lambda d: d.injury_datetime_edit.setDateTime(d.injury_datetime_edit.dateTime().addSecs(-3600)),
+    lambda d: d.mode_buttons["day_2_3"].setChecked(True),
+])
+def test_every_input_change_clears_visible_and_copyable_result(change):
+    dialog = filled_dialog()
+    dialog._calculate()
+    assert dialog._last_result is not None
+    change(dialog)
+    assert dialog._last_result is None
+    assert dialog.total_value_label.text() == "—"
+    assert dialog.current_card[1].text() == "—"
+    assert not dialog.copy_button.isEnabled()
+    assert dialog._result_as_text() == ""
+
+
+def test_validation_failure_does_not_leave_previous_numbers():
+    dialog = filled_dialog()
+    dialog._calculate()
+    assert dialog._last_result is not None
+    dialog.total_tbsa_spin.blockSignals(True)
+    dialog.total_tbsa_spin.setValue(0)
+    dialog.total_tbsa_spin.blockSignals(False)
+    dialog._calculate()
+    assert dialog.validation_label.text()
+    assert dialog.total_value_label.text() == "—"
+    assert not dialog.copy_button.isEnabled()
+
+
+def test_period_volume_load_is_lazy_cached_and_refresh_preserves_manual_values():
+    calls = []
+    now = datetime(2026, 9, 5, 14)
+    def loader(**kwargs):
+        calls.append(kwargs)
+        return {"as_of": now, "infused_ml": 250, "period_infused_ml": 1000,
+                "period_start": kwargs["injury"], "period_end": kwargs["injury"] + timedelta(days=1),
+                "urine_last_hour_ml": 100, "urine_average_3h_ml": 200}
+    dialog = filled_dialog({"monitoring_loader": loader, "infused_ml": 250})
+    assert calls == []
+    assert dialog.card_infused_label.text() == "250 мл"
+    assert dialog.infused_spin.value() == -1
+    dialog._calculate()
+    assert len(calls) == 1
+    assert calls[0]["now"] == now
+    assert dialog._last_result.remaining_ml == 11200 - 1000
+    assert dialog.infused_spin.value() == 1000
+    dialog.weight_spin.setValue(70)
+    dialog._calculate()
+    assert len(calls) == 1
+    dialog.infused_spin.setValue(1500)
+    dialog.urine_average_spin.setValue(300)
+    dialog._refresh_monitoring()
+    assert len(calls) == 2
+    assert dialog.infused_spin.value() == 1500
+    assert dialog.urine_average_spin.value() == 300
+    assert "Вручную" in dialog.infused_source_label.text()
+    assert dialog._last_result is None
+    dialog.injury_datetime_edit.setDateTime(QDateTime(now - timedelta(hours=4)))
+    assert dialog.infused_spin.value() == -1
+    dialog._calculate()
+    assert len(calls) == 3
+    assert dialog.infused_spin.value() == 1000
+
+
+def test_undo_manual_monitoring_restores_snapshot_without_resetting_burn():
+    dialog = filled_dialog({"infused_ml": 250, "urine_last_hour_ml": 100})
+    dialog.infused_spin.setValue(1000)
+    dialog.urine_last_hour_spin.setValue(200)
+    assert dialog.restore_monitoring_button.isEnabled()
+    dialog._restore_monitoring()
+    assert dialog.infused_spin.value() == 250
+    assert dialog.urine_last_hour_spin.value() == 100
+    assert dialog.total_tbsa_spin.value() == 35
+    assert not dialog.restore_monitoring_button.isEnabled()
+
+
+def test_failed_refresh_clears_automatic_values_and_does_not_present_zero():
+    now = datetime(2026, 9, 5, 14)
+    def loader(**kwargs):
+        return {"as_of": now, "infused_load_failed": True, "period_error": "Объём не загружен"}
+    dialog = filled_dialog({"monitoring_loader": loader, "infused_ml": 250, "urine_last_hour_ml": 100})
+    dialog._refresh_monitoring()
+    assert dialog.card_infused_label.text() == "—"
+    assert dialog.infused_spin.text() == "—"
+    assert dialog.urine_last_hour_spin.text() == "—"
+    dialog._calculate()
+    assert dialog._last_result is None
+    assert "не загружены" in dialog.validation_label.text()
+
+
+def test_child_oral_intake_is_visible_required_and_invalidates_result():
+    dialog = filled_dialog({"age_years": 4, "weight_kg": 20, "oral_ml": 400})
+    assert not dialog.oral_spin.isHidden()
+    dialog._calculate()
+    assert dialog._last_result is not None
+    assert dialog._last_result.remaining_ml == dialog._last_result.total_ml - 400
+    dialog.oral_spin.setValue(500)
+    assert dialog._last_result is None
+    dialog.oral_spin.setValue(-1)
+    dialog._calculate()
+    assert "энтеральное" in dialog.validation_label.text()
+    dialog.age_spin.setValue(42)
+    assert dialog.oral_spin.isHidden()
+
+
+@pytest.mark.parametrize("hours,start,end", [(30, "24 ч", "48 ч"), (54, "48 ч", "72 ч")])
+def test_timeline_uses_selected_treatment_day(hours, start, end):
+    dialog = filled_dialog()
+    dialog.injury_datetime_edit.setDateTime(QDateTime(dialog._as_of - timedelta(hours=hours)))
+    dialog.mode_buttons["day_2_3"].setChecked(True)
+    dialog._calculate()
+    assert dialog._last_result is not None
+    assert dialog.timeline_progress.value() == 60
+    assert dialog.timeline_start_label.text() == start
+    assert dialog.timeline_end_label.text() == end

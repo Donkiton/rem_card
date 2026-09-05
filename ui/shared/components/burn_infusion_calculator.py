@@ -130,16 +130,24 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
             drag_area_height=32,
         )
         self._patient_context = dict(patient_context or {})
+        self._monitoring_loader = self._patient_context.get("monitoring_loader")
+        self._as_of = self._patient_context.get("as_of") or datetime.now()
+        self._monitoring = dict(self._patient_context)
+        self._monitoring_key = None
+        self._manual_fields: set[str] = set()
+        self._applying_monitoring = False
         self._last_result: BurnInfusionResult | None = None
         self.resize(1120, 820)
         self.setMinimumSize(900, 680)
         self.setSizeGripEnabled(True)
         self._setup_ui()
+        self.injury_datetime_edit.setDateTime(QDateTime(self._as_of))
         self._apply_styles()
         self._apply_patient_context()
         self._update_age_controls()
         self._update_elapsed_label()
         self._show_empty_result()
+        self._connect_input_changes()
         self._restore_saved_geometry()
 
     def _setup_ui(self) -> None:
@@ -308,23 +316,45 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.infused_spin = self._spin(-1.0, 100000.0, 0, " мл")
         self.infused_spin.setSpecialValueText("—")
         self.infused_spin.setValue(0.0)
-        self.infused_spin.setAccessibleName("Введённый объём за сутки карты, можно скорректировать вручную")
+        self.infused_spin.setAccessibleName("Внутривенно введено за расчётный период, можно скорректировать вручную")
+        self.card_infused_label = QLabel("—")
+        self.card_infused_label.setAccessibleName("Уже введено внутривенно за текущие сутки карты с 08:00 до 08:00")
+        self.oral_spin = self._spin(-1.0, 100000.0, 0, " мл")
+        self.oral_spin.setSpecialValueText("—")
+        self.oral_spin.setValue(0.0)
+        self.oral_label = QLabel("Энтерально за период")
+        self.oral_label.setObjectName("BurnFieldLabel")
+        self.oral_label.setBuddy(self.oral_spin)
         self.urine_last_hour_spin = self._optional_spin("—", " мл/ч")
         self.urine_last_hour_spin.setAccessibleName("Диурез за последний час")
         self.urine_average_spin = self._optional_spin("—", " мл/ч")
         self.urine_average_spin.setAccessibleName("Средний диурез за три часа")
 
-        self._add_labeled(layout, 0, "Уже введено", self.infused_spin)
-        self._add_labeled(layout, 1, "Диурез за последний час", self.urine_last_hour_spin)
-        self._add_labeled(layout, 2, "Средний диурез за 3 часа", self.urine_average_spin)
+        self._add_labeled(layout, 0, "Уже введено за сутки карты", self.card_infused_label)
+        self._add_labeled(layout, 1, "В/в за расчётный период", self.infused_spin)
+        layout.addWidget(self.oral_label, 2, 0)
+        layout.addWidget(self.oral_spin, 2, 1)
+        self._add_labeled(layout, 3, "Диурез за последний час", self.urine_last_hour_spin)
+        self._add_labeled(layout, 4, "Средний диурез за 3 часа", self.urine_average_spin)
         self.infused_source_label = QLabel("")
         self.infused_source_label.setObjectName("BurnMonitoringHint")
         self.infused_source_label.setWordWrap(True)
-        layout.addWidget(self.infused_source_label, 3, 0, 1, 2)
+        layout.addWidget(self.infused_source_label, 5, 0, 1, 2)
         urine_hint = QLabel("Среднее за 3 часа = сумма / 3; незаполненные часы учитываются как 0.")
         urine_hint.setObjectName("BurnMonitoringHint")
         urine_hint.setWordWrap(True)
-        layout.addWidget(urine_hint, 4, 0, 1, 2)
+        layout.addWidget(urine_hint, 6, 0, 1, 2)
+        self.refresh_monitoring_button = QPushButton("Обновить из карты")
+        self.refresh_monitoring_button.setObjectName("BurnSecondaryButton")
+        self.refresh_monitoring_button.setToolTip("Заново прочитать сохранённые данные. Ручные значения сохраняются и помечаются.")
+        self.refresh_monitoring_button.setEnabled(callable(self._monitoring_loader))
+        self.refresh_monitoring_button.clicked.connect(self._refresh_monitoring)
+        layout.addWidget(self.refresh_monitoring_button, 7, 0, 1, 2)
+        self.restore_monitoring_button = QPushButton("Отменить ручные значения")
+        self.restore_monitoring_button.setObjectName("BurnSecondaryButton")
+        self.restore_monitoring_button.setToolTip("Восстановить последний загруженный снимок мониторинга, не меняя параметры ожога.")
+        self.restore_monitoring_button.clicked.connect(self._restore_monitoring)
+        layout.addWidget(self.restore_monitoring_button, 8, 0, 1, 2)
         layout.setColumnStretch(1, 1)
         return group
 
@@ -554,22 +584,130 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         else:
             self.weight_source_label.setText("Актуальная масса в карте не найдена — заполните вручную.")
 
-        infused = context.get("infused_ml")
-        if infused is not None:
-            self.infused_spin.setValue(float(infused))
-        elif context.get("infused_load_failed"):
-            self.infused_spin.setValue(-1.0)
-        self.infused_source_label.setText(str(context.get("infused_source") or ""))
+        self._apply_monitoring(context)
 
-        last_hour = context.get("urine_last_hour_ml")
-        if last_hour is not None:
-            self.urine_last_hour_spin.setValue(float(last_hour))
-        average = context.get("urine_average_3h_ml")
-        if average is not None:
-            self.urine_average_spin.setValue(float(average))
+    def _monitoring_fields(self) -> dict:
+        return {
+            "period_infused_ml": self.infused_spin, "oral_ml": self.oral_spin,
+            "urine_last_hour_ml": self.urine_last_hour_spin, "urine_average_3h_ml": self.urine_average_spin,
+        }
+
+    def _connect_input_changes(self) -> None:
+        for spin in (self.age_spin, self.weight_spin, self.total_tbsa_spin,
+                     self.superficial_tbsa_spin, self.deep_tbsa_spin):
+            spin.valueChanged.connect(self._invalidate_result)
+        for check in (self.inhalation_check, self.electrical_check, self.burn_shock_check):
+            check.toggled.connect(self._invalidate_result)
+        for field, spin in self._monitoring_fields().items():
+            spin.valueChanged.connect(lambda _value, key=field: self._monitoring_edited(key))
+        self.injury_datetime_edit.dateTimeChanged.connect(self._period_changed)
+        for button in self.mode_buttons.values():
+            button.toggled.connect(lambda checked: self._period_changed() if checked else None)
+
+    def _invalidate_result(self, *_args) -> None:
+        self._last_result = None
+        self.copy_button.setEnabled(False)
+        self.validation_label.clear()
+        self._show_empty_result()
+
+    def _monitoring_edited(self, field: str) -> None:
+        if not self._applying_monitoring:
+            self._manual_fields.add(field)
+            self._invalidate_result()
+            self._update_monitoring_source()
+
+    def _period_changed(self, *_args) -> None:
+        self._invalidate_result()
+        self._update_age_controls()
+        self._monitoring_key = None
+        if callable(self._monitoring_loader):
+            # Объём, вручную указанный для одних суток, нельзя перенести на другие.
+            self._applying_monitoring = True
+            try:
+                for key in ("period_infused_ml", "oral_ml"):
+                    self._manual_fields.discard(key)
+                    self._monitoring_fields()[key].setValue(-1)
+                for key in ("period_start", "period_end", "period_infused_ml", "oral_ml",
+                            "period_source", "period_error", "oral_error"):
+                    self._monitoring.pop(key, None)
+            finally:
+                self._applying_monitoring = False
+            self._update_monitoring_source()
+
+    def _apply_monitoring(self, context: dict) -> None:
+        self._monitoring = dict(context)
+        self._as_of = context.get("as_of") or self._as_of
+        self._applying_monitoring = True
+        try:
+            card_volume = context.get("infused_ml")
+            self.card_infused_label.setText(_fmt_ml(card_volume) if card_volume is not None else "—")
+            for key, spin in self._monitoring_fields().items():
+                if key in self._manual_fields:
+                    continue
+                value = context.get(key)
+                if key == "period_infused_ml" and not callable(self._monitoring_loader):
+                    value = context.get("infused_ml", -1 if context.get("infused_load_failed") else 0)
+                if key == "oral_ml" and not callable(self._monitoring_loader):
+                    value = context.get("oral_ml", 0)
+                spin.setValue(float(value) if value is not None else -1)
+        finally:
+            self._applying_monitoring = False
+        self._update_elapsed_label()
+        self._update_monitoring_source()
+
+    def _update_monitoring_source(self) -> None:
+        context = self._monitoring
+        lines = [str(context.get("infused_source") or ""), f"Данные и расчёт на {self._as_of:%d.%m.%Y %H:%M}."]
+        if context.get("loaded_at") is not None:
+            lines.append(f"Обновлено из карты: {context['loaded_at']:%d.%m %H:%M}.")
+        if context.get("period_start") is not None:
+            lines.append(f"Расчётный период: {context['period_start']:%d.%m %H:%M}–{context['period_end']:%d.%m %H:%M}.")
+        elif callable(self._monitoring_loader):
+            lines.append("Объём за период травмы загрузится по кнопке «Рассчитать».")
+        lines.extend(str(context[key]) for key in ("period_source", "period_error", "urine_error", "oral_error") if context.get(key))
+        if self._manual_fields:
+            names = {"period_infused_ml": "в/в", "oral_ml": "энтерально",
+                     "urine_last_hour_ml": "диурез за час", "urine_average_3h_ml": "диурез за 3 часа"}
+            lines.append("Вручную: " + ", ".join(names[key] for key in sorted(self._manual_fields))
+                         + ". При обновлении сохраняются; проверьте актуальность.")
+        self.infused_source_label.setText("\n".join(filter(None, lines)))
+        self.restore_monitoring_button.setEnabled(bool(self._manual_fields))
+
+    def _restore_monitoring(self) -> None:
+        self._invalidate_result()
+        self._manual_fields.clear()
+        self._apply_monitoring(self._monitoring)
+
+    def _load_monitoring(self, *, refresh: bool = False) -> None:
+        if not callable(self._monitoring_loader):
+            return
+        injury = self.injury_datetime_edit.dateTime().toPython()
+        mode = self._selected_mode()
+        include_oral = 0 < self.age_spin.value() < PEDIATRIC_AGE_LIMIT_YEARS and mode != MODE_POST_SHOCK
+        key = (injury, mode, include_oral)
+        if not refresh and key == self._monitoring_key:
+            return
+        context = self._monitoring_loader(injury=injury, mode=mode,
+                                          now=datetime.now() if refresh else self._as_of, include_oral=include_oral)
+        if (self._monitoring.get("period_start") is not None
+                and context.get("period_start") is not None
+                and context.get("period_start") != self._monitoring.get("period_start")):
+            self._manual_fields.difference_update({"period_infused_ml", "oral_ml"})
+        self._apply_monitoring(context)
+        self._monitoring_key = key
+
+    def _refresh_monitoring(self) -> None:
+        self._invalidate_result()
+        try:
+            self._load_monitoring(refresh=True)
+        except ValueError as exc:
+            self.validation_label.setText(f"Проверьте период: {exc}")
 
     def _update_age_controls(self) -> None:
         age = float(self.age_spin.value())
+        show_oral = 0 < age < PEDIATRIC_AGE_LIMIT_YEARS and self._selected_mode() != MODE_POST_SHOCK
+        self.oral_spin.setVisible(show_oral)
+        self.oral_label.setVisible(show_oral)
         self.pediatric_details_label.hide()
         if age + 1e-6 < (1.0 / 12.0):
             self.patient_profile_label.setText("—")
@@ -595,7 +733,7 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
 
     def _update_elapsed_label(self) -> None:
         injury = self.injury_datetime_edit.dateTime().toPython()
-        elapsed = (datetime.now() - injury).total_seconds() / 3600.0
+        elapsed = (self._as_of - injury).total_seconds() / 3600.0
         if elapsed < 0:
             text = "время позже текущего"
         else:
@@ -614,6 +752,9 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     def _build_input(self) -> BurnInfusionInput:
         if self.infused_spin.value() < 0:
             raise ValueError("Укажите уже введённый объём: данные из назначений не загружены.")
+        use_oral = 0 < self.age_spin.value() < PEDIATRIC_AGE_LIMIT_YEARS and self._selected_mode() != MODE_POST_SHOCK
+        if use_oral and self.oral_spin.value() < 0:
+            raise ValueError("Укажите фактическое энтеральное введение за расчётный период; при отсутствии — 0 мл.")
         return BurnInfusionInput(
             age_years=float(self.age_spin.value()),
             weight_kg=float(self.weight_spin.value()),
@@ -627,12 +768,15 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
             infused_ml=float(self.infused_spin.value()),
             urine_last_hour_ml=self._optional_value(self.urine_last_hour_spin),
             urine_average_3h_ml=self._optional_value(self.urine_average_spin),
+            oral_ml=float(self.oral_spin.value()) if use_oral else 0.0,
+            period_start=self._monitoring.get("period_start"),
         )
 
     def _calculate(self) -> None:
-        self.validation_label.clear()
+        self._invalidate_result()
         try:
-            result = calculate_burn_infusion(self._build_input(), mode=self._selected_mode())
+            self._load_monitoring()
+            result = calculate_burn_infusion(self._build_input(), mode=self._selected_mode(), now=self._as_of)
         except ValueError as exc:
             self._last_result = None
             self.copy_button.setEnabled(False)
@@ -654,17 +798,40 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
             breakdown.append(f"Ингаляционная травма: +{_fmt_ml(result.inhalation_extra_ml)}")
         if result.electrical_extra_ml:
             breakdown.append(f"Электротравма: +{_fmt_ml(result.electrical_extra_ml)}")
+        if result.mode == MODE_DAY_2_3:
+            breakdown = ["Доля объёма первых суток; подробности — в трассировке."]
+            if result.maintenance_ml:
+                breakdown.append(f"Физпотребность — нижняя граница: {_fmt_ml(result.maintenance_ml)}/сут")
+                breakdown.append(f"Дополнено до минимума: {_fmt_ml(result.maintenance_floor_added_ml)}")
         self.breakdown_label.setText("\n".join(breakdown))
 
-        self.timeline_progress.setValue(max(0, min(240, int(round(result.elapsed_hours * 10)))))
+        period_elapsed = result.elapsed_hours
+        scale = ("0 ч", "8 ч", "24 ч")
+        if result.mode == MODE_DAY_2_3:
+            offset = 24 if result.elapsed_hours < 48 else 48
+            period_elapsed -= offset
+            scale = (f"{offset} ч", f"{offset + 12} ч", f"{offset + 24} ч")
+        elif result.mode == MODE_POST_SHOCK:
+            start = self._monitoring.get("period_start") or self._as_of.replace(hour=8, minute=0, second=0, microsecond=0)
+            period_elapsed = (self._as_of - start).total_seconds() / 3600
+            if period_elapsed < 0:
+                period_elapsed += 24
+            scale = ("08:00", "20:00", "08:00")
+        for label, text in zip((self.timeline_start_label, self.timeline_mid_label, self.timeline_end_label), scale):
+            label.setText(text)
+        self.timeline_progress.setValue(max(0, min(240, int(round(period_elapsed * 10)))))
         self.timeline_now_label.setText(f"С момента травмы: {_fmt_number(result.elapsed_hours, 1)} ч")
         self.current_card[1].setText(_fmt_ml(result.current_interval_remaining_ml))
         rate_label = (
             "Суммарный ориентир жидкостной терапии" if result.maintenance_ml else "Ориентировочный темп"
         )
         self.current_card[2].setText(
-            f"{result.current_interval_label}\n{rate_label}: {_fmt_ml(result.recommended_rate_ml_h)}/ч"
+            f"{result.current_interval_label}\n{rate_label} (базовый): {_fmt_ml(result.recommended_rate_ml_h)}/ч"
         )
+        difference = result.schedule_difference_ml
+        progress = (f"Расчётное {'опережение' if difference > 0 else 'отставание'} графика: {_fmt_ml(abs(difference))}."
+                    if abs(difference) >= 0.5 else "Введение соответствует расчётному графику.")
+        self.current_card[2].setText(self.current_card[2].text() + "\n" + progress)
         if result.next_interval_rate_ml_h is not None and result.next_16h_ml is not None:
             self.next_card[0].setVisible(True)
             self.next_card[1].setText(_fmt_ml(result.next_16h_ml))
@@ -688,10 +855,12 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.trace_text.setPlainText("\n".join(f"{index}. {line}" for index, line in enumerate(result.calculation_trace, 1)))
 
     def _show_empty_result(self) -> None:
-        self.period_label.setText("Первые 24 часа")
+        self.period_label.setText(self.mode_buttons[self._selected_mode()].text())
         self.total_value_label.setText("—")
         self.breakdown_label.setText("Заполните площадь ожога и время травмы.")
         self.timeline_progress.setValue(0)
+        for label in (self.timeline_start_label, self.timeline_mid_label, self.timeline_end_label):
+            label.setText("—")
         self.timeline_now_label.setText("Расчет еще не выполнен")
         self.current_card[1].setText("—")
         self.current_card[2].setText("Текущий остаток и темп появятся после расчета.")
@@ -703,6 +872,8 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.trace_text.setPlainText("Трассировка формулы появится после расчета.")
 
     def _reset_form(self) -> None:
+        self._manual_fields.clear()
+        self._monitoring_key = None
         self.total_tbsa_spin.setValue(0.0)
         self.superficial_tbsa_spin.setValue(0.0)
         self.deep_tbsa_spin.setValue(0.0)
@@ -712,8 +883,10 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.infused_spin.setValue(0.0)
         self.urine_last_hour_spin.setValue(-1.0)
         self.urine_average_spin.setValue(-1.0)
-        self.injury_datetime_edit.setDateTime(QDateTime.currentDateTime())
+        self._as_of = self._patient_context.get("as_of") or datetime.now()
+        self.injury_datetime_edit.setDateTime(QDateTime(self._as_of))
         self.mode_buttons[MODE_FIRST_24H].setChecked(True)
+        self._manual_fields.clear()
         self._apply_patient_context()
         self._last_result = None
         self.copy_button.setEnabled(False)
@@ -732,6 +905,8 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
             f"{result.period_label}: {_fmt_ml(result.total_ml)}",
             f"Осталось: {_fmt_ml(result.remaining_ml)}",
             f"{rate_label}: {_fmt_ml(result.recommended_rate_ml_h)}/ч",
+            self.infused_source_label.text(),
+            f"Опережение (+) / отставание (−) графика: {_fmt_number(result.schedule_difference_ml)} мл",
             "",
             "Трассировка:",
             *result.calculation_trace,
@@ -905,7 +1080,7 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
                 min-width: 180px;
             }}
             QLabel#BurnBreakdownLabel {{
-                color: {TEXT_MUTED};
+                color: {TEXT_SECONDARY};
                 font-size: 11px;
                 font-weight: 400;
             }}

@@ -345,8 +345,9 @@ class DoctorRemCardWidget(QWidget):
         panel = getattr(self, "sector8_panel", None)
         if not self._is_qobject_alive(panel):
             return
-        enabled, tooltip = self._burn_calculator_availability(load_if_missing=False)
-        panel.set_burn_calc_enabled(enabled, tooltip)
+        # Сектор 8 содержит общий «Расчёт». Доступность ожогов проверяется
+        # только при открытии меню и повторно при выборе калькулятора.
+        panel.set_burn_calc_enabled(False, "Доступность определяется при открытии расчётов")
 
     def _burn_calculator_availability(self, *, load_if_missing: bool) -> tuple[bool, str]:
         if self._selection_mode != "card" or not self.admission_id:
