@@ -12,6 +12,7 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
+from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from rem_card.ui.nurse_view.nurse_remcard_layout import (  # noqa: E402
@@ -25,20 +26,34 @@ class DietSidebarTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def _create_layout(self, layout_class):
+        layout = layout_class()
+        # addCleanup удерживает окно до удаления в GUI-потоке, в том числе
+        # если тест завершился раньше из-за неудачной проверки.
+        self.addCleanup(self._destroy_test_window, layout)
+        return layout
+
+    def _destroy_test_window(self, layout):
+        # processEvents() сам по себе не обрабатывает DeferredDelete.
+        try:
+            # Завершаем отложенную инициализацию, пока её окно ещё живо.
+            self.app.processEvents()
+        finally:
+            layout.close()
+            layout.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
     def _assert_diet_sidebar(self, layout):
         self.assertEqual(layout.set_active_tab("Диета", source="refresh"), "Диета")
         self.assertFalse(layout.sector_3_4_wrapper.isHidden())
         self.assertIs(layout.sector_7b_stack.currentWidget(), layout.sector_7diet_b)
         self.assertEqual(layout.sector_7diet_b.header_lbl.text(), "Диеты")
 
-        layout.deleteLater()
-        self.app.processEvents()
-
     def test_doctor_diet_tab_keeps_balance_sidebar_visible(self):
-        self._assert_diet_sidebar(RemCardLayoutManager())
+        self._assert_diet_sidebar(self._create_layout(RemCardLayoutManager))
 
     def test_nurse_diet_tab_keeps_balance_sidebar_visible(self):
-        self._assert_diet_sidebar(NurseRemCardLayoutManager())
+        self._assert_diet_sidebar(self._create_layout(NurseRemCardLayoutManager))
 
     def _assert_balance_lower_edge_is_stable(self, layout):
         layout.resize(1400, 900)
@@ -57,14 +72,12 @@ class DietSidebarTest(unittest.TestCase):
         layout.set_active_tab("Витальные функции", source="refresh")
         self.app.processEvents()
         self.assertEqual(layout.vitals_stack.geometry(), stack_geometry)
-        layout.deleteLater()
-        self.app.processEvents()
 
     def test_doctor_balance_grid_keeps_same_lower_boundary_as_other_tabs(self):
-        self._assert_balance_lower_edge_is_stable(RemCardLayoutManager())
+        self._assert_balance_lower_edge_is_stable(self._create_layout(RemCardLayoutManager))
 
     def test_nurse_balance_grid_keeps_same_lower_boundary_as_other_tabs(self):
-        self._assert_balance_lower_edge_is_stable(NurseRemCardLayoutManager())
+        self._assert_balance_lower_edge_is_stable(self._create_layout(NurseRemCardLayoutManager))
 
 
 if __name__ == "__main__":
