@@ -521,7 +521,12 @@ class CurrentNurseOrdersWidget(QWidget):
             operation = lambda oid=lab_order_id: self.service.mark_lab_order_completed(oid)
             description = f"lab_order_complete_panel:{lab_order_id}"
         else:
-            operation = lambda aid=admin_id, m=mark: self.service.set_nurse_status(aid, m)
+            row = next((item for item in self._all_data if int(item.get("id") or 0) == int(admin_id)), None)
+            if row is None or self._get_pending_mark(admin_id):
+                return
+            version = int(row.get("version") or 0)
+            service = self.service
+            operation = lambda aid=admin_id, m=mark: service.set_nurse_status(aid, m, expected_version=version)
             description = f"nurse_order_panel_mark:{admin_id}"
 
         self._set_pending_mark(admin_id, mark)

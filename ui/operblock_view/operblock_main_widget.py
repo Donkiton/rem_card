@@ -7779,6 +7779,14 @@ class OperBlockVitalsServiceAdapter:
         self._started_at: datetime | None = None
         self._ended_at: datetime | None = None
 
+    def capture_vital_writer(self):
+        writer = OperBlockVitalsServiceAdapter(self._remcard_service, self._operblock_service)
+        writer.set_operation_context(
+            operation_case_id=self._operation_case_id, admission_id=self._admission_id,
+            started_at=self._started_at, ended_at=self._ended_at,
+        )
+        return writer
+
     def set_operation_context(
         self,
         *,
@@ -7884,13 +7892,19 @@ class OperBlockVitalsServiceAdapter:
                     f"Операция завершена в {end_minute.strftime('%H:%M')}. "
                     "Ввод данных позже этого времени невозможен."
                 )
-        return self._operblock_service.add_vital_record(dto, expected_revision=expected_revision)
+        change = self._operblock_service.add_vital_record(dto, expected_revision=expected_revision, return_change=True)
+        change["operation_case_id"] = self._operation_case_id
+        return change
 
-    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision=None):
+    def undo_vital_change(self, change):
+        return self._operblock_service.undo_vital_change(change)
+
+    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision=None, *, expected_vital_id=None):
         _ = date
         return self._operblock_service.delete_last_vital_record(
             admission_id,
             expected_revision=expected_revision,
+            expected_vital_id=expected_vital_id,
         )
 
     def enqueue_write(self, *args, **kwargs):

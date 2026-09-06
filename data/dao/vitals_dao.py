@@ -5,6 +5,7 @@ from ..dto.remcard_dto import VitalDTO
 from rem_card.app.logger import logger
 from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE, assert_revision_matches
 from .sync_cursor import is_cursor_newer, make_sync_cursor, normalize_sync_cursor
+from rem_card.services.vital_undo import vital_change
 
 
 class VitalsDAO:
@@ -15,7 +16,7 @@ class VitalsDAO:
         """Insert or update vitals row for the same minute (admission_id + minute)."""
         target_minute = dto.timestamp.strftime("%Y-%m-%d %H:%M")
         check_query = """
-            SELECT id, COALESCE(revision, 0) AS revision FROM vitals
+            SELECT *, COALESCE(revision, 0) AS revision FROM vitals
             WHERE admission_id = ?
               AND STRFTIME('%Y-%m-%d %H:%M', datetime) = ?
         """
@@ -106,6 +107,8 @@ class VitalsDAO:
             )
             dto.id = cursor.lastrowid
             dto.revision = 0
+
+        return vital_change(dto, row)
 
     def get_vitals(self, admission_id: int, start: datetime, end: datetime) -> List[VitalDTO]:
         query = """

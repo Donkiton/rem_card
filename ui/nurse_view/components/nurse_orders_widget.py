@@ -1897,6 +1897,7 @@ class NurseOrdersWidget(QWidget):
         if key is None:
             return
         committed_admin = copy(admin)
+        committed_admin.version = int(getattr(admin, "version", 0) or 0) + 1
         committed_admin.comment = mark or ""
         committed_admin.actual_time = datetime.now() if mark else None
         if hasattr(committed_admin, "_pending_mark"):
@@ -1915,6 +1916,8 @@ class NurseOrdersWidget(QWidget):
                     admin = self.model.data(index, Qt.UserRole)
                     if admin and admin.status == "planned" and admin.cell_role in ("start", "single", "body", "end"):
                         mark = getattr(admin, "comment", "") or ""
+                        service = self.service
+                        expected_version = int(getattr(admin, "version", 0) or 0)
 
                         # Проверка на раннюю отметку (> 1 часа в будущем)
                         planned_time_str = getattr(admin, "planned_time", None)
@@ -1950,16 +1953,16 @@ class NurseOrdersWidget(QWidget):
                                 )
                                 return True
                             if mark in (NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED):
-                                operation = lambda aid=admin_id: self.service.cancel_nurse_order_mark(aid)
+                                operation = lambda aid=admin_id: service.cancel_nurse_order_mark(aid, expected_version=expected_version)
                             else:
                                 next_mark = NURSE_MARK_EXECUTED
-                                operation = lambda aid=admin_id: self.service.set_nurse_order_mark(aid, NURSE_MARK_EXECUTED)
+                                operation = lambda aid=admin_id: service.set_nurse_order_mark(aid, NURSE_MARK_EXECUTED, expected_version=expected_version)
                         elif event.button() == Qt.RightButton:
                             if mark in (NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED):
-                                operation = lambda aid=admin_id: self.service.cancel_nurse_order_mark(aid)
+                                operation = lambda aid=admin_id: service.cancel_nurse_order_mark(aid, expected_version=expected_version)
                             else:
                                 next_mark = NURSE_MARK_NOT_EXECUTED
-                                operation = lambda aid=admin_id: self.service.set_nurse_order_mark(aid, NURSE_MARK_NOT_EXECUTED)
+                                operation = lambda aid=admin_id: service.set_nurse_order_mark(aid, NURSE_MARK_NOT_EXECUTED, expected_version=expected_version)
 
                         if operation:
                             if int(admin_id) in self._pending_admin_ids:

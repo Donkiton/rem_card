@@ -294,6 +294,8 @@ def _check_balance_controller_enqueue_error_refreshes(temp_root: str) -> tuple[b
         shift_date = datetime(2026, 5, 3, 8, 0)
         service = FakeFluidService()
         controller = BalanceController(service, admission_id=1, shift_date=shift_date)
+        refresh_requests = []
+        controller.refresh_requested.connect(lambda: refresh_requests.append(True))
         controller.grid = FakeGrid()
         controller.panel_2d = FakePanel()
         controller._effective_bounds_cache = (shift_date - timedelta(hours=1), shift_date + timedelta(hours=23))
@@ -317,8 +319,8 @@ def _check_balance_controller_enqueue_error_refreshes(temp_root: str) -> tuple[b
             return False, "BalanceController did not re-enable UI after write error"
         if controller._undo_stack:
             return False, f"BalanceController added undo state after failed write: {controller._undo_stack}"
-        if service.refresh_reads < 1:
-            return False, "BalanceController did not refresh from DB/service after write error"
+        if not refresh_requests or service.refresh_reads != 0:
+            return False, "BalanceController must request background refresh without reading DB on the UI thread"
         if not critical_messages or "forced balance write failure" not in critical_messages[-1]:
             return False, f"BalanceController did not show write error: {critical_messages}"
         return True, "ok"
@@ -1758,10 +1760,10 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
             if on_success:
                 on_success(result)
 
-        def set_doctor_order_mark(self, admin_id: int, mark: str):
+        def set_doctor_order_mark(self, admin_id: int, mark: str, *, expected_version=None):
             self.mark_calls.append(("set", int(admin_id), mark))
 
-        def cancel_doctor_order_mark(self, admin_id: int):
+        def cancel_doctor_order_mark(self, admin_id: int, *, expected_version=None):
             self.mark_calls.append(("cancel", int(admin_id), ""))
 
     shift = datetime(2026, 5, 3, 8, 0)

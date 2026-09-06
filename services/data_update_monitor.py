@@ -334,8 +334,7 @@ class DataUpdateMonitor(QThread):
             return
 
         if current_change_id > previous_change_id:
-            rows = self._data_service.fetch_changes_since(previous_change_id)
-            raw_changes = [self._normalize_row(row) for row in rows]
+            raw_changes = self._read_bounded_changes(previous_change_id, current_change_id)
             raw_change_ids = [
                 int(change["id"])
                 for change in raw_changes
@@ -435,6 +434,12 @@ class DataUpdateMonitor(QThread):
                 forced=True,
                 force_sources=force_sources,
             )
+
+    def _read_bounded_changes(self, previous_change_id, current_change_id):
+        # A later COMMIT belongs to the next batch, not to a gap in this one.
+        rows = self._data_service.fetch_changes_since(previous_change_id)
+        changes = [self._normalize_row(row) for row in rows]
+        return [change for change in changes if int(change.get("id") or 0) <= current_change_id]
 
     def _filter_changes_for_runtime_role(self, changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
         role = str(getattr(self._data_service, "_runtime_role", "") or "").strip().lower()

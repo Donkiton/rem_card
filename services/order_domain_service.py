@@ -805,6 +805,16 @@ class OrderDomainService:
                 source, source_order_id, source_admin_id
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source, source_admin_id) WHERE source_admin_id IS NOT NULL
+            DO UPDATE SET
+                admission_id = excluded.admission_id,
+                type = excluded.type, volume_ml = excluded.volume_ml,
+                datetime = excluded.datetime, source_order_id = excluded.source_order_id
+            WHERE transfusions.admission_id IS NOT excluded.admission_id
+               OR transfusions.type IS NOT excluded.type
+               OR transfusions.volume_ml IS NOT excluded.volume_ml
+               OR transfusions.datetime IS NOT excluded.datetime
+               OR transfusions.source_order_id IS NOT excluded.source_order_id
             """,
             (
                 row.get("admission_id"),
@@ -818,6 +828,10 @@ class OrderDomainService:
         )
 
     def _sync_transfusion_for_admin(self, cursor, admin_id: int):
+        row = self._fetch_admin_transfusion_row(cursor, admin_id)
+        if row and self._is_active_executed_transfusion_row(row) and self._transfusion_volume_ml(row) > 0:
+            self._insert_transfusion_from_admin_row(cursor, row)
+            return
         cursor.execute(
             """
             DELETE FROM transfusions
@@ -826,20 +840,20 @@ class OrderDomainService:
             (REMCARD_TRANSFUSION_SOURCE, admin_id),
         )
 
-        row = self._fetch_admin_transfusion_row(cursor, admin_id)
-        if row:
-            self._insert_transfusion_from_admin_row(cursor, row)
-
-    def sync_transfusions_for_admission(self, cursor, admission_id: int):
+    def sync_transfusions_for_admission(self, cursor, admission_id: int, *, order_ids=None):
+        order_ids = sorted(set(int(value) for value in order_ids)) if order_ids is not None else None
+        if order_ids == []:
+            return
+        order_filter = ""
+        sub_filter = ""
+        params = [admission_id, admission_id]
+        if order_ids is not None:
+            order_filter = " AND o.id IN (" + ",".join("?" for _ in order_ids) + ")"
+            sub_filter = " AND o2.id IN (" + ",".join("?" for _ in order_ids) + ")"
+            params.extend(order_ids)
+            params.extend(order_ids)
         cursor.execute(
-            """
-            DELETE FROM transfusions
-            WHERE source = ? AND admission_id = ?
-            """,
-            (REMCARD_TRANSFUSION_SOURCE, admission_id),
-        )
-        cursor.execute(
-            """
+            f"""
             SELECT
                 a.id AS admin_id,
                 a.order_id,
@@ -867,24 +881,43 @@ class OrderDomainService:
                   JOIN orders o2 ON o2.id = a2.order_id
                   WHERE o2.admission_id = ?
                     AND a2.is_committed = 1
+                    {sub_filter}
                   GROUP BY a2.order_id, DATETIME(a2.planned_time)
               )
+              {order_filter}
             """,
-            (admission_id, admission_id),
+            tuple(params),
         )
         rows = cursor.fetchall()
         columns = [desc[0] for desc in (cursor.description or [])]
+        desired_ids = set()
         for row in rows:
             mapped = dict(row) if hasattr(row, "keys") else {columns[idx]: row[idx] for idx in range(len(columns))}
-            if mapped:
+            if mapped and self._is_active_executed_transfusion_row(mapped) and self._transfusion_volume_ml(mapped) > 0:
+                desired_ids.add(int(mapped["admin_id"]))
                 self._insert_transfusion_from_admin_row(cursor, mapped)
+        scope = " AND source_order_id IN (" + ",".join("?" for _ in order_ids) + ")" if order_ids is not None else ""
+        cursor.execute(
+            "SELECT id, source_admin_id FROM transfusions WHERE source = ? AND admission_id = ?" + scope,
+            (REMCARD_TRANSFUSION_SOURCE, admission_id, *(order_ids or [])),
+        )
+        obsolete = [(row["id"],) for row in cursor.fetchall() if row["source_admin_id"] not in desired_ids]
+        if obsolete:
+            cursor.executemany("DELETE FROM transfusions WHERE id = ?", obsolete)
 
-    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
+    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
         """Устанавливает отметку выполнения медсестрой в поле comment."""
         self._sanitize_legacy_statuses_once()
         with self.db.remcard_transaction() as cursor:
             row = self._fetch_admin_for_nurse_update(cursor, admin_id)
-            expected_version = self._assert_nurse_admin_current(cursor, row)
+            current_version = self._assert_nurse_admin_current(cursor, row)
+            if expected_version is not None and current_version != int(expected_version):
+                self._raise_nurse_optimistic_conflict(
+                    "displayed_version_changed",
+                    "Выполнение изменено другим рабочим местом. Обновите карточку.",
+                    row=row,
+                )
+            expected_version = current_version
             now_str = datetime.now().isoformat()
 
             color = None
@@ -917,17 +950,23 @@ class OrderDomainService:
             self._sync_transfusion_for_admin(cursor, admin_id)
             logger.info(f"[NurseAction] Admin ID {admin_id} mark set to {mark} at {now_str}.")
 
-    def cancel_nurse_action(self, admin_id: int, *, allow_late_cancel: bool = False):
+    def cancel_nurse_action(self, admin_id: int, *, allow_late_cancel: bool = False, expected_version: Optional[int] = None):
         """Отменяет действие медсестры (очищает comment и actual_time)."""
         with self.db.remcard_transaction() as cursor:
             row = self._fetch_admin_for_nurse_update(cursor, admin_id)
-            expected_version = self._assert_nurse_admin_current(cursor, row)
+            current_version = self._assert_nurse_admin_current(cursor, row)
+            if expected_version is not None and current_version != int(expected_version):
+                self._raise_nurse_optimistic_conflict(
+                    "displayed_version_changed",
+                    "Выполнение изменено другим рабочим местом. Обновите карточку.",
+                    row=row,
+                )
+            expected_version = current_version
 
             if row["actual_time"] and not allow_late_cancel:
                 act_time = datetime.fromisoformat(row["actual_time"])
                 if datetime.now() > act_time + timedelta(minutes=60):
-                    logger.warning(f"[NurseAction] Cancel timeout (60m) expired for Admin ID {admin_id}")
-                    return
+                    raise RuntimeError("Истекло время отмены выполнения (60 минут). Обновите карточку.")
 
             query = """
                 UPDATE administrations
@@ -951,11 +990,11 @@ class OrderDomainService:
             self._sync_transfusion_for_admin(cursor, admin_id)
             logger.info(f"[NurseAction] Admin ID {admin_id} mark cleared.")
 
-    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
-        self.set_nurse_status(admin_id, mark, performer_id=performer_id)
+    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
+        self.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
-    def cancel_doctor_action(self, admin_id: int):
-        self.cancel_nurse_action(admin_id, allow_late_cancel=True)
+    def cancel_doctor_action(self, admin_id: int, *, expected_version: Optional[int] = None):
+        self.cancel_nurse_action(admin_id, allow_late_cancel=True, expected_version=expected_version)
 
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime) -> List[Dict]:
         """Получает данные для сектора 1а. Просроченность больше не создается."""
@@ -976,7 +1015,11 @@ class OrderDomainService:
               AND a.id IN (
                   SELECT MAX(a2.id)
                   FROM administrations a2
+                  JOIN orders o2 ON o2.id = a2.order_id
                   WHERE a2.is_committed = 1
+                    AND o2.admission_id = ?
+                    AND DATETIME(a2.planned_time) >= DATETIME(?)
+                    AND DATETIME(a2.planned_time) < DATETIME(?)
                   GROUP BY a2.order_id, DATETIME(a2.planned_time)
               )
               AND a.cell_role IN ('start', 'single')
@@ -1002,7 +1045,7 @@ class OrderDomainService:
                   OR COALESCE(o.is_committed, 0) = 0
               )
         """
-        rows = self.db.fetch_all_remcard(query, (admission_id, start_dt.isoformat(), end_dt.isoformat()))
+        rows = self.db.fetch_all_remcard(query, (admission_id, start_dt.isoformat(), end_dt.isoformat(), admission_id, start_dt.isoformat(), end_dt.isoformat()))
 
         if rows:
             logger.debug(f"[OrderDomainService] get_nurse_orders_data: Found {len(rows)} committed admin rows for Admission {admission_id}")

@@ -61,7 +61,7 @@ class _ImmediateVitalService:
         _ = force, expected_revision
         dto.id = 101
         dto.revision = 0
-        return dto.id
+        return {"admission_id": dto.admission_id, "vital_id": dto.id, "revision": 0, "before": None}
 
     @staticmethod
     def enqueue_write(*, operation, on_success, on_error, **_kwargs):

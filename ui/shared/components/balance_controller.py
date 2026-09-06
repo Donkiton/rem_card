@@ -2,10 +2,46 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from datetime import datetime, timedelta
 from PySide6.QtCore import QObject, Signal
 from ....app.logger import logger
+from rem_card.services.shift_service import ShiftService
 
 class BalanceController(QObject):
     """Контроллер для связи UI баланса выведения с бизнес-логикой и БД."""
     data_updated = Signal()
+    refresh_requested = Signal()
+
+    def _set_context_value(self, name, value):
+        if getattr(self, name, None) != value:
+            self._context_generation = getattr(self, "_context_generation", 0) + 1
+            if hasattr(self, "hourly_cache"):
+                self.hourly_cache = self._build_empty_hourly_cache()
+                self._hour_fluid_id_map = {}
+                self._hour_revision_map = {}
+                self._effective_bounds_cache = None
+        setattr(self, name, value)
+
+    @property
+    def admission_id(self):
+        return self._admission_id
+
+    @admission_id.setter
+    def admission_id(self, value):
+        self._set_context_value("_admission_id", value)
+
+    @property
+    def shift_date(self):
+        return self._shift_date
+
+    @shift_date.setter
+    def shift_date(self, value):
+        self._set_context_value("_shift_date", value)
+
+    @property
+    def service(self):
+        return self._service
+
+    @service.setter
+    def service(self, value):
+        self._set_context_value("_service", value)
 
     def __init__(self, fluid_service, admission_id: int, shift_date: datetime):
         super().__init__()
@@ -18,7 +54,8 @@ class BalanceController(QObject):
         self.quick_input = None # Теперь это Sector2b_v
         
         # Стек для Undo (храним ID последних созданных/измененных записей)
-        self._undo_stack = [] 
+        self._undo_by_context = {}
+        self._pending_contexts = set()
         
         # Кэш данных: hour (0-23) -> накопленные значения по показателям выведения.
         self.hourly_cache = self._build_empty_hourly_cache()
@@ -30,6 +67,25 @@ class BalanceController(QObject):
 
     def set_patient_period_manual_mode(self, enabled: bool):
         self._allow_patient_period = bool(enabled)
+
+    def _context_key(self):
+        shift_start, _ = ShiftService.get_day_period(self.shift_date)
+        return id(self.service), self.admission_id, shift_start
+
+    @property
+    def _undo_stack(self):
+        return self._undo_by_context.setdefault(self._context_key(), [])
+
+    @property
+    def _write_pending(self):
+        return self._context_key() in self._pending_contexts
+
+    @_write_pending.setter
+    def _write_pending(self, value):
+        if value:
+            self._pending_contexts.add(self._context_key())
+        else:
+            self._pending_contexts.discard(self._context_key())
 
     @staticmethod
     def _build_empty_hourly_cache():
@@ -74,13 +130,8 @@ class BalanceController(QObject):
                 continue
 
     def refresh(self):
-        """Загрузка данных из БД и обновление сетки."""
-        try:
-            effective_bounds = self.service.vital_service.get_effective_bounds(self.admission_id, self.shift_date)
-            fluids = self.service.get_fluids(self.admission_id, self.shift_date)
-            self.apply_loaded_data(fluids, effective_bounds)
-        except Exception as e:
-            logger.error(f"[BalanceCtrl] Error refreshing data: {e}", exc_info=True)
+        """The card's BalanceSnapshotSync owns all database reads."""
+        self.refresh_requested.emit()
 
     def apply_loaded_data(self, fluids, effective_bounds):
         self.hourly_cache = self._build_empty_hourly_cache()
@@ -133,30 +184,8 @@ class BalanceController(QObject):
     def _on_panel_save(self, new_val):
         if self._write_pending:
             return
-        # ПРОВЕРКА ИСХОДА + 1 ЧАС
-        current_sel = self.grid.selectedItems()
-        if current_sel:
-            item = current_sel[0]
-            col = item.column()
-            hour = (col + 8) % 24
-            
-            dt = self.service.vital_service.shift_service.resolve_datetime(f"{hour:02d}:00", self.shift_date)
-            
-            # Получаем статус (безопасный доступ через сервис)
-            status_service = getattr(self.service.vital_service, 'status_service', None)
-            status_event = status_service.get_current_status(self.admission_id) if status_service else None
-            
-            if status_event and status_event.status.is_outcome() and not self._allow_patient_period:
-                # Лимит: время исхода + 1 час
-                limit_time = status_event.start_time + timedelta(hours=1)
-                if dt > limit_time:
-                    outcome_name = "переведен" if status_event.status == status_event.status.TRANSFERRED else "умер"
-                    CustomMessageBox.warning(
-                        None, 
-                        "Внимание", 
-                        f"Пациент {outcome_name} в {status_event.start_time.strftime('%H:%M')}. Ввод выведенного позже {limit_time.strftime('%H:%M')} невозможен."
-                    )
-                    return
+
+        # The service validates the patient period in the queued operation.
 
         # Получаем информацию напрямую из выделения сетки, если get_selected_info() подводит для пустых ячеек
         items = self.grid.selectedItems()
@@ -212,11 +241,7 @@ class BalanceController(QObject):
 
     def is_current_shift(self) -> bool:
         """Проверяет, являются ли установленные сутки текущими реанимационными сутками."""
-        now = datetime.now()
-        if self._effective_bounds_cache:
-            start, end = self._effective_bounds_cache
-        else:
-            start, end = self.service.vital_service.get_effective_bounds(self.admission_id, now)
+        start, end = ShiftService.get_day_period(datetime.now())
         return start <= self.shift_date < end
 
     def add_value(self, row_key: str, input_field):
@@ -233,23 +258,11 @@ class BalanceController(QObject):
         now = datetime.now()
         hour = now.hour
 
-        # ПРОВЕРКА ИСХОДА + 1 ЧАС для быстрого ввода
-        status_service = getattr(self.service.vital_service, 'status_service', None)
-        status_event = status_service.get_current_status(self.admission_id) if status_service else None
-        
-        if status_event and status_event.status.is_outcome():
-            limit_time = status_event.start_time + timedelta(hours=1)
-            # Для простоты проверяем текущее время (now) против лимита
-            if now > limit_time:
-                outcome_name = "переведен" if status_event.status == status_event.status.TRANSFERRED else "умер"
-                CustomMessageBox.warning(
-                    None, 
-                    "Внимание", 
-                    f"Пациент {outcome_name} в {status_event.start_time.strftime('%H:%M')}. Ввод выведенного позже {limit_time.strftime('%H:%M')} невозможен."
-                )
-                return
-
         logger.debug(f"[BalanceCtrl] Quick Add: {row_key} = {val} ml (hour {hour})")
+
+        def clear_saved_input(_result):
+            if input_field.text() == text:
+                input_field.clear()
         
         # Проверяем, есть ли уже значение
         current_hour = self.hourly_cache.setdefault(hour, self._build_empty_hourly_cache()[hour])
@@ -263,7 +276,8 @@ class BalanceController(QObject):
                     hour,
                     val,
                     is_sum=True,
-                    on_success=lambda _result: input_field.clear(),
+                    on_success=clear_saved_input,
+                    quick_input_time=now,
                 )
         else:
             self._process_update(
@@ -271,10 +285,11 @@ class BalanceController(QObject):
                 hour,
                 val,
                 is_sum=True,
-                on_success=lambda _result: input_field.clear(),
+                on_success=clear_saved_input,
+                quick_input_time=now,
             )
 
-    def _process_update(self, row_key, hour, val, is_sum=False, on_success=None):
+    def _process_update(self, row_key, hour, val, is_sum=False, on_success=None, *, quick_input_time=None):
         """Сохранение значения выведения по часу через сервисный слой."""
         if self._write_pending:
             return
@@ -283,8 +298,17 @@ class BalanceController(QObject):
         shift_date = self.shift_date
         service = self.service
         expected_revision = self._hour_revision_map.get(hour)
+        context = self._context_key()
+        generation = self._context_generation
+        stack = self._undo_stack
+        allow_patient_period = self._allow_patient_period
 
         def operation():
+            if quick_input_time is not None:
+                status_service = getattr(service.vital_service, "status_service", None)
+                status = status_service.get_current_status(admission_id) if status_service else None
+                if status and status.status.is_outcome() and quick_input_time > status.start_time + timedelta(hours=1):
+                    raise ValueError("Ввод выведенного позже часа после исхода невозможен.")
             return service.upsert_hourly_output(
                 admission_id=admission_id,
                 shift_date=shift_date,
@@ -293,38 +317,46 @@ class BalanceController(QObject):
                 value=val,
                 is_sum=is_sum,
                 expected_revision=expected_revision,
-                allow_patient_period=self._allow_patient_period,
+                allow_patient_period=allow_patient_period,
             )
 
         def handle_success(result):
-            if not self._is_current_context(admission_id, shift_date):
-                self._finish_pending("Сохранено")
-                return
             if result["action"] == "add":
-                self._undo_stack.append(("add", result["fluid_id"], result.get("new_revision")))
+                stack.append(("add", result["fluid_id"], result.get("new_revision")))
                 logger.debug(f"[BalanceCtrl] Created new record {result['fluid_id']} for hour {hour}")
             else:
-                self._undo_stack.append(("update", result["fluid_id"], row_key, result["old_value"], result.get("new_revision")))
+                stack.append(("update", result["fluid_id"], row_key, result["old_value"], result.get("new_revision")))
                 logger.debug(
                     f"[BalanceCtrl] Updated record {result['fluid_id']} for hour {hour}. {row_key}: "
                     f"{result['old_value']}->{result['new_value']}"
                 )
 
+            del stack[:-50]
+            if context != self._context_key():
+                self._finish_pending(context=context)
+                return
+            if generation != self._context_generation:
+                self.refresh()
+                self._finish_pending(context=context)
+                return
+            self._hour_revision_map[hour] = result.get("new_revision")
+            self._hour_fluid_id_map[hour] = result["fluid_id"]
+            self.hourly_cache[hour][row_key] = result["new_value"]
             if on_success:
                 on_success(result)
             self.refresh()
             if self.panel_2d:
                 self.panel_2d.set_undo_active(len(self._undo_stack) > 0)
-            self._finish_pending("Сохранено")
+            self._finish_pending("Сохранено", context=context)
 
         def handle_error(exc):
             logger.error(
                 f"[BalanceCtrl] Save failed: {exc}",
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
-            if self._is_current_context(admission_id, shift_date):
+            if context == self._context_key():
                 self.refresh()
-            self._finish_pending("Ошибка сохранения")
+            self._finish_pending("Ошибка сохранения", context=context)
             CustomMessageBox.critical(None, "Ошибка", f"Не удалось сохранить данные: {exc}")
 
         self._enqueue_write(
@@ -343,9 +375,9 @@ class BalanceController(QObject):
             return
 
         action = self._undo_stack[-1]
-        admission_id = self.admission_id
-        shift_date = self.shift_date
         service = self.service
+        context = self._context_key()
+        stack = self._undo_stack
 
         def operation():
             if action[0] == 'add':
@@ -356,16 +388,32 @@ class BalanceController(QObject):
             elif action[0] == 'update':
                 fluid_id, row_key, old_val = action[1], action[2], action[3]
                 expected_revision = action[4] if len(action) > 4 else None
-                service.restore_hourly_output(fluid_id, row_key, old_val, expected_revision=expected_revision)
-                return {"action": "update", "fluid_id": fluid_id, "row_key": row_key, "old_value": old_val}
+                revision = service.restore_hourly_output(fluid_id, row_key, old_val, expected_revision=expected_revision)
+                return {"action": "update", "fluid_id": fluid_id, "row_key": row_key, "old_value": old_val, "revision": revision}
             raise ValueError(f"Unknown balance undo action: {action[0]}")
 
         def handle_success(result):
-            if not self._is_current_context(admission_id, shift_date):
-                self._finish_pending("Отменено")
+            if stack and stack[-1] == action:
+                stack.pop()
+            if result.get("revision") is not None:
+                for index in range(len(stack) - 1, -1, -1):
+                    previous = stack[index]
+                    if previous[1] == result["fluid_id"]:
+                        stack[index] = (*previous[:-1], result["revision"])
+                        break
+            if context != self._context_key():
+                self._finish_pending(context=context)
                 return
-            if self._undo_stack and self._undo_stack[-1] == action:
-                self._undo_stack.pop()
+            for hour, fluid_id in list(self._hour_fluid_id_map.items()):
+                if fluid_id != result["fluid_id"]:
+                    continue
+                if result["action"] == "add":
+                    self._hour_revision_map.pop(hour, None)
+                    self._hour_fluid_id_map.pop(hour, None)
+                    self.hourly_cache[hour] = self._build_empty_hourly_cache()[hour]
+                else:
+                    self._hour_revision_map[hour] = result["revision"]
+                    self.hourly_cache[hour][result["row_key"]] = result["old_value"]
             if result["action"] == "add":
                 logger.debug(f"[BalanceCtrl] Undo ADD: deleted record {result['fluid_id']}")
             else:
@@ -376,16 +424,16 @@ class BalanceController(QObject):
             self.refresh()
             if self.panel_2d:
                 self.panel_2d.set_undo_active(len(self._undo_stack) > 0)
-            self._finish_pending("Отменено")
+            self._finish_pending("Отменено", context=context)
 
         def handle_error(exc):
             logger.error(
                 f"[BalanceCtrl] Undo failed: {exc}",
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
-            if self._is_current_context(admission_id, shift_date):
+            if context == self._context_key():
                 self.refresh()
-            self._finish_pending("Ошибка отмены")
+            self._finish_pending("Ошибка отмены", context=context)
             CustomMessageBox.critical(None, "Ошибка", f"Не удалось отменить последнее действие: {exc}")
 
         self._enqueue_write(
@@ -431,10 +479,11 @@ class BalanceController(QObject):
         if self.panel_2d:
             self.panel_2d.status_lbl.setText(text)
 
-    def _finish_pending(self, text: str = ""):
-        self._write_pending = False
-        self._set_write_widgets_enabled(True)
-        if text and self.panel_2d:
+    def _finish_pending(self, text: str = "", *, context=None):
+        context = self._context_key() if context is None else context
+        self._pending_contexts.discard(context)
+        self._set_write_widgets_enabled(not self._write_pending)
+        if text and self.panel_2d and context == self._context_key():
             self.panel_2d.status_lbl.setText(text)
 
     def _set_write_widgets_enabled(self, enabled: bool):
@@ -511,7 +560,7 @@ class BalanceController(QObject):
             
         # Блокируем или разблокируем поля в зависимости от того, текущие ли это сутки
         is_today = self.is_current_shift()
-        self.quick_input.set_quick_input_enabled(is_today)
+        self.quick_input.set_quick_input_enabled(is_today and not self._write_pending)
 
         # ЖЕСТКАЯ ПРОВЕРКА ФОКУСА ДЛЯ БЫСТРОГО ВВОДА
         # Если хоть одно поле быстрого ввода имеет фокус или содержит текст - не обновляем X и не трогаем refresh()

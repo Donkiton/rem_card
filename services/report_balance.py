@@ -3,6 +3,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from rem_card.app.logger import logger
 from rem_card.services.balance_calculator import BalanceCalculator
+from rem_card.services.balance_errors import IncompleteBalanceError
 
 
 INPUT_KEYS = ("infusion", "preparats", "blood", "plasma", "oral")
@@ -162,6 +163,7 @@ def build_print_balance_final(
             oral_day = oral_totals.get("daily", 0) or 0
         except Exception as exc:
             logger.warning("Failed to load oral intake totals for print balance: %s", exc)
+            raise IncompleteBalanceError("Не удалось прочитать питание для печати. Повторите формирование отчёта.") from exc
 
     if config.get("balance", True) and admission_id and hasattr(remcard_service, "get_oral_intake_events"):
         try:
@@ -169,6 +171,7 @@ def build_print_balance_final(
             _add_oral_events_to_hourly(in_hourly, oral_events, start_dt, current_time)
         except Exception as exc:
             logger.warning("Failed to load oral intake events for print balance: %s", exc)
+            raise IncompleteBalanceError("Не удалось прочитать питание для почасового баланса. Повторите формирование отчёта.") from exc
 
     _round_input_hourly(in_hourly)
     in_cur = _sum_input_hourly(in_hourly)

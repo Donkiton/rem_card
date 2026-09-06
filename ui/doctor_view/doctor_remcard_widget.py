@@ -25,7 +25,7 @@ from rem_card.ui.shared.orders_balance_adapter import (
     project_balance_orders,
     oral_totals_from_runtime,
 )
-from rem_card.ui.shared.balance_snapshot_sync import BalanceSnapshotSync
+from rem_card.ui.shared.balance_snapshot_sync import BalanceSnapshotSync, show_balance_sync_status
 
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
@@ -175,6 +175,7 @@ class DoctorRemCardWidget(QWidget):
             overlay_sequence_provider=self._balance_mark_override_sequence,
             role="doctor",
             delay_ms=self._balance_update_delay_ms,
+            status_callback=lambda message: show_balance_sync_status(getattr(self, "layout_manager", None), message),
         )
 
         # Кнопка не опрашивает сетевой lock в фоне: проверка выполняется только при нажатии.
@@ -975,6 +976,12 @@ class DoctorRemCardWidget(QWidget):
             return
         exc_info = (type(exc), exc, exc.__traceback__) if isinstance(exc, BaseException) else None
         logger.error("DoctorRemCardWidget snapshot load failed: %s", exc, exc_info=exc_info)
+
+        from rem_card.services.balance_errors import IncompleteBalanceError
+        if isinstance(exc, IncompleteBalanceError):
+            self._balance_snapshot_sync.report_error(str(exc))
+            self._balance_snapshot_sync.schedule()
+            self._request_card_snapshot(show_empty_message=False, load_scope="patient_open_vitals")
 
     def _on_card_snapshot_finished(self):
         worker = self.sender()
@@ -2917,6 +2924,7 @@ class DoctorRemCardWidget(QWidget):
         self.layout_manager.sector_1b.set_content(self.vitals_input)
 
         self.balance_controller = BalanceController(self.service.fluid_service, self.admission_id, self._current_date)
+        self.balance_controller.refresh_requested.connect(self._refresh_balance_from_db)
         self._bind_balance_widgets_if_ready()
 
         self._card_widgets_initialized = True
@@ -2976,6 +2984,8 @@ class DoctorRemCardWidget(QWidget):
         if not self._apply_balance_snapshot_if_available():
             self._refresh_balance_from_db()
         self._balance_snapshot_sync.ensure_current()
+
+        show_balance_sync_status(self.layout_manager, self._balance_snapshot_sync.status_text)
 
     def on_show_card_clicked(self):
         target_date = self._resolve_current_or_latest_card_date(self.admission_id)

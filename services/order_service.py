@@ -766,7 +766,25 @@ class OrderService:
                 temporary_chain_map,
             )
 
-            self._domain_service.sync_transfusions_for_admission(cursor, int(admission_id))
+            dirty_order_ids = {int(key[0]) for key in normalized_dirty}
+            transfusion_ids = []
+            for order in effective_orders:
+                local_id = int(order.id)
+                current = current_orders.get(local_id)
+                relevant = str(order.drug_key or "").lower().strip() in {"blood", "plasma"}
+                relevant = relevant or (current is not None and str(current["drug_key"] or "").lower().strip() in {"blood", "plasma"})
+                changed = (
+                    current is None or local_id in dirty_order_ids
+                    or bool(getattr(order, "_pending_delete", False))
+                    or not self._order_row_matches_clinical_fields(current, order)
+                    or str(current["status"] or "") != str(getattr(order.status, "value", order.status))
+                )
+                if relevant and changed and local_id in order_id_map:
+                    transfusion_ids.append(order_id_map[local_id])
+            if transfusion_ids:
+                self._domain_service.sync_transfusions_for_admission(
+                    cursor, int(admission_id), order_ids=transfusion_ids,
+                )
             return order_id_map
 
     def add_order(self, dto: OrderDTO):
@@ -1747,17 +1765,17 @@ class OrderService:
     def apply_right_click(self, order: OrderDTO, admin, planned_time: datetime):
         self._domain_service.handle_right_click(order, admin, planned_time)
 
-    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
-        self._domain_service.set_nurse_status(admin_id, mark, performer_id=performer_id)
+    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
+        self._domain_service.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
-    def cancel_nurse_action(self, admin_id: int):
-        self._domain_service.cancel_nurse_action(admin_id)
+    def cancel_nurse_action(self, admin_id: int, *, expected_version: Optional[int] = None):
+        self._domain_service.cancel_nurse_action(admin_id, expected_version=expected_version)
 
-    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
-        self._domain_service.set_doctor_status(admin_id, mark, performer_id=performer_id)
+    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
+        self._domain_service.set_doctor_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
-    def cancel_doctor_action(self, admin_id: int):
-        self._domain_service.cancel_doctor_action(admin_id)
+    def cancel_doctor_action(self, admin_id: int, *, expected_version: Optional[int] = None):
+        self._domain_service.cancel_doctor_action(admin_id, expected_version=expected_version)
 
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime):
         return self._domain_service.get_nurse_orders_data(admission_id, shift_date)

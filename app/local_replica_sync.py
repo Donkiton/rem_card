@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -105,6 +106,13 @@ class LocalReplicaSync:
         self._failure_callback: Callable[[dict[str, Any]], None] | None = None
         self._next_retry_not_before: float = 0.0
         self._current_backoff_sec: float = 0.0
+        self._last_attempt_finished = 0.0
+        self._last_attempt_duration = 0.0
+        # Stable per-workstation phase prevents readers from repeatedly
+        # competing for the same shared snapshot lease at the same instant.
+        phase_key = f"{socket.gethostname()}:{self.local_db_path}"
+        phase = int(hashlib.sha256(phase_key.encode("utf-8")).hexdigest()[:8], 16) / 0xFFFFFFFF
+        self._poll_phase_sec = phase * min(0.25, self.sync_interval_sec * 0.1)
 
     def start(self) -> None:
         os.makedirs(os.path.dirname(self.local_db_path), exist_ok=True)
@@ -384,7 +392,7 @@ class LocalReplicaSync:
         while not self._stop_evt.is_set():
             with self._lock:
                 delay_sec = (
-                    self.sync_interval_sec
+                    self.sync_interval_sec + self._poll_phase_sec
                     if self.consecutive_failures <= 0
                     else max(
                         0.0,
@@ -396,8 +404,20 @@ class LocalReplicaSync:
             if self._stop_evt.is_set():
                 return
             if triggered:
+                # Coalesce wakeups produced while the previous full backup
+                # was running. Required-cursor reads still use central DB.
+                cooldown = self._fast_sync_cooldown()
+                if self._stop_evt.wait(cooldown):
+                    return
                 self._fast_sync_evt.clear()
+            started = time.monotonic()
             self.sync_once()
+            self._last_attempt_finished = time.monotonic()
+            self._last_attempt_duration = self._last_attempt_finished - started
+
+    def _fast_sync_cooldown(self):
+        minimum_gap = min(self.sync_interval_sec, self._last_attempt_duration * 0.5)
+        return max(0.0, minimum_gap - (time.monotonic() - self._last_attempt_finished))
 
     def _wait_for_retry(self, delay_sec: float, last_error_class: str) -> bool:
         deadline = time.monotonic() + max(0.0, float(delay_sec))

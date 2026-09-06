@@ -798,10 +798,15 @@ class SectorW1a(BaseSectorWidget):
 
             description = f"lab_order_complete_panel:w1a:{lab_order_id}"
         else:
+            row = next((item for item in self._all_data if int(item.get("id") or 0) == int(admin_id)), None)
+            if row is None or int(admin_id) in self._pending_marks:
+                return
+            version = int(row.get("expected_revision", row.get("version", 0)) or 0)
+            service = self.service
             def operation(aid=admin_id, value=mark):
-                if hasattr(self.service, "set_nurse_order_mark"):
-                    return self.service.set_nurse_order_mark(aid, value)
-                return self.service.set_nurse_status(aid, value)
+                if hasattr(service, "set_nurse_order_mark"):
+                    return service.set_nurse_order_mark(aid, value, expected_version=version)
+                return service.set_nurse_status(aid, value, expected_version=version)
 
             description = f"nurse_order_panel_mark:w1a:{admin_id}"
 

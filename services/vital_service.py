@@ -8,6 +8,7 @@ from ..data.dao.vitals_dao import VitalsDAO
 from ..data.dto.remcard_dto import PatientStatus, VitalDTO
 from .shift_service import ShiftService
 from .vital_validation import validate_vital_dto
+from .vital_undo import undo_vital_change
 
 CHART_LOOKBACK_DAYS = max(0, int(os.environ.get("REMCARD_CHART_LOOKBACK_DAYS", "2")))
 CHART_LOOKAHEAD_DAYS = max(0, int(os.environ.get("REMCARD_CHART_LOOKAHEAD_DAYS", "1")))
@@ -64,24 +65,24 @@ class VitalService:
             field for field in dirty_fields_raw if field in self.VITAL_SETTINGS_KEYS
         ] if isinstance(dirty_fields_raw, list) else None
 
-        current_settings = self.vitals_dao.get_vital_settings(admission_id, date_str) or {
-            "ad": 1,
-            "pulse": 1,
-            "temp": 1,
-            "spo2": 1,
-            "rr": 0,
-            "cvp": 0,
-        }
-
-        if dirty_fields:
-            merged_settings = dict(current_settings)
-            for field in dirty_fields:
-                merged_settings[field] = clean_settings.get(field, merged_settings.get(field, 0))
-        else:
-            merged_settings = dict(current_settings)
-            merged_settings.update(clean_settings)
-
         with self.vitals_dao.db.remcard_transaction():
+            current_settings = self.vitals_dao.get_vital_settings(admission_id, date_str) or {
+                "ad": 1,
+                "pulse": 1,
+                "temp": 1,
+                "spo2": 1,
+                "rr": 0,
+                "cvp": 0,
+            }
+
+            if dirty_fields:
+                merged_settings = dict(current_settings)
+                for field in dirty_fields:
+                    merged_settings[field] = clean_settings.get(field, merged_settings.get(field, 0))
+            else:
+                merged_settings = dict(current_settings)
+                merged_settings.update(clean_settings)
+
             self.vitals_dao.save_vital_settings(admission_id, date_str, merged_settings)
 
         with self._settings_cache_lock:
@@ -119,20 +120,27 @@ class VitalService:
         if not is_ok:
             raise ValueError(msg)
         with self.vitals_dao.db.remcard_transaction():
-            self.vitals_dao.add_vital(dto, expected_revision=expected_revision)
+            return self.vitals_dao.add_vital(dto, expected_revision=expected_revision)
+
+    def undo_vital_change(self, change):
+        with self.vitals_dao.db.remcard_transaction() as cursor:
+            return undo_vital_change(cursor, change)
 
     def clear_vitals(self, admission_id: int, date: datetime):
         start, end = self.shift_service.get_day_period(date)
         with self.vitals_dao.db.remcard_transaction():
             self.vitals_dao.clear_vitals(admission_id, start, end)
 
-    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision: Optional[int] = None):
-        start, end = self.get_effective_bounds(admission_id, date)
-        vitals = self.vitals_dao.get_vitals(admission_id, start, end)
-        if vitals:
-            last_vital = vitals[-1]
-            with self.vitals_dao.db.remcard_transaction():
-                self.vitals_dao.delete_vital(last_vital.id, expected_revision=expected_revision)
+    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision: Optional[int] = None, *, expected_vital_id=None):
+        # Legacy callers must name the displayed row; a revision alone does
+        # not identify it. Interactive undo uses its own write receipt.
+        if expected_vital_id is None or expected_revision is None:
+            raise ValueError("Для отмены нужны идентификатор и версия конкретной записи.")
+        result = self.undo_vital_change({
+            "admission_id": admission_id, "vital_id": expected_vital_id,
+            "revision": expected_revision, "before": None,
+        })
+        return result["vital_id"]
 
     def get_latest_vital_datetime(self, admission_id: int) -> Optional[datetime]:
         return self.vitals_dao.get_latest_vital_datetime(admission_id)

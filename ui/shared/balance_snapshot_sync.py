@@ -8,6 +8,19 @@ from rem_card.app.logger import logger
 from rem_card.ui.shared.async_call import AsyncCallThread
 
 
+def show_balance_sync_status(layout, message):
+    """Use existing headings so failure state does not change card geometry."""
+    panel = getattr(layout, "sector_2b_g", None)
+    header = getattr(panel, "header_lbl", None)
+    if header is not None:
+        header.setText("Баланс не обновлён" if message else "Введено:")
+        header.setToolTip(message)
+    editor = getattr(layout, "sector_2d", None)
+    label = getattr(editor, "status_lbl", None)
+    if label is not None:
+        label.setText(message)
+
+
 class BalanceSnapshotSync(QObject):
     """Coalesce authoritative balance reads without blocking the UI thread."""
 
@@ -21,6 +34,7 @@ class BalanceSnapshotSync(QObject):
         overlay_sequence_provider: Callable[[], int] | None = None,
         role: str,
         delay_ms: int = 120,
+        status_callback: Callable[[str], None] | None = None,
     ):
         super().__init__(parent)
         self._context_provider = context_provider
@@ -44,6 +58,13 @@ class BalanceSnapshotSync(QObject):
         self._dirty = False
         self._active_request = None
         self._accepted_snapshot = {}
+        self._status_callback = status_callback
+        self.status_text = ""
+
+    def report_error(self, message):
+        self.status_text = str(message or "")
+        if self._status_callback is not None:
+            self._status_callback(self.status_text)
 
     BALANCE_FIELDS = ("effective_bounds", "fluids", "balance_runtime", "balance_calc")
 
@@ -94,6 +115,7 @@ class BalanceSnapshotSync(QObject):
         self._recovery_timer.stop()
         self._dirty = False
         self._accepted_snapshot = {}
+        self.report_error("")
 
     def shutdown(self) -> None:
         self._closing = True
@@ -190,6 +212,7 @@ class BalanceSnapshotSync(QObject):
             self._on_failed(exc)
         else:
             self._retry_count = 0
+            self.report_error("")
 
     def merge_card_snapshot(self, snapshot: dict) -> dict:
         """An older/full or vitals-only response cannot roll balance back."""
@@ -211,6 +234,11 @@ class BalanceSnapshotSync(QObject):
         if self._closing or not self._request_is_current(self._active_request or {}):
             return
         self._retry_count += 1
+        self._dirty = True
+        self.report_error(
+            "Баланс не обновлён. Показаны последние загруженные данные; повторяем чтение."
+            if self._accepted_snapshot else "Баланс не загружен. Повторяем чтение."
+        )
         logger.warning(
             "[BalanceSync] snapshot load failed role=%s retry=%s error=%s",
             self._role,

@@ -6099,7 +6099,7 @@ class OperBlockService:
 
         return int(self.db.run_write_operation(operation, source="operblock_add_vitals"))
 
-    def add_vital_record(self, dto: VitalDTO, *, expected_revision: Optional[int] = None) -> int:
+    def add_vital_record(self, dto: VitalDTO, *, expected_revision: Optional[int] = None, return_change: bool = False):
         validate_operblock_runtime_path(self.db)
         validate_vital_dto(dto)
         timestamp = getattr(dto, "timestamp", None)
@@ -6125,7 +6125,7 @@ class OperBlockService:
             target_end_iso = target_end.isoformat()
             row = cursor.execute(
                 """
-                SELECT id, COALESCE(revision, 0) AS revision
+                SELECT *, COALESCE(revision, 0) AS revision
                 FROM vitals
                 WHERE admission_id = ?
                   AND DATETIME("datetime") >= DATETIME(?)
@@ -6174,7 +6174,8 @@ class OperBlockService:
                     raise DataConflictError(DATA_CONFLICT_MESSAGE)
                 dto.id = int(row["id"])
                 dto.revision = old_revision + 1
-                return int(row["id"])
+                from rem_card.services.vital_undo import vital_change
+                return vital_change(dto, row)
 
             if expected_revision is not None:
                 raise DataConflictError(DATA_CONFLICT_MESSAGE)
@@ -6200,17 +6201,37 @@ class OperBlockService:
             )
             dto.id = int(cursor.lastrowid)
             dto.revision = 0
-            return int(dto.id)
+            from rem_card.services.vital_undo import vital_change
+            return vital_change(dto, None)
 
-        return int(self.db.run_write_operation(operation, source="operblock_add_vital_record"))
+        result = self.db.run_write_operation(operation, source="operblock_add_vital_record")
+        # Also hydrate the DTO when an isolated worker confirmed a receipt.
+        dto.id, dto.revision = int(result["vital_id"]), int(result["revision"])
+        return result if return_change else int(result["vital_id"])
+
+    def undo_vital_change(self, change):
+        from rem_card.services.vital_undo import undo_vital_change
+
+        validate_operblock_runtime_path(self.db)
+
+        def operation(cursor):
+            case = self._assert_active_operation_for_admission(cursor, int(change["admission_id"]))
+            if change.get("operation_case_id") is not None and int(case["operation_case_id"]) != int(change["operation_case_id"]):
+                raise OperBlockConflictError("Операционный случай изменился. Обновите протокол.")
+            return undo_vital_change(cursor, change)
+
+        return self.db.run_write_operation(operation, source="operblock_undo_vital_change")
 
     def delete_last_vital_record(
         self,
         admission_id: int,
         *,
         expected_revision: Optional[int] = None,
+        expected_vital_id: Optional[int] = None,
     ) -> Optional[int]:
         validate_operblock_runtime_path(self.db)
+        if expected_vital_id is None or expected_revision is None:
+            raise ValueError("Для отмены нужны идентификатор и версия конкретной записи.")
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_for_admission(cursor, admission_id)
@@ -6218,7 +6239,7 @@ class OperBlockService:
             ended_at = _parse_dt(case.get("ended_at"))
             if started_at is None:
                 raise OperBlockConflictError("У операции не задано время начала. Обновите протокол.")
-            params: list[Any] = [int(admission_id), _minute_floor(started_at).isoformat()]
+            params: list[Any] = [int(admission_id), int(expected_vital_id), _minute_floor(started_at).isoformat()]
             end_clause = ""
             if ended_at is not None:
                 end_clause = 'AND datetime("datetime") <= datetime(?)'
@@ -6228,6 +6249,7 @@ class OperBlockService:
                 SELECT id, COALESCE(revision, 0) AS revision
                 FROM vitals
                 WHERE admission_id = ?
+                  AND id = ?
                   AND datetime("datetime") >= datetime(?)
                   {end_clause}
                 ORDER BY datetime("datetime") DESC, id DESC

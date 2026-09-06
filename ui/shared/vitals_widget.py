@@ -7,6 +7,7 @@ from PySide6.QtGui import QIntValidator, QDoubleValidator, QIcon
 from ...data.dto.remcard_dto import VitalDTO
 from rem_card.ui.styles.context_menu_style import install_russian_line_edit_context_menu
 from .hybrid_shift_time_picker import HybridShiftTimePicker
+from rem_card.services.shift_service import ShiftService
 
 
 class CommaDotDoubleValidator(QDoubleValidator):
@@ -24,6 +25,26 @@ class CommaDotDoubleValidator(QDoubleValidator):
 class VitalsWidget(QWidget):
     data_changed = Signal()
     vital_changed = Signal(object)
+
+    @property
+    def admission_id(self):
+        return self._admission_id
+
+    @admission_id.setter
+    def admission_id(self, value):
+        if value != getattr(self, "_admission_id", None):
+            self._context_generation = getattr(self, "_context_generation", 0) + 1
+        self._admission_id = value
+
+    @property
+    def shift_date(self):
+        return self._shift_date
+
+    @shift_date.setter
+    def shift_date(self, value):
+        if value != getattr(self, "_shift_date", None):
+            self._context_generation = getattr(self, "_context_generation", 0) + 1
+        self._shift_date = value
 
     def __init__(
         self,
@@ -61,6 +82,8 @@ class VitalsWidget(QWidget):
         self._cached_vitals = None
         self._forced_read_only = False
         self._extra_action_widgets = []
+        self._undo_by_context = {}
+        self._pending_contexts = set()
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(5, 5, 5, 5)
         self.init_ui()
@@ -482,75 +505,80 @@ class VitalsWidget(QWidget):
             logger.error(f"Error in refresh_time_only: {e}")
 
     def update_undo_button_state(self):
-        if self._forced_read_only:
-            self.undo_btn.setEnabled(False)
-            return
-        if not self.service:
-            self.undo_btn.setEnabled(False)
-            return
-        try:
-            if not self._db_cache_dirty and self._cached_settings is not None:
-                self.undo_btn.setEnabled(bool(self._has_vitals))
-                return
-            if self._cached_vitals is not None:
-                vitals = list(self._cached_vitals)
-            else:
-                vitals = self.service.get_vitals(self.admission_id, self.shift_date)
-                self._cached_vitals = list(vitals or [])
-            self._has_vitals = len(vitals) > 0
-            self.undo_btn.setEnabled(self._has_vitals)
-        except Exception:
-            self.undo_btn.setEnabled(False)
+        context = self._write_context()
+        pending = context in self._pending_contexts
+        self.undo_btn.setEnabled(
+            not self._forced_read_only and not pending
+            and bool(self._undo_by_context.get(context))
+        )
+        self.save_btn.setEnabled(not self._forced_read_only and not pending)
+
+    def _write_context(self):
+        return (id(self.service), self.admission_id, ShiftService.get_day_period(self.shift_date)[0], getattr(self.service, "_operation_case_id", None))
+
+    def _capture_writer(self):
+        capture = getattr(self.service, "capture_vital_writer", None)
+        return capture() if callable(capture) else self.service
 
     def undo_last_vital(self):
         if self._forced_read_only:
             CustomMessageBox.information(self, "Только чтение", "Архивная карта открыта в режиме только чтения.")
             return
         if not self.service: return
+        context = self._write_context()
+        stack = self._undo_by_context.get(context, [])
+        if not stack or context in self._pending_contexts:
+            return
+        service = self._capture_writer()
+        change = dict(stack[-1])
+        generation = self._context_generation
         if CustomMessageBox.question(self, "Подтверждение", "Вы уверены, что хотите отменить последнее внесение значений витальных функций?") != CustomMessageBox.Yes:
             return
-        try:
-            expected_revision = self._expected_revision_for_last_vital()
-        except Exception:
-            expected_revision = None
-        cached_last_vital_id = (
-            getattr(self._cached_vitals[-1], "id", None)
-            if self._cached_vitals
-            else None
-        )
-        self.undo_btn.setEnabled(False)
+        self._pending_contexts.add(context)
+        self.update_undo_button_state()
 
         def on_success(result):
-            deleted_vital_id = result if result is not None else cached_last_vital_id
-            self._cache_deleted_vital(deleted_vital_id)
+            self._pending_contexts.discard(context)
+            stack.pop()
+            if result.get("revision") is not None:
+                for previous in reversed(stack):
+                    if previous["vital_id"] == change["vital_id"]:
+                        previous["revision"] = result["revision"]
+                        break
+            if self._write_context() != context or generation != self._context_generation:
+                self.update_undo_button_state()
+                return
+            if result["action"] == "delete":
+                self._cache_deleted_vital(result["vital_id"])
+            else:
+                result = dict(result, vital=VitalDTO(**result["vital"]))
+                self._cache_saved_vital(result["vital"])
             self.update_undo_button_state()
-            self.vital_changed.emit(
-                {
-                    "action": "delete",
-                    "vital_id": deleted_vital_id,
-                    "has_vitals": bool(self._has_vitals),
-                }
-            )
+            self.vital_changed.emit(dict(result, has_vitals=bool(self._has_vitals)))
             self.data_changed.emit()
 
         def on_error(exc):
             from ...app.logger import logger
             logger.error("Error undoing last vital: %s", exc, exc_info=True)
-            self.undo_btn.setEnabled(True)
+            self._pending_contexts.discard(context)
+            self.update_undo_button_state()
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось отменить запись: {exc}")
 
-        self.service.enqueue_write(
-            description=f"undo_last_vital:{self.admission_id}",
-            operation=lambda: self.service.delete_last_vital(
-                self.admission_id,
-                self.shift_date,
-                expected_revision=expected_revision,
-            ),
-            on_success=on_success,
-            on_error=on_error,
-        )
+        try:
+            service.enqueue_write(
+                description=f"undo_last_vital:{change['admission_id']}",
+                operation=lambda: service.undo_vital_change(change),
+                on_success=on_success,
+                on_error=on_error,
+            )
+        except Exception as exc:
+            on_error(exc)
 
     def save_data(self):
+        context = self._write_context()
+        generation = self._context_generation
+        if context in self._pending_contexts:
+            return
         if self._forced_read_only:
             CustomMessageBox.information(self, "Только чтение", "Архивная карта открыта в режиме только чтения.")
             return
@@ -596,79 +624,112 @@ class VitalsWidget(QWidget):
             return
 
         try:
-            def check_range(field, label, min_v, max_v, is_float=False):
-                txt = field.text().strip().replace(',', '.')
-                if not txt: return None
-                try:
-                    val = float(txt) if is_float else int(txt)
-                    if not (min_v <= val <= max_v): raise ValueError(f"Значение {label} должно быть в диапазоне от {min_v} до {max_v}")
-                    return val
-                except ValueError: raise ValueError(f"Некорректное значение в поле {label}")
-
-            settings = self._current_settings()
-            v_sys = check_range(self.sys, "АД Сист.", 0, 300) if settings.get('ad') else None
-            v_dia = check_range(self.dia, "АД Диаст.", 0, 300) if settings.get('ad') else None
-            if v_sys is not None and v_dia is not None and v_dia > v_sys: raise ValueError("АД диаст. не может быть выше систолического")
-            v_pulse = check_range(self.pulse, "Пульс", 0, 300) if settings.get('pulse') else None
-            v_temp = check_range(self.temp, "Темп.", 0.0, 45.0, True) if settings.get('temp') else None
-            v_spo2 = check_range(self.spo2, "SpO2", 0, 100) if settings.get('spo2') else None
-            v_rr = check_range(self.rr, "ЧДД", 0, 100) if settings.get('rr') else None
-            v_cvp = check_range(self.cvp, "ЦВД", -1, 50) if settings.get('cvp') else None
-
-            if settings.get('ad') and (v_sys is None or v_dia is None): raise ValueError("Необходимо заполнить АД")
-            if settings.get('pulse') and v_pulse is None: raise ValueError("Необходимо заполнить Пульс")
-            if settings.get('temp') and v_temp is None: raise ValueError("Необходимо заполнить Температуру")
-            if settings.get('rr') and v_rr is None: raise ValueError("Необходимо заполнить ЧДД")
-            if settings.get('spo2') and v_spo2 is None: raise ValueError("Необходимо заполнить SpO2")
-
-            dto = VitalDTO(id=None, admission_id=self.admission_id, timestamp=current_dt, sys=v_sys, dia=v_dia, pulse=v_pulse, temp=v_temp, spo2=v_spo2, rr=v_rr, cvp=v_cvp)
-            has_real_data = any([v_sys, v_dia, v_pulse, v_temp, v_spo2, v_rr, v_cvp is not None])
+            dto = self._vital_dto_from_inputs(current_dt)
+            has_real_data = any([dto.sys, dto.dia, dto.pulse, dto.temp, dto.spo2, dto.rr, dto.cvp is not None])
             expected_revision = self._expected_revision_for_minute(current_dt)
-            self.save_btn.setEnabled(False)
+            self._enqueue_vital_save(dto, current_time, expected_revision, has_real_data, context, generation)
+        except ValueError as e:
+            CustomMessageBox.warning(self, "Ошибка валидации", str(e))
 
-            def on_success(_):
-                for field in [self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp]:
-                    field.clear()
-                for field in [self.temp, self.sys, self.pulse, self.rr, self.spo2, self.cvp]:
-                    if field.isVisible() and field.isEnabled() and not field.isReadOnly():
-                        field.setFocus()
-                        break
+    def _vital_dto_from_inputs(self, current_dt):
+        settings = self._current_settings()
+        values = {}
+        for key, setting, label, lower, upper, is_float, required in (
+            ("sys", "ad", "АД Сист.", 0, 300, False, True),
+            ("dia", "ad", "АД Диаст.", 0, 300, False, True),
+            ("pulse", "pulse", "Пульс", 0, 300, False, True),
+            ("temp", "temp", "Температуру", 0.0, 45.0, True, True),
+            ("spo2", "spo2", "SpO2", 0, 100, False, True),
+            ("rr", "rr", "ЧДД", 0, 100, False, True),
+            ("cvp", "cvp", "ЦВД", -1, 50, False, False),
+        ):
+            value = self._check_vital_range(getattr(self, key), label, lower, upper, is_float) if settings.get(setting) else None
+            if settings.get(setting) and required and value is None:
+                raise ValueError(f"Необходимо заполнить {label}")
+            values[key] = value
+        if values["sys"] is not None and values["dia"] is not None and values["dia"] > values["sys"]:
+            raise ValueError("АД диаст. не может быть выше систолического")
+        return VitalDTO(id=None, admission_id=self.admission_id, timestamp=current_dt, **values)
 
-                if has_real_data:
-                    next_hour = self.service.next_full_hour(current_time, self.shift_date)
-                    self._set_time_from_service(next_hour)
+    @staticmethod
+    def _check_vital_range(field, label, min_v, max_v, is_float=False):
+        txt = field.text().strip().replace(',', '.')
+        if not txt:
+            return None
+        try:
+            value = float(txt) if is_float else int(txt)
+        except ValueError:
+            raise ValueError(f"Некорректное значение в поле {label}") from None
+        if not min_v <= value <= max_v:
+            raise ValueError(f"Значение {label} должно быть в диапазоне от {min_v} до {max_v}")
+        return value
 
-                self._cache_saved_vital(dto)
+    def _enqueue_vital_save(self, dto, current_time, expected_revision, has_real_data, context, generation):
+        service, shift_date, force = self._capture_writer(), self.shift_date, self._force_vital_status
+        input_texts = {field: field.text() for field in (self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp)}
+        self._pending_contexts.add(context)
+        self.update_undo_button_state()
+
+        def on_success(change):
+            self._pending_contexts.discard(context)
+            if isinstance(change, dict) and "vital_id" in change:
+                from rem_card.services.vital_undo import VITAL_FIELDS
+                dto.id = int(change["vital_id"])
+                dto.revision = int(change["revision"])
+                for key, value in (change.get("before") or {}).items():
+                    if key in VITAL_FIELDS and getattr(dto, key) is None:
+                        setattr(dto, key, value)
+                stack = self._undo_by_context.setdefault(context, [])
+                stack.append(change)
+                del stack[:-50]
+            if self._write_context() != context or generation != self._context_generation:
                 self.update_undo_button_state()
-                self.vital_changed.emit(
-                    {
-                        "action": "upsert",
-                        "vital": dto,
-                        "has_vitals": True,
-                    }
-                )
-                self.data_changed.emit()
-                self.save_btn.setEnabled(True)
+                return
+            for field in [self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp]:
+                if field.text() == input_texts[field]:
+                    field.clear()
+            for field in [self.temp, self.sys, self.pulse, self.rr, self.spo2, self.cvp]:
+                if field.isVisible() and field.isEnabled() and not field.isReadOnly():
+                    field.setFocus()
+                    break
 
-            def on_error(exc):
-                from ...app.logger import logger
-                logger.error("Error saving vital values: %s", exc, exc_info=True)
-                self.save_btn.setEnabled(True)
-                CustomMessageBox.critical(self, "Ошибка", f"Не удалось сохранить витальные функции: {exc}")
+            if has_real_data and self.time_edit.value_str() == current_time:
+                next_hour = self.service.next_full_hour(current_time, self.shift_date)
+                self._set_time_from_service(next_hour)
 
-            self.service.enqueue_write(
-                description=f"save_vital:{self.admission_id}",
-                operation=lambda: self.service.add_vital(
+            self._cache_saved_vital(dto)
+            self.update_undo_button_state()
+            self.vital_changed.emit(
+                {
+                    "action": "upsert",
+                    "vital": dto,
+                    "has_vitals": True,
+                }
+            )
+            self.data_changed.emit()
+            self.update_undo_button_state()
+
+        def on_error(exc):
+            from ...app.logger import logger
+            logger.error("Error saving vital values: %s", exc, exc_info=True)
+            self._pending_contexts.discard(context)
+            self.update_undo_button_state()
+            CustomMessageBox.critical(self, "Ошибка", f"Не удалось сохранить витальные функции: {exc}")
+
+        try:
+            service.enqueue_write(
+                description=f"save_vital:{dto.admission_id}",
+                operation=lambda: service.add_vital(
                     dto,
-                    self.shift_date,
-                    force=self._force_vital_status,
+                    shift_date,
+                    force=force,
                     expected_revision=expected_revision,
                 ),
                 on_success=on_success,
                 on_error=on_error,
             )
-        except ValueError as e:
-            CustomMessageBox.warning(self, "Ошибка валидации", str(e))
+        except Exception as exc:
+            on_error(exc)
 
     def _expected_revision_for_minute(self, timestamp):
         if not self.service or not self.admission_id:
@@ -682,14 +743,3 @@ class VitalsWidget(QWidget):
             if self._minute_floor(vital.timestamp) == target:
                 return int(getattr(vital, "revision", 0) or 0)
         return None
-
-    def _expected_revision_for_last_vital(self):
-        if not self.service or not self.admission_id:
-            return None
-        vitals = self._cached_vitals
-        if vitals is None:
-            vitals = self.service.get_vitals(self.admission_id, self.shift_date)
-            self._cached_vitals = list(vitals or [])
-        if not vitals:
-            return None
-        return int(getattr(vitals[-1], "revision", 0) or 0)

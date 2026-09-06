@@ -2993,6 +2993,7 @@ class OrdersWidget(QWidget):
         if key is None:
             return
         committed_admin = copy(admin)
+        committed_admin.version = int(getattr(admin, "version", 0) or 0) + 1
         committed_admin.comment = mark or ""
         committed_admin.actual_time = datetime.now() if mark else None
         if hasattr(committed_admin, "_pending_mark"):
@@ -4352,6 +4353,7 @@ class OrdersWidget(QWidget):
             return
 
         mark = str(getattr(admin, "comment", "") or "")
+        expected_version = int(getattr(admin, "version", 0) or 0)
         set_mark = getattr(self.service, "set_doctor_order_mark", None) or getattr(self.service, "set_nurse_order_mark", None)
         cancel_mark = getattr(self.service, "cancel_doctor_order_mark", None) or getattr(self.service, "cancel_nurse_order_mark", None)
         if not callable(set_mark) or not callable(cancel_mark):
@@ -4359,13 +4361,13 @@ class OrdersWidget(QWidget):
             return
         if mark == NURSE_MARK_EXECUTED:
             next_mark = NURSE_MARK_NOT_EXECUTED
-            operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_NOT_EXECUTED)
+            operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_NOT_EXECUTED, expected_version=expected_version)
         elif mark == NURSE_MARK_NOT_EXECUTED:
             next_mark = ""
-            operation = lambda aid=admin_id: cancel_mark(aid)
+            operation = lambda aid=admin_id: cancel_mark(aid, expected_version=expected_version)
         else:
             next_mark = NURSE_MARK_EXECUTED
-            operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_EXECUTED)
+            operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_EXECUTED, expected_version=expected_version)
 
         click_seq = self._next_orders_click_seq()
         logger.info(

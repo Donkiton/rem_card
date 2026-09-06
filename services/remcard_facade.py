@@ -1250,6 +1250,8 @@ class RemCardService(QObject):
             }
         except Exception as exc:
             logger.warning("Failed to load oral intake runtime for balance snapshot: %s", exc)
+            from .balance_errors import IncompleteBalanceError
+            raise IncompleteBalanceError("Не удалось прочитать питание. Баланс ожидает обновления.") from exc
         balance_calc = BalanceCalculator.calculate(
             orders=orders,
             current_time=calc_time,
@@ -1433,7 +1435,10 @@ class RemCardService(QObject):
         force: bool = False,
         expected_revision: Optional[int] = None,
     ):
-        self._vitals.add_vital(dto, shift_date, force, expected_revision=expected_revision)
+        return self._vitals.add_vital(dto, shift_date, force, expected_revision=expected_revision)
+
+    def undo_vital_change(self, change):
+        return self._vitals.undo_vital_change(change)
 
     def get_latest_vital(self, admission_id: int) -> Optional[VitalDTO]:
         return self._vitals.get_latest_vital(admission_id)
@@ -1450,8 +1455,8 @@ class RemCardService(QObject):
     def clear_vitals(self, admission_id: int, date: datetime):
         self._vitals.clear_vitals(admission_id, date)
 
-    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision: Optional[int] = None):
-        self._vitals.delete_last_vital(admission_id, date, expected_revision=expected_revision)
+    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision: Optional[int] = None, *, expected_vital_id=None):
+        return self._vitals.delete_last_vital(admission_id, date, expected_revision=expected_revision, expected_vital_id=expected_vital_id)
 
     def get_all_card_dates(self, admission_id: int) -> List[datetime]:
         """
@@ -2066,30 +2071,30 @@ class RemCardService(QObject):
     def apply_order_right_click(self, order: OrderDTO, admin, planned_time: datetime):
         return self._orders.apply_right_click(order, admin, planned_time)
 
-    def set_nurse_order_mark(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
-        self._orders.set_nurse_status(admin_id, mark, performer_id=performer_id)
+    def set_nurse_order_mark(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
+        self._orders.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
-    def cancel_nurse_order_mark(self, admin_id: int):
-        self._orders.cancel_nurse_action(admin_id)
+    def cancel_nurse_order_mark(self, admin_id: int, *, expected_version: Optional[int] = None):
+        self._orders.cancel_nurse_action(admin_id, expected_version=expected_version)
 
-    def set_doctor_order_mark(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
-        self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id)
+    def set_doctor_order_mark(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
+        self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
-    def cancel_doctor_order_mark(self, admin_id: int):
-        self._orders.cancel_doctor_action(admin_id)
+    def cancel_doctor_order_mark(self, admin_id: int, *, expected_version: Optional[int] = None):
+        self._orders.cancel_doctor_action(admin_id, expected_version=expected_version)
 
     # Backward compatibility for widgets expecting OrderDomainService-like API
-    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
-        self._orders.set_nurse_status(admin_id, mark, performer_id=performer_id)
+    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
+        self._orders.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
-    def cancel_nurse_action(self, admin_id: int):
-        self._orders.cancel_nurse_action(admin_id)
+    def cancel_nurse_action(self, admin_id: int, *, expected_version: Optional[int] = None):
+        self._orders.cancel_nurse_action(admin_id, expected_version=expected_version)
 
-    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
-        self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id)
+    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
+        self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
-    def cancel_doctor_action(self, admin_id: int):
-        self._orders.cancel_doctor_action(admin_id)
+    def cancel_doctor_action(self, admin_id: int, *, expected_version: Optional[int] = None):
+        self._orders.cancel_doctor_action(admin_id, expected_version=expected_version)
 
     @staticmethod
     def _card_datetime(value: Any) -> Optional[datetime]:
