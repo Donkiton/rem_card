@@ -47,6 +47,71 @@ class SectorIvlModeParameterLayoutTest(unittest.TestCase):
         self.assertTrue(self.widget.param_field_widgets["FiO2"].isVisible())
         self.assertFalse(self.widget.param_field_widgets["Phigh"].isVisible())
 
+    def _set_patient_context(self, admission_id):
+        if self.widget.remcard_service is None:
+            self.widget.remcard_service = SimpleNamespace(
+                get_ventilation_summary=lambda _id: {},
+                get_ventilation_timeline=lambda _id: [],
+                get_latest_ventilation_case=lambda _id: None,
+                get_patient=lambda _id: None,
+                get_mode_fields=lambda _mode: list(SectorIvl.PARAMETER_ORDER),
+                get_latest_change_id=lambda **_kwargs: 1,
+            )
+        self.widget.set_runtime_context(admission_id=admission_id)
+
+    def _fill_patient_inputs(self):
+        self.widget.mode_combo.setCurrentIndex(1)
+        self.widget.event_indications_edit.setText("Показания первого пациента")
+        for _label, edit in self.widget.param_widgets.values():
+            edit.setText("12")
+        self.widget.extubation_reason_edit.setEditText("Причина первого пациента")
+        self.widget.extubation_o2_flow_edit.setText("5")
+
+    def _assert_patient_inputs_empty(self):
+        self.assertIsNone(self.widget.mode_combo.currentData())
+        self.assertEqual(self.widget.event_indications_edit.text(), "")
+        for name, (_label, edit) in self.widget.param_widgets.items():
+            self.assertEqual(edit.text(), "", name)
+        self.assertEqual(self.widget.extubation_reason_edit.currentText(), "")
+        self.assertEqual(self.widget.extubation_o2_flow_edit.text(), "")
+
+    def test_patient_switch_clears_inputs_including_cached_patient(self):
+        self._set_patient_context(1)
+        self._fill_patient_inputs()
+        self._set_patient_context(2)
+        self._assert_patient_inputs_empty()
+        self._fill_patient_inputs()
+        self._set_patient_context(1)
+        self._assert_patient_inputs_empty()
+
+    def test_same_patient_refresh_preserves_inputs(self):
+        self._set_patient_context(1)
+        self._fill_patient_inputs()
+        self._set_patient_context(1)
+        self.widget.refresh()
+        self.assertEqual(self.widget.mode_combo.currentIndex(), 1)
+        self.assertEqual(self.widget.event_indications_edit.text(), "Показания первого пациента")
+        for name, (_label, edit) in self.widget.param_widgets.items():
+            self.assertEqual(edit.text(), "12", name)
+
+    def test_parent_patient_switch_and_deselection_clear_inputs(self):
+        from PySide6.QtWidgets import QWidget
+
+        parent = QWidget()
+        self.widget.setParent(parent)
+        parent.current_admission_id = 1
+        self._set_patient_context(1)
+        self._fill_patient_inputs()
+        parent.current_admission_id = 2
+        self.widget.refresh()
+        self._assert_patient_inputs_empty()
+        self._fill_patient_inputs()
+        parent.current_admission_id = None
+        self.widget.refresh()
+        self._assert_patient_inputs_empty()
+        self.widget.setParent(None)
+        parent.deleteLater()
+
     def test_parameter_label_and_input_are_aligned_in_the_same_compact_field(self):
         self.widget._apply_mode_fields(["PS", "PEEP", "FiO2"])
         self.app.processEvents()

@@ -223,6 +223,7 @@ class SectorIvl(BaseSectorWidget):
         self._latest_case_revision: Optional[int] = None
         self._latest_event_revision_by_case: dict[int, int] = {}
         self._snapshot_cache = OrderedDict()
+        self._input_context = (None, None)
         self._ivl_write_pending = False
         self._ivl_loading_key = None
         self._history_events = []
@@ -1063,6 +1064,16 @@ class SectorIvl(BaseSectorWidget):
 
     def refresh(self):
         self._resolve_runtime_context()
+        input_context = (self.remcard_service, self.admission_id)
+        if input_context != self._input_context:
+            self._input_context = input_context
+            self.event_type_combo.setCurrentIndex(0)
+            self.mode_combo.setCurrentIndex(0)
+            self.event_indications_edit.clear()
+            for _label, edit in self.param_widgets.values():
+                edit.clear()
+            self._clear_extubation_reason()
+            self.extubation_o2_flow_edit.clear()
 
         if not self.remcard_service or not self.admission_id:
             self.set_loading_state("Случай: пациент не выбран")
