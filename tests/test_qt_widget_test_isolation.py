@@ -103,7 +103,7 @@ def test_common_qt_cleanup_preserves_shared_windows_and_gui_thread(tmp_path, lat
             assert 'PySide6.QtWidgets' not in sys.modules
 
         from PySide6.QtCore import QTimer
-        from PySide6.QtWidgets import QApplication, QWidget
+        from PySide6.QtWidgets import QApplication, QCompleter, QLineEdit, QListView, QWidget
         from shiboken6 import isValid
 
         app = QApplication([])
@@ -125,6 +125,15 @@ def test_common_qt_cleanup_preserves_shared_windows_and_gui_thread(tmp_path, lat
         window = Window()
         window.cycle = window
         child = QWidget(window)
+        field = QLineEdit(window)
+        completer = QCompleter(['one', 'two'], field)
+        completer.setPopup(QListView())
+        field.setCompleter(completer)
+        popup = completer.popup()
+        # Порядок topLevelWidgets не определён. Принудительно проверяем
+        # опасный случай: подсказки перечисляются до владеющего ими окна.
+        original_windows = app.topLevelWidgets
+        app.topLevelWidgets = lambda: sorted(original_windows(), key=lambda widget: widget is not popup)
         window.destroyed.connect(lambda: destroyed_threads.append(threading.get_ident()))
         QTimer.singleShot(0, lambda: initialized.append(isValid(window)))
         try:
@@ -137,6 +146,7 @@ def test_common_qt_cleanup_preserves_shared_windows_and_gui_thread(tmp_path, lat
         assert initialized == [True], 'Pending initialization ran after destruction'
         assert destroyed_threads == [main_thread], 'Window was not destroyed on the GUI thread'
         assert not isValid(window) and not isValid(child)
+        assert not isValid(completer) and not isValid(popup), 'Completer-owned popup leaked'
         assert not closed, 'Cleanup must not invoke application closeEvent side effects'
         if shared is not None:
             assert isValid(shared), 'A window owned by a wider-scope fixture was deleted'

@@ -226,7 +226,6 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self.diagnosis_tab = DiagnosisTabWidget(self.mkb_service, self, show_operations=False)
 
         self.general_tab.setStyleSheet(STYLE_PATIENT_FORM_TAB)
-        self.diagnosis_tab.setStyleSheet(STYLE_PATIENT_FORM_TAB)
         label_column_width = 208
         self.general_tab.set_label_column_width(label_column_width)
         self.diagnosis_tab.set_label_column_width(label_column_width)
