@@ -32,6 +32,7 @@
     "tests/test_local_replica_sync.py",
     "tests/test_manual_db_rotation_undo.py",
     "tests/test_metric_aggregation.py",
+    "tests/test_mkb_search.py",
     "tests/test_network_maintenance.py",
     "tests/test_network_write_outcome_handling.py",
     "tests/test_network_write_worker.py",

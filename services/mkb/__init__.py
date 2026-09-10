@@ -1,3 +1,3 @@
-from .service import MKBService
+from .service import MKBMatch, MKBService, normalize_code_query
 
-__all__ = ["MKBService"]
+__all__ = ["MKBMatch", "MKBService", "normalize_code_query"]

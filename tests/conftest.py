@@ -87,8 +87,17 @@ def cleanup_qt_test_windows():
             # Нулевые singleShot/отложенная инициализация требуют живого окна.
             app.processEvents()
         finally:
-            for widget in app.topLevelWidgets():
-                if id(widget) not in existing_ids and isValid(widget):
+            current_windows = app.topLevelWidgets()
+            # QCompleter владеет своим отдельным popup, хотя popup.parent()
+            # равен None. В Qt 6.10 удаление popup раньше completer приводит
+            # к access violation. Его удалит владелец вместе с полем ввода.
+            owned_popups = {
+                id(completer.popup())
+                for window in current_windows
+                for completer in window.findChildren(qt_widgets.QCompleter)
+            }
+            for widget in current_windows:
+                if id(widget) not in existing_ids and id(widget) not in owned_popups and isValid(widget):
                     widget.deleteLater()
             QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
