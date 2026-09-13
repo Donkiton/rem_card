@@ -305,7 +305,9 @@ def test_three_clients_share_one_database_without_cross_patient_undo(tmp_path):
             admission = 1 if client < 2 else 2
             for offset in range(10):
                 _, receipt = save_vital(database, admission=admission, minute=client * 10 + offset, pulse=60 + client)
-            ready.wait(timeout=5)
+            # Thirty durable writes can exceed five seconds on hosted Windows.
+            # This barrier orders undo after every write; it is not a latency check.
+            ready.wait(timeout=30)
             service = VitalService(VitalsDAO(database), None)
             service.undo_vital_change(receipt)
             return receipt["vital_id"]
