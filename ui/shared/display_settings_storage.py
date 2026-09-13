@@ -27,6 +27,13 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
         {
+            "id": "emergency_mode",
+            "label": "Аварийный режим (только при аварии)",
+            "default_visible": True,
+            "can_hide": True,
+            "default_side": SECTOR8_BUTTON_SIDE_LEFT,
+        },
+        {
             "id": "user_report",
             "label": "Репорт",
             "default_visible": True,
@@ -49,6 +56,13 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
     "nurse": (
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
+        {
+            "id": "emergency_mode",
+            "label": "Аварийный режим (только при аварии)",
+            "default_visible": True,
+            "can_hide": True,
+            "default_side": SECTOR8_BUTTON_SIDE_LEFT,
+        },
         {
             "id": "user_report",
             "label": "Репорт",

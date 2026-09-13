@@ -43,6 +43,7 @@ class ArchiveReadOnlyDatabaseManager:
         )
         configure_connection(self._conn, readonly=True)
         self._read_lock = threading.RLock()
+        self._snapshot_state = threading.local()
 
     def _has_table(self, table_name: str) -> bool:
         row = self._conn.execute(
@@ -193,9 +194,43 @@ class ArchiveReadOnlyDatabaseManager:
 
     @contextmanager
     def central_read_snapshot_scope(self, source: str = "archive_readonly_snapshot"):
-        _ = source
-        with self._read_lock:
+        with self.snapshot_read_scope(source, force_central=True):
             yield self
+
+    @contextmanager
+    def snapshot_read_scope(
+        self,
+        source: str = "archive_readonly_snapshot",
+        *,
+        force_central: bool = False,
+    ):
+        """Hold one coherent read-only SQLite snapshot across related DAO reads."""
+        _ = source, force_central
+        with self._read_lock:
+            depth = int(getattr(self._snapshot_state, "depth", 0) or 0)
+            if depth > 0:
+                self._snapshot_state.depth = depth + 1
+                try:
+                    yield self
+                finally:
+                    self._snapshot_state.depth = depth
+                return
+
+            if self._conn is None:
+                raise ReadOnlyArchiveDbError("Archive DB is closed")
+            self._snapshot_state.depth = 1
+            try:
+                self._conn.execute("BEGIN")
+                yield self
+            finally:
+                try:
+                    if self._conn is not None and self._conn.in_transaction:
+                        self._conn.rollback()
+                finally:
+                    self._snapshot_state.depth = 0
+
+    def current_snapshot_read_source(self) -> str:
+        return "archive" if int(getattr(self._snapshot_state, "depth", 0) or 0) > 0 else ""
 
     def run_read_operation(self, operation: Callable, source: str = "archive_readonly_read"):
         _ = source

@@ -95,15 +95,50 @@ class RoleSessionLock:
         return host in aliases or host.split(".")[0] in aliases
 
     @staticmethod
-    def _is_pid_alive_local(pid_value: Any) -> bool:
+    def _is_pid_alive_local(pid_value: Any) -> Optional[bool]:
+        """Safely reports local process liveness; ``None`` means unknown."""
         try:
             pid = int(pid_value)
         except (TypeError, ValueError):
-            return False
+            return None
         if pid <= 0:
-            return False
+            return None
         if pid == os.getpid():
             return True
+        if os.name == "nt":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                process_query_limited_information = 0x1000
+                still_active = 259
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+                kernel32.OpenProcess.restype = wintypes.HANDLE
+                kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+                kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+                kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+                kernel32.CloseHandle.restype = wintypes.BOOL
+
+                handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+                if not handle:
+                    error_code = ctypes.get_last_error()
+                    if error_code == 87:  # ERROR_INVALID_PARAMETER: PID does not exist.
+                        return False
+                    if error_code == 5:  # ERROR_ACCESS_DENIED: process exists but cannot be queried.
+                        return True
+                    return None
+                try:
+                    exit_code = wintypes.DWORD()
+                    if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return None
+                    return int(exit_code.value) == still_active
+                finally:
+                    kernel32.CloseHandle(handle)
+            except Exception:
+                # An unavailable/failed query must keep the lock rather than
+                # risk deleting a marker owned by a live process.
+                return None
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -114,12 +149,22 @@ class RoleSessionLock:
         except OSError:
             return False
         except Exception:
-            # На Windows os.kill(pid, 0) в редких случаях может пробрасывать
-            # не-OSError исключения (например, SystemError через WinAPI bridge).
-            # Для lock-механизма это не критично: считаем PID "неживым",
-            # чтобы не блокировать роль аварийно.
-            return False
+            return None
         return True
+
+    def _lock_file_signature(self) -> Optional[tuple[int, int, int, int]]:
+        try:
+            stat = os.stat(self.lock_path)
+            return (
+                int(stat.st_dev),
+                int(stat.st_ino),
+                int(stat.st_size),
+                int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+            )
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
 
     def _lock_file_age(self) -> Optional[float]:
         try:
@@ -151,15 +196,22 @@ class RoleSessionLock:
     def _is_stale(self, payload: Optional[dict[str, Any]]) -> bool:
         if payload is _ROLE_LOCK_READ_UNAVAILABLE:
             return False
-        if not payload:
+        if payload is None:
             return True
+        if not isinstance(payload, dict) or not payload:
+            return False
 
         # Ключевой кейс: приложение аварийно закрыли на ЭТОМ же ПК.
         # В этом случае снимаем лок сразу, не дожидаясь timeout.
         holder_host = payload.get("host")
         holder_pid = payload.get("pid")
-        if self._is_local_host(holder_host) and not self._is_pid_alive_local(holder_pid):
-            return True
+        if self._is_local_host(holder_host):
+            pid_alive = self._is_pid_alive_local(holder_pid)
+            if pid_alive is True:
+                return False
+            if pid_alive is False:
+                return True
+            return False
 
         file_age = self._lock_file_age()
         if file_age is not None and file_age <= self.stale_timeout_sec:
@@ -181,7 +233,23 @@ class RoleSessionLock:
         Возвращает True, если stale-lock успешно очищен или уже отсутствует.
         Возвращает False, если lock не stale или stale, но удалить не удалось.
         """
-        if not self._is_stale(payload):
+        if payload is None:
+            return not os.path.exists(self.lock_path)
+        if not isinstance(payload, dict) or not payload:
+            return False
+        expected_nonce = str(payload.get("nonce") or "").strip()
+        if not expected_nonce:
+            return False
+        signature_before = self._lock_file_signature()
+        if signature_before is None or not self._is_stale(payload):
+            return False
+        current = self._read_payload()
+        signature_after = self._lock_file_signature()
+        if (
+            not isinstance(current, dict)
+            or str(current.get("nonce") or "").strip() != expected_nonce
+            or signature_after != signature_before
+        ):
             return False
         try:
             os.remove(self.lock_path)
@@ -221,8 +289,10 @@ class RoleSessionLock:
         self._last_holder = holder
         if holder is _ROLE_LOCK_READ_UNAVAILABLE:
             return True
-        if not holder:
+        if holder is None:
             return False
+        if not isinstance(holder, dict) or not holder:
+            return True
 
         if ignored_nonce and str(holder.get("nonce") or "") == str(ignored_nonce):
             return False

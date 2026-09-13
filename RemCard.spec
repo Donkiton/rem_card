@@ -29,6 +29,17 @@ ALIAS_ROOT = os.path.join(APP_ROOT, "build", "pyinstaller_package_alias")
 ALIAS_PACKAGE_ROOT = os.path.join(ALIAS_ROOT, "rem_card")
 PYINSTALLER_HOOKS_DIR = os.path.join(APP_ROOT, "scripts", "pyinstaller_hooks")
 
+
+def _prefer_windows_system_dlls():
+    if sys.platform == "win32":
+        # Match Windows loader precedence. External tools on PATH can ship an
+        # incompatible icuuc.dll; Qt expects the Windows ICU API instead.
+        system_dir = os.path.join(os.environ["SystemRoot"], "System32")
+        os.environ["PATH"] = system_dir + os.pathsep + os.environ.get("PATH", "")
+
+
+_prefer_windows_system_dlls()
+
 # PyInstaller imports application modules during analysis. That can initialize a
 # temporary settings DB under build/pyinstaller_package_alias; keep its backup
 # cleanup gate from logging a warning without changing packaged runtime behavior.
@@ -78,6 +89,30 @@ def _prepare_package_alias():
         if not os.path.isfile(source_path):
             raise RuntimeError(f"Entry point not found: {source_path}")
         shutil.copy2(source_path, os.path.join(ALIAS_ROOT, entrypoint))
+        if os.environ.get("REMCARD_ISOLATED_TEST_BUILD") == "1":
+            # Test executables carry their own isolation bootstrap. A launcher
+            # alone would be bypassed when a user opens an EXE directly.
+            target_path = os.path.join(ALIAS_ROOT, entrypoint)
+            with open(target_path, "r", encoding="utf-8") as fh:
+                original = fh.read()
+            bootstrap = (
+                "from rem_card.app.isolated_test_runtime import configure_test_runtime\n"
+                "try:\n"
+                "    configure_test_runtime()\n"
+                "except Exception:\n"
+                "    import sys, traceback\n"
+                "    from pathlib import Path\n"
+                "    Path(sys.executable).with_name('test_startup_error.log').write_text(\n"
+                "        traceback.format_exc(), encoding='utf-8')\n"
+                "    raise SystemExit(1)\n"
+            )
+            freeze_line = "    multiprocessing.freeze_support()\n"
+            if freeze_line in original:
+                original = original.replace(freeze_line, freeze_line + "\n" + bootstrap, 1)
+            else:
+                original = bootstrap + original
+            with open(target_path, "w", encoding="utf-8") as fh:
+                fh.write(original)
     for current_dir, _dir_names, _file_names in os.walk(ALIAS_PACKAGE_ROOT):
         init_path = os.path.join(current_dir, "__init__.py")
         if not os.path.exists(init_path):
@@ -306,11 +341,20 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 def _script_toc(script_name):
     normalized = os.path.normcase(script_name)
+    entrypoints = {os.path.normcase(name) for name in ENTRYPOINT_FILES}
+    runtime_hooks = []
+    entry_script = None
     for item in a.scripts:
         candidate = os.path.normcase(os.path.basename(item[1] if len(item) > 1 else item[0]))
         if candidate == normalized:
-            return [item]
-    raise RuntimeError(f"Entry script not found in Analysis: {script_name}")
+            entry_script = item
+        elif candidate not in entrypoints:
+            runtime_hooks.append(item)
+    if entry_script is None:
+        raise RuntimeError(f"Entry script not found in Analysis: {script_name}")
+    # Every executable needs Analysis runtime hooks before its own entrypoint,
+    # including Qt DLL/plugin setup. Never execute the other role scripts.
+    return [*runtime_hooks, entry_script]
 
 
 doctor_exe = EXE(

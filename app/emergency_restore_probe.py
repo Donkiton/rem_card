@@ -43,6 +43,14 @@ RESTORE_PROBE_FILE_NAME = "emergency_restore_probe.tmp"
 EMERGENCY_NURSE_ROLE_LOCK_FILE_NAME = "nurse_emergency.lock"
 EMERGENCY_NURSE_ROLE_LOCK_STALE_TIMEOUT_SEC = 75.0
 EMERGENCY_NURSE_ROLE_LOCK_HEARTBEAT_SEC = 8.0
+SESSION_ROLE_LOCK_FILE_NAMES = (
+    "doctor.lock",
+    "nurse.lock",
+    "operblock.lock",
+    "operblock_emergency.lock",
+    "operblock_planned.lock",
+)
+SESSION_ROLE_LOCK_STALE_TIMEOUT_SEC = 75.0
 
 MERGE_READY_MODE_A_MESSAGE = (
     "Доступ к сетевой базе восстановлен.\n\n"
@@ -273,7 +281,7 @@ class EmergencyRestoreProbe:
         if guard_failure:
             return guard_failure
         session = self._load_session()
-        if session.status not in {"active", "merge_failed"}:
+        if session.status not in {"active", "waiting", "merge_failed"}:
             return self._failure(
                 "active_emergency_session_required",
                 f"session status is {session.status}",
@@ -306,7 +314,7 @@ class EmergencyRestoreProbe:
         context: DbRuntimeContext,
         session: EmergencySessionMetadata,
     ) -> None:
-        if self.role != "nurse":
+        if self.role not in {"doctor", "nurse"}:
             return
         from rem_card.app.runtime_paths import is_compiled
 
@@ -320,23 +328,25 @@ class EmergencyRestoreProbe:
                 if current_lock.refresh():
                     return
             except Exception as exc:
-                logger.warning("Failed to refresh network emergency nurse marker %s: %s", lock_path, exc)
+                logger.warning("Failed to refresh network emergency role marker %s: %s", lock_path, exc)
             self.release_network_emergency_role_marker()
         if current_lock is not None:
             self.release_network_emergency_role_marker()
         try:
             from rem_card.app.role_session_lock import RoleSessionLock
 
+            marker_role = f"{self.role}_emergency"
             owner_parts = [
                 socket.gethostname(),
                 str(os.getpid()),
-                "nurse_emergency",
+                marker_role,
                 str(session.emergency_session_id or ""),
             ]
             role_lock = RoleSessionLock(
                 lock_path=lock_path,
                 role="nurse_emergency",
                 owner_id=":".join(owner_parts),
+                owner_role=self.role,
                 stale_timeout_sec=EMERGENCY_NURSE_ROLE_LOCK_STALE_TIMEOUT_SEC,
                 heartbeat_sec=EMERGENCY_NURSE_ROLE_LOCK_HEARTBEAT_SEC,
                 logger=logger,
@@ -345,12 +355,12 @@ class EmergencyRestoreProbe:
                 self._network_emergency_role_lock = role_lock
             else:
                 logger.warning(
-                    "Failed to acquire network emergency nurse marker %s: %s",
+                    "Failed to acquire network emergency role marker %s: %s",
                     lock_path,
                     role_lock.describe_holder(),
                 )
         except Exception as exc:
-            logger.warning("Failed to create network emergency nurse marker %s: %s", lock_path, exc, exc_info=True)
+            logger.warning("Failed to create network emergency role marker %s: %s", lock_path, exc, exc_info=True)
 
     def release_network_emergency_role_marker(self) -> None:
         role_lock = self._network_emergency_role_lock
@@ -360,7 +370,7 @@ class EmergencyRestoreProbe:
         try:
             role_lock.release()
         except Exception as exc:
-            logger.warning("Failed to release network emergency nurse marker: %s", exc, exc_info=True)
+            logger.warning("Failed to release network emergency role marker: %s", exc, exc_info=True)
 
     def _runtime_guard_failure(self) -> EmergencyRestoreStatus | None:
         if not self.enabled:
@@ -482,13 +492,7 @@ class EmergencyRestoreProbe:
             return "emergency_merge_lock_active", merge_lock
         active_lock = _first_existing_lock(
             context.session_locks_dir,
-            (
-                "doctor.lock",
-                "nurse.lock",
-                "operblock.lock",
-                "operblock_emergency.lock",
-                "operblock_planned.lock",
-            ),
+            SESSION_ROLE_LOCK_FILE_NAMES,
         )
         if active_lock:
             return "session_lock_active", active_lock
@@ -557,7 +561,11 @@ class EmergencyRestoreProbe:
         current = self.get_status()
         first_ts = float(current.get("first_success_ts") or 0.0) or now
         consecutive = int(current.get("consecutive_successes") or 0) + 1
-        stable = consecutive >= self.success_rounds_required and (now - first_ts) <= self.stability_window_sec
+        last_success = float(current.get("last_success_ts") or 0.0)
+        continuous = bool(current.get("network_stable")) and 0 <= now - last_success <= self.stability_window_sec
+        stable = consecutive >= self.success_rounds_required and (
+            continuous or (now - first_ts) <= self.stability_window_sec
+        )
         status = final_status if stable else f"round_success_{final_status}"
         if not stable and (now - first_ts) > self.stability_window_sec:
             consecutive = 1
@@ -645,6 +653,7 @@ class EmergencyRestoreProbeScheduler:
         self._started = False
         self._running = False
         self._pending = False
+        self._force_probe = False
         self._next_allowed_ts = 0.0
 
     @property
@@ -684,6 +693,7 @@ class EmergencyRestoreProbeScheduler:
             if not self._started or self._stop_event.is_set():
                 return False
             self._pending = True
+            self._force_probe = True
         self._wake_event.set()
         return True
 
@@ -723,7 +733,9 @@ class EmergencyRestoreProbeScheduler:
             self._wake_event.clear()
             if self._stop_event.is_set():
                 break
-            if time.monotonic() < self._next_allowed_ts:
+            with self._lock:
+                force_probe = self._force_probe
+            if not force_probe and time.monotonic() < self._next_allowed_ts:
                 continue
             self._run_scheduled_probe()
 
@@ -734,6 +746,7 @@ class EmergencyRestoreProbeScheduler:
                 return
             self._running = True
             self._pending = False
+            self._force_probe = False
         try:
             status = self.probe.run_probe_once()
             self._emit_status(status)
@@ -857,13 +870,39 @@ def _probe_lock_file_available(lock_path: str) -> str:
 
 
 def _first_existing_lock(directory: str, names: tuple[str, ...]) -> str:
+    active = active_role_session_lock_paths(directory, names)
+    return active[0] if active else ""
+
+
+def active_role_session_lock_paths(
+    directory: str,
+    names: tuple[str, ...] = SESSION_ROLE_LOCK_FILE_NAMES,
+) -> list[str]:
+    """Returns live/unknown role locks and safely reclaims proven stale locks."""
     if not os.path.isdir(directory):
-        return ""
+        return []
+    from rem_card.app.role_session_lock import RoleSessionLock
+
+    active: list[str] = []
     for name in names:
         path = os.path.join(directory, name)
-        if os.path.exists(path):
-            return path
-    return ""
+        if not os.path.exists(path):
+            continue
+        try:
+            checker = RoleSessionLock(
+                lock_path=path,
+                role=os.path.splitext(name)[0],
+                owner_id=f"{socket.gethostname()}:{os.getpid()}:restore_lock_check:{uuid.uuid4().hex}",
+                stale_timeout_sec=SESSION_ROLE_LOCK_STALE_TIMEOUT_SEC,
+                heartbeat_sec=60.0,
+                logger=logger,
+            )
+            if checker.is_held_by_other():
+                active.append(path)
+        except Exception as exc:
+            logger.warning("Failed to check restore role lock %s: %s", path, exc)
+            active.append(path)
+    return active
 
 
 def _status_is_success_like(status: dict[str, Any]) -> bool:

@@ -82,6 +82,25 @@ def test_archive_manager_supports_cancellable_fetch_all(tmp_path):
         manager.close()
 
 
+def test_archive_status_movement_snapshot_uses_nested_readonly_scope(tmp_path):
+    db_path = tmp_path / "archive_movement.db"
+    _create_archived_card_db(db_path)
+    service, manager = create_archive_readonly_service(str(db_path))
+    try:
+        with manager.snapshot_read_scope("outer", force_central=True):
+            assert manager.current_snapshot_read_source() == "archive"
+            assert manager._conn.in_transaction is True
+            snapshot = service.status_service.get_movement_snapshot(1)
+            assert snapshot["events"] == []
+            assert snapshot["current_status"] is None
+            assert isinstance(snapshot["version"], int)
+            assert manager.current_snapshot_read_source() == "archive"
+        assert manager.current_snapshot_read_source() == ""
+        assert manager._conn.in_transaction is False
+    finally:
+        manager.close()
+
+
 def test_rotated_archive_loads_orders_and_full_balance_snapshot(tmp_path):
     db_path = tmp_path / "rao_journal_archived_20260820.db"
     _create_archived_card_db(db_path)

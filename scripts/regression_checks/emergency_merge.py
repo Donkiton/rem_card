@@ -10,7 +10,6 @@ import json
 import os
 import shutil
 import socket
-import sqlite3
 import uuid
 
 
@@ -481,7 +480,8 @@ def _check_restore_probe_shutdown_stops_worker(temp_root: str) -> tuple[bool, st
 def _check_restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_restore_probe import MERGE_READY_MODE_A_MESSAGE, REMOTE_CHANGED_CONFLICT_MESSAGE
 
-    main_window_text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    workflow_text = (PROJECT_ROOT / "ui" / "shared" / "emergency_workflow_controller.py").read_text(encoding="utf-8")
+    review_text = (PROJECT_ROOT / "ui" / "shared" / "emergency_review_dialog.py").read_text(encoding="utf-8")
     if "закрыть RemCard" not in MERGE_READY_MODE_A_MESSAGE:
         return False, "merge-ready dialog must tell user to close RemCard"
     if "Не запускайте RemCard на других компьютерах" not in MERGE_READY_MODE_A_MESSAGE:
@@ -489,20 +489,24 @@ def _check_restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs(t
     if "сетевая база изменилась" not in REMOTE_CHANGED_CONFLICT_MESSAGE:
         return False, "remote-changed warning text missing"
     for token in (
-        "EmergencyActionDialog.ask",
-        "Да, объединить",
-        "Без объединения",
-        "time.monotonic() + 60.0",
-        "_close_for_emergency_discard",
+        "EmergencyWaitingDialog",
+        "pause_emergency_work",
+        "request_probe",
         "remote_changed_conflict_pending",
-        "EmergencyPasswordDialog.verify",
-        "verify_emergency_password",
+        "EmergencyReviewDialog",
+        "selected_admission_ids",
+        "review_selection",
+        "authorize_patient_merge",
+        "mark_merge_ready",
         "mark_session_discarded",
-        "finalize_pending_emergency_discard",
-        "Вернуться в аварийный режим",
+        "resume_local_work",
+        "_restart_after_close",
     ):
-        if token not in main_window_text:
+        if token not in workflow_text:
             return False, f"restore prompt action token missing: {token}"
+    for token in ("Перенести выбранные", "Завершить без переноса", "Вернуться к выбору"):
+        if token not in review_text:
+            return False, f"review action token missing: {token}"
     main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
     if "finalize_pending_emergency_discard" not in main_text or "db_shutdown_ok" not in main_text:
         return False, "discard finalization must run after DB shutdown"
@@ -727,11 +731,15 @@ def _check_merge_dry_run_remote_less_than_base_blocked(temp_root: str) -> tuple[
     from rem_card.app.emergency_validation import compute_file_hash
 
     fixture = _prepare_merge_dry_run_fixture(temp_root)
-    _append_emergency_medical_change(fixture["session"].base_snapshot_path, entity_id=1001)
+    original_remote_last = int(fixture["session"].base_last_change_id or 0)
+    advanced_base_last = _append_emergency_medical_change(
+        fixture["session"].base_snapshot_path,
+        entity_id=1001,
+    )
     _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=1001)
     session = replace(
         fixture["session"],
-        base_last_change_id=1,
+        base_last_change_id=advanced_base_last,
         base_snapshot_hash=compute_file_hash(fixture["session"].base_snapshot_path),
     )
     fixture["store"].write_active_session(session)
@@ -741,12 +749,19 @@ def _check_merge_dry_run_remote_less_than_base_blocked(temp_root: str) -> tuple[
         return False, f"marker should reject base mismatch before inconsistent remote: {result.to_dict()}"
     marker_path = fixture["marker_path"]
     payload = _read_json(marker_path)
-    payload["base_last_change_id"] = 1
-    payload["remote_last_change_id"] = 1
+    payload["base_last_change_id"] = advanced_base_last
+    payload["remote_last_change_id"] = original_remote_last
     Path(marker_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     result = _run_merge_dry_run_fixture(fixture)
-    if result.result_status != "blocked_inconsistent":
-        return False, f"remote < base did not block as inconsistent: {result.to_dict()}"
+    blockers = list(result.blockers or [])
+    if (
+        result.result_status != "blocked_marker_invalid"
+        or not any(
+            item.get("code") == "marker_invalid" and "below base" in str(item.get("reason") or "")
+            for item in blockers
+        )
+    ):
+        return False, f"remote < base was not denied by the signed marker contract: {result.to_dict()}"
     return True, "ok"
 
 
@@ -983,13 +998,16 @@ def _check_mode_a_merge_rejects_remote_inconsistent(temp_root: str) -> tuple[boo
     from rem_card.app.emergency_validation import compute_file_hash, validate_medical_db_snapshot
 
     fixture = _prepare_merge_dry_run_fixture(temp_root, marker=False, status="merge_pending")
-    _append_emergency_medical_change(fixture["session"].base_snapshot_path, entity_id=3101)
+    advanced_base_last = _append_emergency_medical_change(
+        fixture["session"].base_snapshot_path,
+        entity_id=3101,
+    )
     _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=3101)
     _append_emergency_medical_change(fixture["medical_path"], entity_id=3101)
     remote_validation = validate_medical_db_snapshot(fixture["medical_path"])
     session = replace(
         fixture["session"],
-        base_last_change_id=1,
+        base_last_change_id=advanced_base_last,
         base_snapshot_hash=compute_file_hash(fixture["session"].base_snapshot_path),
         base_remote_fingerprint=dict(remote_validation.fingerprint),
     )
@@ -998,7 +1016,7 @@ def _check_mode_a_merge_rejects_remote_inconsistent(temp_root: str) -> tuple[boo
     fixture["marker_path"] = write_merge_ready_marker(
         fixture["store"].resolve_root(),
         session,
-        remote_last_change_id=1,
+        remote_last_change_id=int(remote_validation.last_change_id or 0),
         remote_fingerprint=dict(remote_validation.fingerprint),
     )
     fixture["service"] = fixture["service"].__class__(
@@ -1238,11 +1256,18 @@ def _check_mode_a_merge_rollback_restores_remote_on_final_validation_failure(tem
 
 
 def _check_mode_a_merge_marks_session_merged_on_success(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
     fixture = _prepare_mode_a_merge_fixture(temp_root)
+    store = fixture["store"]
+    current = store.read_active_session(fixture["session"].emergency_session_id)
+    store.write_active_session(replace(current, merge_recovery_required=True))
     result = _run_mode_a_merge_fixture(fixture)
     metadata = _archived_session_metadata(result)
     if metadata.get("status") != "merged" or metadata.get("merge_result") != "success":
         return False, f"merged session metadata mismatch: {metadata}"
+    if metadata.get("merge_recovery_required") is not False:
+        return False, f"successful merge retained recovery flag: {metadata}"
     return True, "ok"
 
 
@@ -1348,13 +1373,14 @@ def _check_pending_emergency_merge_defaults_to_row_level(temp_root: str) -> tupl
     required = (
         "ROW_LEVEL_MERGE_STRATEGY",
         "EmergencyRowLevelMergeService",
-        "legacy_file_replacement_manual_fallback",
+        "merge_authorization.json",
+        "review_required",
     )
     missing = [token for token in required if token not in text]
     if missing:
         return False, f"pending merge default row-level tokens missing: {missing}"
-    if "strategy = str(os.environ.get(\"REMCARD_EMERGENCY_MERGE_STRATEGY\") or ROW_LEVEL_MERGE_STRATEGY)" not in text:
-        return False, "pending merge does not default to row-level strategy"
+    if "EmergencyModeAMergeService" in text or "REMCARD_EMERGENCY_MERGE_STRATEGY" in text:
+        return False, "pending merge still permits unsafe file-replacement strategy"
     return True, "ok"
 
 
@@ -1412,24 +1438,29 @@ def _check_emergency_acceptance_runner_exists(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
-def _check_emergency_acceptance_runner_has_full_mode_a_scenario(temp_root: str) -> tuple[bool, str]:
+def _check_emergency_acceptance_runner_has_reviewed_row_level_scenario(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     text = _emergency_acceptance_runner_text()
-    required = ("scenario_full_mode_a_path", "ready_mode_a", "EmergencyModeAMergeService", "find_resumable_active_session")
+    required = (
+        "scenario_full_mode_a_path",
+        "ready_mode_a",
+        "EmergencyRowLevelMergeService",
+        "selected_admission_ids=selected",
+        "expected_plan_digest=plan_digest(approved)",
+        "find_resumable_active_session",
+    )
     missing = [token for token in required if token not in text]
     if missing:
-        return False, f"full Mode A scenario tokens missing: {missing}"
+        return False, f"reviewed row-level acceptance tokens missing: {missing}"
     return True, "ok"
 
 
 def _check_pending_emergency_merge_runner_runs_merge_pending_session(temp_root: str) -> tuple[bool, str]:
     from .emergency_standby import _append_real_emergency_vital_change
     from rem_card.app.emergency_pending_merge import find_pending_emergency_merge_session, run_pending_emergency_merge
-    from rem_card.app.emergency_validation import validate_medical_db_snapshot
 
     fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
-    local_change = _append_real_emergency_vital_change(fixture["session"].local_db_path)
-    local_last = int(validate_medical_db_snapshot(fixture["session"].local_db_path).last_change_id or 0)
+    _append_real_emergency_vital_change(fixture["session"].local_db_path)
     before_settings = _file_hash(fixture["settings_path"])
     fixture["probe"].run_probe_once()
     marker_path = fixture["probe"].mark_merge_ready()
@@ -1444,21 +1475,8 @@ def _check_pending_emergency_merge_runner_runs_merge_pending_session(temp_root: 
         source_settings_db_path=fixture["settings_path"],
         network_baza_dir=fixture["network_baza"],
     )
-    remote_last = validate_medical_db_snapshot(fixture["medical_path"]).last_change_id
-    if not result.attempted or not result.ok:
-        return False, f"pending merge did not complete: {result}"
-    if int(remote_last or 0) <= int(fixture["session"].base_last_change_id or 0):
-        return False, f"pending merge did not advance remote change id: local={local_last} remote={remote_last}"
-    conn = sqlite3.connect(fixture["medical_path"])
-    try:
-        row = conn.execute(
-            "SELECT COUNT(*) FROM vitals WHERE last_modified_by = ? AND sys = ?",
-            ("regression_pending", 120),
-        ).fetchone()
-    finally:
-        conn.close()
-    if int(row[0] or 0) != 1:
-        return False, f"pending merge did not apply local vital row: {local_change}"
+    if result.attempted or result.ok or result.error != "review_required":
+        return False, f"unreviewed pending merge was not held for review: {result}"
     if _file_hash(fixture["settings_path"]) != before_settings:
         return False, "pending merge modified remote settings DB"
     own_active_dir = os.path.join(
@@ -1466,12 +1484,10 @@ def _check_pending_emergency_merge_runner_runs_merge_pending_session(temp_root: 
         "active",
         fixture["session"].emergency_session_id,
     )
-    if os.path.exists(own_active_dir):
-        return False, "merged pending session remained active after successful merge"
-    if not os.path.isfile(result.dry_run_report_path):
-        return False, f"pending dry-run report missing: {result.dry_run_report_path}"
-    if not os.path.isfile(result.merge_report_path):
-        return False, f"pending merge report missing: {result.merge_report_path}"
+    if not os.path.exists(own_active_dir):
+        return False, "unreviewed pending session was removed"
+    if result.dry_run_report_path or result.merge_report_path:
+        return False, f"unreviewed pending merge started execution: {result}"
     return True, "ok"
 
 

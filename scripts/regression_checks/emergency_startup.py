@@ -5,7 +5,6 @@ from __future__ import annotations
 from .common import PROJECT_ROOT
 from pathlib import Path
 import os
-import sqlite3
 import time
 
 
@@ -107,29 +106,21 @@ def _check_emergency_startup_does_not_require_authorized_workstation(temp_root: 
     return True, "ok"
 
 
-def _check_emergency_startup_missing_standby_uses_empty_database_fallback(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+def _check_emergency_startup_missing_standby_denies_without_writes(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup
 
     root = os.path.join(temp_root, "er")
     decision = prepare_emergency_startup("nurse", root=root)
-    if not decision.allowed or decision.status != "empty_database_available" or not decision.empty_database_allowed:
-        return False, f"missing standby did not offer empty emergency DB fallback: {decision}"
-    if list(Path(root).rglob("rao_journal_emergency.db")):
-        return False, "empty emergency DB was created before password/session activation"
-    session = start_or_resume_emergency_session(decision, root=root)
-    if session.resumed:
-        return False, "missing standby fallback was treated as resumed session"
-    for path in (session.metadata.local_db_path, session.metadata.base_snapshot_path, session.metadata.settings_snapshot_path):
-        if not path or not os.path.isfile(path):
-            return False, f"empty fallback session file missing: {path}"
-    with sqlite3.connect(session.metadata.local_db_path) as conn:
-        count = int(conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0] or 0)
-    if count != 0:
-        return False, f"empty fallback DB contains patients: {count}"
+    if decision.allowed or decision.status != "no_valid_standby" or decision.empty_database_allowed:
+        return False, f"missing standby was not denied: {decision}"
+    if os.path.exists(root):
+        written = [path for path in Path(root).rglob("*") if path.is_file()]
+        if written:
+            return False, f"missing standby decision wrote local files: {written[:3]}"
     return True, "ok"
 
 
-def _check_emergency_startup_expired_standby_uses_empty_database_fallback(temp_root: str) -> tuple[bool, str]:
+def _check_emergency_startup_expired_standby_denies_without_empty_session_creation(temp_root: str) -> tuple[bool, str]:
     from .emergency_standby import _old_iso_timestamp, _prepare_emergency_store_fixture
     from dataclasses import replace
 
@@ -139,10 +130,13 @@ def _check_emergency_startup_expired_standby_uses_empty_database_fallback(temp_r
     old = _old_iso_timestamp(4)
     store.write_standby_metadata(replace(standby, created_at=old, updated_at=old))
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
-    if not decision.allowed or decision.status != "empty_database_available" or not decision.empty_database_allowed:
-        return False, f"expired standby did not offer empty emergency DB fallback: {decision}"
+    if decision.allowed or decision.status != "no_valid_standby" or decision.empty_database_allowed:
+        return False, f"expired standby was not denied: {decision}"
     if "older than 3 days" not in decision.technical_reason:
         return False, f"expired standby reason mismatch: {decision.technical_reason}"
+    active_root = Path(store.resolve_root()) / "active"
+    if active_root.exists() and any(path.is_file() for path in active_root.rglob("*")):
+        return False, "expired standby decision created an empty active session"
     return True, "ok"
 
 
@@ -356,24 +350,15 @@ def _check_startup_schema_policy_block_does_not_fallback_emergency(temp_root: st
     return True, "ok"
 
 
-def _check_emergency_startup_empty_db_created_only_after_activation(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+def _check_emergency_startup_empty_db_is_never_created(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup
 
     root = os.path.join(temp_root, "er")
     decision = prepare_emergency_startup("nurse", root=root)
-    if not decision.allowed or decision.status != "empty_database_available":
-        return False, f"missing standby did not allow password-gated empty fallback: {decision}"
-    if list(Path(root).rglob("rao_journal_emergency.db")):
-        return False, "empty emergency DB was created before activation"
-    session = start_or_resume_emergency_session(decision, root=root)
-    if not os.path.isfile(session.metadata.local_db_path):
-        return False, "empty emergency DB was not created after activation"
-    if not os.path.isfile(str(session.metadata.settings_snapshot_path or "")):
-        return False, "empty emergency settings snapshot was not created after activation"
-    with sqlite3.connect(session.metadata.local_db_path) as conn:
-        count = int(conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0] or 0)
-    if count != 0:
-        return False, f"empty emergency DB contains patients: {count}"
+    if decision.allowed or decision.status != "no_valid_standby":
+        return False, f"missing standby did not fail closed: {decision}"
+    if os.path.exists(root) and any(path.is_file() for path in Path(root).rglob("*")):
+        return False, "missing standby decision created an empty emergency file"
     return True, "ok"
 
 
@@ -859,20 +844,29 @@ def _check_runtime_outage_stale_standby_warning_recorded(temp_root: str) -> tupl
     return True, "ok"
 
 
-def _check_runtime_outage_empty_db_created_only_after_activation(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+def _check_runtime_outage_without_standby_denies_without_database_writes(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup
     from rem_card.app.runtime_outage import write_runtime_outage_startup_request
 
     root = os.path.join(temp_root, "er")
     _marker_path, payload = write_runtime_outage_startup_request(root=root, source_role="nurse")
+    before_files = {
+        str(path.relative_to(root)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in Path(root).rglob("*")
+        if path.is_file()
+    }
     decision = prepare_emergency_startup("nurse", root=root)
-    if not decision.allowed or decision.status != "empty_database_available":
-        return False, f"runtime outage without standby did not offer empty fallback: {decision}"
-    if list(Path(root).rglob("rao_journal_emergency.db")):
-        return False, "runtime outage created empty emergency DB before activation"
-    session = start_or_resume_emergency_session(decision, root=root, startup_request=payload)
-    if not os.path.isfile(session.metadata.local_db_path):
-        return False, "runtime outage did not create empty emergency DB after activation"
+    if decision.allowed or decision.status != "no_valid_standby":
+        return False, f"runtime outage without standby was not denied: {decision}"
+    after_files = {
+        str(path.relative_to(root)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in Path(root).rglob("*")
+        if path.is_file()
+    }
+    if after_files != before_files:
+        return False, "runtime outage denial created or modified database/session files"
+    if payload.get("source_role") != "nurse":
+        return False, f"runtime outage request fixture changed unexpectedly: {payload}"
     return True, "ok"
 
 

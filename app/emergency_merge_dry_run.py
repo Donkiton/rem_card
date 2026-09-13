@@ -268,7 +268,9 @@ class EmergencyMergeDryRunService:
 
     def check_session_locks(self, context: DbRuntimeContext | None = None) -> dict[str, Any]:
         context = context or self._network_context()
-        active = _existing_session_locks(context.session_locks_dir)
+        from rem_card.app.emergency_restore_probe import active_role_session_lock_paths
+
+        active = active_role_session_lock_paths(context.session_locks_dir)
         return {
             "ok": not active,
             "session_locks_dir": context.session_locks_dir,

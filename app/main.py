@@ -56,6 +56,7 @@ SINGLE_INSTANCE_UNRESPONSIVE = "unresponsive"
 SINGLE_INSTANCE_ACQUIRED = "acquired"
 SINGLE_INSTANCE_ERROR = "error"
 SINGLE_INSTANCE_ACK = "SHOWN"
+SINGLE_INSTANCE_CLOSING = "closing"
 _PENDING_OPERBLOCK_OFFLINE_RUNTIME = object()
 
 ACTIVE_EMERGENCY_SESSION_NETWORK_AVAILABLE_MESSAGE = (
@@ -273,7 +274,7 @@ def _wait_for_initial_w1(app, window, logger, started_at: float, timeout_ms: int
         except Exception:
             break
         state = _initial_w1_state(window)
-        if state.get("ready"):
+        if state.get("ready") or getattr(window, "_is_closing", False):
             break
         time.sleep(0.005)
 
@@ -465,10 +466,11 @@ def _show_settings_startup_warnings_if_needed(container) -> None:
 
 def _show_startup_warning_without_settings(title: str, message: str):
     try:
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
+        from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog
 
         QApplication.instance() or QApplication(sys.argv)
-        QMessageBox.warning(None, title, message)
+        EmergencyActionDialog.ask(None, title, message, [("Понятно", 1)])
     except Exception:
         _show_native_warning(title, message)
 
@@ -481,19 +483,11 @@ def _show_startup_action_without_settings(
     default_code: int = 0,
 ) -> int:
     try:
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
+        from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog
 
         QApplication.instance() or QApplication(sys.argv)
-        box = QMessageBox()
-        box.setWindowTitle(title)
-        box.setText(message)
-        button_codes = {}
-        for index, (button_text, result_code) in enumerate(actions):
-            role = QMessageBox.AcceptRole if index == 0 else QMessageBox.RejectRole
-            button = box.addButton(str(button_text), role)
-            button_codes[button] = int(result_code)
-        box.exec()
-        return int(button_codes.get(box.clickedButton(), default_code))
+        return EmergencyActionDialog.ask(None, title, message, actions, default_code=default_code)
     except Exception:
         _show_native_warning(title, message)
         return int(default_code)
@@ -639,19 +633,15 @@ def _configure_dev_runtime_baza_pin() -> Optional[str]:
 
 
 def _wait_for_restart_parent(parent_pid: int, *, timeout_sec: float = 45.0) -> bool:
+    from rem_card.app.role_session_lock import RoleSessionLock
+
     if parent_pid <= 0 or parent_pid == os.getpid():
         return False
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
-        try:
-            os.kill(parent_pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            # Для дочернего процесса этого не должно происходить, но не
-            # начинаем второй экземпляр, пока родитель потенциально жив.
-            pass
-        except OSError:
+        # os.kill(pid, 0) is not a read-only check on Windows. Query liveness
+        # without sending a signal, and wait conservatively if it is unknown.
+        if RoleSessionLock._is_pid_alive_local(parent_pid) is False:
             return True
         time.sleep(0.1)
     return False
@@ -1053,7 +1043,12 @@ def _show_emergency_startup_password(settings_db_path: str | None) -> bool:
             cancel_text=EMERGENCY_STARTUP_CANCEL_TEXT,
             error_text="Пароль неверный. Аварийный режим не будет открыт без подтверждения.",
         )
-    except Exception:
+    except Exception as exc:
+        _write_startup_local_log(f"Emergency password dialog failed: {exc}")
+        _show_startup_warning_without_settings(
+            "Аварийный пароль", "Не удалось открыть окно проверки пароля. Локальные данные сохранены. "
+            "Обратитесь к системному администратору."
+        )
         return False
 
 
@@ -1300,56 +1295,79 @@ def _resolve_active_emergency_session_before_network_start(
     *,
     before_user_message: Optional[Callable[[], None]] = None,
 ):
-    if role != "nurse":
+    if role not in {"doctor", "nurse"}:
         return None
 
     try:
         from rem_card.app.emergency_startup import prepare_emergency_startup, record_emergency_startup_metric
-    except Exception:
-        return None
+    except Exception as exc:
+        _write_startup_local_log(f"Emergency startup discovery import failed: {exc}")
+        _show_startup_warning_without_settings("Запуск RemCard", "Не удалось проверить аварийные данные этого ПК. "
+                                               "Запуск остановлен. Обратитесь к администратору.")
+        return False
 
     try:
         decision = prepare_emergency_startup(role)
-    except Exception:
-        return None
+    except Exception as exc:
+        _write_startup_local_log(f"Emergency startup discovery failed: {exc}")
+        _show_startup_warning_without_settings("Запуск RemCard", "Не удалось проверить аварийные данные этого ПК. "
+                                               "Запуск остановлен. Обратитесь к администратору.")
+        return False
     if getattr(decision, "active_session_metadata", None) is None:
+        if getattr(decision, "status", "") == "active_session_invalid":
+            _call_startup_message_callback(before_user_message)
+            _show_startup_warning_without_settings("Проверьте аварийную копию", decision.user_message)
+            return False
         return None
     if not getattr(decision, "allowed", False):
         return None
 
-    record_emergency_startup_metric("emergency_startup_active_session_network_available", status=decision.status)
-    _call_startup_message_callback(before_user_message)
-    choice = _show_active_emergency_startup_choice(
-        _active_emergency_session_network_start_message(),
-        network_available=True,
-    )
-    if int(choice or 0) == 0:
-        record_emergency_startup_metric("emergency_startup_user_cancelled", status=decision.status)
-        return False
-    if int(choice or 0) == 1:
-        record_emergency_startup_metric("emergency_startup_user_accepted", status=decision.status, action="resume")
-        return _start_active_emergency_session_for_startup(decision)
-    if int(choice or 0) != 2:
-        return False
+    from dataclasses import replace
+    from rem_card.app.emergency_store import EmergencyLocalStore
+    from rem_card.app.emergency_workflow import authorization_path
 
-    settings_db_path = str(getattr(decision, "password_settings_db_path", "") or "")
-    if not _show_emergency_network_transition_password(settings_db_path):
-        record_emergency_startup_metric("emergency_startup_password_rejected", status=decision.status, action="network")
-        return False
+    metadata = decision.active_session_metadata
+    store = EmergencyLocalStore(root=decision.root, source_role=role)
+    from rem_card.app.emergency_participants import finish_in_progress
 
-    ok, details = _mark_active_emergency_session_merge_pending_for_network_start(decision)
-    if not ok:
-        _show_custom_warning("Аварийное объединение недоступно", details)
-        record_emergency_startup_metric(
-            "emergency_startup_network_switch_blocked",
-            status=decision.status,
-            reason=details,
+    if finish_in_progress(os.path.dirname(metadata.local_db_path)):
+        _call_startup_message_callback(before_user_message)
+        _show_startup_warning_without_settings(
+            "Завершение аварийной работы",
+            "Другое окно завершает аварийную сессию этого ПК. Дождитесь переноса и повторите запуск.",
         )
-        return _start_active_emergency_session_for_startup(decision)
+        return False
+    if metadata.status in {"merge_pending", "merging", "merge_failed"}:
+        if os.path.isfile(authorization_path(store, metadata.emergency_session_id)):
+            from rem_card.app.emergency_pending_merge import run_pending_emergency_merge
 
-    record_emergency_startup_metric("emergency_startup_network_switch_requested", status=decision.status)
-    _run_pending_emergency_merge_before_startup(before_user_message or (lambda: None))
-    return None
+            _call_startup_message_callback(before_user_message)
+            result = run_pending_emergency_merge(root=decision.root)
+            if result.ok and result.attempted:
+                return None
+            if result.ok and not result.attempted:
+                refreshed = prepare_emergency_startup(role)
+                if refreshed.active_session_metadata is None and refreshed.status != "active_session_invalid":
+                    return None
+            _show_startup_warning_without_settings(
+                "Перенос не завершён",
+                result.user_message or "Локальные данные сохранены. Проверьте связь и повторно просмотрите изменения.",
+            )
+            recovery_required = bool((result.details or {}).get("requires_recovery", result.attempted))
+            metadata = replace(store.read_active_session(metadata.emergency_session_id),
+                               merge_recovery_required=recovery_required)
+            store.write_active_session(metadata)
+        else:
+            metadata = replace(metadata, merge_recovery_required=(
+                metadata.merge_recovery_required or metadata.status in {"merging", "merge_failed"}
+            ))
+            store.write_active_session(metadata)
+        metadata = store.mark_session_status(metadata.emergency_session_id,
+                                             "merge_failed" if metadata.merge_recovery_required else "waiting")
+        decision = replace(decision, active_session_metadata=metadata)
+    record_emergency_startup_metric("emergency_startup_active_session_network_available", status=metadata.status)
+    # The local session is opened first, so its patient review is never bypassed.
+    return _start_active_emergency_session_for_startup(decision)
 
 
 def _handle_emergency_startup_guard_failure(
@@ -1567,6 +1585,8 @@ def _notify_existing_instance(QLocalSocket, server_name: str, role_suffix: str) 
         if not socket_client.waitForReadyRead(1500):
             return SINGLE_INSTANCE_UNRESPONSIVE
         response = bytes(socket_client.readAll()).decode("utf-8", errors="replace").strip().upper()
+        if response == "CLOSING":
+            return SINGLE_INSTANCE_CLOSING
         if response != SINGLE_INSTANCE_ACK:
             return SINGLE_INSTANCE_UNRESPONSIVE
         print(f"Приложение с ролью '{role_suffix}' уже запущено. Окно развернуто.")
@@ -1608,10 +1628,41 @@ def _show_unresponsive_single_instance_warning(role_suffix: str) -> None:
     _show_startup_warning_without_settings(
         "Запуск RemCard",
         f"Предыдущий экземпляр роли «{role_display_name(role_suffix)}» найден, "
-        "но не отвечает на команду показа окна.\n\n"
-        "Завершите зависший процесс RemCard через Диспетчер задач и повторите запуск. "
-        "Локальный режим не был открыт, чтобы два процесса не записывали данные одновременно.",
+        "но пока не отвечает. Возможно, он сохраняет данные и завершает работу.\n\n"
+        "Подождите и повторите запуск. Если ожидание не помогает, обратитесь к администратору. "
+        "Новый экземпляр пока не открыт: сохранение предыдущего должно завершиться.",
     )
+
+
+def _wait_for_previous_instance(QLocalSocket, QLocalServer, server_name, role_suffix, timeout_sec=12.0):
+    from PySide6.QtCore import QEventLoop, QTimer
+    from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog
+
+    dialog = EmergencyActionDialog(
+        "Ожидание RemCard",
+        "Предыдущий экземпляр ещё завершает работу или временно занят.\n"
+        "Ждём освобождения программы, чтобы сохранить данные.", [("Отменить запуск", 0)],
+    )
+    cancelled = []
+    dialog.finished.connect(lambda _: cancelled.append(True))
+    dialog.show()
+    deadline = time.monotonic() + timeout_sec
+    result = (None, False, SINGLE_INSTANCE_UNRESPONSIVE)
+    try:
+        while not cancelled and time.monotonic() < deadline:
+            loop = QEventLoop()
+            QTimer.singleShot(400, loop.quit)
+            loop.exec()
+            if cancelled:
+                break
+            result = _prepare_single_instance_server(QLocalSocket, QLocalServer, server_name, role_suffix)
+            if result[2] in {SINGLE_INSTANCE_ACQUIRED, SINGLE_INSTANCE_SHOWN}:
+                return result
+        if cancelled:
+            return None, False, SINGLE_INSTANCE_SHOWN  # caller exits without an error dialog
+        return result
+    finally:
+        dialog.finish_with_code(0)
 
 
 def _handle_single_instance_show_request(client, window, Qt) -> bool:
@@ -1620,6 +1671,10 @@ def _handle_single_instance_show_request(client, window, Qt) -> bool:
     data = bytes(client.readAll()).decode("utf-8", errors="replace")
     if data != "SHOW":
         return False
+    if getattr(window, "_is_closing", False):
+        if int(client.write(b"CLOSING")) < 0:
+            return False
+        return bool(client.waitForBytesWritten(500))
     if window.isMinimized():
         window.showNormal()
     window.setWindowState(window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
@@ -1633,6 +1688,11 @@ def _handle_single_instance_show_request(client, window, Qt) -> bool:
 def _single_instance_server_name(role: Optional[str]) -> str:
     role_suffix = role if role else "default"
     instance_scope = role_suffix if is_compiled() else f"dev_{role_suffix}"
+    test_namespace = os.environ.get("REMCARD_TEST_INSTANCE_NAMESPACE", "")
+    if test_namespace:
+        import hashlib
+
+        instance_scope += "_test_" + hashlib.sha256(test_namespace.encode("utf-8")).hexdigest()[:16]
     return f"rem_card_single_instance_server_{instance_scope}"
 
 
@@ -1865,6 +1925,11 @@ def _shutdown_window_resources(window, logger):
         else:
             logger.warning("Pending emergency discard finalization skipped because DB shutdown was incomplete")
     resources_ok = bool(data_service_shutdown_ok and db_shutdown_ok)
+    if resources_ok:
+        for container in containers:
+            participant = getattr(container, "emergency_participant", None)
+            if participant is not None:
+                participant.release()
     logger.info("Application resource shutdown finished result=%s", "ok" if resources_ok else "incomplete")
     return resources_ok
 
@@ -2213,10 +2278,15 @@ def _acquire_single_instance_for_startup(
         server_name,
         role_suffix,
     )
+    if single_instance_status in {SINGLE_INSTANCE_UNRESPONSIVE, SINGLE_INSTANCE_CLOSING}:
+        splash_controller.close()
+        server, server_listening, single_instance_status = _wait_for_previous_instance(
+            QLocalSocket, QLocalServer, server_name, role_suffix,
+        )
     if single_instance_status == SINGLE_INSTANCE_SHOWN:
         splash_controller.close()
         sys.exit(0)
-    if single_instance_status == SINGLE_INSTANCE_UNRESPONSIVE:
+    if single_instance_status in {SINGLE_INSTANCE_UNRESPONSIVE, SINGLE_INSTANCE_CLOSING}:
         splash_controller.close()
         _show_unresponsive_single_instance_warning(role_suffix)
         sys.exit(1)
@@ -2240,6 +2310,16 @@ def _prepare_runtime_context_for_startup(
         args.role,
         active_local_case=active_local_operblock_case,
     )
+    if preselected_runtime_context is None and args.role in {"doctor", "nurse"}:
+        active_context = _resolve_active_emergency_session_before_network_start(
+            args.role, before_user_message=splash_controller.close,
+        )
+        if active_context is False:
+            splash_controller.close()
+            sys.exit(0)
+        if active_context is not None:
+            preselected_runtime_context = active_context
+            preselected_runtime_reason = "saved_emergency_session"
     emergency_startup_state = {"runtime_context": preselected_runtime_context}
 
     if not _validate_compiled_startup_unless_runtime_preselected(
@@ -2379,6 +2459,9 @@ def _show_startup_window(
     logger: Any,
     startup_started_at: float,
 ) -> None:
+    if getattr(window, "_is_closing", False):
+        splash_controller.close()
+        return
     initial_role_prepared = _prepare_initial_role_window(
         app,
         window,
@@ -2386,8 +2469,17 @@ def _show_startup_window(
         args.role,
         startup_started_at,
     )
+    # Startup waits process Qt events: a sibling may already have requested
+    # and completed this window's close while the initial role was loading.
+    if getattr(window, "_is_closing", False):
+        splash_controller.close()
+        return
     splash_controller.finish(window)
+    if getattr(window, "_is_closing", False):
+        return
     window.show()
+    if getattr(window, "_is_closing", False):
+        return
     _schedule_operblock_offline_notice_after_window(
         getattr(container, "runtime_context", emergency_runtime_context),
         preselected_runtime_reason,
@@ -2571,7 +2663,9 @@ def _run_startup_application(
         state.logger,
     )
 
-    state.exit_code = app.exec()
+    # QApplication.quit() issued during startup does not quit a future exec().
+    # Preserve the accepted close and reach the normal resource finalizer.
+    state.exit_code = 0 if getattr(state.window, "_is_closing", False) else app.exec()
     state.restart_requested = bool(app.property("remcard_restart_requested"))
     state.logger.info("Application exiting with code %s", state.exit_code)
 
@@ -2648,8 +2742,9 @@ def _finalize_startup_application(
         pass
     try:
         if state.window and hasattr(state.window, "release_role_lock"):
-            state.window.release_role_lock()
-        elif state.role_lock:
+            if state.resources_shutdown_ok:
+                state.window.release_role_lock()
+        elif state.role_lock and not state.window:
             state.role_lock.release()
     except Exception:
         pass

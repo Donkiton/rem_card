@@ -307,7 +307,12 @@ def run_compiled_smoke(package_dir: Path) -> None:
         if result.returncode != 0:
             stdout = (result.stdout or b"").decode("utf-8", errors="replace").strip()
             stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
-            details = "\n".join(value for value in (stdout, stderr) if value)
+            test_error_path = package_dir / "test_startup_error.log"
+            test_error = (
+                test_error_path.read_text(encoding="utf-8", errors="replace")
+                if test_error_path.is_file() else ""
+            )
+            details = "\n".join(value for value in (stdout, stderr, test_error) if value)
             suffix = f"\n{details}" if details else ""
             raise RuntimeError(
                 f"Smoke-тест {exe_name} завершился с кодом {result.returncode}. "
@@ -1086,6 +1091,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def validate_cli_args(args: argparse.Namespace) -> None:
+    if os.environ.get("REMCARD_ISOLATED_TEST_BUILD") == "1" and not args.test_worktree:
+        raise SystemExit("Изолированный тестовый профиль требует --test-worktree.")
     if args.test_worktree:
         conflicts = [
             name

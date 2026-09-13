@@ -53,6 +53,8 @@ def _find_our_shortcut():
         return None
 
     desktop = _get_desktop_path()
+    if not os.path.isdir(desktop):
+        return None
     exe_path = os.path.abspath(sys.executable).lower()
 
     shell = Dispatch("WScript.Shell")
@@ -154,6 +156,21 @@ class MainWindow(QMainWindow):
             self.init_with_role(role)
         else:
             self.init_ui()
+
+        self._emergency_workflow = None
+        if self._is_emergency_runtime():
+            from rem_card.ui.shared.emergency_workflow_controller import EmergencyWorkflowController
+
+            self._emergency_workflow = EmergencyWorkflowController(self)
+            participant = getattr(container, "emergency_participant", None)
+            if participant is not None:
+                from rem_card.ui.shared.emergency_participants import EmergencyPeerMonitor
+
+                self._emergency_peer_monitor = EmergencyPeerMonitor(self, participant)
+        elif role in {"doctor", "nurse"}:
+            from rem_card.ui.shared.emergency_participants import NetworkEmergencyMonitor
+
+            self._network_emergency_monitor = NetworkEmergencyMonitor(self)
 
         self._schedule_maintenance()
 
@@ -856,6 +873,10 @@ class MainWindow(QMainWindow):
         payload = dict(payload or {})
         status = str(payload.get("status") or "")
         self._update_restore_probe_status_label(status)
+        controller = getattr(self, "_emergency_workflow", None)
+        if controller is not None:
+            controller.on_status(payload)
+            return
         if self._restore_probe_dialog_active:
             return
         if time.monotonic() < float(self._restore_probe_notice_deferred_until or 0.0):
@@ -891,81 +912,29 @@ class MainWindow(QMainWindow):
             text = mapping.get(status, "Ожидание восстановления сетевой базы")
         label.setText(text)
 
-    def _show_restore_probe_merge_ready_dialog(self, payload: dict | None = None):
-        from rem_card.app.emergency_restore_probe import MERGE_READY_MODE_A_MESSAGE, REMOTE_CHANGED_CONFLICT_MESSAGE
-        from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog
-
-        payload = dict(payload or {})
-        status = str(payload.get("status") or "")
-        message = MERGE_READY_MODE_A_MESSAGE
-        if status == "remote_changed_conflict_pending":
-            message = f"{REMOTE_CHANGED_CONFLICT_MESSAGE}\n\nВыберите дальнейшее действие."
-
-        self._restore_probe_dialog_active = True
-        try:
-            result = EmergencyActionDialog.ask(
-                self,
-                "Сетевая база восстановлена",
-                message,
-                [
-                    ("Да, объединить", 1),
-                    ("Нет", 0),
-                    ("Без объединения", 2),
-                ],
-                default_code=0,
-            )
-        finally:
-            self._restore_probe_dialog_active = False
-        if int(result or 0) == 1:
-            self._close_for_emergency_merge()
-            return
-        if int(result or 0) == 2:
-            self._close_for_emergency_discard()
-            return
-        self._restore_probe_notice_deferred_until = time.monotonic() + 60.0
-
-    def _show_restore_probe_conflict_warning(self):
-        if self._restore_probe_conflict_notified:
-            return
-        from rem_card.app.emergency_restore_probe import REMOTE_CHANGED_CONFLICT_MESSAGE
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
-
-        self._restore_probe_dialog_active = True
-        try:
-            CustomMessageBox.warning(
-                self,
-                "Сетевая база изменилась",
-                REMOTE_CHANGED_CONFLICT_MESSAGE,
-            )
-        finally:
-            self._restore_probe_dialog_active = False
-            self._restore_probe_conflict_notified = True
-            self._restore_probe_notice_deferred_until = time.monotonic() + 300.0
+    def _show_restore_probe_merge_ready_dialog(self, payload: dict):
+        controller = getattr(self, "_emergency_workflow", None)
+        if controller is not None:
+            controller.on_status(payload)
 
     def _close_for_emergency_merge(self):
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        controller = getattr(self, "_emergency_workflow", None)
+        if controller is not None:
+            controller.begin_wait()
 
-        if not self._confirm_emergency_password_for_exit(
-            "Подтверждение объединения",
-            (
-                "Для выхода из аварийного режима и объединения с сетевой базой "
-                "введите аварийный пароль."
-            ),
-        ):
-            self._restore_probe_notice_deferred_until = time.monotonic() + 60.0
-            return
+    def _request_shared_emergency_finish(self):
+        participant = getattr(self.container, "emergency_participant", None)
+        if participant is not None:
+            participant.request_finish()
 
-        scheduler = getattr(self.container, "emergency_restore_probe_scheduler", None)
-        if scheduler is None:
-            CustomMessageBox.warning(self, "Аварийный режим", "Не удалось подготовить закрытие для объединения.")
-            return
-        try:
-            scheduler.mark_merge_ready()
-        except Exception as exc:
-            logger.warning("Failed to mark emergency merge-ready state: %s", exc, exc_info=True)
-            CustomMessageBox.warning(self, "Аварийный режим", f"Не удалось подготовить объединение:\n{exc}")
-            return
-        self.close()
+    def _shared_emergency_peers_ready(self):
+        participant = getattr(self.container, "emergency_participant", None)
+        return participant is None or participant.peers_ready()
+
+    def _cancel_shared_emergency_finish(self):
+        participant = getattr(self.container, "emergency_participant", None)
+        if participant is not None:
+            participant.cancel_finish()
 
     def _close_for_emergency_discard(self):
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -2150,8 +2119,6 @@ class MainWindow(QMainWindow):
                     and hasattr(container.data_service, "set_shutting_down")
                 ):
                     container.data_service.set_shutting_down()
-            self.release_role_lock()
-
             if hasattr(self, 'doctor_main'):
                 if hasattr(self.doctor_main, 'shutdown'):
                     self.doctor_main.shutdown()
@@ -2203,6 +2170,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error during closeEvent: {e}")
         finally:
-            self.release_role_lock()
+            # main._finalize_startup_application releases the role only after
+            # accepted writes and database connections have finished shutting down.
             QApplication.quit()
             super().closeEvent(event)

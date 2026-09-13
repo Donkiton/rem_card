@@ -22,7 +22,7 @@ from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 DB_CYCLE_META_KEY = "db_cycle_started_at"
 ROTATION_ROLE_LOCK_STALE_TIMEOUT_SEC = 75.0
-ROTATION_BLOCKING_EMERGENCY_STATUSES = {"active", "merge_pending", "merging", "merge_failed"}
+ROTATION_BLOCKING_EMERGENCY_STATUSES = {"active", "waiting", "merge_pending", "merging", "merge_failed"}
 MANUAL_ROTATION_UNDO_STATE_FILE = "manual_rotation_undo.json"
 MANUAL_ROTATION_UNDO_WINDOW = timedelta(hours=24)
 REPLICA_SNAPSHOT_WAIT_SEC = 20.0

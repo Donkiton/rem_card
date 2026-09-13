@@ -27,6 +27,7 @@ from rem_card.app.emergency_metadata import (
 from rem_card.app.emergency_paths import active_session_dir, archived_session_dir
 from rem_card.app.emergency_remote_identity import validate_remote_identity_error
 from rem_card.app.emergency_restore_probe import (
+    active_role_session_lock_paths,
     clear_merge_ready_marker,
     emergency_merge_lock_path,
     merge_ready_marker_path,
@@ -700,6 +701,7 @@ class EmergencyModeAMergeService:
             remote_backup_path=result.remote_backup_path,
             local_backup_path=archived_local_backup_path,
             merge_result="success",
+            merge_recovery_required=False,
             final_remote_last_change_id=result.remote_last_change_id_after,
             final_remote_hash=result.final_remote_hash,
             last_merge_error=None,
@@ -812,7 +814,12 @@ class EmergencyModeAMergeService:
         )
 
     def _recheck_session_locks(self, context: DbRuntimeContext) -> dict[str, Any]:
-        return self._dry_run_service.check_session_locks(context)
+        active = active_role_session_lock_paths(context.session_locks_dir)
+        return {
+            "ok": not active,
+            "session_locks_dir": context.session_locks_dir,
+            "active_locks": active,
+        }
 
     def _validate_remote_unchanged(self, session: EmergencySessionMetadata, context: DbRuntimeContext) -> dict[str, Any]:
         remote_validation = validate_medical_db_snapshot(context.medical_db_path)

@@ -347,7 +347,7 @@ class EmergencyStandbyScheduler:
                     if status == "merge_failed":
                         self._last_block_context = {"emergency_session_id": name}
                         return "merge_failed_unresolved"
-                    if status in {"active", "merge_pending", "merging"}:
+                    if status in {"active", "waiting", "merge_pending", "merging"}:
                         self._last_block_context = {"emergency_session_id": name}
                         return "active_emergency_session"
                 except Exception:

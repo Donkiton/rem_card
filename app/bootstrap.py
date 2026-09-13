@@ -292,6 +292,22 @@ class Container:
 
 
 def bootstrap(role: str | None = None, runtime_context=None) -> Container:
+    participant = None
+    if getattr(runtime_context, "mode", "") == "emergency" and role in {"doctor", "nurse"}:
+        from rem_card.app.emergency_participants import EmergencyParticipant
+
+        participant = EmergencyParticipant(runtime_context.baza_dir, role)
+    try:
+        container = _bootstrap_impl(role=role, runtime_context=runtime_context)
+    except Exception:
+        if participant is not None:
+            participant.release()
+        raise
+    container.emergency_participant = participant
+    return container
+
+
+def _bootstrap_impl(role: str | None = None, runtime_context=None) -> Container:
     from rem_card.data.dao.db_manager import DatabaseManager
 
     logger.info("Bootstrapping container...")

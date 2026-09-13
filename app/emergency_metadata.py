@@ -12,6 +12,7 @@ EMERGENCY_METADATA_JSON_INDENT = 2
 SESSION_STATUSES = {
     "standby",
     "active",
+    "waiting",
     "merge_pending",
     "merging",
     "merged",
@@ -69,6 +70,7 @@ class EmergencySessionMetadata:
     discarded_at: str | None = None
     discard_reason: str | None = None
     discard_report_path: str | None = None
+    merge_recovery_required: bool = False
     metadata_schema_version: int = 1
 
     def __post_init__(self) -> None:

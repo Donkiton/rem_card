@@ -47,12 +47,31 @@ class DisplaySettingsSector8SidesTest(unittest.TestCase):
 
         self.assertEqual(section["side"]["user_report"], SECTOR8_BUTTON_SIDE_LEFT)
         self.assertEqual(section["side"]["user_reports"], SECTOR8_BUTTON_SIDE_LEFT)
-        self.assertEqual(ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_LEFT), ["user_report"])
+        left_ids = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_LEFT)
+        self.assertIn("emergency_mode", left_ids)
+        self.assertEqual([item for item in left_ids if item != "emergency_mode"], ["user_report"])
         right_ids = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_RIGHT)
         self.assertIn("add_patient", right_ids)
         self.assertIn("calculations", right_ids)
         self.assertIn("archive", right_ids)
         self.assertNotIn("user_report", right_ids)
+
+    def test_old_settings_gain_emergency_button_for_doctor_and_nurse_only(self):
+        for role in ("doctor", "nurse"):
+            with self.subTest(role=role):
+                settings = normalize_role_display_settings(role, {
+                    "sector8_buttons": {
+                        "order": ["settings", "user_report", "archive"],
+                        "visible": {"archive": False},
+                        "side": {"settings": "left", "user_report": "right"},
+                    },
+                })["sector8_buttons"]
+                self.assertTrue(settings["visible"]["emergency_mode"])
+                self.assertEqual(settings["side"]["emergency_mode"], "left")
+                self.assertFalse(settings["visible"]["archive"])
+                self.assertEqual(settings["side"]["settings"], "left")
+                self.assertEqual(settings["side"]["user_report"], "right")
+        self.assertNotIn("emergency_mode", default_role_display_settings("operblock")["sector8_buttons"]["order"])
 
     def test_legacy_doctor_calculators_merge_visibility_order_and_side(self):
         settings = normalize_role_display_settings(
