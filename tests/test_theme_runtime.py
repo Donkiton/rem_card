@@ -257,6 +257,12 @@ app.processEvents()
 assert switch.hasFocus()
 
 for index in range(100):
+    # The previous temporary window may still be returning native activation.
+    # Establish focus before testing that the theme change preserves it.
+    app.setActiveWindow(switch)
+    switch.setFocus(Qt.FocusReason.OtherFocusReason)
+    app.processEvents()
+    assert switch.hasFocus(), ('before theme change', index)
     previous = manager.mode
     QTest.keyClick(switch, Qt.Key.Key_Space)
     app.processEvents()
@@ -269,6 +275,7 @@ for index in range(100):
     assert base_name == expected_style, (index, manager.mode, base_name, expected_style)
 
     host = QWidget()
+    host.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
     host.container = SimpleNamespace(runtime_context=SimpleNamespace(mode='network'))
     panel = Sector8Panel(host)
     panel.resize(1000, 50)
