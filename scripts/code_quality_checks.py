@@ -47,7 +47,7 @@ def _rel(path: Path) -> str:
 
 
 def _is_skipped(path: Path) -> bool:
-    return any(part in SKIP_DIR_NAMES for part in path.parts)
+    return any(part in SKIP_DIR_NAMES for part in path.relative_to(PROJECT_ROOT).parts)
 
 
 def _project_files():
