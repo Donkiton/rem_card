@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout
@@ -11,8 +12,7 @@ class CvcAccessMapWidget(QFrame):
         super().__init__(parent)
         self._access_code = ""
         self.setObjectName("cvc_access_map")
-        self.setStyleSheet(
-            """
+        set_widget_style(self, """
             QFrame#cvc_access_map {
                 border: 1px dashed #9aa5b1;
                 border-radius: 6px;
@@ -22,12 +22,11 @@ class CvcAccessMapWidget(QFrame):
                 border: none;
                 color: #52606d;
             }
-            """
-        )
+            """)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         self.title = QLabel("Схема доступа")
-        self.title.setStyleSheet("font-weight: bold;")
+        set_widget_style(self.title, "font-weight: bold;")
         self.label = QLabel("Кликабельная схема будет добавлена позже.\nСейчас выбор выполняется списком слева.")
         self.label.setWordWrap(True)
         layout.addWidget(self.title)

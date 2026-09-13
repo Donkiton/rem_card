@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
 import os
 import uuid
@@ -41,7 +42,6 @@ from rem_card.services.shift_service import ShiftService
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.theme_tokens import token
 
 
@@ -131,7 +131,7 @@ LAB_TIME_UP_ICON = _icon_qss_url("spin_arrow_up.svg")
 LAB_TIME_DOWN_ICON = _icon_qss_url("spin_arrow_down.svg")
 
 def _lab_tokens() -> dict[str, Any]:
-    return get_theme_manager().current_tokens()
+    return style_tokens()
 
 
 def _lab_token(key: str, default: str = "") -> str:
@@ -224,7 +224,7 @@ def _lab_popup_time_control_style(radius: int) -> str:
 
 def _apply_lab_combo_view_style(combo: QComboBox) -> None:
     try:
-        combo.view().setStyleSheet(_lab_combo_view_style())
+        set_widget_style(combo.view(), _lab_combo_view_style())
     except Exception:
         pass
 
@@ -457,8 +457,7 @@ class OneTimeLabAnalysisDialog(BaseStyledDialog):
         self._build_ui()
 
     def _build_ui(self):
-        self.content_widget.setStyleSheet(
-            """
+        set_widget_style(self.content_widget, """
             QLineEdit, QPlainTextEdit {
                 background: #ffffff;
                 border: 1px solid #c8d2dc;
@@ -486,8 +485,7 @@ class OneTimeLabAnalysisDialog(BaseStyledDialog):
                 padding-bottom: 6px;
             }
             """
-            + _lab_popup_time_control_style(6)
-        )
+            + _lab_popup_time_control_style(6))
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Название анализа")
 
@@ -555,8 +553,7 @@ class EditLabOrderDialog(BaseStyledDialog):
         self._fill_data()
 
     def _build_ui(self):
-        self.content_widget.setStyleSheet(
-            """
+        set_widget_style(self.content_widget, """
             QLabel#lab_edit_analysis_name {
                 color: #24313d;
                 font-weight: bold;
@@ -592,8 +589,7 @@ class EditLabOrderDialog(BaseStyledDialog):
                 padding-bottom: 6px;
             }
             """
-            + _lab_popup_time_control_style(6)
-        )
+            + _lab_popup_time_control_style(6))
         self.analysis_label = QLabel("Анализ")
         self.analysis_label.setObjectName("lab_edit_analysis_name")
         self.analysis_label.setWordWrap(True)
@@ -690,7 +686,7 @@ class AddLabAnalysisDialog(SavedFramelessDialogMixin, BaseStyledDialog):
 
     def _build_ui(self):
         self.content_widget.setObjectName("lab_dialog_content")
-        self.content_widget.setStyleSheet(_lab_assignment_dialog_style())
+        set_widget_style(self.content_widget, _lab_assignment_dialog_style())
         self.content_layout.setContentsMargins(16, 12, 16, 0)
         self.content_layout.setSpacing(10)
 

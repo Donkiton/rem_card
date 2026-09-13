@@ -1,10 +1,13 @@
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import themed_qcolor
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import json
 import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QPoint, QSettings, Qt
-from PySide6.QtGui import QColor, QTextCursor
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -98,15 +101,15 @@ class _OutcomeComboItemDelegate(QStyledItemDelegate):
         text_rect = row_rect.adjusted(8, 0, -8, 0)
 
         if opt.state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(row_rect, QColor("#dbeafe"))
+            painter.fillRect(row_rect, themed_qcolor("#dbeafe", "background"))
         elif opt.state & QStyle.StateFlag.State_MouseOver:
-            painter.fillRect(row_rect, QColor("#eef6ff"))
+            painter.fillRect(row_rect, themed_qcolor("#eef6ff", "background"))
         else:
-            painter.fillRect(row_rect, QColor("#ffffff"))
+            painter.fillRect(row_rect, themed_qcolor("#ffffff", "background"))
 
         painter.save()
         painter.setFont(opt.font)
-        painter.setPen(QColor("#172033"))
+        painter.setPen(themed_qcolor("#172033", "text"))
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, opt.text)
         painter.restore()
 
@@ -300,12 +303,12 @@ class _OutcomeDialogBase(BaseStyledDialog):
         )
 
     def _apply_content_style(self):
-        self.content_widget.setStyleSheet(self._content_style_sheet())
+        set_widget_style(self.content_widget, self._content_style_sheet())
 
     def _apply_combo_view_style(self, combo: QComboBox) -> None:
         try:
             view = combo.view()
-            view.setStyleSheet(OUTCOME_COMBO_VIEW_STYLE)
+            set_widget_style(view, OUTCOME_COMBO_VIEW_STYLE)
             view.setItemDelegate(_OutcomeComboItemDelegate(view))
             combo.setMaxVisibleItems(min(max(1, combo.count()), OUTCOME_COMBO_MAX_VISIBLE_ITEMS))
         except Exception:
@@ -379,8 +382,7 @@ class _OutcomeDialogBase(BaseStyledDialog):
                 button.setFixedSize(76, 24)
             button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
-        picker.setStyleSheet(
-            picker.styleSheet()
+        set_widget_style(picker, source_style(picker)
             + """
             QPushButton#hybrid_quick_button {
                 min-width: 76px;
@@ -403,8 +405,7 @@ class _OutcomeDialogBase(BaseStyledDialog):
                 max-height: 24px;
                 padding: 0px;
             }
-            """
-        )
+            """)
 
     @staticmethod
     def _parse_context_datetime(value) -> Optional[datetime]:
@@ -677,8 +678,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(
-            """
+        set_widget_style(scroll, """
             QScrollArea#outcome_scroll {
                 border: none;
                 background: transparent;
@@ -691,13 +691,12 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
                 height: 0px;
                 background: transparent;
             }
-            """
-        )
-        scroll.viewport().setStyleSheet("background: transparent;")
+            """)
+        set_widget_style(scroll.viewport(), "background: transparent;")
 
         body = QWidget()
         body.setObjectName("outcome_scroll_body")
-        body.setStyleSheet(self._content_style_sheet())
+        set_widget_style(body, self._content_style_sheet())
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(14)
@@ -825,7 +824,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
             edit.setFixedHeight(56)
             edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            edit.setStyleSheet("QScrollBar { width: 0px; height: 0px; }")
+            set_widget_style(edit, "QScrollBar { width: 0px; height: 0px; }")
             grid.addWidget(label, row, 0)
             grid.addWidget(edit, row, 1)
             self.measure_edits.append((label_text, edit))

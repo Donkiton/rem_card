@@ -1,7 +1,8 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style, themed_qcolor
 
 from PySide6.QtCore import QObject, QPoint, QEvent, Qt
-from PySide6.QtGui import QColor, QCursor, QGuiApplication, QHelpEvent, QPalette
+from PySide6.QtGui import QCursor, QGuiApplication, QHelpEvent, QPalette
 from PySide6.QtWidgets import QLabel, QToolTip, QWidget
 
 
@@ -54,11 +55,10 @@ class ReadableTooltipFilter(QObject):
 
     def _apply_style(self) -> None:
         palette = self._tooltip.palette()
-        palette.setColor(QPalette.ColorRole.Window, QColor(TOOLTIP_BG))
-        palette.setColor(QPalette.ColorRole.WindowText, QColor(TOOLTIP_TEXT))
+        palette.setColor(QPalette.ColorRole.Window, themed_qcolor(TOOLTIP_BG, "surface.input"))
+        palette.setColor(QPalette.ColorRole.WindowText, themed_qcolor(TOOLTIP_TEXT, "text.primary"))
         self._tooltip.setPalette(palette)
-        self._tooltip.setStyleSheet(
-            f"""
+        set_widget_style(self._tooltip, f"""
             QLabel#remcard_readable_tooltip {{
                 background-color: {TOOLTIP_BG};
                 color: {TOOLTIP_TEXT};
@@ -67,8 +67,7 @@ class ReadableTooltipFilter(QObject):
                 font-size: 13px;
                 font-family: "Segoe UI", Roboto, Arial, sans-serif;
             }}
-            """
-        )
+            """)
 
     def _show(self, text: str, global_pos: QPoint) -> None:
         QToolTip.hideText()
@@ -107,9 +106,8 @@ def apply_tooltip_palette(app) -> None:
         QPalette.ColorGroup.Inactive,
         QPalette.ColorGroup.Disabled,
     ):
-        palette.setColor(group, QPalette.ColorRole.ToolTipBase, QColor(TOOLTIP_BG))
-        palette.setColor(group, QPalette.ColorRole.ToolTipText, QColor(TOOLTIP_TEXT))
-    app.setPalette(palette)
+        palette.setColor(group, QPalette.ColorRole.ToolTipBase, themed_qcolor(TOOLTIP_BG, "surface.input"))
+        palette.setColor(group, QPalette.ColorRole.ToolTipText, themed_qcolor(TOOLTIP_TEXT, "text.primary"))
     QToolTip.setPalette(palette)
 
     tooltip_filter = getattr(app, "_remcard_readable_tooltip_filter", None)

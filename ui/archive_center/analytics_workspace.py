@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QButtonGroup, QComboBox, QFrame, QGridLayout, QHea
 
 from rem_card.services.analytics.platform import CohortDefinition, CohortFilter, MetricDefinition, MetricResult, MetricScope, StatisticsSnapshot, population_kind_label
 from rem_card.ui.shared.archive_date_edit import ArchiveDateEdit
+from rem_card.ui.shared.themed_html import set_themed_html
 
 
 class _DisplayTextExtractor(HTMLParser):
@@ -159,7 +160,7 @@ class AnalyticsWorkspace(QFrame):
         self.selected_result = QTextBrowser(self)
         self.selected_result.setObjectName("AnalyticsSelectedResult")
         self.selected_result.setOpenExternalLinks(False)
-        self.selected_result.setHtml("Выберите показатель и нажмите «Рассчитать».")
+        set_themed_html(self.selected_result, "Выберите показатель и нажмите «Рассчитать».")
         self.kpi = self.selected_result
         self.methodology = QLabel("Здесь будут показаны формула, включения и исключения.", self); self.methodology.setObjectName("AnalyticsWorkspaceText"); self.methodology.setWordWrap(True)
         self.source_cases = QTableWidget(0, 4, self); self.source_cases.setObjectName("ArchiveDataTable")
@@ -256,7 +257,7 @@ class AnalyticsWorkspace(QFrame):
         if metric_id in self._definitions:
             definition = self._definitions[metric_id]
             self.selected_metric = None
-            self.selected_result.setHtml(
+            set_themed_html(self.selected_result,
                 f"<h3>{escape(definition.title)}</h3>"
                 "<p>Рассчитываем выбранный показатель…</p>"
             )
@@ -329,7 +330,7 @@ class AnalyticsWorkspace(QFrame):
         self.selected_metric = result
         definition = result.definition
         structured_rows = tuple(row for row in result.rows if isinstance(row, Mapping))
-        self.selected_result.setHtml(self._result_html(result, structured_rows))
+        set_themed_html(self.selected_result, self._result_html(result, structured_rows))
         methodology_rows = ""
         if structured_rows and any(row.get("name") for row in structured_rows):
             items = "".join(

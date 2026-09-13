@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import (
     QHBoxLayout, QPushButton, QLabel, QTextEdit, QComboBox,
@@ -26,16 +27,14 @@ def _apply_medication_combo_style(root):
     for combo in combos:
         line_edit = combo.lineEdit()
         if line_edit is not None:
-            line_edit.setStyleSheet(
-                """
+            set_widget_style(line_edit, """
                 QLineEdit {
                     background: transparent;
                     border: none;
                     padding: 0;
                     color: #172033;
                 }
-                """
-            )
+                """)
 
 
 class ManualEntryDialog(BaseStyledDialog):
@@ -53,7 +52,7 @@ class ManualEntryDialog(BaseStyledDialog):
     def setup_ui_content(self):
         from rem_card.ui.styles.theme import BG_CARD, BORDER_RADIUS_SM, BORDER_LIGHT
 
-        self.content_widget.setStyleSheet(f"""
+        set_widget_style(self.content_widget, f"""
             QLabel {{ background-color: transparent; color: #2c3e50; }}
             QLineEdit, QComboBox, QDoubleSpinBox, QCheckBox {{ 
                 background-color: {BG_CARD}; 
@@ -460,7 +459,7 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
     def setup_ui_content(self):
         from rem_card.ui.styles.theme import BG_CARD, BORDER_RADIUS_SM, BORDER_LIGHT
 
-        self.content_widget.setStyleSheet(f"""
+        set_widget_style(self.content_widget, f"""
             QLabel {{ background-color: transparent; color: #2c3e50; }}
             QLineEdit, QComboBox, QDoubleSpinBox, QCheckBox {{ 
                 background-color: {BG_CARD}; 
@@ -789,7 +788,7 @@ class AdministrationDialog(BaseStyledDialog):
     def setup_ui_content(self):
         from rem_card.ui.styles.theme import BG_CARD, BORDER_RADIUS_SM, BORDER_LIGHT
         
-        self.content_widget.setStyleSheet(f"""
+        set_widget_style(self.content_widget, f"""
             QLabel {{ background-color: transparent; border: none; color: #2c3e50; }}
             QComboBox, QDateTimeEdit, QTextEdit {{ 
                 background-color: {BG_CARD}; 
@@ -804,7 +803,7 @@ class AdministrationDialog(BaseStyledDialog):
         if dose_str == "0":
             dose_str = ""
         info_lbl = QLabel(f"<b>{self.order.latin}</b> {dose_str}".strip())
-        info_lbl.setStyleSheet("font-size: 14px;")
+        set_widget_style(info_lbl, "font-size: 14px;")
         layout.addWidget(info_lbl)
         
         layout.addWidget(QLabel("Статус:"))

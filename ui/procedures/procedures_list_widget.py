@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from datetime import datetime
 
@@ -37,8 +38,7 @@ class ProceduresListWidget(QTableWidget):
         self.setSelectionBehavior(QTableWidget.SelectRows)
         self.setSelectionMode(QTableWidget.SingleSelection)
         self.setAlternatingRowColors(True)
-        self.setStyleSheet(
-            """
+        set_widget_style(self, """
             QTableWidget {
                 background: #f3f6fa;
                 alternate-background-color: #e9eef5;
@@ -56,8 +56,7 @@ class ProceduresListWidget(QTableWidget):
             QHeaderView::section:hover {
                 background-color: #cbd7e5;
             }
-            """
-        )
+            """)
         self.horizontalHeader().setSectionsClickable(True)
         self.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
         self.horizontalHeader().setSortIndicatorShown(True)
@@ -105,8 +104,7 @@ class ProceduresListWidget(QTableWidget):
         cancel_btn = QPushButton("Отменить")
         for button in (open_btn, print_btn, cancel_btn):
             button.setMinimumWidth(76)
-            button.setStyleSheet(
-                """
+            set_widget_style(button, """
                 QPushButton {
                     background: #e9eef5;
                     color: #172033;
@@ -119,8 +117,7 @@ class ProceduresListWidget(QTableWidget):
                     background: #dde7f2;
                     border-color: #7aa6d8;
                 }
-                """
-            )
+                """)
         open_btn.clicked.connect(lambda: self.open_requested.emit(procedure_id))
         print_btn.clicked.connect(lambda: self.print_requested.emit(procedure_id))
         cancel_btn.clicked.connect(lambda: self.cancel_requested.emit(procedure_id))

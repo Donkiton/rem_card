@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -39,8 +40,7 @@ class OperBlockQuickButtonsSettingsWidget(QWidget):
 
         self.frame = QFrame()
         self.frame.setObjectName("adminDictFrame")
-        self.frame.setStyleSheet(
-            """
+        set_widget_style(self.frame, """
             QFrame#adminDictFrame {
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
@@ -49,13 +49,12 @@ class OperBlockQuickButtonsSettingsWidget(QWidget):
             QTableWidget {
                 background-color: white;
             }
-            """
-        )
+            """)
         layout = QVBoxLayout(self.frame)
 
         header_label = QLabel("Кнопки быстрых назначений")
         header_label.setProperty("heading", "true")
-        header_label.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(header_label, "border: none; background: transparent;")
         layout.addWidget(header_label)
 
         self.table = QTableWidget()

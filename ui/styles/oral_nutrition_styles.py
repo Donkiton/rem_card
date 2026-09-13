@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from PySide6.QtWidgets import QComboBox, QDateTimeEdit, QWidget
 
@@ -451,7 +452,7 @@ QAbstractItemView::item:hover {{
     combos.extend(root.findChildren(QComboBox))
     for combo in combos:
         view = combo.view()
-        view.setStyleSheet(popup_style)
+        set_widget_style(view, popup_style)
         retained_popups.append(view)
 
     date_edits = [root] if isinstance(root, QDateTimeEdit) else []
@@ -459,7 +460,7 @@ QAbstractItemView::item:hover {{
     for editor in date_edits:
         if editor.calendarPopup():
             calendar = editor.calendarWidget()
-            calendar.setStyleSheet(build_oral_nutrition_dialog_style(tokens))
+            set_widget_style(calendar, build_oral_nutrition_dialog_style(tokens))
             retained_popups.append(calendar)
 
     root._oral_popup_widgets = retained_popups

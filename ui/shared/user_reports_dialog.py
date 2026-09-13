@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from typing import Any
 
@@ -82,8 +84,7 @@ class UserReportDialog(BaseStyledDialog):
         footer.addWidget(cancel_btn)
         footer.addWidget(self.send_btn)
         layout.addLayout(footer)
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + """
             QLabel#DisplaySettingsSectionTitle {
                 font-weight: bold;
@@ -94,8 +95,7 @@ class UserReportDialog(BaseStyledDialog):
                 border: none;
                 background: transparent;
             }
-            """
-        )
+            """)
 
     def _current_type_and_text(self) -> tuple[str, str]:
         if self.tabs.currentIndex() == 1:
@@ -238,16 +238,14 @@ class UserReportsInboxDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         footer.addWidget(close_dialog_btn)
         layout.addLayout(footer)
 
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + """
             QLabel#UserReportsSummary {
                 color: #607080;
                 border: none;
                 background: transparent;
             }
-            """
-        )
+            """)
         self._update_action_buttons()
 
     def _restore_saved_geometry(self) -> None:

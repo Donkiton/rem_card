@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 
@@ -80,10 +82,8 @@ class PersistentSaveFileDialog(QFileDialog):
         self.setMinimumSize(760, 500)
         self.resize(1040, 680)
         prepare_settings_file_dialog(self)
-        self.setStyleSheet(
-            f"{self.styleSheet()}\n"
-            "QFileDialog#RemCardSaveFileDialog { background: transparent; }"
-        )
+        set_widget_style(self, f"{source_style(self)}\n"
+            "QFileDialog#RemCardSaveFileDialog { background: transparent; }")
         self._configure_file_view()
 
     def _install_custom_title_bar(self, title: str) -> None:
@@ -127,7 +127,7 @@ class PersistentSaveFileDialog(QFileDialog):
 
         self.main_frame = QFrame(self)
         self.main_frame.setObjectName("ProcedureDialogMainFrame")
-        self.main_frame.setStyleSheet(_SAVE_DIALOG_SHELL_STYLE)
+        set_widget_style(self.main_frame, _SAVE_DIALOG_SHELL_STYLE)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(30)

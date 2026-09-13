@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLineEdit
 
 
@@ -19,8 +20,7 @@ class NursePrescriptionInputWidget(QWidget):
         self.input_field.setPlaceholderText("Введите препарат...")
         self.input_field.setReadOnly(True)
         self.input_field.setEnabled(False)
-        self.input_field.setStyleSheet(
-            """
+        set_widget_style(self.input_field, """
             QLineEdit {
                 font-size: 14px;
                 padding: 5px;
@@ -31,6 +31,5 @@ class NursePrescriptionInputWidget(QWidget):
                 border: 2px solid #bdc4c8;
                 outline: none;
             }
-            """
-        )
+            """)
         layout.addWidget(self.input_field)

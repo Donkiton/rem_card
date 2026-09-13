@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import inspect
 from collections import OrderedDict
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -62,7 +63,7 @@ class SectorEvents(BaseSectorWidget):
 
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
 
         self.init_ui()
 
@@ -117,7 +118,7 @@ class SectorEvents(BaseSectorWidget):
         
         self.edit_reason_text = QLineEdit()
         self.edit_reason_text.setPlaceholderText("Комментарий к перемещению...")
-        self.edit_reason_text.setStyleSheet("""
+        set_widget_style(self.edit_reason_text, """
             QLineEdit {
                 background-color: white;
                 border: 1px solid #bdc3c7;
@@ -135,7 +136,7 @@ class SectorEvents(BaseSectorWidget):
         # Кнопка ОТМЕНЫ последнего действия
         self.btn_rollback = QPushButton(" Отменить последнее")
         self.btn_rollback.setFixedHeight(30)
-        self.btn_rollback.setStyleSheet("""
+        set_widget_style(self.btn_rollback, """
             QPushButton {
                 font-weight: bold; font-size: 12px; color: #e74c3c;
                 background-color: #fdfdfd; border-radius: 4px; border: 1.5px solid #e74c3c;
@@ -154,7 +155,7 @@ class SectorEvents(BaseSectorWidget):
         self.history_area = QScrollArea()
         self.history_area.setWidgetResizable(True)
         self.history_area.setFrameShape(QFrame.NoFrame)
-        self.history_area.setStyleSheet("background-color: #fdfdfd; border: 1px solid #dcdde1; border-radius: 4px;")
+        set_widget_style(self.history_area, "background-color: #fdfdfd; border: 1px solid #dcdde1; border-radius: 4px;")
         
         self.history_list_container = QWidget()
         self.history_list_layout = QVBoxLayout(self.history_list_container)
@@ -174,7 +175,7 @@ class SectorEvents(BaseSectorWidget):
         self.main_layout_v.addWidget(self.bottom_footer)
 
         # Стили
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_events_main_container { background-color: transparent !important; }
             QWidget#sector_header {
                 font-weight: bold; font-size: 14px; color: #2c3e50 !important; 
@@ -207,7 +208,7 @@ class SectorEvents(BaseSectorWidget):
         btn = QPushButton(text)
         btn.setCheckable(True)
         btn.setFixedHeight(36)
-        btn.setStyleSheet(f"""
+        set_widget_style(btn, f"""
             QPushButton {{
                 font-weight: bold; font-size: 13px; color: white;
                 background-color: {color}; border-radius: 5px; border: 1px solid #bdc3c7;
@@ -370,7 +371,7 @@ class SectorEvents(BaseSectorWidget):
         self._clear_history_rows()
         placeholder = QLabel(text)
         placeholder.setAlignment(Qt.AlignCenter)
-        placeholder.setStyleSheet("color: #7f8c8d; padding: 12px; border: none;")
+        set_widget_style(placeholder, "color: #7f8c8d; padding: 12px; border: none;")
         self.history_list_layout.insertWidget(0, placeholder)
 
     def _set_loading_state(self, text="Загрузка событий..."):
@@ -388,13 +389,13 @@ class SectorEvents(BaseSectorWidget):
     def _create_reason_edit(self, event):
         reason_edit = QLineEdit(_movement_comment_text(event.status, event.reason_text))
         reason_edit.setPlaceholderText("Комментарий...")
-        reason_edit.setStyleSheet("border: 1px solid #dcdde1; border-radius: 2px; padding: 1px 5px;")
+        set_widget_style(reason_edit, "border: 1px solid #dcdde1; border-radius: 2px; padding: 1px 5px;")
         return reason_edit
 
     def _create_change_handler(self, btn, style):
         def handler():
             self._is_editing_time = True
-            btn.setStyleSheet(style)
+            set_widget_style(btn, style)
             btn.setToolTip("Нажмите, чтобы сохранить изменения")
         return handler
 
@@ -403,7 +404,7 @@ class SectorEvents(BaseSectorWidget):
             dt_start_view = QLabel("...")
             dt_start_view.setFixedWidth(60)
             dt_start_view.setAlignment(Qt.AlignCenter)
-            dt_start_view.setStyleSheet("font-weight: bold; color: #7f8c8d;")
+            set_widget_style(dt_start_view, "font-weight: bold; color: #7f8c8d;")
             dt_start_view.setToolTip(event.start_time.strftime("%d.%m.%y %H:%M"))
             layout.addWidget(dt_start_view)
 
@@ -415,7 +416,7 @@ class SectorEvents(BaseSectorWidget):
         dt_start.setDisplayFormat("HH:mm")
         dt_start.setButtonSymbols(QDateTimeEdit.NoButtons)
         dt_start.setFixedWidth(60)
-        dt_start.setStyleSheet("border: none; background: transparent; font-weight: bold;")
+        set_widget_style(dt_start, "border: none; background: transparent; font-weight: bold;")
         layout.addWidget(dt_start)
         return dt_start
 
@@ -423,7 +424,7 @@ class SectorEvents(BaseSectorWidget):
         sep = QLabel("-")
         sep.setFixedWidth(12)
         sep.setAlignment(Qt.AlignCenter)
-        sep.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(sep, "border: none; background: transparent;")
         layout.addWidget(sep)
 
     def _is_start_outside_shift(self, event):
@@ -438,7 +439,7 @@ class SectorEvents(BaseSectorWidget):
         dt_end_view = QLabel("...")
         dt_end_view.setFixedWidth(60)
         dt_end_view.setAlignment(Qt.AlignCenter)
-        dt_end_view.setStyleSheet("font-weight: bold; color: #7f8c8d;")
+        set_widget_style(dt_end_view, "font-weight: bold; color: #7f8c8d;")
         layout.addWidget(dt_end_view)
 
         dt_end = QDateTimeEdit(event.end_time or self.shift_end)
@@ -456,7 +457,7 @@ class SectorEvents(BaseSectorWidget):
         btn = QPushButton("✓")
         btn.setFixedSize(20, 20)
         btn.setToolTip("Данные сохранены")
-        btn.setStyleSheet(saved_style)
+        set_widget_style(btn, saved_style)
         return btn
 
     def _should_block_save_button(self, is_start_outside, is_end_outside, is_archive):
@@ -466,7 +467,7 @@ class SectorEvents(BaseSectorWidget):
 
     def _disable_save_button(self, btn, tooltip):
         btn.setEnabled(False)
-        btn.setStyleSheet("QPushButton { border-radius: 10px; background-color: #bdc3c7; color: white; border: 1px solid #bdc3c7; }")
+        set_widget_style(btn, "QPushButton { border-radius: 10px; background-color: #bdc3c7; color: white; border: 1px solid #bdc3c7; }")
         btn.setToolTip(tooltip)
 
     def _add_completed_event_controls(self, layout, event, dt_start, reason_edit, is_start_outside, is_end_outside, is_archive):
@@ -474,7 +475,7 @@ class SectorEvents(BaseSectorWidget):
         dt_end.setDisplayFormat("HH:mm")
         dt_end.setButtonSymbols(QDateTimeEdit.NoButtons)
         dt_end.setFixedWidth(60)
-        dt_end.setStyleSheet("border: none; background: transparent; font-weight: bold;")
+        set_widget_style(dt_end, "border: none; background: transparent; font-weight: bold;")
         layout.addWidget(dt_end)
 
         dt_start.dateTimeChanged.connect(lambda: setattr(self, '_is_editing_time', True))
@@ -505,7 +506,7 @@ class SectorEvents(BaseSectorWidget):
     def _add_open_event_controls(self, layout, event, dt_start, reason_edit, is_archive):
         l_end = QLabel("...")
         l_end.setFixedWidth(60)
-        l_end.setStyleSheet("border: none; background: transparent; font-weight: bold;")
+        set_widget_style(l_end, "border: none; background: transparent; font-weight: bold;")
         layout.addWidget(l_end)
 
         btn_container, btn_lay = self._create_button_container()
@@ -558,8 +559,7 @@ class SectorEvents(BaseSectorWidget):
         s_lbl = QLabel(s_name)
         s_lbl.setFixedWidth(155) # Увеличено на 40% (110 -> 155)
         s_lbl.setAlignment(Qt.AlignCenter)
-        s_lbl.setStyleSheet(
-            f"\n"
+        set_widget_style(s_lbl, f"\n"
             f"                QLabel {{\n"
             f"                    color: {s_color}; \n"
             f"                    font-weight: bold; \n"
@@ -568,14 +568,13 @@ class SectorEvents(BaseSectorWidget):
             f"                    background-color: rgba({QColor(s_color).red()}, {QColor(s_color).green()}, {QColor(s_color).blue()}, 25);\n"
             f"                    padding: 2px;\n"
             f"                }}\n"
-            f"            "
-        )
+            f"            ")
         layout.addWidget(s_lbl)
 
     def _prepare_reason_edit_for_archive(self, reason_edit, is_archive):
         if is_archive:
             reason_edit.setReadOnly(True)
-            reason_edit.setStyleSheet("border: none; background: transparent; color: #444;")
+            set_widget_style(reason_edit, "border: none; background: transparent; color: #444;")
 
     def _creator_display(self, event):
         creator_raw = str(event.created_by or "SYSTEM").upper()
@@ -588,12 +587,12 @@ class SectorEvents(BaseSectorWidget):
 
     def _add_creator_label(self, layout, event):
         creator = QLabel(f"[{self._creator_display(event)}]")
-        creator.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        set_widget_style(creator, "color: #7f8c8d; font-size: 11px;")
         layout.addWidget(creator)
 
     def _build_event_row(self, event, is_archive):
         row = QFrame()
-        row.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dcdde1; border-radius: 3px; margin: 2px;")
+        set_widget_style(row, "background-color: #f8f9fa; border: 1px solid #dcdde1; border-radius: 3px; margin: 2px;")
         layout = QHBoxLayout(row)
         layout.setContentsMargins(10, 5, 10, 5)
 

@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QFrame
 from PySide6.QtCore import Qt, Signal
 from rem_card.app.roles import (
@@ -55,27 +56,27 @@ class BedWidget(QFrame):
         layout.setSpacing(4)
 
         # Применяем стиль из темы
-        self.setStyleSheet(get_bed_style(self.patient is not None))
+        set_widget_style(self, get_bed_style(self.patient is not None))
 
         bed_lbl = QLabel(f"КОЙКА №{self.bed_number}")
-        bed_lbl.setStyleSheet("font-weight: bold; font-size: 11px; opacity: 0.8;")
+        set_widget_style(bed_lbl, "font-weight: bold; font-size: 11px; opacity: 0.8;")
         layout.addWidget(bed_lbl)
 
         if self.patient:
             name_lbl = QLabel(self.patient.get_display_name())
             name_lbl.setWordWrap(True)
-            name_lbl.setStyleSheet("font-size: 14px; font-weight: bold;")
+            set_widget_style(name_lbl, "font-size: 14px; font-weight: bold;")
             layout.addWidget(name_lbl)
 
             diag_text = self.patient.diagnosis_text or "Диагноз не указан"
             diag_lbl = QLabel(diag_text)
-            diag_lbl.setStyleSheet("font-size: 11px;")
+            set_widget_style(diag_lbl, "font-size: 11px;")
             diag_lbl.setWordWrap(True)
             layout.addWidget(diag_lbl)
         else:
             empty_lbl = QLabel("СВОБОДНО")
             empty_lbl.setAlignment(Qt.AlignCenter)
-            empty_lbl.setStyleSheet("font-weight: bold; font-size: 16px; margin-top: 5px;")
+            set_widget_style(empty_lbl, "font-weight: bold; font-size: 16px; margin-top: 5px;")
             layout.addWidget(empty_lbl)
 
     def mousePressEvent(self, event):

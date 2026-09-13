@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QListWidget, QListWidgetItem, QDialog, QPushButton, QFrame
 from PySide6.QtGui import QIcon
@@ -109,7 +110,7 @@ class PatientArchiveDialog(QDialog):
         
         main_frame = QFrame(self)
         main_frame.setObjectName("MainFrame")
-        main_frame.setStyleSheet("""
+        set_widget_style(main_frame, """
             #MainFrame {
                 background-color: #f8f9fa;
                 border-radius: 10px;
@@ -149,7 +150,7 @@ class PatientArchiveDialog(QDialog):
         self.btn_load.setEnabled(False) # Изначально неактивна
         
         # Стиль кнопки во всю ширину
-        self.btn_load.setStyleSheet("""
+        set_widget_style(self.btn_load, """
             QPushButton {
                 font-size: 15px; 
                 font-weight: bold; 

@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 import re
 import tempfile
@@ -11,6 +12,7 @@ from rem_card.services.analytics.graphs_service import build_graphs_html, build_
 from rem_card.ui.analytics.chart_renderer import fit_chart_images_to_width
 from rem_card.ui.analytics.graphs_catalog import GRAPH_GROUPS, TOP_GRAPHS
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
+from rem_card.ui.shared.themed_html import set_themed_html
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 from rem_card.ui.styles.theme import (
     ANALYTICS_CHART_COLORS,
@@ -59,7 +61,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         self.bg_container = QWidget(self)
         self.bg_container.setMouseTracking(True)
         self.bg_container.setObjectName("bg_container")
-        self.bg_container.setStyleSheet(STYLE_ANALYTICS_DIALOG_CONTAINER)
+        set_widget_style(self.bg_container, STYLE_ANALYTICS_DIALOG_CONTAINER)
 
         self.shadow = QGraphicsDropShadowEffect(self)
         self.shadow.setBlurRadius(30)
@@ -78,19 +80,19 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         # Header panel
         self.header_panel = QWidget()
         self.header_panel.setFixedHeight(40)
-        self.header_panel.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
+        set_widget_style(self.header_panel, STYLE_TRANSPARENT_WIDGET)
         self.header_panel_layout = QHBoxLayout(self.header_panel)
         self.header_panel_layout.setContentsMargins(10, 0, 0, 0)
 
         self.title_label = QLabel("ФОРМИРОВАНИЕ ГРАФИКОВ")
-        self.title_label.setStyleSheet(STYLE_ANALYTICS_TITLE)
+        set_widget_style(self.title_label, STYLE_ANALYTICS_TITLE)
         self.header_panel_layout.addWidget(self.title_label)
         self.header_panel_layout.addStretch()
 
         self.close_button = QPushButton("×")
         self.close_button.setFixedSize(30, 30)
         self.close_button.setCursor(Qt.PointingHandCursor)
-        self.close_button.setStyleSheet(STYLE_DIALOG_CLOSE_BUTTON)
+        set_widget_style(self.close_button, STYLE_DIALOG_CLOSE_BUTTON)
         self.close_button.clicked.connect(self.reject)
         self.header_panel_layout.addWidget(self.close_button)
         self.main_layout.addWidget(self.header_panel)
@@ -107,7 +109,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
 
         # Buttons to check/uncheck - more neat
         ctrl_frame = QFrame()
-        ctrl_frame.setStyleSheet(STYLE_ANALYTICS_CONTROL_FRAME)
+        set_widget_style(ctrl_frame, STYLE_ANALYTICS_CONTROL_FRAME)
         ctrl_layout = QVBoxLayout(ctrl_frame)
         ctrl_layout.setSpacing(5)
 
@@ -117,12 +119,12 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
 
         for b in [self.btn_select_all, self.btn_deselect_all, self.btn_select_top]:
             b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(STYLE_ANALYTICS_OPTION_BUTTON)
+            set_widget_style(b, STYLE_ANALYTICS_OPTION_BUTTON)
             ctrl_layout.addWidget(b)
 
         self.chk_include_recovery = QCheckBox("Учитывать пробуждение")
         self.chk_include_recovery.setChecked(False)
-        self.chk_include_recovery.setStyleSheet(STYLE_ANALYTICS_CHECKBOX)
+        set_widget_style(self.chk_include_recovery, STYLE_ANALYTICS_CHECKBOX)
         ctrl_layout.addWidget(self.chk_include_recovery)
 
         self.btn_select_all.clicked.connect(self._select_all)
@@ -134,10 +136,10 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         # Checkboxes for graphs
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet(STYLE_ANALYTICS_SCROLL_AREA)
+        set_widget_style(self.scroll_area, STYLE_ANALYTICS_SCROLL_AREA)
 
         self.checkboxes_container = QWidget()
-        self.checkboxes_container.setStyleSheet(STYLE_ANALYTICS_CHECKBOX_CONTAINER)
+        set_widget_style(self.checkboxes_container, STYLE_ANALYTICS_CHECKBOX_CONTAINER)
         self.checkboxes_layout = QVBoxLayout(self.checkboxes_container)
         self.checkboxes_layout.setSpacing(8)
 
@@ -147,13 +149,13 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         self.checkboxes = {}
         for group_name, graphs in self.graph_groups.items():
             group_lbl = QLabel(group_name.upper())
-            group_lbl.setStyleSheet(STYLE_ANALYTICS_GROUP_LABEL)
+            set_widget_style(group_lbl, STYLE_ANALYTICS_GROUP_LABEL)
             self.checkboxes_layout.addWidget(group_lbl)
 
             for key, name in graphs.items():
                 cb = QCheckBox(name)
                 cb.setChecked(False)
-                cb.setStyleSheet(STYLE_ANALYTICS_CHECKBOX)
+                set_widget_style(cb, STYLE_ANALYTICS_CHECKBOX)
                 self.checkboxes_layout.addWidget(cb)
                 self.checkboxes[key] = cb
 
@@ -164,14 +166,14 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         self.preview_btn = QPushButton("ПРЕДПРОСМОТР ГРАФИКОВ")
         self.preview_btn.setCursor(Qt.PointingHandCursor)
         self.preview_btn.setFixedHeight(40)
-        self.preview_btn.setStyleSheet(STYLE_ANALYTICS_PREVIEW_BUTTON)
+        set_widget_style(self.preview_btn, STYLE_ANALYTICS_PREVIEW_BUTTON)
         self.preview_btn.clicked.connect(self._on_preview_clicked)
         self.options_layout.addWidget(self.preview_btn)
 
         self.save_pdf_btn = QPushButton("СОХРАНИТЬ ОТДЕЛЬНО В PDF")
         self.save_pdf_btn.setCursor(Qt.PointingHandCursor)
         self.save_pdf_btn.setFixedHeight(45)
-        self.save_pdf_btn.setStyleSheet(STYLE_ANALYTICS_PRIMARY_BUTTON)
+        set_widget_style(self.save_pdf_btn, STYLE_ANALYTICS_PRIMARY_BUTTON)
         self.save_pdf_btn.clicked.connect(self._on_save_pdf_clicked)
         self.options_layout.addWidget(self.save_pdf_btn)
 
@@ -179,7 +181,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
 
         # Right Side - Preview (TextBrowser to show generated images)
         self.report_text = QTextBrowser()
-        self.report_text.setStyleSheet(STYLE_ANALYTICS_TEXT_BROWSER)
+        set_widget_style(self.report_text, STYLE_ANALYTICS_TEXT_BROWSER)
         self.content_layout.addWidget(self.report_text, 2)
 
     def _select_all(self):
@@ -236,7 +238,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         self._cleanup_temp_graph_files()
         self._remember_temp_graph_paths(image_paths)
         html = getattr(result, "html", "")
-        self.report_text.setHtml(self._fit_graphs_preview_html(html))
+        set_themed_html(self.report_text, self._fit_graphs_preview_html(html))
         if save_pdf:
             self._start_graphs_pdf_worker(html)
             return
@@ -252,7 +254,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         os.makedirs(REPORT_DIR, exist_ok=True)
         filename = f"graphs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         pdf_path = os.path.join(REPORT_DIR, filename)
-        self.report_text.setHtml(self._fit_graphs_preview_html(html))
+        set_themed_html(self.report_text, self._fit_graphs_preview_html(html))
         self._graphs_pdf_worker = AnalyticsWorker(lambda: build_graphs_pdf(html, pdf_path), parent=self)
         self._graphs_pdf_worker.completed.connect(self._on_graphs_pdf_ready)
         self._graphs_pdf_worker.failed.connect(self._on_graphs_pdf_failed)
@@ -298,7 +300,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         self.preview_btn.setEnabled(not busy)
         self.save_pdf_btn.setEnabled(not busy)
         if text:
-            self.report_text.setHtml(f"<p>{text}</p>")
+            set_themed_html(self.report_text, f"<p>{text}</p>")
 
     def _fit_graphs_preview_html(self, html: str) -> str:
         viewport = self.report_text.viewport()

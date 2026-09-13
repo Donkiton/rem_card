@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from datetime import datetime
 
@@ -77,7 +78,7 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
 
         self.container = QWidget()
         self.container.setObjectName("container")
-        self.container.setStyleSheet(STYLE_ANALYTICS_DIALOG_CONTAINER)
+        set_widget_style(self.container, STYLE_ANALYTICS_DIALOG_CONTAINER)
         self.container_layout = QVBoxLayout(self.container)
         self.container_layout.setContentsMargins(30, 20, 30, 30)
         self.container_layout.setSpacing(20)
@@ -87,21 +88,21 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
         # Header
         header_layout = QHBoxLayout()
         title_label = QLabel("ОТЧЕТНЫЙ ПЕРИОД")
-        title_label.setStyleSheet(STYLE_ANALYTICS_TITLE)
+        set_widget_style(title_label, STYLE_ANALYTICS_TITLE)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
 
         self.close_btn = QPushButton("×")
         self.close_btn.setFixedSize(30, 30)
         self.close_btn.setCursor(Qt.PointingHandCursor)
-        self.close_btn.setStyleSheet(STYLE_DIALOG_CLOSE_BUTTON)
+        set_widget_style(self.close_btn, STYLE_DIALOG_CLOSE_BUTTON)
         self.close_btn.clicked.connect(self.reject)
         header_layout.addWidget(self.close_btn)
         self.container_layout.addLayout(header_layout)
 
         # Date Selection
         dates_frame = QFrame()
-        dates_frame.setStyleSheet(STYLE_ANALYTICS_DATE_FRAME)
+        set_widget_style(dates_frame, STYLE_ANALYTICS_DATE_FRAME)
         dates_layout = QVBoxLayout(dates_frame)
         dates_layout.setContentsMargins(20, 20, 20, 20)
         dates_layout.setSpacing(15)
@@ -109,13 +110,13 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
         # Start Date
         start_layout = QHBoxLayout()
         start_label = QLabel("Начало периода:")
-        start_label.setStyleSheet(STYLE_ANALYTICS_DATE_LABEL)
+        set_widget_style(start_label, STYLE_ANALYTICS_DATE_LABEL)
         self.start_date = QDateEdit()
         self.start_date.setCalendarPopup(True)
         self.start_date.setDate(
             self._parse_period_qdate(self._prefill_start_dt) or QDate.currentDate().addMonths(-1)
         )
-        self.start_date.setStyleSheet(STYLE_ANALYTICS_DATE_EDIT)
+        set_widget_style(self.start_date, STYLE_ANALYTICS_DATE_EDIT)
         start_layout.addWidget(start_label)
         start_layout.addWidget(self.start_date)
         dates_layout.addLayout(start_layout)
@@ -123,13 +124,13 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
         # End Date
         end_layout = QHBoxLayout()
         end_label = QLabel("Конец периода:")
-        end_label.setStyleSheet(STYLE_ANALYTICS_DATE_LABEL)
+        set_widget_style(end_label, STYLE_ANALYTICS_DATE_LABEL)
         self.end_date = QDateEdit()
         self.end_date.setCalendarPopup(True)
         self.end_date.setDate(
             self._parse_period_qdate(self._prefill_end_dt) or QDate.currentDate()
         )
-        self.end_date.setStyleSheet(STYLE_ANALYTICS_DATE_EDIT)
+        set_widget_style(self.end_date, STYLE_ANALYTICS_DATE_EDIT)
         end_layout.addWidget(end_label)
         end_layout.addWidget(self.end_date)
         dates_layout.addLayout(end_layout)
@@ -140,7 +141,7 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
         self.excel_btn = QPushButton("СФОРМИРОВАТЬ ГРАФИКИ")
         self.excel_btn.setFixedHeight(50)
         self.excel_btn.setCursor(Qt.PointingHandCursor)
-        self.excel_btn.setStyleSheet(STYLE_ANALYTICS_PRIMARY_BUTTON)
+        set_widget_style(self.excel_btn, STYLE_ANALYTICS_PRIMARY_BUTTON)
         self.excel_btn.clicked.connect(self._open_graphs_dialog)
         self.container_layout.addWidget(self.excel_btn)
         self.excel_btn.setVisible(self._show_graph_button)
@@ -148,7 +149,7 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
         self.pdf_btn = QPushButton("СОХРАНИТЬ ПОЛНЫЙ ОТЧЕТ (PDF)")
         self.pdf_btn.setFixedHeight(50)
         self.pdf_btn.setCursor(Qt.PointingHandCursor)
-        self.pdf_btn.setStyleSheet(STYLE_ANALYTICS_PREVIEW_BUTTON)
+        set_widget_style(self.pdf_btn, STYLE_ANALYTICS_PREVIEW_BUTTON)
         self.pdf_btn.clicked.connect(self._generate_pdf_report)
         self.container_layout.addWidget(self.pdf_btn)
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.theme_tokens import token
 
 
 def _tokens() -> dict[str, str]:
-    return get_theme_manager().current_tokens()
+    return style_tokens()
 
 
 def _t(key: str, default: str = "") -> str:
@@ -14,7 +14,7 @@ def _t(key: str, default: str = "") -> str:
 
 def _set_style(widget, qss: str) -> None:
     if widget is not None:
-        widget.setStyleSheet(qss)
+        set_widget_style(widget, qss)
 
 
 def apply_custom_dialog_style(dialog) -> None:

@@ -1,9 +1,10 @@
-from rem_card.ui.styles.theme_manager import get_theme_manager
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 from rem_card.ui.styles.theme_tokens import token
 
 
 def database_info_dialog_style() -> str:
-    tokens = get_theme_manager().current_tokens()
+    tokens = style_tokens()
 
     def value(key, default=""):
         return token(tokens, key, default)
@@ -89,4 +90,4 @@ def database_info_dialog_style() -> str:
 
 
 def apply_database_info_dialog_style(widget) -> None:
-    widget.setStyleSheet(widget.styleSheet() + database_info_dialog_style())
+    set_widget_style(widget, source_style(widget) + database_info_dialog_style())

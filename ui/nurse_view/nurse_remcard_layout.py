@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QStackedWidget, QSizePolicy)
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.foreground_activity import mark_foreground_activity
@@ -130,7 +131,7 @@ class NurseRemCardLayoutManager(QWidget):
         self._align_nurse_7b_chrome()
 
         # Для медсестры держим верхний сектор с правым отступом 3px от границы окна.
-        self.sector_8.setStyleSheet("""
+        set_widget_style(self.sector_8, """
             QFrame#sector_8_frame {
                 background-color: #e9ecef;
                 border: 1px solid #bdc3c7;

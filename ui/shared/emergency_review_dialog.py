@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from typing import Any, Mapping
 
@@ -77,7 +78,7 @@ class AdmissionReviewBlock(QFrame):
         for section in patient.get("sections") or []:
             section_title = QLabel(str(section.get("title") or "Изменения"), self.details_widget)
             section_title.setObjectName("EmergencyReviewSectionTitle")
-            section_title.setStyleSheet("font-weight: 600;")
+            set_widget_style(section_title, "font-weight: 600;")
             details_layout.addWidget(section_title)
             for item in section.get("items") or []:
                 label = QLabel(str(item.get("text") or ""), self.details_widget)

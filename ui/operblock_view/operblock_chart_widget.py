@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style, theme_color
 
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -860,6 +861,60 @@ class OperBlockChartWidget(ChartWidget):
         self._order_label_scroll_refresh_timer.timeout.connect(self._refresh_order_label_scroll_overlay)
         self.chart_layout.addWidget(self._timeline_scrollbar)
 
+    def apply_theme(self, *_args):
+        """Recolor the inherited plot and already-rendered operblock overlay in place."""
+        super().apply_theme(*_args)
+        # ChartWidget.__init__ dispatches here before the subclass creates its
+        # overlay collections; the registered runtime callback arrives later.
+        if not hasattr(self, "_order_marker_items"):
+            return
+        self._apply_operblock_overlay_theme()
+
+    def _plot_background_color(self) -> str:
+        return str(self._paint_colors["plot_bg"])
+
+    @staticmethod
+    def _overlay_color(value: str) -> str:
+        return str(theme_color(value, "paint"))
+
+    def _track_overlay_item(self, item, kind: str, *, color: str | None = None, label: str | None = None, style: dict | None = None):
+        setattr(item, "_operblock_theme_kind", kind)
+        if color is not None:
+            setattr(item, "_operblock_theme_color", str(color))
+        if label is not None:
+            setattr(item, "_operblock_theme_label", str(label))
+            setattr(item, "_operblock_theme_style", dict(style or {}))
+        return item
+
+    def _apply_operblock_overlay_theme(self) -> None:
+        background = self._plot_background_color()
+        for item in list(self._order_marker_items):
+            kind = getattr(item, "_operblock_theme_kind", "")
+            color = getattr(item, "_operblock_theme_color", None)
+            if kind == "line" and color:
+                item.setPen(pg.mkPen(self._overlay_color(color), width=1, style=item.opts["pen"].style()))
+            elif kind == "mask":
+                pen = item.opts["pen"]
+                item.setPen(pg.mkPen(background, width=pen.widthF(), style=pen.style()))
+            elif kind == "point" and color:
+                item.setBrush(pg.mkBrush(self._overlay_color(color)))
+                item.setPen(pg.mkPen(background, width=1))
+            elif kind == "bar" and color:
+                item.setBrush(pg.mkBrush(self._overlay_color(color)))
+            elif kind == "order_text":
+                item.setHtml(self._order_marker_label_html(
+                    getattr(item, "_operblock_theme_label", ""),
+                    getattr(item, "_operblock_theme_style", {}),
+                ))
+                item.fill = pg.mkBrush(background)
+                item.update()
+            elif kind == "stage_text" and color:
+                item.setHtml(self._operation_stage_label_html(
+                    getattr(item, "_operblock_theme_label", ""), color,
+                ))
+                item.fill = pg.mkBrush(background)
+                item.update()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._sync_order_label_scrollbar_geometry()
@@ -911,7 +966,7 @@ class OperBlockChartWidget(ChartWidget):
         scrollbar.valueChanged.connect(self._on_timeline_scroll_value_changed)
         scrollbar.sliderPressed.connect(self._on_timeline_scroll_user_started)
         scrollbar.sliderReleased.connect(self._refresh_timeline_scroll_overlay)
-        scrollbar.setStyleSheet(operblock_horizontal_scrollbar_style("OperBlockTimelineScrollBar"))
+        set_widget_style(scrollbar, operblock_horizontal_scrollbar_style("OperBlockTimelineScrollBar"))
         scrollbar.hide()
         return scrollbar
 
@@ -922,7 +977,7 @@ class OperBlockChartWidget(ChartWidget):
         scrollbar.setSingleStep(1)
         scrollbar.valueChanged.connect(self._on_order_label_scroll_value_changed)
         scrollbar.sliderReleased.connect(self._refresh_order_label_scroll_overlay)
-        scrollbar.setStyleSheet(_operblock_vertical_scrollbar_style("OperBlockOrderLabelScrollBar"))
+        set_widget_style(scrollbar, _operblock_vertical_scrollbar_style("OperBlockOrderLabelScrollBar"))
         scrollbar.hide()
         return scrollbar
 
@@ -1990,8 +2045,9 @@ class OperBlockChartWidget(ChartWidget):
                 line = pg.PlotDataItem(
                     [x, x],
                     [y_start, y_end],
-                    pen=pg.mkPen(color, width=1, style=Qt.DotLine),
+                    pen=pg.mkPen(self._overlay_color(color), width=1, style=Qt.DotLine),
                 )
+                self._track_overlay_item(line, "line", color=color)
                 line.setZValue(self.ORDER_GUIDELINE_Z)
                 setattr(line, "_operblock_guideline_segment", True)
                 self.plot_widget.addItem(line)
@@ -2002,8 +2058,9 @@ class OperBlockChartWidget(ChartWidget):
                 mask = pg.PlotDataItem(
                     [float(x_key), float(x_key)],
                     [y_start, y_end],
-                    pen=pg.mkPen("#ffffff", width=int(self.ORDER_GUIDELINE_MASK_WIDTH_PX)),
+                    pen=pg.mkPen(self._plot_background_color(), width=int(self.ORDER_GUIDELINE_MASK_WIDTH_PX)),
                 )
+                self._track_overlay_item(mask, "mask")
                 mask.setZValue(self.ORDER_GUIDELINE_MASK_Z)
                 setattr(mask, "_operblock_guideline_mask", True)
                 self.plot_widget.addItem(mask)
@@ -2526,6 +2583,7 @@ class OperBlockChartWidget(ChartWidget):
                 html=self._order_marker_label_html(drug_text, style),
                 anchor=group.get("name_anchor") or (0.0, 0.0),
             )
+            self._track_overlay_item(drug_label, "order_text", label=drug_text, style=style)
             self._compact_order_text_item(drug_label)
             drug_label.setZValue(110 + lane)
             name_x = float(group.get("name_x") or 0.0)
@@ -2566,9 +2624,10 @@ class OperBlockChartWidget(ChartWidget):
                     y=[marker_y],
                     symbol=dose_entry.get("symbol") or "o",
                     size=self.ORDER_DOSE_MARKER_SIZE,
-                    brush=pg.mkBrush(str((style or {}).get("color") or "#8e44ad")),
-                    pen=pg.mkPen("#ffffff", width=1),
+                    brush=pg.mkBrush(self._overlay_color(str((style or {}).get("color") or "#8e44ad"))),
+                    pen=pg.mkPen(self._plot_background_color(), width=1),
                 )
+                self._track_overlay_item(point, "point", color=str((style or {}).get("color") or "#8e44ad"))
                 point.setZValue(80 + lane)
                 self.plot_widget.addItem(point)
                 self._order_marker_items.append(point)
@@ -2596,8 +2655,9 @@ class OperBlockChartWidget(ChartWidget):
                 dose_label = pg.TextItem(
                     html=self._order_marker_label_html(dose_text, style),
                     anchor=dose_anchor,
-                    fill=pg.mkBrush("#ffffff"),
+                    fill=pg.mkBrush(self._plot_background_color()),
                 )
+                self._track_overlay_item(dose_label, "order_text", label=dose_text, style=style)
                 self._compact_order_text_item(dose_label)
                 dose_label.setZValue(85 + lane)
                 dose_label.setPos(dose_label_x, dose_label_y)
@@ -2622,6 +2682,7 @@ class OperBlockChartWidget(ChartWidget):
             html=self._order_marker_label_html(drug_text, style),
             anchor=group.get("name_anchor") or (0.0, 0.0),
         )
+        self._track_overlay_item(drug_label, "order_text", label=drug_text, style=style)
         self._compact_order_text_item(drug_label)
         drug_label.setZValue(110 + lane)
         name_x = float(group.get("name_x") or 0.0)
@@ -2661,15 +2722,17 @@ class OperBlockChartWidget(ChartWidget):
                 [x_start - bar_mask_padding_hours, x_end + bar_mask_padding_hours],
                 [bar_y, bar_y],
                 pen=pg.mkPen(
-                    "#ffffff",
+                    self._plot_background_color(),
                     width=max(1.0, self.INFUSION_BAR_WIDTH + self.ORDER_GUIDELINE_GAP_PADDING_PX * 2.0),
                 ),
             )
+            self._track_overlay_item(bar_mask, "mask")
             bar_mask.setZValue(self.INFUSION_BAR_MASK_Z)
             self.plot_widget.addItem(bar_mask)
             self._order_marker_items.append(bar_mask)
 
             bar = self._rounded_infusion_bar_item(x_start, x_end, bar_y, color)
+            self._track_overlay_item(bar, "bar", color=color)
             bar.setZValue(self.INFUSION_BAR_Z)
             self.plot_widget.addItem(bar)
             self._order_marker_items.append(bar)
@@ -2727,8 +2790,9 @@ class OperBlockChartWidget(ChartWidget):
             rate_label = pg.TextItem(
                 html=self._order_marker_label_html(label_text, style),
                 anchor=label_spec.get("anchor") or (0.5, 0.0),
-                fill=pg.mkBrush("#ffffff"),
+                fill=pg.mkBrush(self._plot_background_color()),
             )
+            self._track_overlay_item(rate_label, "order_text", label=label_text, style=style)
             self._compact_order_text_item(rate_label)
             rate_label.setZValue(self.INFUSION_RATE_LABEL_Z)
             rate_label.setPos(float(label_spec.get("x") or 0.0), rate_label_y)
@@ -2745,7 +2809,7 @@ class OperBlockChartWidget(ChartWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, radius_x, radius_y)
         item = QGraphicsPathItem(path)
-        item.setBrush(pg.mkBrush(color))
+        item.setBrush(pg.mkBrush(self._overlay_color(color)))
         item.setPen(pg.mkPen(None))
         setattr(item, "_operblock_infusion_bar", True)
         setattr(item, "_operblock_infusion_corner_radius_px", float(self.INFUSION_BAR_CORNER_RADIUS_PX))
@@ -2863,8 +2927,9 @@ class OperBlockChartWidget(ChartWidget):
                 line = pg.PlotDataItem(
                     [x, x],
                     [y_start, y_end],
-                    pen=pg.mkPen(color, width=1, style=Qt.DashLine),
+                    pen=pg.mkPen(self._overlay_color(color), width=1, style=Qt.DashLine),
                 )
+                self._track_overlay_item(line, "line", color=color)
                 line.setZValue(32)
                 setattr(line, "_operblock_operation_stage_segment", True)
                 self.plot_widget.addItem(line)
@@ -2875,15 +2940,12 @@ class OperBlockChartWidget(ChartWidget):
         colors = [str(spec.get("color") or "#506174") for spec in specs]
         label_color = colors[0] if all(color == colors[0] for color in colors) else "#334155"
         label = pg.TextItem(
-            html=(
-                "<span style='font-family: Segoe UI; "
-                f"font-size: {int(self.OPERATION_START_LABEL_FONT_SIZE)}px; font-weight: 700; "
-                f"color: {html.escape(label_color)}; padding: 2px 4px;'>{html.escape(label_text)}</span>"
-            ),
+            html=self._operation_stage_label_html(label_text, label_color),
             anchor=anchor,
-            fill=pg.mkBrush("#ffffff"),
+            fill=pg.mkBrush(self._plot_background_color()),
             angle=-90,
         )
+        self._track_overlay_item(label, "stage_text", color=label_color, label=label_text)
         label.setZValue(73)
         label.setPos(label_x, self._operation_start_label_y())
         self.plot_widget.addItem(label)
@@ -2916,8 +2978,9 @@ class OperBlockChartWidget(ChartWidget):
             line = pg.PlotDataItem(
                 [x, x],
                 [y_start, y_end],
-                pen=pg.mkPen(color, width=1, style=Qt.DashLine),
+                pen=pg.mkPen(self._overlay_color(color), width=1, style=Qt.DashLine),
             )
+            self._track_overlay_item(line, "line", color=color)
             line.setZValue(32)
             setattr(line, "_operblock_operation_stage_segment", True)
             self.plot_widget.addItem(line)
@@ -2925,15 +2988,12 @@ class OperBlockChartWidget(ChartWidget):
 
         label_x, anchor = self._operation_start_label_position(x, label_text)
         label = pg.TextItem(
-            html=(
-                "<span style='font-family: Segoe UI; "
-                f"font-size: {int(self.OPERATION_START_LABEL_FONT_SIZE)}px; font-weight: 700; "
-                f"color: {html.escape(color)}; padding: 2px 4px;'>{html.escape(label_text)}</span>"
-            ),
+            html=self._operation_stage_label_html(label_text, color),
             anchor=anchor,
-            fill=pg.mkBrush("#ffffff"),
+            fill=pg.mkBrush(self._plot_background_color()),
             angle=-90,
         )
+        self._track_overlay_item(label, "stage_text", color=color, label=label_text)
         label.setZValue(73)
         label.setPos(label_x, self._operation_start_label_y())
         self.plot_widget.addItem(label)
@@ -3090,11 +3150,18 @@ class OperBlockChartWidget(ChartWidget):
         return drug_label or full_label, ""
 
     def _order_marker_label_html(self, label: str, style: dict | None = None) -> str:
-        color = str((style or {}).get("color") or "#8e44ad")
+        color = self._overlay_color(str((style or {}).get("color") or "#8e44ad"))
         font_size = int(getattr(self, "ORDER_LABEL_FONT_SIZE", OperBlockChartWidget.ORDER_LABEL_FONT_SIZE))
         return (
             f"<span style='font-family: Segoe UI; font-size: {font_size}px; font-weight: 700; "
             f"color: {html.escape(color)}; padding: 1px 3px;'>{html.escape(label)}</span>"
+        )
+
+    def _operation_stage_label_html(self, label: str, color: str) -> str:
+        return (
+            "<span style='font-family: Segoe UI; "
+            f"font-size: {int(self.OPERATION_START_LABEL_FONT_SIZE)}px; font-weight: 700; "
+            f"color: {html.escape(self._overlay_color(color))}; padding: 2px 4px;'>{html.escape(label)}</span>"
         )
 
     @staticmethod
@@ -3667,7 +3734,7 @@ class OperBlockChartWidget(ChartWidget):
         real_timestamp = getattr(closest_vital, "real_timestamp", None) or getattr(closest_vital, "timestamp", None)
         time_str = real_timestamp.strftime("%H:%M") if isinstance(real_timestamp, datetime) else "--:--"
         html_text = (
-            "<div style='font-family: Segoe UI; font-size: 13px; padding: 5px; background-color: #ebecef;'>"
+            "<div style='font-family: Segoe UI; font-size: 13px; padding: 5px;'>"
             f"<b>Время: {html.escape(time_str)}</b><br>"
         )
 

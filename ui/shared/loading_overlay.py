@@ -1,16 +1,52 @@
-import os
+from rem_card.ui.styles.theme_runtime import set_widget_style, themed_qcolor
+import math
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QMovie
+from PySide6.QtCore import Qt, QPointF, QTimer
+from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
+
+class LoadingSpinner(QWidget):
+    """Transparent, theme-aware dots; no animation work while hidden."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(48, 48)
+        self.setAccessibleName("Загрузка")
+        self._phase = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._advance)
+
+    def _advance(self):
+        self._phase = (self._phase + 1) % 10
+        self.update()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._timer.start()
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        color = themed_qcolor("#2563eb", "border.focus")
+        for index in range(10):
+            angle = index * math.tau / 10 - math.pi / 2
+            color.setAlphaF(0.18 + 0.82 * ((index - self._phase) % 10) / 9)
+            painter.setBrush(color)
+            painter.drawEllipse(QPointF(24 + 15 * math.cos(angle), 24 + 15 * math.sin(angle)), 3, 3)
 
 
 class LoadingOverlay(QWidget):
     """Small in-app loading overlay shown above the current window content."""
 
-    def __init__(self, parent=None, gif_path: str | None = None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._movie = None
         self.setObjectName("LoadingOverlay")
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -29,9 +65,7 @@ class LoadingOverlay(QWidget):
         panel_layout.setContentsMargins(18, 14, 20, 14)
         panel_layout.setSpacing(12)
 
-        self.spinner_label = QLabel(self.panel)
-        self.spinner_label.setFixedSize(48, 48)
-        self.spinner_label.setAlignment(Qt.AlignCenter)
+        self.spinner_label = LoadingSpinner(self.panel)
         panel_layout.addWidget(self.spinner_label, 0, Qt.AlignVCenter)
 
         self.message_label = QLabel("Загрузка...", self.panel)
@@ -41,15 +75,7 @@ class LoadingOverlay(QWidget):
 
         root_layout.addWidget(self.panel, 0, Qt.AlignCenter)
 
-        if gif_path and os.path.exists(gif_path):
-            self._movie = QMovie(gif_path)
-            self._movie.setScaledSize(QSize(48, 48))
-            self.spinner_label.setMovie(self._movie)
-        else:
-            self.spinner_label.setText("...")
-
-        self.setStyleSheet(
-            """
+        set_widget_style(self, """
             QWidget#LoadingOverlay {
                 background-color: rgba(248, 249, 250, 74);
             }
@@ -63,8 +89,7 @@ class LoadingOverlay(QWidget):
                 font-size: 14px;
                 font-weight: 700;
             }
-            """
-        )
+            """)
 
     def show_loading(self, message: str = "Загрузка..."):
         self.message_label.setText(str(message or "Загрузка..."))
@@ -73,12 +98,8 @@ class LoadingOverlay(QWidget):
             self.setGeometry(parent.rect())
         self.show()
         self.raise_()
-        if self._movie is not None:
-            self._movie.start()
 
     def hide_loading(self):
-        if self._movie is not None:
-            self._movie.stop()
         self.hide()
 
 

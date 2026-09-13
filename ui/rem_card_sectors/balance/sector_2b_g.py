@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from datetime import datetime
 
@@ -55,9 +56,9 @@ class Sector2b_g(QWidget):
         # Заголовок с общим объемом
         header_layout = QHBoxLayout()
         header_lbl_in = QLabel("Всего введено:")
-        header_lbl_in.setStyleSheet("font-weight: bold; font-size: 14px; color: #495057; border: none; background: transparent;")
+        set_widget_style(header_lbl_in, "font-weight: bold; font-size: 14px; color: #495057; border: none; background: transparent;")
         self.total_in_val = QLabel("0 мл")
-        self.total_in_val.setStyleSheet(self.val_style)
+        set_widget_style(self.total_in_val, self.val_style)
         header_layout.addWidget(header_lbl_in)
         header_layout.addStretch()
         header_layout.addWidget(self.total_in_val)
@@ -66,7 +67,7 @@ class Sector2b_g(QWidget):
         # Разделитель
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color: #e0e0e0; border: none; background-color: #e0e0e0; max-height: 1px;")
+        set_widget_style(line, "color: #e0e0e0; border: none; background-color: #e0e0e0; max-height: 1px;")
         self.data_layout.addWidget(line)
         
         # Поля данных
@@ -88,7 +89,7 @@ class Sector2b_g(QWidget):
         self.main_layout_v.addWidget(self.bottom_corner)
 
         # Применяем QSS стили (добавлена правая граница и закругления по аналогии с Sector2b_v)
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#balance_header {
                 font-weight: bold; 
                 font-size: 15px; 
@@ -156,7 +157,7 @@ class Sector2b_g(QWidget):
         
         # Иконка
         icon_lbl = QLabel()
-        icon_lbl.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(icon_lbl, "border: none; background: transparent;")
         icon_path = os.path.join(self.icons_dir, icon_name)
         
         if os.path.exists(icon_path):
@@ -175,14 +176,14 @@ class Sector2b_g(QWidget):
                 icon_lbl.setFixedSize(16, 16)
             
         text_lbl = QLabel(title)
-        text_lbl.setStyleSheet(self.label_style)
+        set_widget_style(text_lbl, self.label_style)
         
         label_container.addWidget(icon_lbl)
         label_container.addWidget(text_lbl)
         
         # Значение
         val_lbl = QLabel("0 мл")
-        val_lbl.setStyleSheet("font-weight: 600; color: #495057; font-size: 13px; border: none; background: transparent;")
+        set_widget_style(val_lbl, "font-weight: 600; color: #495057; font-size: 13px; border: none; background: transparent;")
         
         row_layout.addLayout(label_container)
         row_layout.addStretch()
@@ -338,7 +339,7 @@ class Sector2b_g(QWidget):
         self.total_in_val.setText(f"{total_cur}/{total_day} мл")
         
         # Итоговая сумма должна быть зеленой по ТЗ
-        self.total_in_val.setStyleSheet("font-weight: bold; color: #28a745; font-size: 14px; border: none; background: transparent;")
+        set_widget_style(self.total_in_val, "font-weight: bold; color: #28a745; font-size: 14px; border: none; background: transparent;")
 
     def set_loading_state(self):
         self.infusion_val.setText("—/— мл")
@@ -347,4 +348,4 @@ class Sector2b_g(QWidget):
         self.plasma_val.setText("—/— мл")
         self.oral_val.setText("—/— мл")
         self.total_in_val.setText("—/— мл")
-        self.total_in_val.setStyleSheet(self.val_style)
+        set_widget_style(self.total_in_val, self.val_style)

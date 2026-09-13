@@ -1,4 +1,7 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import themed_qcolor
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -206,7 +209,6 @@ from rem_card.ui.styles.theme import (
     TEXT_PRIMARY,
     TEXT_SECONDARY,
 )
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.operblock_view.operblock_control_styles import (
     operblock_arrow_button_style,
     operblock_arrow_icon,
@@ -493,7 +495,7 @@ SECTOR_BODY_STYLE = f"""
 def _label(text: str, *, size: int = 12, weight: int = 400, color: str = TEXT_PRIMARY) -> QLabel:
     label = QLabel(text)
     label.setWordWrap(True)
-    label.setStyleSheet(f"font-size: {size}px; font-weight: {weight}; color: {color}; background: transparent; border: none;")
+    set_widget_style(label, f"font-size: {size}px; font-weight: {weight}; color: {color}; background: transparent; border: none;")
     return label
 
 
@@ -513,57 +515,57 @@ class _OperBlockEmptyRoomIllustration(QWidget):
         clip = QPainterPath()
         clip.addEllipse(circle_rect)
         painter.setClipPath(clip)
-        painter.fillPath(clip, QColor("#EEF7FF"))
+        painter.fillPath(clip, themed_qcolor("#EEF7FF", "text"))
 
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#FFFFFF"))
+        painter.setBrush(themed_qcolor("#FFFFFF", "background"))
         painter.drawRoundedRect(QRectF(25, 24, 44, 34), 6, 6)
         painter.drawRoundedRect(QRectF(75, 24, 44, 34), 6, 6)
-        painter.setBrush(QColor("#D9EFFF"))
+        painter.setBrush(themed_qcolor("#D9EFFF", "background"))
         painter.drawRect(QRectF(68, 24, 2, 34))
 
-        painter.setBrush(QColor("#E2E8F0"))
+        painter.setBrush(themed_qcolor("#E2E8F0", "background"))
         painter.drawRect(QRectF(0, 102, 144, 42))
-        painter.setPen(QPen(QColor("#C7D4E2"), 1))
+        painter.setPen(QPen(themed_qcolor("#C7D4E2", "text"), 1))
         painter.drawLine(20, 115, 124, 115)
 
-        painter.setPen(QPen(QColor("#8AA3B8"), 4, Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(themed_qcolor("#8AA3B8", "text"), 4, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(45, 71, 72, 84)
-        painter.setBrush(QColor("#FFFFFF"))
-        painter.setPen(QPen(QColor("#BED0DE"), 2))
+        painter.setBrush(themed_qcolor("#FFFFFF", "background"))
+        painter.setPen(QPen(themed_qcolor("#BED0DE", "text"), 2))
         painter.drawRoundedRect(QRectF(42, 80, 66, 20), 10, 10)
-        painter.setBrush(QColor("#BFE3EA"))
+        painter.setBrush(themed_qcolor("#BFE3EA", "background"))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(QRectF(50, 84, 48, 12), 6, 6)
-        painter.setPen(QPen(QColor("#8AA3B8"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(themed_qcolor("#8AA3B8", "text"), 3, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(58, 100, 50, 116)
         painter.drawLine(93, 100, 101, 116)
 
-        painter.setPen(QPen(QColor("#7C93A7"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(themed_qcolor("#7C93A7", "text"), 3, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(98, 68, 98, 92)
-        painter.setBrush(QColor("#FFFFFF"))
-        painter.setPen(QPen(QColor("#AFC3D3"), 2))
+        painter.setBrush(themed_qcolor("#FFFFFF", "background"))
+        painter.setPen(QPen(themed_qcolor("#AFC3D3", "text"), 2))
         painter.drawRoundedRect(QRectF(102, 64, 23, 18), 4, 4)
-        painter.setBrush(QColor("#93C5FD"))
+        painter.setBrush(themed_qcolor("#93C5FD", "background"))
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(QRectF(106, 68, 15, 10), 2, 2)
 
-        painter.setPen(QPen(QColor("#9AAFC1"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.setPen(QPen(themed_qcolor("#9AAFC1", "text"), 3, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(72, 20, 72, 45)
         painter.drawLine(72, 45, 58, 58)
         painter.drawLine(72, 45, 86, 58)
-        painter.setBrush(QColor("#FDFDFE"))
-        painter.setPen(QPen(QColor("#BAC8D6"), 2))
+        painter.setBrush(themed_qcolor("#FDFDFE", "background"))
+        painter.setPen(QPen(themed_qcolor("#BAC8D6", "text"), 2))
         painter.drawEllipse(QRectF(49, 54, 18, 12))
         painter.drawEllipse(QRectF(77, 54, 18, 12))
-        painter.setBrush(QColor("#DDF4FF"))
+        painter.setBrush(themed_qcolor("#DDF4FF", "background"))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(QRectF(54, 58, 8, 5))
         painter.drawEllipse(QRectF(82, 58, 8, 5))
 
         painter.setClipping(False)
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor("#BBD7EA"), 2))
+        painter.setPen(QPen(themed_qcolor("#BBD7EA", "text"), 2))
         painter.drawEllipse(circle_rect)
         painter.end()
 
@@ -636,12 +638,12 @@ class _OperBlockBoardProgressStepper(QWidget):
         span = right - left
         points = [left + (span * index / max(1, len(self._stages) - 1)) for index in range(len(self._stages))]
 
-        line_pen = QPen(QColor("#9AA8B8"), 2, Qt.SolidLine, Qt.RoundCap)
+        line_pen = QPen(themed_qcolor("#9AA8B8", "text"), 2, Qt.SolidLine, Qt.RoundCap)
         painter.setPen(line_pen)
         painter.drawLine(int(points[0]), int(center_y), int(points[-1]), int(center_y))
 
         active_end = points[0] + span * self._fill_fraction
-        active_pen = QPen(QColor("#2563EB"), 2, Qt.SolidLine, Qt.RoundCap)
+        active_pen = QPen(themed_qcolor("#2563EB", "text"), 2, Qt.SolidLine, Qt.RoundCap)
         painter.setPen(active_pen)
         painter.drawLine(int(points[0]), int(center_y), int(active_end), int(center_y))
 
@@ -654,11 +656,11 @@ class _OperBlockBoardProgressStepper(QWidget):
 
         for index, stage in enumerate(self._stages):
             is_active = index <= self._active_index or self._active_index == len(self._stages) - 1
-            border = QColor("#2563EB" if is_active else "#CBD5E1")
-            text = QColor("#2563EB" if is_active else "#94A3B8")
+            border = themed_qcolor("#2563EB" if is_active else "#CBD5E1", "text")
+            text = themed_qcolor("#2563EB" if is_active else "#94A3B8", "text")
             circle_rect = QRectF(points[index] - radius, center_y - radius, circle, circle)
             painter.setPen(QPen(border, 2))
-            painter.setBrush(QColor("#FFFFFF"))
+            painter.setBrush(themed_qcolor("#FFFFFF", "background"))
             painter.drawEllipse(circle_rect)
             painter.setFont(circle_font)
             painter.setPen(text)
@@ -666,7 +668,7 @@ class _OperBlockBoardProgressStepper(QWidget):
 
             label_rect = QRectF(points[index] - label_width / 2.0, center_y + radius + 11.0, label_width, 24.0)
             painter.setFont(label_font)
-            painter.setPen(QColor("#1F2D3D"))
+            painter.setPen(themed_qcolor("#1F2D3D", "text"))
             painter.drawText(label_rect, Qt.AlignHCenter | Qt.AlignTop, stage)
 
         painter.end()
@@ -1994,7 +1996,7 @@ class OperBlockSector8Panel(QWidget):
             button.setIconSize(button.iconSize())
         button.setMinimumHeight(32)
         button.setCursor(Qt.PointingHandCursor)
-        button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(button, STYLE_SECTOR8_BUTTON)
         return button
 
     def _clear_layout(self):
@@ -2125,7 +2127,7 @@ class FittingSingleLineLabel(QLabel):
         self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.setMinimumWidth(220)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
-        self.setStyleSheet(f"color: {color}; background: transparent; border: none;")
+        set_widget_style(self, f"color: {color}; background: transparent; border: none;")
         self.set_full_text(text)
 
     def setText(self, text: str):
@@ -2246,7 +2248,7 @@ class OperBlockStyledDialog(SavedFramelessDialogMixin, QDialog):
         self.main_layout.addWidget(header_panel)
 
         self.content_widget = QFrame(self.bg_container)
-        self.content_widget.setStyleSheet(STYLE_PATIENT_FORM_TAB)
+        set_widget_style(self.content_widget, STYLE_PATIENT_FORM_TAB)
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setContentsMargins(20, 16, 20, 20)
         self.content_layout.setSpacing(10)
@@ -2302,7 +2304,7 @@ class OperBlockSettingsDialog(OperBlockStyledDialog):
         footer.addStretch(1)
         close_button = QPushButton("Закрыть")
         close_button.setMinimumHeight(34)
-        close_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(close_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         close_button.clicked.connect(self.reject)
         footer.addWidget(close_button)
         layout.addLayout(footer)
@@ -2312,7 +2314,7 @@ class OperBlockSettingsDialog(OperBlockStyledDialog):
         button = QPushButton(text)
         button.setMinimumHeight(42)
         button.setCursor(Qt.PointingHandCursor)
-        button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(button, STYLE_SECTOR8_BUTTON)
         return button
 
 
@@ -2355,8 +2357,7 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._apply_table_scrollbar_style()
-        self.table.setStyleSheet(
-            """
+        set_widget_style(self.table, """
             QTableWidget#OperBlockAnesthesiaTypesTable {
                 background: #f3f6fa;
                 alternate-background-color: #e9eef5;
@@ -2382,8 +2383,7 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
             QHeaderView::section:hover {
                 background-color: #cbd7e5;
             }
-            """
-        )
+            """)
         self.table.itemSelectionChanged.connect(self._sync_input_from_selection)
         self.table.itemDoubleClicked.connect(lambda _item: self.type_input.setFocus())
         layout.addWidget(self.table, 1)
@@ -2403,9 +2403,9 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
         self.delete_button = QPushButton("Удалить")
         for button in (self.add_button, self.update_button, self.move_up_button, self.move_down_button):
             button.setMinimumHeight(34)
-            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+            set_widget_style(button, STYLE_SECTOR8_BUTTON)
         self.delete_button.setMinimumHeight(34)
-        self.delete_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        set_widget_style(self.delete_button, DANGER_BUTTON_STYLE)
         self.add_button.clicked.connect(self._add_item)
         self.update_button.clicked.connect(self._update_selected_item)
         self.move_up_button.clicked.connect(lambda: self._move_selected_item(-1))
@@ -2422,11 +2422,11 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
         footer.addStretch(1)
         cancel_button = QPushButton("Отмена")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         cancel_button.clicked.connect(self.reject)
         self.save_button = QPushButton("Сохранить")
         self.save_button.setMinimumHeight(34)
-        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         self.save_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, self.save_button)
         footer.addWidget(cancel_button)
@@ -2441,14 +2441,12 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
         scrollbar.setFixedWidth(14)
         scrollbar.setSingleStep(34)
         scrollbar.setPageStep(136)
-        scrollbar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(scrollbar, _operblock_vertical_scrollbar_style(
                 "OperBlockAnesthesiaTypesTableScrollBar",
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
 
     def _render_table(self, select_id: str | None = None):
         selected_id = select_id or self._selected_item_id()
@@ -2600,8 +2598,7 @@ class OperBlockTeamDialog(OperBlockStyledDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.table.setStyleSheet(
-            """
+        set_widget_style(self.table, """
             QTableWidget#OperBlockTeamTable {
                 background: #f3f6fa;
                 alternate-background-color: #e9eef5;
@@ -2627,8 +2624,7 @@ class OperBlockTeamDialog(OperBlockStyledDialog):
             QHeaderView::section:hover {
                 background-color: #cbd7e5;
             }
-            """
-        )
+            """)
         self.table.itemSelectionChanged.connect(self._sync_inputs_from_selection)
         layout.addWidget(self.table, 1)
 
@@ -2654,9 +2650,9 @@ class OperBlockTeamDialog(OperBlockStyledDialog):
         self.delete_button = QPushButton("Удалить")
         for button in (self.add_button, self.update_button):
             button.setMinimumHeight(34)
-            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+            set_widget_style(button, STYLE_SECTOR8_BUTTON)
         self.delete_button.setMinimumHeight(34)
-        self.delete_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        set_widget_style(self.delete_button, DANGER_BUTTON_STYLE)
         self.add_button.clicked.connect(self._add_item)
         self.update_button.clicked.connect(self._update_selected_item)
         self.delete_button.clicked.connect(self._delete_selected_item)
@@ -2669,11 +2665,11 @@ class OperBlockTeamDialog(OperBlockStyledDialog):
         footer.addStretch(1)
         cancel_button = QPushButton("Отмена")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         cancel_button.clicked.connect(self.reject)
         self.save_button = QPushButton("Сохранить")
         self.save_button.setMinimumHeight(34)
-        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         self.save_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, self.save_button)
         footer.addWidget(cancel_button)
@@ -2850,8 +2846,7 @@ class OperBlockDialogTimeInput(QFrame):
         self.setMinimumWidth(170)
         self.setMaximumWidth(240)
         self.setProperty("focused", False)
-        self.setStyleSheet(
-            f"""
+        set_widget_style(self, f"""
             QFrame#{frame_name} {{
                 background-color: #FFFFFF;
                 border: 1px solid #D1D5DB;
@@ -2874,8 +2869,7 @@ class OperBlockDialogTimeInput(QFrame):
                 border: none;
             }}
             """
-            + operblock_arrow_button_style(f"QPushButton#{button_name}")
-        )
+            + operblock_arrow_button_style(f"QPushButton#{button_name}"))
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -3079,7 +3073,7 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         self.assistance_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.assistance_combo.setMinimumContentsLength(38)
         self.assistance_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.assistance_combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(self.assistance_combo, _operblock_combo_box_style())
         line_edit = self.assistance_combo.lineEdit()
         if line_edit is not None:
             line_edit.setPlaceholderText("Не выбрано")
@@ -3116,11 +3110,11 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         footer.addStretch(1)
         cancel_button = QPushButton("Отмена")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         cancel_button.clicked.connect(self.reject)
         self.start_button = QPushButton("Начать")
         self.start_button.setMinimumHeight(34)
-        self.start_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.start_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         self.start_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, self.start_button)
         footer.addWidget(cancel_button)
@@ -3141,14 +3135,12 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         scrollbar.setFixedWidth(14)
         scrollbar.setSingleStep(36)
         scrollbar.setPageStep(144)
-        scrollbar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(scrollbar, _operblock_vertical_scrollbar_style(
                 "OperBlockStaffComboPopupScrollBar",
                 width_px=14,
                 left_margin_px=2,
                 right_margin_px=1,
-            )
-        )
+            ))
 
     @staticmethod
     def _staff_combo(items: list[str]) -> QComboBox:
@@ -3158,7 +3150,7 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         combo.setMinimumWidth(430)
         combo.setMinimumContentsLength(38)
         combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(combo, _operblock_combo_box_style())
         StartAnesthesiaDialog._apply_staff_combo_popup_scrollbar(combo)
         line_edit = combo.lineEdit()
         if line_edit is not None:
@@ -3243,7 +3235,7 @@ class EndSurgeryDialog(OperBlockStyledDialog):
 
         footer_frame = QFrame()
         footer_frame.setObjectName("EndSurgeryDialogFooter")
-        footer_frame.setStyleSheet("QFrame#EndSurgeryDialogFooter { background: transparent; border: none; }")
+        set_widget_style(footer_frame, "QFrame#EndSurgeryDialogFooter { background: transparent; border: none; }")
         footer_frame.setFixedWidth(label_width + row_spacing + self.end_time_input.maximumWidth())
         footer_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         footer = QHBoxLayout(footer_frame)
@@ -3252,11 +3244,11 @@ class EndSurgeryDialog(OperBlockStyledDialog):
         footer.addStretch(1)
         cancel_button = QPushButton("Отмена")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         cancel_button.clicked.connect(self.reject)
         self.finish_button = QPushButton("Завершить")
         self.finish_button.setMinimumHeight(34)
-        self.finish_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        set_widget_style(self.finish_button, DANGER_BUTTON_STYLE)
         self.finish_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, self.finish_button)
         footer.addWidget(cancel_button)
@@ -3330,7 +3322,7 @@ class EndAnesthesiaTransferDialog(OperBlockStyledDialog):
         self.department_combo.setMinimumWidth(260)
         self.department_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.department_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
-        self.department_combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(self.department_combo, _operblock_combo_box_style())
         line_edit = self.department_combo.lineEdit()
         if line_edit is not None:
             line_edit.setPlaceholderText("Куда переводится пациент")
@@ -3354,11 +3346,11 @@ class EndAnesthesiaTransferDialog(OperBlockStyledDialog):
         footer.addStretch(1)
         cancel_button = QPushButton("Отмена")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         cancel_button.clicked.connect(self.reject)
         self.finish_button = QPushButton("Завершить")
         self.finish_button.setMinimumHeight(34)
-        self.finish_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        set_widget_style(self.finish_button, DANGER_BUTTON_STYLE)
         self.finish_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, self.finish_button)
         footer.addWidget(cancel_button)
@@ -3453,20 +3445,16 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         surgeons_scrollbar.setFixedWidth(14)
         surgeons_scrollbar.setSingleStep(36)
         surgeons_scrollbar.setPageStep(108)
-        surgeons_scrollbar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(surgeons_scrollbar, _operblock_vertical_scrollbar_style(
                 "OperBlockSurgeryTeamScrollBar",
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
 
         self.surgeons_widget = QWidget()
         self.surgeons_widget.setObjectName("OperBlockSurgeryTeamContent")
-        self.surgeons_widget.setStyleSheet(
-            "QWidget#OperBlockSurgeryTeamContent { background: transparent; border: none; }"
-        )
+        set_widget_style(self.surgeons_widget, "QWidget#OperBlockSurgeryTeamContent { background: transparent; border: none; }")
         self.surgeons_layout = QFormLayout(self.surgeons_widget)
         self.surgeons_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         self.surgeons_layout.setContentsMargins(0, 0, 0, 0)
@@ -3483,8 +3471,7 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         self._install_surgery_team_combo_event_filter(self.operating_nurse_combo)
         self.surgeons_layout.addRow("Опер. сестра:", self.operating_nurse_combo)
         self.surgeons_scroll.setWidget(self.surgeons_widget)
-        self.surgeons_scroll.setStyleSheet(
-            """
+        set_widget_style(self.surgeons_scroll, """
             QScrollArea#OperBlockSurgeryTeamScroll {
                 background: transparent;
                 border: none;
@@ -3492,8 +3479,7 @@ class StartSurgeryDialog(OperBlockStyledDialog):
             QScrollArea#OperBlockSurgeryTeamScroll > QWidget > QWidget {
                 background: transparent;
             }
-            """
-        )
+            """)
         form.addRow(self.surgeons_scroll)
         layout.addLayout(form, 1)
 
@@ -3501,11 +3487,11 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         footer.addStretch(1)
         cancel_button = QPushButton("Отмена")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         cancel_button.clicked.connect(self.reject)
         self.start_button = QPushButton("Начать")
         self.start_button.setMinimumHeight(34)
-        self.start_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.start_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         self.start_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, self.start_button)
         footer.addWidget(cancel_button)
@@ -3688,31 +3674,26 @@ class OperationStagesDialog(OperBlockStyledDialog):
         scrollbar.setFixedWidth(14)
         scrollbar.setSingleStep(38)
         scrollbar.setPageStep(152)
-        scrollbar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(scrollbar, _operblock_vertical_scrollbar_style(
                 "OperBlockOperationStagesScrollBar",
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
 
         self.rows_widget = QWidget()
         self.rows_widget.setObjectName("OperBlockOperationStagesContent")
-        self.rows_widget.setStyleSheet(
-            """
+        set_widget_style(self.rows_widget, """
             QWidget#OperBlockOperationStagesContent {
                 background: transparent;
                 border: none;
             }
-            """
-        )
+            """)
         self.rows_layout = QVBoxLayout(self.rows_widget)
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(7)
         self.scroll.setWidget(self.rows_widget)
-        self.scroll.setStyleSheet(
-            """
+        set_widget_style(self.scroll, """
             QScrollArea#OperBlockOperationStagesScroll {
                 background: transparent;
                 border: none;
@@ -3720,8 +3701,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
             QScrollArea#OperBlockOperationStagesScroll > QWidget > QWidget {
                 background: transparent;
             }
-            """
-        )
+            """)
         layout.addWidget(self.scroll, 1)
 
         note_label = QLabel(
@@ -3729,16 +3709,14 @@ class OperationStagesDialog(OperBlockStyledDialog):
             "Конец операции и конец пособия также будут установлены автоматически."
         )
         note_label.setWordWrap(True)
-        note_label.setStyleSheet(
-            f"font-size: 12px; color: {TEXT_SECONDARY}; background: transparent; border: none;"
-        )
+        set_widget_style(note_label, f"font-size: 12px; color: {TEXT_SECONDARY}; background: transparent; border: none;")
         layout.addWidget(note_label, 0)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
         close_button = QPushButton("Закрыть")
         close_button.setMinimumHeight(34)
-        close_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(close_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         close_button.clicked.connect(self.accept)
         footer.addWidget(close_button)
         layout.addLayout(footer)
@@ -3838,15 +3816,13 @@ class OperationStagesDialog(OperBlockStyledDialog):
         row_key = self._row_key(row)
         frame = QFrame()
         frame.setObjectName("OperBlockOperationStageRow")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#OperBlockOperationStageRow {{
                 background: #ffffff;
                 border: 1px solid {BORDER_LIGHT};
                 border-radius: 6px;
             }}
-            """
-        )
+            """)
         frame.setMinimumHeight(46)
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(10, 7, 10, 7)
@@ -3855,7 +3831,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
         number_label = QLabel(str(index))
         number_label.setFixedWidth(28)
         number_label.setAlignment(Qt.AlignCenter)
-        number_label.setStyleSheet(f"font-size: 13px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
+        set_widget_style(number_label, f"font-size: 13px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
         layout.addWidget(number_label)
 
         can_edit_time = not bool(row.get("readonly")) and bool(row.get("event_time"))
@@ -3872,7 +3848,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
             if can_edit_time
             else f"font-size: 12px; color: {TEXT_SECONDARY};"
         )
-        time_label.setStyleSheet(time_style)
+        set_widget_style(time_label, time_style)
         layout.addWidget(time_label)
 
         edit = QLineEdit()
@@ -3881,8 +3857,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
         edit.setMinimumHeight(32)
         edit.setReadOnly(bool(row.get("readonly")))
         edit.setProperty("row_key", row_key)
-        edit.setStyleSheet(
-            f"""
+        set_widget_style(edit, f"""
             QLineEdit {{
                 background: {'#f8fafc' if row.get('readonly') else '#ffffff'};
                 border: 1px solid {BORDER_COLOR};
@@ -3893,8 +3868,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
             QLineEdit:read-only {{
                 color: {TEXT_SECONDARY};
             }}
-            """
-        )
+            """)
         layout.addWidget(edit, 1)
         edit.returnPressed.connect(lambda key=row_key: self._request_save(key))
 
@@ -3902,7 +3876,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
         save_button.setFixedWidth(104)
         save_button.setMinimumHeight(30)
         save_button.setCursor(Qt.PointingHandCursor)
-        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE + "QPushButton { padding: 4px 8px; }")
+        set_widget_style(save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE + "QPushButton { padding: 4px 8px; }")
         save_button.setProperty("row_key", row_key)
         save_button.clicked.connect(lambda _=False, key=row_key: self._request_save(key))
         layout.addWidget(save_button, 0)
@@ -4190,18 +4164,16 @@ class EditOperBlockStaffDialog(OperBlockStyledDialog):
         scrollbar.setFixedWidth(14)
         scrollbar.setSingleStep(36)
         scrollbar.setPageStep(108)
-        scrollbar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(scrollbar, _operblock_vertical_scrollbar_style(
                 "OperBlockEditStaffScrollBar",
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
 
         self.team_widget = QWidget()
         self.team_widget.setObjectName("OperBlockEditStaffContent")
-        self.team_widget.setStyleSheet("QWidget#OperBlockEditStaffContent { background: transparent; border: none; }")
+        set_widget_style(self.team_widget, "QWidget#OperBlockEditStaffContent { background: transparent; border: none; }")
         self.team_layout = QFormLayout(self.team_widget)
         self.team_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         self.team_layout.setContentsMargins(0, 0, 0, 0)
@@ -4240,8 +4212,7 @@ class EditOperBlockStaffDialog(OperBlockStyledDialog):
             combo.setEnabled(self._anesthesia_enabled)
 
         self.team_scroll.setWidget(self.team_widget)
-        self.team_scroll.setStyleSheet(
-            """
+        set_widget_style(self.team_scroll, """
             QScrollArea#OperBlockEditStaffScroll {
                 background: transparent;
                 border: none;
@@ -4249,19 +4220,18 @@ class EditOperBlockStaffDialog(OperBlockStyledDialog):
             QScrollArea#OperBlockEditStaffScroll > QWidget > QWidget {
                 background: transparent;
             }
-            """
-        )
+            """)
         layout.addWidget(self.team_scroll, 1)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
         cancel_button = QPushButton("Отмена")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         cancel_button.clicked.connect(self.reject)
         self.save_button = QPushButton("Сохранить")
         self.save_button.setMinimumHeight(34)
-        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         self.save_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, self.save_button)
         footer.addWidget(cancel_button)
@@ -4428,15 +4398,15 @@ class QuickOrdersSettingsDialog(OperBlockStyledDialog):
             "Пустые дозировки в секторе не показываются."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
+        set_widget_style(hint, f"font-size: 12px; color: {TEXT_SECONDARY};")
         layout.addWidget(hint)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QScrollArea.NoFrame)
-        self.scroll.setStyleSheet(STYLE_PATIENT_FORM_SCROLL)
+        set_widget_style(self.scroll, STYLE_PATIENT_FORM_SCROLL)
         self.rows_host = QWidget()
-        self.rows_host.setStyleSheet(STYLE_PATIENT_FORM_PAGE)
+        set_widget_style(self.rows_host, STYLE_PATIENT_FORM_PAGE)
         self.rows_layout = QVBoxLayout(self.rows_host)
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows_layout.setSpacing(6)
@@ -4447,15 +4417,15 @@ class QuickOrdersSettingsDialog(OperBlockStyledDialog):
         actions = QHBoxLayout()
         self.add_row_button = QPushButton("Добавить препарат")
         self.add_row_button.setMinimumHeight(34)
-        self.add_row_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.add_row_button, STYLE_SECTOR8_BUTTON)
         self.add_row_button.clicked.connect(lambda: self._add_row())
         self.cancel_button = QPushButton("Отменить")
         self.cancel_button.setMinimumHeight(34)
-        self.cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(self.cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         self.cancel_button.clicked.connect(self.reject)
         self.save_button = QPushButton("Сохранить")
         self.save_button.setMinimumHeight(34)
-        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         self.save_button.clicked.connect(self.accept)
         actions.addWidget(self.add_row_button)
         actions.addStretch(1)
@@ -4467,8 +4437,7 @@ class QuickOrdersSettingsDialog(OperBlockStyledDialog):
         template = template or {}
         row = QFrame()
         row.setObjectName("quickOrderSettingsRow")
-        row.setStyleSheet(
-            f"""
+        set_widget_style(row, f"""
             QFrame#quickOrderSettingsRow {{
                 background-color: {BG_LIGHT};
                 border: 1px solid {BORDER_LIGHT};
@@ -4485,8 +4454,7 @@ class QuickOrdersSettingsDialog(OperBlockStyledDialog):
                 border: 1px solid {BORDER_COLOR};
                 background: {BG_CARD};
             }}
-            """
-        )
+            """)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(8, 6, 8, 6)
         row_layout.setSpacing(6)
@@ -4518,7 +4486,7 @@ class QuickOrdersSettingsDialog(OperBlockStyledDialog):
 
         remove_button = QPushButton("Удалить")
         remove_button.setMinimumHeight(32)
-        remove_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        set_widget_style(remove_button, DANGER_BUTTON_STYLE)
         remove_button.clicked.connect(lambda _=False, widget=row: self._remove_row(widget))
         row_layout.addWidget(remove_button, 0)
 
@@ -4595,7 +4563,7 @@ class _OperBlockTableTextDelegate(QStyledItemDelegate):
     def createEditor(self, parent, option, index):
         editor = super().createEditor(parent, option, index)
         if isinstance(editor, QLineEdit):
-            editor.setStyleSheet(_operblock_table_editor_style())
+            set_widget_style(editor, _operblock_table_editor_style())
             editor.setTextMargins(2, 0, 2, 0)
             editor.setMinimumHeight(20)
         return editor
@@ -4615,7 +4583,7 @@ class _OperBlockComboBoxDelegate(QStyledItemDelegate):
     def createEditor(self, parent, _option, _index):
         combo = QComboBox(parent)
         combo.setEditable(False)
-        combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(combo, _operblock_combo_box_style())
         combo.addItems(self._option_labels())
         QTimer.singleShot(0, combo.showPopup)
         return combo
@@ -4867,7 +4835,7 @@ class OperBlockExtraQuickTypesDialog(OperBlockStyledDialog):
         if not self._options:
             empty_label = QLabel("Дополнительные типы не настроены.")
             empty_label.setWordWrap(True)
-            empty_label.setStyleSheet(f"font-size: 13px; color: {TEXT_SECONDARY};")
+            set_widget_style(empty_label, f"font-size: 13px; color: {TEXT_SECONDARY};")
             layout.addWidget(empty_label)
             layout.addStretch(1)
         else:
@@ -4878,8 +4846,7 @@ class OperBlockExtraQuickTypesDialog(OperBlockStyledDialog):
                     continue
                 checkbox = QCheckBox(label)
                 checkbox.setChecked(key in self._selected_keys)
-                checkbox.setStyleSheet(
-                    f"""
+                set_widget_style(checkbox, f"""
                     QCheckBox {{
                         color: {TEXT_PRIMARY};
                         font-size: 13px;
@@ -4889,8 +4856,7 @@ class OperBlockExtraQuickTypesDialog(OperBlockStyledDialog):
                         width: 16px;
                         height: 16px;
                     }}
-                    """
-                )
+                    """)
                 self._checkboxes[key] = checkbox
                 layout.addWidget(checkbox)
             layout.addStretch(1)
@@ -4899,11 +4865,11 @@ class OperBlockExtraQuickTypesDialog(OperBlockStyledDialog):
         actions.addStretch(1)
         cancel_button = QPushButton("Отменить")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         cancel_button.clicked.connect(self.reject)
         save_button = QPushButton("Сохранить")
         save_button.setMinimumHeight(34)
-        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         save_button.clicked.connect(self.accept)
         actions.addWidget(cancel_button)
         actions.addWidget(save_button)
@@ -5057,13 +5023,13 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
 
     def _init_ui(self):
         layout = self.content_layout
-        self.content_widget.setStyleSheet(f"{STYLE_PATIENT_FORM_TAB}\n{_operblock_combo_box_style()}")
+        set_widget_style(self.content_widget, f"{STYLE_PATIENT_FORM_TAB}\n{_operblock_combo_box_style()}")
 
         hint = QLabel(
             "Таблица редактирует только шаблоны оперблока. Основной справочник doctor/nurse не меняется."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
+        set_widget_style(hint, f"font-size: 12px; color: {TEXT_SECONDARY};")
         layout.addWidget(hint)
 
         filters = QHBoxLayout()
@@ -5087,7 +5053,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self.enabled_filter.currentIndexChanged.connect(self._apply_filter)
         import_button = QPushButton("Импорт из справочника")
         import_button.setFixedHeight(34)
-        import_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(import_button, STYLE_SECTOR8_BUTTON)
         import_button.clicked.connect(self._show_disabled_presets)
         filters.addWidget(self.filter_input, 2)
         filters.addWidget(self.kind_filter, 1)
@@ -5130,8 +5096,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self._apply_table_column_visibility()
         header.sectionResized.connect(self._on_table_header_changed)
         header.sectionMoved.connect(self._on_table_header_changed)
-        self.table.setStyleSheet(
-            f"""
+        set_widget_style(self.table, f"""
             QTableWidget#medicationPresetSettingsTable {{
                 background-color: {BG_CARD};
                 alternate-background-color: #F8FAFC;
@@ -5157,8 +5122,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 padding: 5px 6px;
                 font-weight: 700;
             }}
-            """
-        )
+            """)
         self.table.setItemDelegateForColumn(
             self.COL_KIND,
             _OperBlockComboBoxDelegate(self._kind_combo_options, self.table),
@@ -5182,23 +5146,23 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         actions = QHBoxLayout()
         self.add_row_button = QPushButton("Добавить препарат")
         self.add_row_button.setMinimumHeight(34)
-        self.add_row_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.add_row_button, STYLE_SECTOR8_BUTTON)
         self.add_row_button.clicked.connect(lambda: self._add_row({"enabled": True, "kind": "bolus"}))
         self.toggle_visible_button = QPushButton("Вкл/Выкл все")
         self.toggle_visible_button.setMinimumHeight(34)
-        self.toggle_visible_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.toggle_visible_button, STYLE_SECTOR8_BUTTON)
         self.toggle_visible_button.clicked.connect(self._toggle_visible_enabled)
         self.delete_selected_button = QPushButton("Удалить выбранные")
         self.delete_selected_button.setMinimumHeight(34)
-        self.delete_selected_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        set_widget_style(self.delete_selected_button, DANGER_BUTTON_STYLE)
         self.delete_selected_button.clicked.connect(self._delete_selected_rows)
         self.cancel_button = QPushButton("Отменить")
         self.cancel_button.setMinimumHeight(34)
-        self.cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(self.cancel_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         self.cancel_button.clicked.connect(self.reject)
         self.save_button = QPushButton("Сохранить")
         self.save_button.setMinimumHeight(34)
-        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         self.save_button.clicked.connect(self.save)
         actions.addWidget(self.add_row_button)
         actions.addWidget(self.toggle_visible_button)
@@ -5216,14 +5180,12 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         scrollbar.setFixedWidth(14)
         scrollbar.setSingleStep(34)
         scrollbar.setPageStep(136)
-        scrollbar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(scrollbar, _operblock_vertical_scrollbar_style(
                 "OperBlockMedicationPresetsTableScrollBar",
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
 
     def _apply_default_table_column_widths(self):
         defaults = {
@@ -5504,8 +5466,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             else "Убрать из избранного" if enabled
             else "Сначала включите препарат"
         )
-        button.setStyleSheet(
-            f"""
+        set_widget_style(button, f"""
             QPushButton#OperBlockFavoritePresetButton {{
                 background: transparent;
                 border: none;
@@ -5520,8 +5481,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 background: transparent;
                 border: none;
             }}
-            """
-        )
+            """)
         button.clicked.connect(lambda _=False, index=int(template_index): self._toggle_favorite(index))
         return button
 
@@ -6074,7 +6034,7 @@ class EditOrderDialog(OperBlockStyledDialog):
         layout = self.content_layout
 
         text_label = QLabel("Назначение")
-        text_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
+        set_widget_style(text_label, f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
         layout.addWidget(text_label)
 
         self.text_input = _line_edit()
@@ -6087,19 +6047,19 @@ class EditOrderDialog(OperBlockStyledDialog):
             time_row.setContentsMargins(0, 0, 0, 0)
             time_row.setSpacing(10)
             time_label = QLabel("Время введения")
-            time_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
+            set_widget_style(time_label, f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
             self.time_input = QTimeEdit()
             self.time_input.setDisplayFormat("HH:mm")
             self.time_input.setFixedHeight(34)
             self.time_input.setTime(QTime(self._base_datetime.hour, self._base_datetime.minute))
-            self.time_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
+            set_widget_style(self.time_input, STYLE_PATIENT_FORM_VALID_FIELD)
             time_row.addWidget(time_label, 0)
             time_row.addWidget(self.time_input, 0)
             time_row.addStretch(1)
             layout.addLayout(time_row)
 
         route_label = QLabel("Место введения")
-        route_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
+        set_widget_style(route_label, f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
         layout.addWidget(route_label)
 
         route_row = QHBoxLayout()
@@ -6122,11 +6082,11 @@ class EditOrderDialog(OperBlockStyledDialog):
         actions.addStretch(1)
         cancel_button = QPushButton("Отменить")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        set_widget_style(cancel_button, STYLE_PATIENT_FORM_CANCEL_BUTTON)
         cancel_button.clicked.connect(self.reject)
         save_button = QPushButton("Сохранить")
         save_button.setMinimumHeight(34)
-        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         save_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, save_button)
         actions.addWidget(cancel_button)
@@ -6139,8 +6099,7 @@ class EditOrderDialog(OperBlockStyledDialog):
         button.setMinimumSize(70, 32)
         button.setCursor(Qt.PointingHandCursor)
         button.setProperty("route_code", route_code)
-        button.setStyleSheet(
-            f"""
+        set_widget_style(button, f"""
             QPushButton {{
                 background-color: #F1F5F9;
                 border: 1px solid {BORDER_LIGHT};
@@ -6154,8 +6113,7 @@ class EditOrderDialog(OperBlockStyledDialog):
                 border-color: #2F8A57;
                 color: #17633A;
             }}
-            """
-        )
+            """)
         self.route_button_group.addButton(button)
         return button
 
@@ -6207,9 +6165,7 @@ def _create_gas_dialog_image_icon(
 ) -> QFrame:
     frame = QFrame(parent)
     frame.setFixedSize(frame_size, frame_size)
-    frame.setStyleSheet(
-        f"background-color: {background}; border: none; border-radius: {frame_size // 2}px;"
-    )
+    set_widget_style(frame, f"background-color: {background}; border: none; border-radius: {frame_size // 2}px;")
     layout = QVBoxLayout(frame)
     layout.setContentsMargins(0, 0, 0, 0)
     icon_label = QLabel(frame)
@@ -6363,8 +6319,7 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         return result
 
     def _init_ui(self) -> None:
-        self.setStyleSheet(
-            """
+        set_widget_style(self, """
             QDialog {
                 background-color: transparent;
                 font-family: "Segoe UI", "Inter", Arial, sans-serif;
@@ -6492,8 +6447,7 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
                 border-top: 1px solid #E5E7EB;
             }
             """
-            + operblock_med_action_button_style("QPushButton#MedCancelButton", "QPushButton#MedSaveButton")
-        )
+            + operblock_med_action_button_style("QPushButton#MedCancelButton", "QPushButton#MedSaveButton"))
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
@@ -7112,8 +7066,7 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         self._restore_saved_geometry()
 
     def _init_ui(self):
-        self.setStyleSheet(
-            """
+        set_widget_style(self, """
             QDialog {
                 background-color: transparent;
                 font-family: "Segoe UI", "Inter", Arial, sans-serif;
@@ -7262,8 +7215,7 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7377F7, stop:1 #5B52EA);
                 border-color: #6366F1;
             }
-            """
-        )
+            """)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
@@ -7652,12 +7604,12 @@ class TimeEditDialog(OperBlockStyledDialog):
         time_row.setContentsMargins(0, 0, 0, 0)
         time_row.setSpacing(10)
         time_label = QLabel(self._field_label)
-        time_label.setStyleSheet(f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
+        set_widget_style(time_label, f"font-size: 13px; font-weight: 700; color: {TEXT_PRIMARY};")
         self.time_input = QTimeEdit()
         self.time_input.setDisplayFormat("HH:mm")
         self.time_input.setFixedHeight(34)
         self.time_input.setTime(QTime(self._base_datetime.hour, self._base_datetime.minute))
-        self.time_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
+        set_widget_style(self.time_input, STYLE_PATIENT_FORM_VALID_FIELD)
         time_row.addWidget(time_label, 0)
         time_row.addWidget(self.time_input, 0)
         time_row.addStretch(1)
@@ -7667,11 +7619,11 @@ class TimeEditDialog(OperBlockStyledDialog):
         actions.addStretch(1)
         cancel_button = QPushButton("Отменить")
         cancel_button.setMinimumHeight(34)
-        cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        set_widget_style(cancel_button, STYLE_PATIENT_FORM_CANCEL_BUTTON)
         cancel_button.clicked.connect(self.reject)
         save_button = QPushButton("Сохранить")
         save_button.setMinimumHeight(34)
-        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         save_button.clicked.connect(self.accept)
         self._configure_enter_accept_button(cancel_button, save_button)
         actions.addWidget(cancel_button)
@@ -7936,8 +7888,7 @@ class OperBlockAdmissionTimeInput(QFrame):
 
     def _init_ui(self) -> None:
         self.setObjectName("OperBlockAdmissionTimeInput")
-        self.setStyleSheet(
-            f"""
+        set_widget_style(self, f"""
             QFrame#OperBlockAdmissionTimeInput {{
                 background: transparent;
                 border: none;
@@ -7990,8 +7941,7 @@ class OperBlockAdmissionTimeInput(QFrame):
                 color: #B45309;
             }}
             """
-            + operblock_arrow_button_style("QPushButton#OperBlockAdmissionTimeStepButton")
-        )
+            + operblock_arrow_button_style("QPushButton#OperBlockAdmissionTimeStepButton"))
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
@@ -8253,7 +8203,7 @@ class OperBlockQueueDialog(OperBlockStyledDialog):
             "Список запрашивается только при открытии этого окна и по кнопке «Обновить»."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
+        set_widget_style(intro, f"color: {TEXT_SECONDARY}; font-size: 13px;")
         self.content_layout.addWidget(intro)
 
         self.table = QTableWidget(0, 7)
@@ -8279,26 +8229,26 @@ class OperBlockQueueDialog(OperBlockStyledDialog):
         self.content_layout.addWidget(self.table, 1)
 
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        set_widget_style(self.status_label, f"color: {TEXT_SECONDARY}; font-size: 12px;")
         self.content_layout.addWidget(self.status_label)
 
         actions = QHBoxLayout()
         self.refresh_button = QPushButton("Обновить")
         self.refresh_button.setMinimumHeight(36)
         self.refresh_button.setCursor(Qt.PointingHandCursor)
-        self.refresh_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.refresh_button, STYLE_SECTOR8_BUTTON)
         self.refresh_button.clicked.connect(self.refresh_rows)
         actions.addWidget(self.refresh_button)
         actions.addStretch(1)
         close_button = QPushButton("Закрыть")
         close_button.setMinimumHeight(36)
-        close_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        set_widget_style(close_button, OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
         close_button.clicked.connect(self.reject)
         actions.addWidget(close_button)
         self.choose_button = QPushButton("Занять стол")
         self.choose_button.setMinimumHeight(36)
         self.choose_button.setEnabled(False)
-        self.choose_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.choose_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         self.choose_button.clicked.connect(self._choose_selected)
         actions.addWidget(self.choose_button)
         self.content_layout.addLayout(actions)
@@ -8433,8 +8383,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
     def _section(self, title: str) -> tuple[QFrame, QFormLayout]:
         frame = QFrame()
         frame.setObjectName("OperBlockPatientFormSection")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#OperBlockPatientFormSection {{
                 background-color: {BG_CARD};
                 border: 1px solid {BORDER_LIGHT};
@@ -8444,13 +8393,12 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
                 background: transparent;
                 border: none;
             }}
-            """
-        )
+            """)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(18, 14, 18, 16)
         layout.setSpacing(10)
         title_label = QLabel(title)
-        title_label.setStyleSheet(STYLE_PATIENT_FORM_SECTION_TITLE)
+        set_widget_style(title_label, STYLE_PATIENT_FORM_SECTION_TITLE)
         layout.addWidget(title_label)
         form = QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -8514,14 +8462,12 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
 
         content = QFrame(self.bg_container)
         content.setObjectName("OperBlockOccupyFormContent")
-        content.setStyleSheet(
-            f"""
+        set_widget_style(content, f"""
             {STYLE_PATIENT_FORM_TAB}
             QFrame#OperBlockOccupyFormContent {{
                 background-color: {BG_MAIN};
             }}
-            """
-        )
+            """)
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(20, 16, 20, 20)
         content_layout.setSpacing(10)
@@ -8532,8 +8478,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.form_scroll.setFrameShape(QScrollArea.NoFrame)
         self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.form_scroll.setStyleSheet(
-            f"""
+        set_widget_style(self.form_scroll, f"""
             QScrollArea#OperBlockOccupyFormScroll {{
                 border: none;
                 background: {BG_MAIN};
@@ -8544,34 +8489,29 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             QScrollArea#OperBlockOccupyFormScroll > QWidget > QWidget {{
                 background: {BG_MAIN};
             }}
-            """
-        )
+            """)
         self.form_scroll.viewport().setObjectName("OperBlockOccupyFormViewport")
-        self.form_scroll.viewport().setStyleSheet(f"background: {BG_MAIN};")
+        set_widget_style(self.form_scroll.viewport(), f"background: {BG_MAIN};")
         form_scrollbar = self.form_scroll.verticalScrollBar()
         form_scrollbar.setObjectName("OperBlockPatientFormScrollBar")
         form_scrollbar.setFixedWidth(14)
         form_scrollbar.setSingleStep(36)
         form_scrollbar.setPageStep(180)
-        form_scrollbar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(form_scrollbar, _operblock_vertical_scrollbar_style(
                 "OperBlockPatientFormScrollBar",
                 width_px=14,
                 left_margin_px=2,
                 right_margin_px=1,
-            )
-        )
+            ))
 
         self.form_page = QWidget()
         self.form_page.setObjectName("OperBlockOccupyFormPage")
-        self.form_page.setStyleSheet(
-            f"""
+        set_widget_style(self.form_page, f"""
             {STYLE_PATIENT_FORM_PAGE}
             QWidget#OperBlockOccupyFormPage {{
                 background-color: {BG_MAIN};
             }}
-            """
-        )
+            """)
         page_layout = QVBoxLayout(self.form_page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(10)
@@ -8584,7 +8524,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.gender_combo = QComboBox()
         self.gender_combo.setFixedHeight(34)
         self.gender_combo.addItems(["Мужской", "Женский"])
-        self.gender_combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(self.gender_combo, _operblock_combo_box_style())
         self._install_occupy_combo_wheel_redirect(self.gender_combo)
         self.birth_date_input = _line_edit()
         self.birth_date_input.setObjectName("OperBlockOccupyBirthDateInput")
@@ -8634,7 +8574,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.anesthesia_assistance_type_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.anesthesia_assistance_type_combo.setMinimumContentsLength(38)
         self.anesthesia_assistance_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
-        self.anesthesia_assistance_type_combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(self.anesthesia_assistance_type_combo, _operblock_combo_box_style())
         assistance_line_edit = self.anesthesia_assistance_type_combo.lineEdit()
         if assistance_line_edit is not None:
             assistance_line_edit.setPlaceholderText("Вид пособия")
@@ -8655,8 +8595,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.weight_input.setPlaceholderText("кг")
         height_weight_widget = QWidget()
         height_weight_widget.setObjectName("OperBlockOccupyHeightWeightFields")
-        height_weight_widget.setStyleSheet(
-            """
+        set_widget_style(height_weight_widget, """
             QWidget#OperBlockOccupyHeightWeightFields {
                 background: transparent;
                 border: none;
@@ -8665,8 +8604,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
                 background: transparent;
                 border: none;
             }
-            """
-        )
+            """)
         height_weight_layout = QGridLayout(height_weight_widget)
         height_weight_layout.setContentsMargins(0, 0, 0, 0)
         height_weight_layout.setHorizontalSpacing(12)
@@ -8674,7 +8612,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         height_label = QLabel("Рост (см)")
         weight_label = QLabel("Вес (кг)")
         for label in (height_label, weight_label):
-            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+            set_widget_style(label, f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
         height_weight_layout.addWidget(height_label, 0, 0)
         height_weight_layout.addWidget(weight_label, 0, 1)
         height_weight_layout.addWidget(self.height_input, 1, 0)
@@ -8689,8 +8627,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self._install_occupy_combo_wheel_redirect(self.blood_rh_combo)
         blood_widget = QWidget()
         blood_widget.setObjectName("OperBlockOccupyBloodFields")
-        blood_widget.setStyleSheet(
-            """
+        set_widget_style(blood_widget, """
             QWidget#OperBlockOccupyBloodFields {
                 background: transparent;
                 border: none;
@@ -8699,8 +8636,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
                 background: transparent;
                 border: none;
             }
-            """
-        )
+            """)
         blood_layout = QGridLayout(blood_widget)
         blood_layout.setContentsMargins(0, 0, 0, 0)
         blood_layout.setHorizontalSpacing(12)
@@ -8708,7 +8644,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         blood_group_label = QLabel("Группа крови")
         blood_rh_label = QLabel("Резус")
         for label in (blood_group_label, blood_rh_label):
-            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+            set_widget_style(label, f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
         blood_layout.addWidget(blood_group_label, 0, 0)
         blood_layout.addWidget(blood_rh_label, 0, 1)
         blood_layout.addWidget(self.blood_group_combo, 1, 0)
@@ -8717,8 +8653,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         blood_layout.setColumnStretch(1, 1)
         surgery_team_widget = QWidget()
         surgery_team_widget.setObjectName("OperBlockOccupySurgeryFields")
-        surgery_team_widget.setStyleSheet(
-            """
+        set_widget_style(surgery_team_widget, """
             QWidget#OperBlockOccupySurgeryFields {
                 background: transparent;
                 border: none;
@@ -8727,8 +8662,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
                 background: transparent;
                 border: none;
             }
-            """
-        )
+            """)
         surgery_team_layout = QGridLayout(surgery_team_widget)
         surgery_team_layout.setContentsMargins(0, 0, 0, 0)
         surgery_team_layout.setHorizontalSpacing(12)
@@ -8737,7 +8671,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         surgeon_label = QLabel("Хирург")
         operating_nurse_label = QLabel("Опер. сестра")
         for label in (surgeon_label, operating_nurse_label):
-            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+            set_widget_style(label, f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
         surgery_team_layout.addWidget(surgeon_label, 0, 0)
         surgery_team_layout.addWidget(operating_nurse_label, 0, 1)
 
@@ -8747,7 +8681,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.add_surgeon_button = QPushButton("+ Добавить хирурга")
         self.add_surgeon_button.setCursor(Qt.PointingHandCursor)
         self.add_surgeon_button.setFixedHeight(32)
-        self.add_surgeon_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.add_surgeon_button, STYLE_SECTOR8_BUTTON)
         self.add_surgeon_button.clicked.connect(lambda: self._add_surgeon_row())
         surgery_team_layout.setColumnStretch(0, 1)
         surgery_team_layout.setColumnStretch(1, 1)
@@ -8760,8 +8694,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             self._install_occupy_combo_wheel_redirect(combo)
         anesthesia_team_widget = QWidget()
         anesthesia_team_widget.setObjectName("OperBlockOccupyAnesthesiaFields")
-        anesthesia_team_widget.setStyleSheet(
-            """
+        set_widget_style(anesthesia_team_widget, """
             QWidget#OperBlockOccupyAnesthesiaFields {
                 background: transparent;
                 border: none;
@@ -8770,8 +8703,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
                 background: transparent;
                 border: none;
             }
-            """
-        )
+            """)
         anesthesia_team_layout = QGridLayout(anesthesia_team_widget)
         anesthesia_team_layout.setContentsMargins(0, 0, 0, 0)
         anesthesia_team_layout.setHorizontalSpacing(12)
@@ -8779,7 +8711,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         anesthesiologist_label = QLabel("Анестезиолог")
         anesthetist_label = QLabel("Анестезистка")
         for label in (anesthesiologist_label, anesthetist_label):
-            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+            set_widget_style(label, f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
         anesthesia_team_layout.addWidget(anesthesiologist_label, 0, 0)
         anesthesia_team_layout.addWidget(anesthetist_label, 0, 1)
         anesthesia_team_layout.addWidget(self.anesthesiologist_combo, 1, 0)
@@ -8832,7 +8764,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         ad_row.setSpacing(8)
         slash = QLabel("/")
         slash.setAlignment(Qt.AlignCenter)
-        slash.setStyleSheet(f"font-size: 18px; font-weight: 800; color: {TEXT_SECONDARY}; background: transparent;")
+        set_widget_style(slash, f"font-size: 18px; font-weight: 800; color: {TEXT_SECONDARY}; background: transparent;")
         ad_row.addWidget(self.sys_input, 1)
         ad_row.addWidget(slash, 0)
         ad_row.addWidget(self.dia_input, 1)
@@ -8852,14 +8784,14 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.cancel_button.setFixedHeight(45)
         self.cancel_button.setAutoDefault(False)
         self.cancel_button.setDefault(False)
-        self.cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        set_widget_style(self.cancel_button, STYLE_PATIENT_FORM_CANCEL_BUTTON)
         self.cancel_button.clicked.connect(self.reject)
         self.save_button = QPushButton(self._save_button_text)
         self.save_button.setCursor(Qt.PointingHandCursor)
         self.save_button.setFixedHeight(45)
         self.save_button.setAutoDefault(True)
         self.save_button.setDefault(True)
-        self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        set_widget_style(self.save_button, OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
         buttons.addWidget(self.cancel_button, 1)
         buttons.addWidget(self.save_button, 2)
         content_layout.addLayout(buttons)
@@ -8888,10 +8820,10 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         remove_button.setFixedHeight(32)
         remove_button.setFixedWidth(remove_button.sizeHint().width() + 20)
         remove_button.setCursor(Qt.PointingHandCursor)
-        remove_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        set_widget_style(remove_button, STYLE_PATIENT_FORM_CANCEL_BUTTON)
         row = QWidget()
         row.setObjectName("OperBlockOccupySurgeonRow")
-        row.setStyleSheet("QWidget#OperBlockOccupySurgeonRow { background: transparent; border: none; }")
+        set_widget_style(row, "QWidget#OperBlockOccupySurgeonRow { background: transparent; border: none; }")
         row_layout = QVBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(0)
@@ -8942,7 +8874,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         combo = QComboBox()
         combo.setEditable(False)
         combo.setFixedHeight(34)
-        combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(combo, _operblock_combo_box_style())
         combo.addItem("Не указано", "")
         for option in options:
             combo.addItem(option, option)
@@ -8958,7 +8890,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         combo.setMinimumContentsLength(38)
         combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(combo, _operblock_combo_box_style())
         line_edit = combo.lineEdit()
         if line_edit is not None:
             line_edit.setPlaceholderText("Не указано")
@@ -9235,7 +9167,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.diagnosis_code_input.setText(normalized)
         self.diagnosis_code_input.setCursorPosition(len(normalized))
         self.diagnosis_code_input.blockSignals(False)
-        self.diagnosis_code_input.setStyleSheet("")
+        set_widget_style(self.diagnosis_code_input, "")
         self.diagnosis_name.setText("")
         if not is_complete_operblock_mkb_code(normalized):
             self._set_manual_diagnosis_enabled(False, clear=True, placeholder="Сначала введите полный код МКБ-10")
@@ -9250,9 +9182,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
     ):
         self.diagnosis_text_input.setEnabled(True)
         self.diagnosis_text_input.setReadOnly(not bool(enabled))
-        self.diagnosis_text_input.setStyleSheet(
-            STYLE_PATIENT_FORM_MANUAL_FIELD if enabled else STYLE_PATIENT_FORM_READONLY_FIELD
-        )
+        set_widget_style(self.diagnosis_text_input, STYLE_PATIENT_FORM_MANUAL_FIELD if enabled else STYLE_PATIENT_FORM_READONLY_FIELD)
         self.diagnosis_text_input.setPlaceholderText(placeholder)
         if text is not None:
             self.diagnosis_text_input.setText(text)
@@ -9266,23 +9196,23 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.diagnosis_code_input.blockSignals(False)
         if not code:
             self.diagnosis_name.setText("")
-            self.diagnosis_code_input.setStyleSheet("")
+            set_widget_style(self.diagnosis_code_input, "")
             self._set_manual_diagnosis_enabled(False, clear=True, placeholder="Сначала введите код МКБ-10")
             return False
         if not is_complete_operblock_mkb_code(code):
             self.diagnosis_name.setText("Формат кода: X33, S82.0 или S82.01")
-            self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_INVALID_FIELD)
+            set_widget_style(self.diagnosis_code_input, STYLE_PATIENT_FORM_INVALID_FIELD)
             self._set_manual_diagnosis_enabled(False, clear=True, placeholder="Сначала введите полный код МКБ-10")
             return False
         name = self.mkb_service.get_diagnosis_by_code(code)
         if name:
             self.diagnosis_name.setText(name)
-            self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
+            set_widget_style(self.diagnosis_code_input, STYLE_PATIENT_FORM_VALID_FIELD)
             self._set_manual_diagnosis_enabled(False, text=name, placeholder="Диагноз из МКБ-10")
             return True
         else:
             self.diagnosis_name.setText("Код не найден")
-            self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_INVALID_FIELD)
+            set_widget_style(self.diagnosis_code_input, STYLE_PATIENT_FORM_INVALID_FIELD)
             self._set_manual_diagnosis_enabled(True, clear=self.diagnosis_text_input.isReadOnly())
             return True
 
@@ -9618,7 +9548,7 @@ class OperBlockMainWidget(QWidget):
                 button.setVisible(False)
 
     def _init_ui(self):
-        self.setStyleSheet(f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
+        set_widget_style(self, f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 2, 0, 0)
         root.setSpacing(0)
@@ -9804,7 +9734,7 @@ class OperBlockMainWidget(QWidget):
     def _build_legacy_archive_page(self) -> QWidget:
         metric_started = operblock_startup_metrics.timer_start()
         page = QWidget()
-        page.setStyleSheet(f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
+        set_widget_style(page, f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
@@ -9816,7 +9746,7 @@ class OperBlockMainWidget(QWidget):
             else "Архив пациентов операционной"
         )
         title = QLabel(archive_title)
-        title.setStyleSheet(f"font-size: 18px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
+        set_widget_style(title, f"font-size: 18px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
         self.archive_search_input = QLineEdit()
         self.archive_search_input.setPlaceholderText("ФИО, ИБ, диагноз")
         self.archive_search_input.setMinimumHeight(34)
@@ -9825,7 +9755,7 @@ class OperBlockMainWidget(QWidget):
         )
         self.archive_refresh_button = QPushButton("Обновить")
         self.archive_refresh_button.setMinimumHeight(34)
-        self.archive_refresh_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.archive_refresh_button, STYLE_SECTOR8_BUTTON)
         self.archive_refresh_button.clicked.connect(
             lambda: self.refresh_operblock_archive(
                 force=True,
@@ -9852,7 +9782,7 @@ class OperBlockMainWidget(QWidget):
         pagination.setContentsMargins(0, 0, 0, 0)
         pagination.setSpacing(6)
         self.archive_prev_page_button = QPushButton("◀")
-        self.archive_prev_page_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.archive_prev_page_button, STYLE_SECTOR8_BUTTON)
         self.archive_prev_page_button.clicked.connect(lambda: self._set_operblock_archive_page(self._archive_current_page - 1))
         pagination.addWidget(self.archive_prev_page_button)
 
@@ -9862,12 +9792,12 @@ class OperBlockMainWidget(QWidget):
         pagination.addLayout(self.archive_page_buttons_layout)
 
         self.archive_next_page_button = QPushButton("▶")
-        self.archive_next_page_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.archive_next_page_button, STYLE_SECTOR8_BUTTON)
         self.archive_next_page_button.clicked.connect(lambda: self._set_operblock_archive_page(self._archive_current_page + 1))
         pagination.addWidget(self.archive_next_page_button)
 
         self.archive_page_info_label = QLabel("Страница 1 из 1")
-        self.archive_page_info_label.setStyleSheet(f"border: none; color: {TEXT_SECONDARY}; font-weight: 600;")
+        set_widget_style(self.archive_page_info_label, f"border: none; color: {TEXT_SECONDARY}; font-weight: 600;")
         pagination.addWidget(self.archive_page_info_label)
         pagination.addStretch(1)
 
@@ -9878,7 +9808,7 @@ class OperBlockMainWidget(QWidget):
         pagination.addWidget(self.archive_page_jump_input)
 
         self.archive_page_jump_button = QPushButton("Перейти")
-        self.archive_page_jump_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.archive_page_jump_button, STYLE_SECTOR8_BUTTON)
         self.archive_page_jump_button.clicked.connect(self._jump_operblock_archive_page_from_input)
         pagination.addWidget(self.archive_page_jump_button)
         layout.addLayout(pagination)
@@ -9891,10 +9821,10 @@ class OperBlockMainWidget(QWidget):
         self.archive_delete_all_button = QPushButton("Удалить всех")
         for button in (self.archive_open_button, self.archive_restore_button, self.archive_delete_button, self.archive_delete_all_button):
             button.setMinimumHeight(36)
-            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+            set_widget_style(button, STYLE_SECTOR8_BUTTON)
             button.setEnabled(False)
-        self.archive_delete_button.setStyleSheet(DANGER_BUTTON_STYLE)
-        self.archive_delete_all_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        set_widget_style(self.archive_delete_button, DANGER_BUTTON_STYLE)
+        set_widget_style(self.archive_delete_all_button, DANGER_BUTTON_STYLE)
         self.archive_open_button.clicked.connect(self._open_selected_archive_case)
         self.archive_restore_button.clicked.connect(self._restore_selected_archive_case)
         self.archive_delete_button.clicked.connect(self._delete_selected_archive_case)
@@ -9923,7 +9853,7 @@ class OperBlockMainWidget(QWidget):
         layout.addWidget(self._build_protocol_left_column(), 0)
 
         right_column = QWidget()
-        right_column.setStyleSheet("background: transparent;")
+        set_widget_style(right_column, "background: transparent;")
         right_layout = QVBoxLayout(right_column)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
@@ -9957,8 +9887,7 @@ class OperBlockMainWidget(QWidget):
 
     def _make_protocol_tab_placeholder(self, text: str) -> QWidget:
         frame = QFrame()
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame {{
                 background-color: {BG_LIGHT};
                 border-left: 1.5px solid {BORDER_COLOR};
@@ -9972,8 +9901,7 @@ class OperBlockMainWidget(QWidget):
                 font-size: 14px;
                 font-weight: 600;
             }}
-            """
-        )
+            """)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(0, 0, 0, 0)
         label = QLabel(str(text or "Загрузка..."))
@@ -10093,7 +10021,7 @@ class OperBlockMainWidget(QWidget):
     def _build_protocol_left_column(self) -> QWidget:
         column = QWidget()
         column.setFixedWidth(250)
-        column.setStyleSheet("background: transparent;")
+        set_widget_style(column, "background: transparent;")
         layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -10107,7 +10035,7 @@ class OperBlockMainWidget(QWidget):
         self.protocol_actions_sector.setFixedWidth(250)
 
         actions_panel = QWidget()
-        actions_panel.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(actions_panel, "background: transparent; border: none;")
         actions_layout = QVBoxLayout(actions_panel)
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setSpacing(5)
@@ -10124,7 +10052,7 @@ class OperBlockMainWidget(QWidget):
             self.report_button.setIcon(QIcon(report_icon))
         self.report_button.setMinimumHeight(32)
         self.report_button.setCursor(Qt.PointingHandCursor)
-        self.report_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.report_button, STYLE_SECTOR8_BUTTON)
 
         self.start_anesthesia_button.clicked.connect(self._start_anesthesia)
         self.end_anesthesia_button.clicked.connect(self._end_anesthesia)
@@ -10196,11 +10124,11 @@ class OperBlockMainWidget(QWidget):
         self.protocol_info_header_label = QLabel("Информация")
         self.protocol_info_header_label.setFixedHeight(28)
         self.protocol_info_header_label.setAlignment(Qt.AlignCenter)
-        self.protocol_info_header_label.setStyleSheet(SECTOR_HEADER_STYLE)
+        set_widget_style(self.protocol_info_header_label, SECTOR_HEADER_STYLE)
         layout.addWidget(self.protocol_info_header_label)
 
         top_body = QFrame()
-        top_body.setStyleSheet(SECTOR_BODY_STYLE)
+        set_widget_style(top_body, SECTOR_BODY_STYLE)
         top_layout = QHBoxLayout(top_body)
         top_layout.setContentsMargins(6, 2, 6, 4)
         top_layout.setSpacing(6)
@@ -10208,12 +10136,10 @@ class OperBlockMainWidget(QWidget):
         self.protocol_status_label = QLabel("-")
         self.protocol_status_label.setFixedWidth(120)
         self.protocol_status_label.setAlignment(Qt.AlignCenter)
-        self.protocol_status_label.setStyleSheet(
-            """
+        set_widget_style(self.protocol_status_label, """
             font-weight: bold; font-size: 14px; color: white;
             background-color: #7f8c8d; border-radius: 4px; padding: 2px 5px;
-            """
-        )
+            """)
         self.protocol_history_label = _label("№ -", size=14, weight=700, color=COLOR_PRIMARY_DARK)
         self.protocol_history_label.setWordWrap(False)
         self.protocol_patient_label = FittingSingleLineLabel("-", max_pixel_size=16, min_pixel_size=16, weight=700)
@@ -10223,10 +10149,8 @@ class OperBlockMainWidget(QWidget):
         self.protocol_diagnosis_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.protocol_diagnosis_label.setMinimumWidth(70)
         self.protocol_diagnosis_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.protocol_diagnosis_label.setStyleSheet(
-            f"font-size: 14px; font-weight: 400; color: {TEXT_PRIMARY}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(self.protocol_diagnosis_label, f"font-size: 14px; font-weight: 400; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         top_layout.addWidget(self.protocol_status_label, 0, Qt.AlignVCenter)
         top_layout.addWidget(self.protocol_history_label, 0, Qt.AlignVCenter)
         top_layout.addWidget(self.protocol_patient_label, 0, Qt.AlignVCenter)
@@ -10253,8 +10177,7 @@ class OperBlockMainWidget(QWidget):
 
         body = QFrame()
         body.setObjectName("operblockProtocolTitle")
-        body.setStyleSheet(
-            f"""
+        set_widget_style(body, f"""
             QFrame#operblockProtocolTitle {{
                 background-color: {BG_LIGHT};
                 border: 1.5px solid {BORDER_COLOR};
@@ -10266,18 +10189,17 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }}
-            """
-        )
+            """)
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(12, 0, 12, 0)
         body_layout.setSpacing(14)
         self.protocol_title_label = ElidedTooltipLabel(self._protocol_title_text())
-        self.protocol_title_label.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY_DARK};")
-        tokens = get_theme_manager().current_tokens()
+        set_widget_style(self.protocol_title_label, f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY_DARK};")
+        tokens = style_tokens()
         self.protocol_started_label = QLabel("-", body)
-        self.protocol_started_label.setStyleSheet(build_remcard_period_label_style(tokens))
+        set_widget_style(self.protocol_started_label, build_remcard_period_label_style(tokens))
         self.protocol_current_time_label = QLabel("", body)
-        self.protocol_current_time_label.setStyleSheet(build_remcard_current_time_label_style(tokens))
+        set_widget_style(self.protocol_current_time_label, build_remcard_current_time_label_style(tokens))
         body_layout.addWidget(self.protocol_title_label, 1)
         body_layout.addWidget(self.protocol_started_label, 0)
         body_layout.addWidget(self.protocol_current_time_label, 0)
@@ -10314,8 +10236,7 @@ class OperBlockMainWidget(QWidget):
 
     def _build_protocol_tab_bar(self) -> QWidget:
         frame = QFrame()
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame {{
                 background: {BG_MAIN};
                 border-left: 1.5px solid {BORDER_COLOR};
@@ -10325,8 +10246,7 @@ class OperBlockMainWidget(QWidget):
                 border-bottom-left-radius: {CUSTOM_DIALOG_RADIUS};
                 border-bottom-right-radius: {CUSTOM_DIALOG_RADIUS};
             }}
-            """
-        )
+            """)
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(5, 0, 5, 0)
         layout.setSpacing(10)
@@ -10359,7 +10279,7 @@ class OperBlockMainWidget(QWidget):
         button.setCheckable(True)
         button.setChecked(checked)
         button.setFixedHeight(32)
-        button.setStyleSheet(build_remcard_tab_button_style(get_theme_manager().current_tokens()))
+        set_widget_style(button, build_remcard_tab_button_style(style_tokens()))
         return button
 
     def _clear_protocol_tabs_layout(self):
@@ -10446,11 +10366,9 @@ class OperBlockMainWidget(QWidget):
         button = QPushButton(text)
         button.setMinimumHeight(32)
         button.setCursor(Qt.PointingHandCursor)
-        button.setStyleSheet(
-            DANGER_BUTTON_STYLE
+        set_widget_style(button, DANGER_BUTTON_STYLE
             if danger
-            else STYLE_SECTOR8_BUTTON
-        )
+            else STYLE_SECTOR8_BUTTON)
         return button
 
     def _set_protocol_tab(self, index: int):
@@ -10524,8 +10442,7 @@ class OperBlockMainWidget(QWidget):
         layout.setContentsMargins(0, 28, 0, 0)
         layout.setSpacing(8)
         self.vitals_staff_legend_layout = layout
-        panel.setStyleSheet(
-            f"""
+        set_widget_style(panel, f"""
             QWidget#OperBlockStaffLegendPanel {{
                 background: transparent;
                 border: none;
@@ -10564,8 +10481,7 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }}
-            """
-        )
+            """)
         panel.hide()
         return panel
 
@@ -10755,8 +10671,7 @@ class OperBlockMainWidget(QWidget):
     def _orders_panel(self, title: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("operblockOrdersPanel")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#operblockOrdersPanel {{
                 background-color: {OPERBLOCK_ORDERS_CARD_BG};
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
@@ -10767,38 +10682,34 @@ class OperBlockMainWidget(QWidget):
                 border: none;
                 color: {OPERBLOCK_ORDERS_TEXT};
             }}
-            """
-        )
+            """)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
         if title:
             label = QLabel(title)
-            label.setStyleSheet(
-                f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; "
-                "background: transparent; border: none;"
-            )
+            set_widget_style(label, f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; "
+                "background: transparent; border: none;")
             layout.addWidget(label)
         return frame, layout
 
     def _build_orders_tab(self) -> QWidget:
         metric_started = operblock_startup_metrics.timer_start()
         page = QWidget()
-        page.setStyleSheet(f"QWidget {{ background-color: {OPERBLOCK_ORDERS_BG}; color: {OPERBLOCK_ORDERS_TEXT}; }}")
+        set_widget_style(page, f"QWidget {{ background-color: {OPERBLOCK_ORDERS_BG}; color: {OPERBLOCK_ORDERS_TEXT}; }}")
         outer_layout = QHBoxLayout(page)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
         content_column = QWidget()
-        content_column.setStyleSheet("background: transparent;")
+        set_widget_style(content_column, "background: transparent;")
         layout = QVBoxLayout(content_column)
         layout.setContentsMargins(0, 3, 0, 5)
         layout.setSpacing(3)
 
         input_panel, input_body = self._orders_panel("")
         input_panel.setObjectName("operblockNewOrderPanel")
-        input_panel.setStyleSheet(
-            f"""
+        set_widget_style(input_panel, f"""
             QFrame#operblockNewOrderPanel {{
                 background-color: {OPERBLOCK_ORDERS_BG};
                 border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
@@ -10809,22 +10720,18 @@ class OperBlockMainWidget(QWidget):
                 border: none;
                 color: {OPERBLOCK_ORDERS_TEXT};
             }}
-            """
-        )
+            """)
         input_body.setContentsMargins(14, 12, 14, 12)
         input_layout = QHBoxLayout()
         input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(10)
         input_title = QLabel("Новое назначение")
         input_title.setMinimumWidth(132)
-        input_title.setStyleSheet(
-            f"font-size: 14px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
-        )
+        set_widget_style(input_title, f"font-size: 14px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;")
         self.order_input = _line_edit()
         self.order_input.setPlaceholderText("Введите препарат или назначение")
         self.order_input.setMinimumHeight(40)
-        self.order_input.setStyleSheet(
-            f"""
+        set_widget_style(self.order_input, f"""
             QLineEdit {{
                 background-color: {OPERBLOCK_ORDERS_CARD_BG};
                 color: {OPERBLOCK_ORDERS_TEXT};
@@ -10835,33 +10742,30 @@ class OperBlockMainWidget(QWidget):
             QLineEdit:focus {{
                 border: 1px solid {OPERBLOCK_ORDERS_ACCENT};
             }}
-            """
-        )
+            """)
         self._add_line_edit_icon(self.order_input, "search")
         self.order_dose_input = _line_edit()
         self.order_dose_input.setPlaceholderText("Доза (мг, мл, %)")
         self.order_dose_input.setFixedWidth(190)
         self.order_dose_input.setMinimumHeight(40)
-        self.order_dose_input.setStyleSheet(self.order_input.styleSheet())
+        set_widget_style(self.order_dose_input, source_style(self.order_input))
         self.order_rate_input = _line_edit()
         self.order_rate_input.setPlaceholderText("Скорость (мл/час)")
         self.order_rate_input.setFixedWidth(145)
         self.order_rate_input.setMinimumHeight(40)
-        self.order_rate_input.setStyleSheet(self.order_input.styleSheet())
+        set_widget_style(self.order_rate_input, source_style(self.order_input))
         self.order_type_combo = QComboBox()
         self.order_type_combo.setFixedWidth(140)
         self.order_type_combo.setMinimumHeight(40)
         self.order_type_combo.addItems(("Болюс", "Газ", "Дозатор", "Капельница"))
-        self.order_type_combo.setStyleSheet(
-            _operblock_combo_box_style()
+        set_widget_style(self.order_type_combo, _operblock_combo_box_style()
             + f"""
             QComboBox {{
                 border-radius: 8px;
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
                 padding: 7px 30px 7px 10px;
             }}
-            """
-        )
+            """)
         self.order_type_combo.currentTextChanged.connect(self._update_manual_order_type_fields)
         self.save_order_button = QPushButton("Добавить")
         self.save_order_button.setIcon(self._operblock_ui_icon("plus"))
@@ -10869,7 +10773,7 @@ class OperBlockMainWidget(QWidget):
         self.save_order_button.setMinimumHeight(40)
         self.save_order_button.setMinimumWidth(122)
         self.save_order_button.setCursor(Qt.PointingHandCursor)
-        self.save_order_button.setStyleSheet(_operblock_primary_action_button_style(radius=8, padding="8px 15px"))
+        set_widget_style(self.save_order_button, _operblock_primary_action_button_style(radius=8, padding="8px 15px"))
         self.save_order_button.clicked.connect(self._save_order)
         input_layout.addWidget(input_title, 0)
         input_layout.addWidget(self.order_input, 1)
@@ -10885,8 +10789,7 @@ class OperBlockMainWidget(QWidget):
         active_panel, active_body = self._orders_panel("")
         self.active_infusions_panel = active_panel
         active_panel.setObjectName("operblockActiveInfusionsPanel")
-        active_panel.setStyleSheet(
-            f"""
+        set_widget_style(active_panel, f"""
             QFrame#operblockActiveInfusionsPanel {{
                 background-color: {OPERBLOCK_ORDERS_BG};
                 border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
@@ -10897,16 +10800,13 @@ class OperBlockMainWidget(QWidget):
                 border: none;
                 color: {OPERBLOCK_ORDERS_TEXT};
             }}
-            """
-        )
+            """)
         active_body.setContentsMargins(14, 12, 14, 14)
         active_header = QHBoxLayout()
         active_header.setContentsMargins(0, 0, 0, 2)
         active_header.setSpacing(8)
         active_title = QLabel("Активные дозаторы, капельницы и газы")
-        active_title.setStyleSheet(
-            f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
-        )
+        set_widget_style(active_title, f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;")
         self.active_infusions_count_label = self._count_badge("0")
         active_header.addWidget(active_title, 0)
         active_header.addWidget(self.active_infusions_count_label, 0)
@@ -10922,23 +10822,19 @@ class OperBlockMainWidget(QWidget):
         self.active_infusions_scroll.setMinimumHeight(OPERBLOCK_ACTIVE_INFUSION_EMPTY_HEIGHT)
         self.active_infusions_scroll.setMaximumHeight(OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT)
         self.active_infusions_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        self.active_infusions_scroll.setStyleSheet(
-            "QScrollArea#operblockActiveInfusionsScroll { background: transparent; border: none; }"
-        )
+        set_widget_style(self.active_infusions_scroll, "QScrollArea#operblockActiveInfusionsScroll { background: transparent; border: none; }")
         active_scroll_bar = self.active_infusions_scroll.verticalScrollBar()
         active_scroll_bar.setObjectName("OperBlockActiveInfusionsScrollBar")
         active_scroll_bar.setFixedWidth(14)
-        active_scroll_bar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(active_scroll_bar, _operblock_vertical_scrollbar_style(
                 "OperBlockActiveInfusionsScrollBar",
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
         self.active_infusions_content = QWidget()
         self.active_infusions_content.setMinimumHeight(OPERBLOCK_ACTIVE_INFUSION_EMPTY_HEIGHT)
-        self.active_infusions_content.setStyleSheet("background: transparent;")
+        set_widget_style(self.active_infusions_content, "background: transparent;")
         self.active_infusions_list = QGridLayout(self.active_infusions_content)
         self.active_infusions_list.setContentsMargins(0, 0, 0, 0)
         self.active_infusions_list.setHorizontalSpacing(OPERBLOCK_ACTIVE_INFUSION_GRID_SPACING)
@@ -10953,8 +10849,7 @@ class OperBlockMainWidget(QWidget):
         timeline_panel, timeline_body = self._orders_panel("")
         self.orders_timeline_panel = timeline_panel
         timeline_panel.setObjectName("operblockOrdersTimelinePanel")
-        timeline_panel.setStyleSheet(
-            f"""
+        set_widget_style(timeline_panel, f"""
             QFrame#operblockOrdersTimelinePanel {{
                 background-color: {OPERBLOCK_ORDERS_BG};
                 border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
@@ -10965,30 +10860,27 @@ class OperBlockMainWidget(QWidget):
                 border: none;
                 color: {OPERBLOCK_ORDERS_TEXT};
             }}
-            """
-        )
+            """)
         timeline_body.setContentsMargins(14, 12, 14, 10)
         timeline_header = QHBoxLayout()
         timeline_header.setContentsMargins(0, 0, 0, 2)
         timeline_header.setSpacing(8)
         timeline_title = QLabel("Назначения")
-        timeline_title.setStyleSheet(
-            f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
-        )
+        set_widget_style(timeline_title, f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;")
         self.orders_count_label = self._count_badge("0")
         self.orders_filter_button = QPushButton("Фильтры")
         self.orders_filter_button.setIcon(self._operblock_ui_icon("filter"))
         self.orders_filter_button.setIconSize(QSize(15, 15))
         self.orders_filter_button.setFixedHeight(32)
         self.orders_filter_button.setCursor(Qt.PointingHandCursor)
-        self.orders_filter_button.setStyleSheet(self._secondary_order_button_style())
+        set_widget_style(self.orders_filter_button, self._secondary_order_button_style())
         self.orders_filter_button.clicked.connect(self._show_orders_filter_menu)
         self.orders_sort_combo = QComboBox()
         self.orders_sort_combo.setFixedHeight(32)
         self.orders_sort_combo.setMinimumWidth(210)
         for sort_key, title in OPERBLOCK_ORDERS_SORT_OPTIONS:
             self.orders_sort_combo.addItem(title, sort_key)
-        self.orders_sort_combo.setStyleSheet(_operblock_combo_box_style())
+        set_widget_style(self.orders_sort_combo, _operblock_combo_box_style())
         self.orders_sort_combo.currentIndexChanged.connect(self._on_orders_sort_changed)
         timeline_header.addWidget(timeline_title, 0)
         timeline_header.addWidget(self.orders_count_label, 0)
@@ -11001,24 +10893,20 @@ class OperBlockMainWidget(QWidget):
         self.orders_scroll.setFrameShape(QScrollArea.NoFrame)
         self.orders_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.orders_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.orders_scroll.setStyleSheet(
-            """
+        set_widget_style(self.orders_scroll, """
             QScrollArea {{ background: transparent; border: none; }}
-            """
-        )
+            """)
         orders_scroll_bar = self.orders_scroll.verticalScrollBar()
         orders_scroll_bar.setObjectName("OperBlockOrdersScrollBar")
         orders_scroll_bar.setFixedWidth(14)
-        orders_scroll_bar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(orders_scroll_bar, _operblock_vertical_scrollbar_style(
                 "OperBlockOrdersScrollBar",
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
         orders_content = QWidget()
-        orders_content.setStyleSheet("background: transparent;")
+        set_widget_style(orders_content, "background: transparent;")
         self.orders_list = QVBoxLayout()
         self.orders_list.setContentsMargins(0, 0, 0, 0)
         self.orders_list.setSpacing(4)
@@ -11031,7 +10919,7 @@ class OperBlockMainWidget(QWidget):
         self._pump_operblock_ui_events()
 
         quick_wrapper = QWidget()
-        quick_wrapper.setStyleSheet("background: transparent;")
+        set_widget_style(quick_wrapper, "background: transparent;")
         quick_wrapper_layout = QVBoxLayout(quick_wrapper)
         quick_wrapper_layout.setContentsMargins(5, 3, 0, 5)
         quick_wrapper_layout.setSpacing(0)
@@ -11039,8 +10927,7 @@ class OperBlockMainWidget(QWidget):
         quick_panel, quick_body = self._orders_panel("Быстрые назначения")
         self.quick_orders_panel = quick_panel
         quick_panel.setObjectName("operblockQuickOrdersPanel")
-        quick_panel.setStyleSheet(
-            f"""
+        set_widget_style(quick_panel, f"""
             QFrame#operblockQuickOrdersPanel {{
                 background-color: {OPERBLOCK_ORDERS_BG};
                 border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
@@ -11051,22 +10938,19 @@ class OperBlockMainWidget(QWidget):
                 border: none;
                 color: {OPERBLOCK_ORDERS_TEXT};
             }}
-            """
-        )
+            """)
         quick_panel.setFixedWidth(286)
         quick_body.setSpacing(8)
 
         self.quick_orders_controls_panel = QFrame()
         self.quick_orders_controls_panel.setObjectName("operblockQuickOrdersControlsPanel")
-        self.quick_orders_controls_panel.setStyleSheet(
-            f"""
+        set_widget_style(self.quick_orders_controls_panel, f"""
             QFrame#operblockQuickOrdersControlsPanel {{
                 background-color: {OPERBLOCK_ORDERS_CARD_BG};
                 border: 1.5px solid {OPERBLOCK_ORDERS_BORDER};
                 border-radius: 5px;
             }}
-            """
-        )
+            """)
         quick_controls_layout = QVBoxLayout(self.quick_orders_controls_panel)
         quick_controls_layout.setContentsMargins(8, 8, 8, 8)
         quick_controls_layout.setSpacing(8)
@@ -11074,8 +10958,7 @@ class OperBlockMainWidget(QWidget):
         self.preset_search_input = QLineEdit()
         self.preset_search_input.setPlaceholderText("Найти препарат...")
         self.preset_search_input.setFixedHeight(32)
-        self.preset_search_input.setStyleSheet(
-            f"""
+        set_widget_style(self.preset_search_input, f"""
             QLineEdit {{
                 background-color: {OPERBLOCK_ORDERS_CARD_BG};
                 color: {OPERBLOCK_ORDERS_TEXT};
@@ -11084,8 +10967,7 @@ class OperBlockMainWidget(QWidget):
                 padding: 0 9px;
             }}
             QLineEdit:focus {{ border: 1px solid {OPERBLOCK_ORDERS_ACCENT}; }}
-            """
-        )
+            """)
         self.preset_search_input.textChanged.connect(self._on_preset_search_changed)
         quick_controls_layout.addWidget(self.preset_search_input)
 
@@ -11106,8 +10988,7 @@ class OperBlockMainWidget(QWidget):
 
         self.preset_settings_button = QPushButton("Настроить препараты")
         self.preset_settings_button.setFixedHeight(32)
-        self.preset_settings_button.setStyleSheet(
-            f"""
+        set_widget_style(self.preset_settings_button, f"""
             QPushButton {{
                 background-color: #F8FAFC;
                 color: {OPERBLOCK_ORDERS_TEXT};
@@ -11117,8 +10998,7 @@ class OperBlockMainWidget(QWidget):
                 font-weight: 500;
             }}
             QPushButton:hover {{ background-color: #EEF3FF; }}
-            """
-        )
+            """)
         self.preset_settings_button.clicked.connect(self._open_quick_orders_settings)
         self.preset_settings_button.setVisible(False)
         quick_controls_layout.addWidget(self.preset_settings_button)
@@ -11131,21 +11011,19 @@ class OperBlockMainWidget(QWidget):
         quick_scroll.setFrameShape(QScrollArea.NoFrame)
         quick_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         quick_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        quick_scroll.setStyleSheet("QScrollArea#operblockQuickOrdersScroll { background: transparent; border: none; }")
+        set_widget_style(quick_scroll, "QScrollArea#operblockQuickOrdersScroll { background: transparent; border: none; }")
         self.quick_orders_scroll = quick_scroll
         quick_scroll_bar = quick_scroll.verticalScrollBar()
         quick_scroll_bar.setObjectName("OperBlockQuickOrdersScrollBar")
         quick_scroll_bar.setFixedWidth(14)
-        quick_scroll_bar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(quick_scroll_bar, _operblock_vertical_scrollbar_style(
                 "OperBlockQuickOrdersScrollBar",
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
         quick_content = _QuickOrderPresetListWidget(self)
-        quick_content.setStyleSheet("background: transparent;")
+        set_widget_style(quick_content, "background: transparent;")
         self.quick_orders_list = QVBoxLayout(quick_content)
         self.quick_orders_list.setContentsMargins(0, 0, 0, 0)
         self.quick_orders_list.setSpacing(8)
@@ -11184,10 +11062,8 @@ class OperBlockMainWidget(QWidget):
         badge.setAlignment(Qt.AlignCenter)
         badge.setMinimumWidth(24)
         badge.setFixedHeight(22)
-        badge.setStyleSheet(
-            f"font-size: 12px; font-weight: 500; color: #1D4ED8; background-color: #DBEAFE; "
-            f"border: 1px solid {OPERBLOCK_ORDERS_BORDER}; border-radius: 11px; padding: 0 7px;"
-        )
+        set_widget_style(badge, f"font-size: 12px; font-weight: 500; color: #1D4ED8; background-color: #DBEAFE; "
+            f"border: 1px solid {OPERBLOCK_ORDERS_BORDER}; border-radius: 11px; padding: 0 7px;")
         return badge
 
     @staticmethod
@@ -11275,9 +11151,9 @@ class OperBlockMainWidget(QWidget):
         header = QLabel(title)
         header.setFixedHeight(28)
         header.setAlignment(Qt.AlignCenter)
-        header.setStyleSheet(SECTOR_HEADER_STYLE)
+        set_widget_style(header, SECTOR_HEADER_STYLE)
         body = QFrame()
-        body.setStyleSheet(SECTOR_BODY_STYLE)
+        set_widget_style(body, SECTOR_BODY_STYLE)
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
@@ -12084,7 +11960,7 @@ class OperBlockMainWidget(QWidget):
             button.setChecked(page == current_page)
             button.setMinimumWidth(30)
             button.setFixedHeight(28)
-            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+            set_widget_style(button, STYLE_SECTOR8_BUTTON)
             button.clicked.connect(lambda _checked=False, p=page: self._set_operblock_archive_page(p))
             layout.addWidget(button)
 
@@ -12356,8 +12232,7 @@ class OperBlockMainWidget(QWidget):
         button.setCursor(Qt.PointingHandCursor)
         button.setIcon(QIcon(os.path.join(get_icon_dir(), "operblock_plus.svg")))
         button.setIconSize(QSize(22, 22))
-        button.setStyleSheet(
-            """
+        set_widget_style(button, """
             QPushButton#OperBlockEmptyStateOccupyButton {
                 background-color: #16A34A;
                 color: #FFFFFF;
@@ -12376,8 +12251,7 @@ class OperBlockMainWidget(QWidget):
                 background-color: #166534;
                 border-color: #14532D;
             }
-            """
-        )
+            """)
         button.setEnabled(not self.is_view_only_mode())
         if not self.is_view_only_mode():
             button.clicked.connect(lambda _=False, code=table_code, name=display_name: self._open_occupy_dialog(code, name))
@@ -12389,8 +12263,7 @@ class OperBlockMainWidget(QWidget):
         button.setFixedHeight(58)
         button.setMinimumWidth(190)
         button.setCursor(Qt.PointingHandCursor)
-        button.setStyleSheet(
-            """
+        set_widget_style(button, """
             QPushButton#OperBlockEmptyStateQueueButton {
                 background-color: #2563EB;
                 color: #FFFFFF;
@@ -12406,8 +12279,7 @@ class OperBlockMainWidget(QWidget):
             QPushButton#OperBlockEmptyStateQueueButton:pressed {
                 background-color: #1E40AF;
             }
-            """
-        )
+            """)
         button.setEnabled(not self.is_view_only_mode())
         if not self.is_view_only_mode():
             button.clicked.connect(
@@ -12423,8 +12295,7 @@ class OperBlockMainWidget(QWidget):
         info = QFrame()
         info.setObjectName("OperBlockEmptyStateInfo")
         info.setMinimumHeight(58)
-        info.setStyleSheet(
-            """
+        set_widget_style(info, """
             QFrame#OperBlockEmptyStateInfo {
                 background-color: #EFF6FF;
                 border: 1px solid #BBD7FF;
@@ -12434,8 +12305,7 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }
-            """
-        )
+            """)
         info_layout = QHBoxLayout(info)
         info_layout.setContentsMargins(18, 12, 18, 12)
         info_layout.setSpacing(11)
@@ -12455,7 +12325,7 @@ class OperBlockMainWidget(QWidget):
         text.setObjectName("OperBlockEmptyStateInfoText")
         text.setWordWrap(True)
         text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        text.setStyleSheet("color: #31516F; font-size: 14px; font-weight: 600;")
+        set_widget_style(text, "color: #31516F; font-size: 14px; font-weight: 600;")
         info_layout.addWidget(text, 0, Qt.AlignVCenter)
         info_layout.addStretch(1)
         return info
@@ -12481,8 +12351,7 @@ class OperBlockMainWidget(QWidget):
         empty_card.setObjectName("OperBlockEmptyStateCard")
         empty_card.setMinimumHeight(438)
         empty_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        empty_card.setStyleSheet(
-            """
+        set_widget_style(empty_card, """
             QFrame#OperBlockEmptyStateCard {
                 background-color: #FFFFFF;
                 border: 1px solid #DDE5EE;
@@ -12492,8 +12361,7 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }
-            """
-        )
+            """)
         empty_shadow = QGraphicsDropShadowEffect(empty_card)
         empty_shadow.setBlurRadius(24)
         empty_shadow.setColor(QColor(31, 45, 61, 20))
@@ -12521,7 +12389,7 @@ class OperBlockMainWidget(QWidget):
         free = QLabel("МЕСТО СВОБОДНО")
         free.setObjectName("OperBlockEmptyStateStatus")
         free.setAlignment(Qt.AlignCenter)
-        free.setStyleSheet("color: #16A34A; font-size: 25px; font-weight: 900; background: transparent;")
+        set_widget_style(free, "color: #16A34A; font-size: 25px; font-weight: 900; background: transparent;")
         status_row.addWidget(free, 0, Qt.AlignVCenter)
         status_row.addStretch(1)
         empty_layout.addLayout(status_row)
@@ -12530,13 +12398,13 @@ class OperBlockMainWidget(QWidget):
         description.setObjectName("OperBlockEmptyStateDescription")
         description.setAlignment(Qt.AlignCenter)
         description.setWordWrap(True)
-        description.setStyleSheet("color: #5D7288; font-size: 15px; line-height: 130%;")
+        set_widget_style(description, "color: #5D7288; font-size: 15px; line-height: 130%;")
         empty_layout.addWidget(description)
 
         separator = QFrame()
         separator.setObjectName("OperBlockEmptyStateSeparator")
         separator.setFixedHeight(1)
-        separator.setStyleSheet("background-color: #E2E8F0; border: none;")
+        set_widget_style(separator, "background-color: #E2E8F0; border: none;")
         empty_layout.addSpacing(2)
         empty_layout.addWidget(separator)
         empty_layout.addSpacing(2)
@@ -12580,7 +12448,7 @@ class OperBlockMainWidget(QWidget):
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(18, 18, 18, 18)
         body_layout.setSpacing(16)
-        body.setStyleSheet("QWidget#OperBlockStartBody { background: #F7F9FC; }")
+        set_widget_style(body, "QWidget#OperBlockStartBody { background: #F7F9FC; }")
 
         content = QGridLayout()
         content.setContentsMargins(0, 0, 0, 0)
@@ -12588,7 +12456,7 @@ class OperBlockMainWidget(QWidget):
         content.setVerticalSpacing(12)
 
         center_top = QWidget()
-        center_top.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(center_top, "background: transparent; border: none;")
         center_top_layout = QVBoxLayout(center_top)
         center_top_layout.setContentsMargins(0, 0, 0, 0)
         center_top_layout.setSpacing(12)
@@ -12630,10 +12498,10 @@ class OperBlockMainWidget(QWidget):
         for button in (open_btn, edit_btn, print_btn, close_btn):
             button.setFixedHeight(48)
             button.setCursor(Qt.PointingHandCursor)
-        open_btn.setStyleSheet(self._board_action_button_style("open"))
-        edit_btn.setStyleSheet(self._board_action_button_style("edit"))
-        print_btn.setStyleSheet(self._board_action_button_style("print"))
-        close_btn.setStyleSheet(self._board_action_button_style("danger"))
+        set_widget_style(open_btn, self._board_action_button_style("open"))
+        set_widget_style(edit_btn, self._board_action_button_style("edit"))
+        set_widget_style(print_btn, self._board_action_button_style("print"))
+        set_widget_style(close_btn, self._board_action_button_style("danger"))
         open_btn.clicked.connect(
             lambda _=False, case_id=patient.get("operation_case_id"): self._open_protocol(int(case_id))
         )
@@ -12731,8 +12599,7 @@ class OperBlockMainWidget(QWidget):
     ) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("OperBlockStartBlock")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#OperBlockStartBlock {{
                 background-color: {background_color};
                 border: 1px solid {border_color};
@@ -12742,8 +12609,7 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }}
-            """
-        )
+            """)
         if shadow:
             effect = QGraphicsDropShadowEffect(frame)
             effect.setBlurRadius(24)
@@ -12766,13 +12632,13 @@ class OperBlockMainWidget(QWidget):
                 marker.setObjectName("OperBlockBoardBlockHeaderIcon")
                 marker.setFixedSize(18, 18)
                 marker.setAlignment(Qt.AlignCenter)
-                marker.setStyleSheet(f"color: {icon_color}; font-size: 12px; font-weight: 900;")
+                set_widget_style(marker, f"color: {icon_color}; font-size: 12px; font-weight: 900;")
                 header.addWidget(marker, 0, Qt.AlignTop)
             title_label = QLabel(title)
             title_label.setWordWrap(True)
             title_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
             title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-            title_label.setStyleSheet(f"color: {title_color}; font-size: 15px; font-weight: 800;")
+            set_widget_style(title_label, f"color: {title_color}; font-size: 15px; font-weight: 800;")
             header.addWidget(title_label, 1, Qt.AlignTop)
             layout.addLayout(header)
         return frame, layout
@@ -12786,7 +12652,7 @@ class OperBlockMainWidget(QWidget):
     def _board_separator() -> QFrame:
         line = QFrame()
         line.setFixedHeight(1)
-        line.setStyleSheet("background: #E1E7EF; border: none;")
+        set_widget_style(line, "background: #E1E7EF; border: none;")
         return line
 
     @staticmethod
@@ -12861,14 +12727,14 @@ class OperBlockMainWidget(QWidget):
         label.setFixedSize(size, size)
         label.setAlignment(Qt.AlignCenter)
         label.setPixmap(pixmap)
-        label.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(label, "background: transparent; border: none;")
         return label
 
     @staticmethod
     def _board_muted_label(text: str, *, size: int = 13) -> QLabel:
         label = QLabel(text)
         label.setWordWrap(True)
-        label.setStyleSheet(f"font-size: {size}px; color: #64748B; font-weight: 500;")
+        set_widget_style(label, f"font-size: {size}px; color: #64748B; font-weight: 500;")
         return label
 
     @staticmethod
@@ -12876,7 +12742,7 @@ class OperBlockMainWidget(QWidget):
         label = QLabel(text)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        label.setStyleSheet(f"font-size: {size}px; color: {color}; font-weight: {weight};")
+        set_widget_style(label, f"font-size: {size}px; color: {color}; font-weight: {weight};")
         return label
 
     @staticmethod
@@ -12904,7 +12770,7 @@ class OperBlockMainWidget(QWidget):
         icon.setFixedSize(22, 22)
         icon.setAlignment(Qt.AlignCenter)
         icon.setPixmap(pixmap)
-        icon.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(icon, "background: transparent; border: none;")
         return icon
 
     @staticmethod
@@ -12924,8 +12790,7 @@ class OperBlockMainWidget(QWidget):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setMaximumHeight(maximum_height)
         scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        scroll.setStyleSheet(
-            f"""
+        set_widget_style(scroll, f"""
             QScrollArea#{object_name} {{
                 background: transparent;
                 border: none;
@@ -12933,21 +12798,18 @@ class OperBlockMainWidget(QWidget):
             QScrollArea#{object_name} > QWidget > QWidget {{
                 background: transparent;
             }}
-            """
-        )
+            """)
         scrollbar = scroll.verticalScrollBar()
         scrollbar.setObjectName(scrollbar_object_name)
         scrollbar.setFixedWidth(14)
         scrollbar.setSingleStep(single_step)
         scrollbar.setPageStep(page_step)
-        scrollbar.setStyleSheet(
-            _operblock_vertical_scrollbar_style(
+        set_widget_style(scrollbar, _operblock_vertical_scrollbar_style(
                 scrollbar_object_name,
                 width_px=14,
                 left_margin_px=3,
                 right_margin_px=2,
-            )
-        )
+            ))
         return scroll
 
     @staticmethod
@@ -13127,7 +12989,7 @@ class OperBlockMainWidget(QWidget):
         photo = QLabel()
         photo.setFixedSize(232, 268)
         photo.setAlignment(Qt.AlignCenter)
-        photo.setStyleSheet("border-radius: 4px;")
+        set_widget_style(photo, "border-radius: 4px;")
         self._set_patient_photo(photo, patient.get("gender"))
         top.addWidget(photo, 0, Qt.AlignTop)
 
@@ -13137,10 +12999,8 @@ class OperBlockMainWidget(QWidget):
         status = QLabel("В ОПЕРАЦИОННОЙ")
         status.setAlignment(Qt.AlignCenter)
         status.setFixedHeight(24)
-        status.setStyleSheet(
-            "color: #FFFFFF; background-color: #EF4444; border-radius: 5px; "
-            "font-size: 12px; font-weight: 800; padding: 3px 8px;"
-        )
+        set_widget_style(status, "color: #FFFFFF; background-color: #EF4444; border-radius: 5px; "
+            "font-size: 12px; font-weight: 800; padding: 3px 8px;")
         main.addWidget(status, 0, Qt.AlignLeft)
         main.addWidget(self._board_value_label(f"ИБ № {patient.get('history_number') or '—'}", size=15, color="#0F5CC9"))
         name = self._board_value_label(patient.get("full_name") or "Неизвестно", size=21, weight=800)
@@ -13207,8 +13067,7 @@ class OperBlockMainWidget(QWidget):
             layout.addSpacing(10)
             notice = QFrame()
             notice.setObjectName("OperBlockVitalsNotice")
-            notice.setStyleSheet(
-                """
+            set_widget_style(notice, """
                 QFrame#OperBlockVitalsNotice {
                     background-color: #EFF6FF;
                     border: 1px solid #93C5FD;
@@ -13218,21 +13077,18 @@ class OperBlockMainWidget(QWidget):
                     background: transparent;
                     border: none;
                 }
-                """
-            )
+                """)
             notice_layout = QHBoxLayout(notice)
             notice_layout.setContentsMargins(14, 10, 14, 10)
             notice_layout.setSpacing(10)
             icon = QLabel("i")
             icon.setFixedSize(18, 18)
             icon.setAlignment(Qt.AlignCenter)
-            icon.setStyleSheet(
-                "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
-                "font-size: 12px; font-weight: 800;"
-            )
+            set_widget_style(icon, "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
+                "font-size: 12px; font-weight: 800;")
             text = QLabel("Показатели будут отображаться после начала мониторинга")
             text.setWordWrap(True)
-            text.setStyleSheet("color: #2563EB; font-size: 13px; font-weight: 700;")
+            set_widget_style(text, "color: #2563EB; font-size: 13px; font-weight: 700;")
             notice_layout.addWidget(icon, 0, Qt.AlignTop)
             notice_layout.addWidget(text, 1)
             layout.addWidget(notice)
@@ -13266,7 +13122,7 @@ class OperBlockMainWidget(QWidget):
             row = index // 2
             col = index % 2
             item = QWidget()
-            item.setStyleSheet("background: transparent; border: none;")
+            set_widget_style(item, "background: transparent; border: none;")
             item_layout = QHBoxLayout(item)
             item_layout.setContentsMargins(0, 0, 0, 0)
             item_layout.setSpacing(10)
@@ -13327,8 +13183,7 @@ class OperBlockMainWidget(QWidget):
         notice = QFrame()
         notice.setObjectName(object_name)
         notice.setMinimumHeight(66)
-        notice.setStyleSheet(
-            f"""
+        set_widget_style(notice, f"""
             QFrame#{object_name} {{
                 background-color: #EFF6FF;
                 border: 1px solid #8FBEFF;
@@ -13338,20 +13193,17 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }}
-            """
-        )
+            """)
         notice_layout = QHBoxLayout(notice)
         notice_layout.setContentsMargins(16, 0, 16, 0)
         notice_layout.setSpacing(10)
         icon = QLabel("i")
         icon.setFixedSize(18, 18)
         icon.setAlignment(Qt.AlignCenter)
-        icon.setStyleSheet(
-            "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
-            "font-size: 12px; font-weight: 800;"
-        )
+        set_widget_style(icon, "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
+            "font-size: 12px; font-weight: 800;")
         notice_text = QLabel(text)
-        notice_text.setStyleSheet("color: #2563EB; font-size: 13px; font-weight: 800;")
+        set_widget_style(notice_text, "color: #2563EB; font-size: 13px; font-weight: 800;")
         notice_layout.addWidget(icon, 0)
         notice_layout.addWidget(notice_text, 1)
         return notice
@@ -13374,7 +13226,7 @@ class OperBlockMainWidget(QWidget):
         stepper_area = QWidget()
         stepper_area.setObjectName("OperBlockBoardProgressStepperArea")
         stepper_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        stepper_area.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(stepper_area, "background: transparent; border: none;")
         stepper_layout = QVBoxLayout(stepper_area)
         stepper_layout.setContentsMargins(0, 0, 0, 0)
         stepper_layout.setSpacing(0)
@@ -13389,8 +13241,7 @@ class OperBlockMainWidget(QWidget):
         layout.setAlignment(Qt.AlignTop)
         stages_panel = QFrame()
         stages_panel.setObjectName("OperBlockBoardStagesPanel")
-        stages_panel.setStyleSheet(
-            """
+        set_widget_style(stages_panel, """
             QFrame#OperBlockBoardStagesPanel {
                 background-color: #F8FBFF;
                 border: 1px solid #CFE3FF;
@@ -13400,8 +13251,7 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }
-            """
-        )
+            """)
         stages_layout = QVBoxLayout(stages_panel)
         stages_layout.setContentsMargins(12, 10, 12, 10)
         stages_layout.setSpacing(8)
@@ -13416,10 +13266,10 @@ class OperBlockMainWidget(QWidget):
             dot = QLabel("•")
             dot.setFixedWidth(12)
             dot.setAlignment(Qt.AlignCenter)
-            dot.setStyleSheet("font-size: 18px; color: #1F2D3D; font-weight: 900;")
+            set_widget_style(dot, "font-size: 18px; color: #1F2D3D; font-weight: 900;")
             time_label = QLabel(_format_order_time(item.get("event_time")))
             time_label.setFixedWidth(44)
-            time_label.setStyleSheet("font-size: 12px; color: #64748B; font-weight: 700;")
+            set_widget_style(time_label, "font-size: 12px; color: #64748B; font-weight: 700;")
             text_label = self._board_value_label(
                 str(item.get("label") or "Этап операции"),
                 size=13,
@@ -13456,7 +13306,7 @@ class OperBlockMainWidget(QWidget):
             page_step=136,
         )
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
+        set_widget_style(content, "background: transparent;")
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(8)
@@ -13466,11 +13316,11 @@ class OperBlockMainWidget(QWidget):
             row.setSpacing(8)
             time_label = QLabel(_format_order_time(item.get("time")))
             time_label.setFixedWidth(44)
-            time_label.setStyleSheet("font-size: 12px; color: #64748B; font-weight: 800;")
+            set_widget_style(time_label, "font-size: 12px; color: #64748B; font-weight: 800;")
             text_label = self._board_value_label(str(item.get("label") or "Препарат"), size=13, weight=700)
             pill = QLabel(str(item.get("kind_label") or "Болюс"))
             pill.setAlignment(Qt.AlignCenter)
-            pill.setStyleSheet("background: #EEF2FF; color: #2563EB; border: 1px solid #C7D2FE; border-radius: 5px; padding: 2px 6px; font-size: 11px; font-weight: 800;")
+            set_widget_style(pill, "background: #EEF2FF; color: #2563EB; border: 1px solid #C7D2FE; border-radius: 5px; padding: 2px 6px; font-size: 11px; font-weight: 800;")
             row.addWidget(time_label, 0)
             row.addWidget(text_label, 1)
             row.addWidget(pill, 0)
@@ -13510,8 +13360,7 @@ class OperBlockMainWidget(QWidget):
         label = QLabel(display_name)
         label.setFixedHeight(54)
         label.setAlignment(Qt.AlignCenter)
-        label.setStyleSheet(
-            """
+        set_widget_style(label, """
             QLabel {
                 background-color: #F5F7FA;
                 color: #1F2D3D;
@@ -13521,8 +13370,7 @@ class OperBlockMainWidget(QWidget):
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
             }
-            """
-        )
+            """)
         operblock_startup_metrics.record_since(
             "board_apply_card_header_ms",
             metric_started,
@@ -13539,7 +13387,7 @@ class OperBlockMainWidget(QWidget):
         frame.setObjectName("operblockTableCard")
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         stylesheet_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
-        frame.setStyleSheet(PATIENT_CARD_STYLE)
+        set_widget_style(frame, PATIENT_CARD_STYLE)
         operblock_startup_metrics.record_since(
             "board_apply_card_stylesheet_ms",
             stylesheet_started,
@@ -13825,9 +13673,7 @@ class OperBlockMainWidget(QWidget):
     def _update_protocol_status_label(self, started_at, *, active: bool):
         text, color = _format_main_remcard_status_text(started_at, active=active)
         self.protocol_status_label.setText(text)
-        self.protocol_status_label.setStyleSheet(
-            f"background-color: {color}; color: white; font-weight: bold; border-radius: 4px; padding: 2px;"
-        )
+        set_widget_style(self.protocol_status_label, f"background-color: {color}; color: white; font-weight: bold; border-radius: 4px; padding: 2px;")
 
     def _update_latest_badges(self, latest: dict):
         ad = str(latest.get("ad") or "-/-")
@@ -14195,8 +14041,7 @@ class OperBlockMainWidget(QWidget):
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             button.setToolTip(label)
             button.setCursor(Qt.PointingHandCursor)
-            button.setStyleSheet(
-                f"""
+            set_widget_style(button, f"""
                 QPushButton {{
                     background-color: #F8FAFC;
                     color: {OPERBLOCK_ORDERS_MUTED};
@@ -14211,8 +14056,7 @@ class OperBlockMainWidget(QWidget):
                     color: {OPERBLOCK_ORDERS_ACCENT};
                     border-color: {OPERBLOCK_ORDERS_BORDER};
                 }}
-                """
-            )
+                """)
             self.preset_filter_group.addButton(button, index)
             if filter_key == "favorite":
                 layout.addWidget(button, grid_row, 0, 1, 2)
@@ -14492,15 +14336,13 @@ class OperBlockMainWidget(QWidget):
         height = max(46, int(source_widget.height() or source_widget.sizeHint().height() or 46))
         placeholder.setMinimumHeight(height)
         placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        placeholder.setStyleSheet(
-            f"""
+        set_widget_style(placeholder, f"""
             QFrame#QuickOrderDragPlaceholder {{
                 background-color: #EAF3FF;
                 border: 2px dashed {OPERBLOCK_ORDERS_ACCENT};
                 border-radius: 7px;
             }}
-            """
-        )
+            """)
         return placeholder
 
     def _begin_quick_order_drag(self, source_preset_id: str) -> bool:
@@ -14760,8 +14602,7 @@ class OperBlockMainWidget(QWidget):
 
         frame = _QuickOrderPresetCard(self._quick_order_preset_id(preset), self)
         frame.setObjectName("medicationPresetRow")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#medicationPresetRow {{
                 background-color: {card_bg};
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
@@ -14785,24 +14626,19 @@ class OperBlockMainWidget(QWidget):
                 color: {OPERBLOCK_ORDERS_MUTED};
                 background-color: #F1F5F9;
             }}
-            """
-        )
+            """)
         row_layout = QVBoxLayout(frame)
         row_layout.setContentsMargins(8, 8, 8, 8)
         row_layout.setSpacing(6)
 
         name_label = ElidedTooltipLabel(title_line)
-        name_label.setStyleSheet(
-            f"font-size: 13px; font-weight: 500; color: {card_text}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(name_label, f"font-size: 13px; font-weight: 500; color: {card_text}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         row_layout.addWidget(name_label)
         if concentration_text:
             detail_label = ElidedTooltipLabel(concentration_text)
-            detail_label.setStyleSheet(
-                f"font-size: 11px; color: {card_muted}; background: transparent; border: none;"
-                f"{TOOLTIP_WHITE_STYLE}"
-            )
+            set_widget_style(detail_label, f"font-size: 11px; color: {card_muted}; background: transparent; border: none;"
+                f"{TOOLTIP_WHITE_STYLE}")
             row_layout.addWidget(detail_label)
 
         def add_button(grid: QGridLayout, text: str, row: int, column: int, callback) -> None:
@@ -14923,8 +14759,7 @@ class OperBlockMainWidget(QWidget):
 
         frame = QFrame()
         frame.setObjectName("quickOrderRow")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#quickOrderRow {{
                 background-color: {BG_LIGHT};
                 border: 1px solid {BORDER_LIGHT};
@@ -14945,8 +14780,7 @@ class OperBlockMainWidget(QWidget):
                 color: {TEXT_MUTED};
                 background-color: {BG_MAIN};
             }}
-            """
-        )
+            """)
         row_layout = QVBoxLayout(frame)
         row_layout.setContentsMargins(5, 5, 5, 5)
         row_layout.setSpacing(5)
@@ -14955,34 +14789,26 @@ class OperBlockMainWidget(QWidget):
         drug_header.setContentsMargins(0, 0, 0, 0)
         drug_header.setSpacing(5)
         drug_label = ElidedTooltipLabel(title_line)
-        drug_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 500; color: {TEXT_PRIMARY}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(drug_label, f"font-size: 12px; font-weight: 500; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         group_label = QLabel(f"{group_number}")
         group_label.setAlignment(Qt.AlignCenter)
         group_label.setFixedSize(22, 20)
-        group_label.setStyleSheet(
-            f"font-size: 11px; font-weight: 500; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
-            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px;"
-        )
+        set_widget_style(group_label, f"font-size: 11px; font-weight: 500; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px;")
         kind_label = QLabel({"infusion": "ИНФ", "gas": "ГАЗ"}.get(kind, "БОЛ"))
         kind_label.setAlignment(Qt.AlignCenter)
         kind_label.setFixedSize(32, 20)
-        kind_label.setStyleSheet(
-            f"font-size: 10px; font-weight: 500; color: {TEXT_SECONDARY}; background-color: #ffffff; "
-            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px;"
-        )
+        set_widget_style(kind_label, f"font-size: 10px; font-weight: 500; color: {TEXT_SECONDARY}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px;")
         drug_header.addWidget(drug_label, 1)
         drug_header.addWidget(kind_label, 0)
         drug_header.addWidget(group_label, 0)
         row_layout.addLayout(drug_header)
         if concentration_text:
             detail_label = ElidedTooltipLabel(concentration_text)
-            detail_label.setStyleSheet(
-                f"font-size: 11px; color: {TEXT_SECONDARY}; background: transparent; border: none;"
-                f"{TOOLTIP_WHITE_STYLE}"
-            )
+            set_widget_style(detail_label, f"font-size: 11px; color: {TEXT_SECONDARY}; background: transparent; border: none;"
+                f"{TOOLTIP_WHITE_STYLE}")
             row_layout.addWidget(detail_label)
 
         if kind == "infusion":
@@ -15016,10 +14842,8 @@ class OperBlockMainWidget(QWidget):
                     rate_label = ElidedTooltipLabel(_compact_infusion_rate_display_text(rate))
                     rate_label.setMinimumWidth(0)
                     rate_label.setToolTip(rate)
-                    rate_label.setStyleSheet(
-                        f"font-size: 12px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
-                        f"{TOOLTIP_WHITE_STYLE}"
-                    )
+                    set_widget_style(rate_label, f"font-size: 12px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+                        f"{TOOLTIP_WHITE_STYLE}")
                     rate_layout.addWidget(start_button, 0)
                     rate_layout.addWidget(rate_label, 1)
                     rate_grid.addLayout(rate_layout, index // rate_columns, index % rate_columns)
@@ -15055,9 +14879,7 @@ class OperBlockMainWidget(QWidget):
                     else _quick_order_dose_display_text(dose, concentration_text)
                 )
                 dose_label = QLabel(dose_label_text)
-                dose_label.setStyleSheet(
-                    f"font-size: 12px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
-                )
+                set_widget_style(dose_label, f"font-size: 12px; color: {TEXT_PRIMARY}; background: transparent; border: none;")
                 dose_layout.addWidget(add_button, 0)
                 dose_layout.addWidget(dose_label, 1)
                 row_layout.addLayout(dose_layout)
@@ -16084,9 +15906,7 @@ class OperBlockMainWidget(QWidget):
     def _group_icon_frame(self, visual: dict) -> QFrame:
         frame = QFrame()
         frame.setFixedSize(44, 44)
-        frame.setStyleSheet(
-            f"background-color: {visual.get('color') or '#2563EB'}; border: none; border-radius: 10px;"
-        )
+        set_widget_style(frame, f"background-color: {visual.get('color') or '#2563EB'}; border: none; border-radius: 10px;")
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(0, 0, 0, 0)
         icon = QLabel()
@@ -16134,8 +15954,7 @@ class OperBlockMainWidget(QWidget):
         collapsed = key in self._collapsed_order_group_keys
         frame = QFrame()
         frame.setObjectName("operblockMedicationGroupCard")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#operblockMedicationGroupCard {{
                 background-color: #FFFFFF;
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
@@ -16145,8 +15964,7 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }}
-            """
-        )
+            """)
         outer = QHBoxLayout(frame)
         outer.setContentsMargins(14, 14, 14, 14)
         outer.setSpacing(12)
@@ -16162,26 +15980,22 @@ class OperBlockMainWidget(QWidget):
         title_col.setContentsMargins(0, 0, 0, 0)
         title_col.setSpacing(3)
         name_label = ElidedTooltipLabel(str(group.get("drug_name") or "Без названия"))
-        name_label.setStyleSheet(
-            f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(name_label, f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         total_label = ElidedTooltipLabel(str(group.get("total_text") or "Итого: нет дозы"))
         total_label.setProperty("operblock_group_total_key", key)
-        total_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(total_label, f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         title_col.addWidget(name_label)
         title_col.addWidget(total_label)
         latest_dt = group.get("latest_dt")
         latest_label = QLabel(latest_dt.strftime("%H:%M") if isinstance(latest_dt, datetime) else "")
-        latest_label.setStyleSheet(f"font-size: 13px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED};")
+        set_widget_style(latest_label, f"font-size: 13px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED};")
         latest_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         toggle_button = QPushButton("⌄" if collapsed else "⌃")
         toggle_button.setFixedSize(28, 28)
         toggle_button.setCursor(Qt.PointingHandCursor)
-        toggle_button.setStyleSheet(self._small_icon_button_style())
+        set_widget_style(toggle_button, self._small_icon_button_style())
         toggle_button.clicked.connect(lambda _=False, group_key=key: self._toggle_medication_group(group_key))
         header.addLayout(title_col, 1)
         header.addWidget(latest_label, 0)
@@ -16197,8 +16011,7 @@ class OperBlockMainWidget(QWidget):
     def _make_medication_entry_row(self, entry: dict, visual: dict) -> QWidget:
         row = QFrame()
         row.setObjectName("operblockMedicationEntryRow")
-        row.setStyleSheet(
-            f"""
+        set_widget_style(row, f"""
             QFrame#operblockMedicationEntryRow {{
                 background-color: #F8FAFC;
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
@@ -16208,28 +16021,23 @@ class OperBlockMainWidget(QWidget):
                 background: transparent;
                 border: none;
             }}
-            """
-        )
+            """)
         layout = QHBoxLayout(row)
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(8)
         time_label = QLabel(_format_order_time(entry.get("time")))
         time_label.setFixedWidth(54)
         time_label.setAlignment(Qt.AlignCenter)
-        time_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 500; color: {visual.get('time_fg')}; "
-            f"background-color: {visual.get('time_bg')}; border: none; border-radius: 6px; padding: 4px 6px;"
-        )
+        set_widget_style(time_label, f"font-size: 12px; font-weight: 500; color: {visual.get('time_fg')}; "
+            f"background-color: {visual.get('time_bg')}; border: none; border-radius: 6px; padding: 4px 6px;")
         detail_text = str(entry.get("detail") or "")
         detail_label = ElidedTooltipLabel(detail_text)
         entry_row = entry.get("row") if isinstance(entry.get("row"), dict) else {}
         entry_order_id = _safe_int((entry_row or {}).get("id"))
         if entry_order_id:
             detail_label.setProperty("operblock_order_id", int(entry_order_id))
-        detail_label.setStyleSheet(
-            f"font-size: 13px; font-weight: 400; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(detail_label, f"font-size: 13px; font-weight: 400; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         layout.addWidget(time_label, 0)
         layout.addWidget(detail_label, 1)
 
@@ -16303,8 +16111,7 @@ class OperBlockMainWidget(QWidget):
         border = "#FECACA" if danger else OPERBLOCK_ORDERS_BORDER
         color = "#DC2626" if danger else OPERBLOCK_ORDERS_TEXT
         hover = "#FFF5F5" if danger else "#F1F5F9"
-        button.setStyleSheet(
-            f"""
+        set_widget_style(button, f"""
             QPushButton {{
                 background-color: #FFFFFF;
                 border: 1px solid {border};
@@ -16322,8 +16129,7 @@ class OperBlockMainWidget(QWidget):
                 background-color: #F1F5F9;
                 border-color: {OPERBLOCK_ORDERS_BORDER};
             }}
-            """
-        )
+            """)
         return button
 
     def _visible_order_action_button(self, text: str, icon_name: str, *, danger: bool = False) -> QPushButton:
@@ -16347,8 +16153,7 @@ class OperBlockMainWidget(QWidget):
     def _make_timeline_event_row(self, event: dict) -> QWidget:
         frame = QFrame()
         frame.setObjectName("timelineEventRow")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#timelineEventRow {{
                 background-color: {OPERBLOCK_ORDERS_CARD_BG};
                 border: none;
@@ -16371,8 +16176,7 @@ class OperBlockMainWidget(QWidget):
                 border-color: {OPERBLOCK_ORDERS_BORDER};
                 color: {OPERBLOCK_ORDERS_TEXT};
             }}
-            """
-        )
+            """)
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(0, 7, 0, 7)
         layout.setSpacing(10)
@@ -16380,25 +16184,21 @@ class OperBlockMainWidget(QWidget):
         time_label = QLabel(_format_order_time(event.get("time")))
         time_label.setFixedWidth(52)
         time_label.setAlignment(Qt.AlignCenter)
-        time_label.setStyleSheet(f"font-size: 13px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT};")
+        set_widget_style(time_label, f"font-size: 13px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT};")
 
         drug_label = ElidedTooltipLabel(str(event.get("drug") or "Без названия"))
         drug_label.setMinimumWidth(150)
-        drug_label.setStyleSheet(
-            f"font-size: 13px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(drug_label, f"font-size: 13px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
 
         detail_label = ElidedTooltipLabel(str(event.get("detail") or ""))
         detail_label.setMinimumWidth(80)
-        detail_label.setStyleSheet(
-            f"font-size: 13px; color: {OPERBLOCK_ORDERS_MUTED}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(detail_label, f"font-size: 13px; color: {OPERBLOCK_ORDERS_MUTED}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
 
         badge_label = QLabel(str(event.get("badge") or "Событие"))
         badge_label.setAlignment(Qt.AlignCenter)
-        badge_label.setStyleSheet(self._event_badge_style(str(event.get("badge") or "")))
+        set_widget_style(badge_label, self._event_badge_style(str(event.get("badge") or "")))
 
         menu_button = QPushButton("⋯")
         menu_button.setFixedSize(30, 28)
@@ -16426,8 +16226,7 @@ class OperBlockMainWidget(QWidget):
 
     def _actions_menu(self) -> QMenu:
         menu = QMenu(self)
-        menu.setStyleSheet(
-            f"""
+        set_widget_style(menu, f"""
             QMenu {{
                 background-color: {OPERBLOCK_ORDERS_CARD_BG};
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
@@ -16443,8 +16242,7 @@ class OperBlockMainWidget(QWidget):
                 background-color: #EEF3FF;
                 color: {OPERBLOCK_ORDERS_ACCENT};
             }}
-            """
-        )
+            """)
         return menu
 
     def _show_order_actions_menu(self, button: QPushButton, row: dict):
@@ -16632,8 +16430,7 @@ class OperBlockMainWidget(QWidget):
         frame.setObjectName("operblockActiveInfusion")
         frame.setMinimumHeight(OPERBLOCK_ACTIVE_INFUSION_CARD_MIN_HEIGHT)
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#operblockActiveInfusion {{
                 background-color: #FFFFFF;
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
@@ -16659,15 +16456,14 @@ class OperBlockMainWidget(QWidget):
                 color: {OPERBLOCK_ORDERS_MUTED};
                 background-color: #F1F5F9;
             }}
-            """
-        )
+            """)
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(12)
 
         icon_box = QFrame()
         icon_box.setFixedSize(44, 44)
-        icon_box.setStyleSheet("background-color: #EAF3FF; border: none; border-radius: 10px;")
+        set_widget_style(icon_box, "background-color: #EAF3FF; border: none; border-radius: 10px;")
         icon_layout = QVBoxLayout(icon_box)
         icon_layout.setContentsMargins(0, 0, 0, 0)
         icon = QLabel()
@@ -16688,10 +16484,8 @@ class OperBlockMainWidget(QWidget):
         has_rate = _infusion_has_rate(interval)
         is_active = str(interval.get("status") or "") == "active" and not interval.get("end_time")
         name = ElidedTooltipLabel(self._active_infusion_title_text(interval))
-        name.setStyleSheet(
-            f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(name, f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         is_oxygen = _is_oxygen_infusion(interval)
         rate = "" if _is_gas_infusion(interval) else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
         gas_dose = _gas_dose_text(interval) if _is_gas_infusion(interval) else ""
@@ -16713,15 +16507,14 @@ class OperBlockMainWidget(QWidget):
         elif declared_volume and not is_active:
             detail_parts.append(f"введено: {declared_volume}")
         detail = ElidedTooltipLabel(" · ".join(detail_parts))
-        detail.setStyleSheet(f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED};")
+        set_widget_style(detail, f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_MUTED};")
 
         progress = QProgressBar()
         progress.setRange(0, 100)
         progress.setValue(self._active_infusion_progress_percent(interval))
         progress.setTextVisible(False)
         progress.setFixedHeight(6)
-        progress.setStyleSheet(
-            f"""
+        set_widget_style(progress, f"""
             QProgressBar {{
                 background-color: #E2E8F0;
                 border: none;
@@ -16731,10 +16524,9 @@ class OperBlockMainWidget(QWidget):
                 background-color: {OPERBLOCK_ORDERS_ACCENT};
                 border-radius: 3px;
             }}
-            """
-        )
+            """)
         volume_label = ElidedTooltipLabel(self._active_infusion_volume_text(interval))
-        volume_label.setStyleSheet(f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_TEXT};")
+        set_widget_style(volume_label, f"font-size: 12px; font-weight: 400; color: {OPERBLOCK_ORDERS_TEXT};")
 
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
@@ -16754,8 +16546,7 @@ class OperBlockMainWidget(QWidget):
         stop_button = QPushButton(OPERBLOCK_INFUSION_STOP_BUTTON_TEXT)
         stop_button.setIcon(self._operblock_ui_icon("stop"))
         stop_button.setIconSize(QSize(14, 14))
-        stop_button.setStyleSheet(
-            f"""
+        set_widget_style(stop_button, f"""
             QPushButton {{
                 background-color: #FFFFFF;
                 border: 1px solid #FECACA;
@@ -16771,8 +16562,7 @@ class OperBlockMainWidget(QWidget):
                 background-color: #F1F5F9;
                 border-color: {OPERBLOCK_ORDERS_BORDER};
             }}
-            """
-        )
+            """)
         buttons = (change_button, stop_button)
         for button in buttons:
             button.setFixedHeight(30)
@@ -17819,8 +17609,7 @@ class OperBlockMainWidget(QWidget):
         rows = list(group.get("rows") or [])
         frame = QFrame()
         frame.setObjectName("operblockOrderGroup")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#operblockOrderGroup {{
                 background-color: {BG_LIGHT};
                 border: 1px solid {BORDER_COLOR};
@@ -17845,8 +17634,7 @@ class OperBlockMainWidget(QWidget):
                 color: {TEXT_MUTED};
                 background-color: {BG_MAIN};
             }}
-            """
-        )
+            """)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(8, 7, 8, 7)
         layout.setSpacing(5)
@@ -17858,24 +17646,20 @@ class OperBlockMainWidget(QWidget):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(6)
         name_label = ElidedTooltipLabel(str(group.get("drug_name") or "Без названия"))
-        name_label.setStyleSheet(
-            f"font-size: 14px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(name_label, f"font-size: 14px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         latest_label = QLabel(f"{_format_order_time(rows[-1].get('datetime'))}" if rows else "")
         latest_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        latest_label.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
+        set_widget_style(latest_label, f"font-size: 12px; color: {TEXT_SECONDARY};")
         title_row.addWidget(name_label, 1)
         title_row.addWidget(latest_label, 0)
         total_label = ElidedTooltipLabel(
             _summarize_order_total(rows, concentration_for_row=self._order_row_concentration_text)
         )
         total_label.setMinimumWidth(120)
-        total_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 700; color: {TEXT_PRIMARY}; background-color: #ffffff; "
+        set_widget_style(total_label, f"font-size: 12px; font-weight: 700; color: {TEXT_PRIMARY}; background-color: #ffffff; "
             f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px 7px;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+            f"{TOOLTIP_WHITE_STYLE}")
         header.addLayout(title_row)
         header.addWidget(total_label)
         layout.addLayout(header)
@@ -17886,10 +17670,8 @@ class OperBlockMainWidget(QWidget):
             if day != current_day:
                 current_day = day
                 day_label = QLabel(day)
-                day_label.setStyleSheet(
-                    f"font-size: 11px; font-weight: 700; color: {TEXT_SECONDARY}; "
-                    f"background-color: {BG_MAIN}; border-radius: 3px; padding: 1px 6px;"
-                )
+                set_widget_style(day_label, f"font-size: 11px; font-weight: 700; color: {TEXT_SECONDARY}; "
+                    f"background-color: {BG_MAIN}; border-radius: 3px; padding: 1px 6px;")
                 layout.addWidget(day_label, 0, Qt.AlignLeft)
             layout.addLayout(self._make_order_entry_row(row))
         return frame
@@ -17898,8 +17680,7 @@ class OperBlockMainWidget(QWidget):
         rows = list(group.get("rows") or [])
         frame = QFrame()
         frame.setObjectName("operblockInfusionHistoryGroup")
-        frame.setStyleSheet(
-            f"""
+        set_widget_style(frame, f"""
             QFrame#operblockInfusionHistoryGroup {{
                 background-color: {BG_LIGHT};
                 border: 1px solid {BORDER_COLOR};
@@ -17924,8 +17705,7 @@ class OperBlockMainWidget(QWidget):
                 color: {TEXT_MUTED};
                 background-color: {BG_MAIN};
             }}
-            """
-        )
+            """)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(8, 7, 8, 7)
         layout.setSpacing(5)
@@ -17934,23 +17714,19 @@ class OperBlockMainWidget(QWidget):
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(6)
         name_label = ElidedTooltipLabel(str(group.get("drug_name") or "Дозатор"))
-        name_label.setStyleSheet(
-            f"font-size: 14px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(name_label, f"font-size: 14px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         latest_dt = group.get("latest_dt")
         latest_label = QLabel(latest_dt.strftime("%H:%M") if isinstance(latest_dt, datetime) else "")
         latest_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        latest_label.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
+        set_widget_style(latest_label, f"font-size: 12px; color: {TEXT_SECONDARY};")
         title_row.addWidget(name_label, 1)
         title_row.addWidget(latest_label, 0)
         layout.addLayout(title_row)
 
         total_label = QLabel(self._summarize_infusion_history(rows))
-        total_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 700; color: {TEXT_PRIMARY}; background-color: #ffffff; "
-            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px 7px;"
-        )
+        set_widget_style(total_label, f"font-size: 12px; font-weight: 700; color: {TEXT_PRIMARY}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px 7px;")
         layout.addWidget(total_label)
 
         current_day = None
@@ -17959,10 +17735,8 @@ class OperBlockMainWidget(QWidget):
             if day != current_day:
                 current_day = day
                 day_label = QLabel(day)
-                day_label.setStyleSheet(
-                    f"font-size: 11px; font-weight: 700; color: {TEXT_SECONDARY}; "
-                    f"background-color: {BG_MAIN}; border-radius: 3px; padding: 1px 6px;"
-                )
+                set_widget_style(day_label, f"font-size: 11px; font-weight: 700; color: {TEXT_SECONDARY}; "
+                    f"background-color: {BG_MAIN}; border-radius: 3px; padding: 1px 6px;")
                 layout.addWidget(day_label, 0, Qt.AlignLeft)
             layout.addLayout(self._make_infusion_history_entry_row(interval))
         return frame
@@ -18009,15 +17783,11 @@ class OperBlockMainWidget(QWidget):
         time_label = QLabel(_format_order_time(interval.get("start_time")))
         time_label.setFixedWidth(48)
         time_label.setAlignment(Qt.AlignCenter)
-        time_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
-            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px;"
-        )
+        set_widget_style(time_label, f"font-size: 12px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px;")
         detail_label = ElidedTooltipLabel(self._infusion_history_entry_text(interval))
-        detail_label.setStyleSheet(
-            f"font-size: 13px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(detail_label, f"font-size: 13px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         entry.addWidget(time_label, 0)
         entry.addWidget(detail_label, 1)
         edit_button = self._infusion_history_action_button("Изменить")
@@ -18075,16 +17845,12 @@ class OperBlockMainWidget(QWidget):
         time_label = QLabel(_format_order_time(row.get("datetime")))
         time_label.setFixedWidth(48)
         time_label.setAlignment(Qt.AlignCenter)
-        time_label.setStyleSheet(
-            f"font-size: 12px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
-            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px;"
-        )
+        set_widget_style(time_label, f"font-size: 12px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; background-color: #ffffff; "
+            f"border: 1px solid {BORDER_COLOR}; border-radius: 4px; padding: 2px;")
         dose_text = _order_dose_text_with_route(str(row.get("dose_text") or row.get("text") or ""), row, short=False)
         dose_label = ElidedTooltipLabel(dose_text)
-        dose_label.setStyleSheet(
-            f"font-size: 13px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
-            f"{TOOLTIP_WHITE_STYLE}"
-        )
+        set_widget_style(dose_label, f"font-size: 13px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{TOOLTIP_WHITE_STYLE}")
         edit_button = self._order_action_button("Изменить")
         delete_button = self._order_action_button("Удалить", danger=True)
         edit_button.clicked.connect(lambda _=False, payload=dict(row): self._edit_order_with_time(payload))
@@ -18100,7 +17866,7 @@ class OperBlockMainWidget(QWidget):
         button.setFixedHeight(24)
         button.setCursor(Qt.PointingHandCursor)
         if danger:
-            button.setStyleSheet(DANGER_BUTTON_STYLE + "QPushButton { padding: 2px 7px; font-size: 11px; }")
+            set_widget_style(button, DANGER_BUTTON_STYLE + "QPushButton { padding: 2px 7px; font-size: 11px; }")
         self._order_action_buttons.append(button)
         return button
 
@@ -18109,7 +17875,7 @@ class OperBlockMainWidget(QWidget):
         button.setFixedHeight(24)
         button.setCursor(Qt.PointingHandCursor)
         if danger:
-            button.setStyleSheet(DANGER_BUTTON_STYLE + "QPushButton { padding: 2px 7px; font-size: 11px; }")
+            set_widget_style(button, DANGER_BUTTON_STYLE + "QPushButton { padding: 2px 7px; font-size: 11px; }")
         self._infusion_action_buttons.append(button)
         return button
 

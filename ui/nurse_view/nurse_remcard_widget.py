@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QDateEdit)
 from PySide6.QtCore import QDate, QTimer, Qt
@@ -30,13 +31,13 @@ class NurseRemCardWidget(QWidget):
         header_layout.addWidget(self.btn_back)
 
         self.header = QLabel(f"Ремкарта пациента (ID: {self.admission_id})")
-        self.header.setStyleSheet("font-size: 14px; font-weight: bold;")
+        set_widget_style(self.header, "font-size: 14px; font-weight: bold;")
         header_layout.addWidget(self.header)
         
         self.lbl_status = QLabel("-")
         self.lbl_status.setFixedWidth(210) # Увеличено на ~30%
         self.lbl_status.setAlignment(Qt.AlignCenter)
-        self.lbl_status.setStyleSheet("font-weight: bold; color: white; background-color: #7f8c8d; border-radius: 4px; padding: 2px;")
+        set_widget_style(self.lbl_status, "font-weight: bold; color: white; background-color: #7f8c8d; border-radius: 4px; padding: 2px;")
         header_layout.addWidget(self.lbl_status)
         
         header_layout.addStretch()
@@ -95,7 +96,7 @@ class NurseRemCardWidget(QWidget):
         }
         text, color = status_map.get(ev.status, (ev.status.value, "#7f8c8d"))
         self.lbl_status.setText(f"{text} ({ev.start_time.strftime('%H:%M')})")
-        self.lbl_status.setStyleSheet(f"font-weight: bold; color: white; background-color: {color}; border-radius: 4px; padding: 2px;")
+        set_widget_style(self.lbl_status, f"font-weight: bold; color: white; background-color: {color}; border-radius: 4px; padding: 2px;")
         
         is_active = (ev.status == PatientStatus.ACTIVE)
         self.vitals_input.setEnabled(is_active)

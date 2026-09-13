@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 from dataclasses import asdict
@@ -207,8 +209,7 @@ class OperBlockIconSettingsDialog(BaseStyledDialog):
         footer.addWidget(close_btn)
         layout.addLayout(footer)
 
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + """
             QFrame#OperBlockIconDetail {
                 background-color: #ffffff;
@@ -281,8 +282,7 @@ class OperBlockIconSettingsDialog(BaseStyledDialog):
                 background-color: #d7eaf8;
                 color: #1f3447;
             }
-            """
-        )
+            """)
         self._ui_ready = True
         self.tabs.currentChanged.connect(self._on_tab_changed)
 

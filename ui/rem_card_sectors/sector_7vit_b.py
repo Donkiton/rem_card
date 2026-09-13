@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from html import escape
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
@@ -22,7 +23,7 @@ class Sector7vit_b(BaseSectorWidget):
         self._loaded_number = ""
         self.label.hide() # Скрываем стандартный заголовок
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         self.setup_ui()
 
     def setup_ui(self):
@@ -51,7 +52,7 @@ class Sector7vit_b(BaseSectorWidget):
         self.main_layout_v.addWidget(self.data_area, 1)
 
         # Применяем QSS стили
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_7vit_b_main_container {
                 background-color: #f8f9fa;
             }

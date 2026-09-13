@@ -12,6 +12,7 @@ from rem_card.ui.shared.display_settings_storage import (
     role_display_settings_from_payload,
 )
 from rem_card.ui.styles.theme import STYLE_SECTOR8_BUTTON
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 
 class NurseSector8Panel(QWidget):
@@ -48,7 +49,7 @@ class NurseSector8Panel(QWidget):
         self.btn_archive.setIcon(QIcon(archive_icon))
         self.btn_archive.setIconSize(QSize(18, 18))
         self.btn_archive.setMinimumHeight(32)
-        self.btn_archive.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_archive, STYLE_SECTOR8_BUTTON)
         self.btn_archive.clicked.connect(self.archive_clicked.emit)
 
         # 2. Кнопка Обновить
@@ -57,7 +58,7 @@ class NurseSector8Panel(QWidget):
         self.btn_refresh.setIcon(QIcon(refresh_icon))
         self.btn_refresh.setIconSize(QSize(18, 18))
         self.btn_refresh.setMinimumHeight(32)
-        self.btn_refresh.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_refresh, STYLE_SECTOR8_BUTTON)
         self.btn_refresh.clicked.connect(self.refresh_clicked.emit)
 
         # Кнопка отправки пользовательского репорта
@@ -66,7 +67,7 @@ class NurseSector8Panel(QWidget):
         self.btn_user_report.setIcon(QIcon(report_icon))
         self.btn_user_report.setIconSize(QSize(18, 18))
         self.btn_user_report.setMinimumHeight(32)
-        self.btn_user_report.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_user_report, STYLE_SECTOR8_BUTTON)
         self.btn_user_report.clicked.connect(self.user_report_clicked.emit)
 
         # Кнопка просмотра входящих репортов
@@ -75,7 +76,7 @@ class NurseSector8Panel(QWidget):
         self.btn_user_reports.setIcon(QIcon(reports_icon))
         self.btn_user_reports.setIconSize(QSize(18, 18))
         self.btn_user_reports.setMinimumHeight(32)
-        self.btn_user_reports.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_user_reports, STYLE_SECTOR8_BUTTON)
         self.btn_user_reports.clicked.connect(self.user_reports_clicked.emit)
 
         # Кнопка Добавить пациента (доступна только в режиме списка коек)
@@ -84,7 +85,7 @@ class NurseSector8Panel(QWidget):
         self.btn_add_patient.setIcon(QIcon(add_icon))
         self.btn_add_patient.setIconSize(QSize(18, 18))
         self.btn_add_patient.setMinimumHeight(32)
-        self.btn_add_patient.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_add_patient, STYLE_SECTOR8_BUTTON)
         self.btn_add_patient.clicked.connect(self.add_patient_clicked.emit)
 
         # Единая точка входа в клинические калькуляторы
@@ -93,7 +94,7 @@ class NurseSector8Panel(QWidget):
         self.btn_calculations.setIcon(QIcon(calc_icon))
         self.btn_calculations.setIconSize(QSize(18, 18))
         self.btn_calculations.setMinimumHeight(32)
-        self.btn_calculations.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_calculations, STYLE_SECTOR8_BUTTON)
         self.btn_calculations.clicked.connect(self.calculations_clicked.emit)
 
         # Кнопка Настройки
@@ -102,7 +103,7 @@ class NurseSector8Panel(QWidget):
         self.btn_settings.setIcon(QIcon(settings_icon))
         self.btn_settings.setIconSize(QSize(18, 18))
         self.btn_settings.setMinimumHeight(32)
-        self.btn_settings.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_settings, STYLE_SECTOR8_BUTTON)
         self.btn_settings.clicked.connect(self.settings_clicked.emit)
 
         # 3. Кнопка Назад
@@ -111,7 +112,7 @@ class NurseSector8Panel(QWidget):
         self.btn_back.setIcon(QIcon(back_icon))
         self.btn_back.setIconSize(QSize(18, 18))
         self.btn_back.setMinimumHeight(32)
-        self.btn_back.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_back, STYLE_SECTOR8_BUTTON)
 
         # 3. Кнопка Выход
         self.btn_exit = QPushButton(" Выход", self)
@@ -119,13 +120,13 @@ class NurseSector8Panel(QWidget):
         self.btn_exit.setIcon(QIcon(exit_icon))
         self.btn_exit.setIconSize(QSize(18, 18))
         self.btn_exit.setMinimumHeight(32)
-        self.btn_exit.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_exit, STYLE_SECTOR8_BUTTON)
         self.btn_exit.clicked.connect(self.exit_clicked.emit)
 
         from rem_card.ui.shared.emergency_mode_button import create_emergency_mode_button
 
         self.btn_emergency_mode = create_emergency_mode_button(self)
-        self.btn_emergency_mode.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        set_widget_style(self.btn_emergency_mode, STYLE_SECTOR8_BUTTON)
 
         self._button_widgets = {
             "archive": self.btn_archive,

@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 from copy import deepcopy
 
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -12,14 +13,13 @@ from rem_card.services.prescription_engine import engine
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 from rem_card.ui.admin_view.dictionary_page_chrome import apply_dictionary_page_chrome
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.theme_tokens import token
 
 from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox
 
 
 def _tokens():
-    return get_theme_manager().current_tokens()
+    return style_tokens()
 
 
 def _t(key, default=""):
@@ -117,8 +117,7 @@ def _drug_editor_scroll(form_widget: QWidget, object_name: str) -> QScrollArea:
     scroll.viewport().setAutoFillBackground(False)
     form_widget.setAutoFillBackground(False)
     scroll.setWidget(form_widget)
-    scroll.setStyleSheet(
-        f"""
+    set_widget_style(scroll, f"""
         QScrollArea#{object_name} {{
             background: transparent;
             border: none;
@@ -131,8 +130,7 @@ def _drug_editor_scroll(form_widget: QWidget, object_name: str) -> QScrollArea:
             background: transparent;
             border: none;
         }}
-        """
-    )
+        """)
     return scroll
 
 
@@ -218,13 +216,13 @@ class TemplateDilutionVolumeReplaceDialog(BaseStyledDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setStyleSheet(_admin_drugs_table_style())
+        set_widget_style(self.table, _admin_drugs_table_style())
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.content_layout.addWidget(self.table, 1)
 
         tools_layout = QHBoxLayout()
         self.status_label = QLabel("Выберите растворитель и нажмите «Найти».")
-        self.status_label.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(self.status_label, "border: none; background: transparent;")
         tools_layout.addWidget(self.status_label, 1)
 
         self.btn_remove = QPushButton("Убрать из замены")
@@ -838,7 +836,7 @@ class DrugsDictWidget(QWidget):
 
         self.frame = QFrame()
         self.frame.setObjectName("adminDictFrame")
-        self.frame.setStyleSheet("""
+        set_widget_style(self.frame, """
             QFrame#adminDictFrame {
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
@@ -849,7 +847,7 @@ class DrugsDictWidget(QWidget):
         
         header = QLabel("Справочник Препаратов")
         header.setProperty("heading", "true")
-        header.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(header, "border: none; background: transparent;")
         layout.addWidget(header)
         
         # Фильтры
@@ -882,7 +880,7 @@ class DrugsDictWidget(QWidget):
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.itemDoubleClicked.connect(self.edit_item)
-        self.table.setStyleSheet(_admin_drugs_table_style())
+        set_widget_style(self.table, _admin_drugs_table_style())
         layout.addWidget(self.table)
         
         btn_layout = QHBoxLayout()

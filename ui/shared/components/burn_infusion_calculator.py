@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from datetime import datetime
 import math
@@ -924,8 +926,7 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.validation_label.setText("Расчет скопирован в буфер обмена.")
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + f"""
             QScrollArea#BurnScroll, QWidget#BurnScrollBody, QWidget#BurnColumn {{
                 background: transparent;
@@ -1166,8 +1167,7 @@ class BurnInfusionCalculatorDialog(SavedFramelessDialogMixin, BaseStyledDialog):
                 color: {TEXT_MUTED};
                 background: {BG_LIGHT};
             }}
-            """
-        )
+            """)
 
 
 __all__ = ["BurnInfusionCalculatorDialog"]

@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from datetime import datetime, timedelta
 from rem_card.services.shift_service import ShiftService
@@ -42,7 +43,7 @@ class VitalBadge(QFrame):
 
     def update_style(self, font_size: int, width: int):
         self.setFixedWidth(width)
-        self.setStyleSheet(f"""
+        set_widget_style(self, f"""
             QFrame#vital_badge_frame {{
                 background-color: {self.bg_color};
                 border-radius: 7px;
@@ -63,7 +64,7 @@ class Sector4b(BaseSectorWidget):
         super().__init__("4б", parent)
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         self._outcome_timer_status_dto = None
         self._outcome_timer_delay_minutes = 30
         self._recovery_mode = False
@@ -101,7 +102,7 @@ class Sector4b(BaseSectorWidget):
         self.main_layout_v.addWidget(self.content_area)
 
         # Стили
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_4b_main_container {
                 background-color: #f8f9fa !important;
             }
@@ -134,36 +135,34 @@ class Sector4b(BaseSectorWidget):
         self.info_layout.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         
         self.lbl_history = QLabel("№ -")
-        self.lbl_history.setStyleSheet(f"font-weight: bold; font-size: 14px; background: transparent; color: {COLOR_PRIMARY_DARK};")
+        set_widget_style(self.lbl_history, f"font-weight: bold; font-size: 14px; background: transparent; color: {COLOR_PRIMARY_DARK};")
         
         self.lbl_name = QLabel("-")
-        self.lbl_name.setStyleSheet("font-weight: bold; font-size: 16px; background: transparent;")
+        set_widget_style(self.lbl_name, "font-weight: bold; font-size: 16px; background: transparent;")
         
         self.lbl_age = QLabel("Возраст: -")
-        self.lbl_age.setStyleSheet("font-size: 14px; background: transparent;")
+        set_widget_style(self.lbl_age, "font-size: 14px; background: transparent;")
         
         self.lbl_days = QLabel("Сутки: -")
-        self.lbl_days.setStyleSheet("font-size: 14px; background: transparent;")
+        set_widget_style(self.lbl_days, "font-size: 14px; background: transparent;")
         
         self.lbl_diagnosis = QLabel("Диагноз: -")
-        self.lbl_diagnosis.setStyleSheet("font-size: 14px; background: transparent;")
+        set_widget_style(self.lbl_diagnosis, "font-size: 14px; background: transparent;")
         self.lbl_diagnosis.setWordWrap(False)
 
         self.lbl_status = QLabel("-")
         self.lbl_status.setFixedWidth(185)
         self.lbl_status.setAlignment(Qt.AlignCenter)
-        self.lbl_status.setStyleSheet("""
+        set_widget_style(self.lbl_status, """
             font-weight: bold; font-size: 13px; color: white;
             background-color: #7f8c8d; border-radius: 4px; padding: 2px 5px;
         """)
 
         self.lbl_outcome_timer = QLabel("")
         self.lbl_outcome_timer.setVisible(False)
-        self.lbl_outcome_timer.setStyleSheet(
-            "font-weight: 700; font-size: 12px; color: #8a5a00; "
+        set_widget_style(self.lbl_outcome_timer, "font-weight: 700; font-size: 12px; color: #8a5a00; "
             "background-color: #fff8e1; border: 1px solid #f1c40f; "
-            "border-radius: 4px; padding: 2px 7px;"
-        )
+            "border-radius: 4px; padding: 2px 7px;")
         
         self.info_layout.addWidget(self.lbl_status)
         self.info_layout.addWidget(self.lbl_outcome_timer)
@@ -185,7 +184,7 @@ class Sector4b(BaseSectorWidget):
     def update_status(self, status_dto):
         if not status_dto:
             self.lbl_status.setText("Статус не опр.")
-            self.lbl_status.setStyleSheet("background-color: #7f8c8d; color: white; font-weight: bold; border-radius: 4px;")
+            set_widget_style(self.lbl_status, "background-color: #7f8c8d; color: white; font-weight: bold; border-radius: 4px;")
             self._clear_outcome_timer()
             return
 
@@ -201,7 +200,7 @@ class Sector4b(BaseSectorWidget):
         
         time_str = status_dto.start_time.strftime("%H:%M")
         self.lbl_status.setText(f"{text} ({time_str})")
-        self.lbl_status.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold; border-radius: 4px; padding: 2px;")
+        set_widget_style(self.lbl_status, f"background-color: {color}; color: white; font-weight: bold; border-radius: 4px; padding: 2px;")
 
         if not status_dto.status.is_outcome():
             self._clear_outcome_timer()
@@ -363,7 +362,7 @@ class Sector4v(BaseSectorWidget):
         super().__init__("4в", parent)
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         
         # Путь к иконкам
         self.icon_dir = os.path.join(os.path.dirname(__file__), "..", "..", "icon")
@@ -388,7 +387,7 @@ class Sector4v(BaseSectorWidget):
 
         # Внутренний виджет для скролла
         self.inner_content = QWidget()
-        self.inner_content.setStyleSheet("background: transparent;")
+        set_widget_style(self.inner_content, "background: transparent;")
         self.content_layout = QHBoxLayout(self.inner_content)
         self.content_layout.setContentsMargins(7, 0, 10, 0)
         self.content_layout.setSpacing(10)
@@ -423,7 +422,7 @@ class Sector4v(BaseSectorWidget):
         self.btn_yest_card.setIcon(QIcon(yest_icon_path))
         self.btn_yest_card.setIconSize(QSize(20, 20))
         self.btn_yest_card.setMinimumHeight(32)
-        self.btn_yest_card.setStyleSheet(button_style)
+        set_widget_style(self.btn_yest_card, button_style)
         self.btn_yest_card.clicked.connect(self.yest_card_requested.emit)
 
         # Кнопка "Показать карту"
@@ -432,7 +431,7 @@ class Sector4v(BaseSectorWidget):
         self.btn_show_card.setIcon(QIcon(show_icon_path))
         self.btn_show_card.setIconSize(QSize(20, 20))
         self.btn_show_card.setMinimumHeight(32)
-        self.btn_show_card.setStyleSheet(button_style)
+        set_widget_style(self.btn_show_card, button_style)
         self.btn_show_card.clicked.connect(self.show_card_requested.emit)
         
         # Кнопка "Создать новую карту"
@@ -441,7 +440,7 @@ class Sector4v(BaseSectorWidget):
         self.btn_new_card.setIcon(QIcon(new_icon_path))
         self.btn_new_card.setIconSize(QSize(20, 20))
         self.btn_new_card.setMinimumHeight(32)
-        self.btn_new_card.setStyleSheet(button_style)
+        set_widget_style(self.btn_new_card, button_style)
         self.btn_new_card.clicked.connect(self.create_card_requested.emit)
 
         # Кнопка "План. карта"
@@ -450,7 +449,7 @@ class Sector4v(BaseSectorWidget):
         self.btn_plan_card.setIcon(QIcon(plan_icon_path))
         self.btn_plan_card.setIconSize(QSize(20, 20))
         self.btn_plan_card.setMinimumHeight(32)
-        self.btn_plan_card.setStyleSheet(button_style)
+        set_widget_style(self.btn_plan_card, button_style)
         self.btn_plan_card.setEnabled(False)
         self.btn_plan_card.clicked.connect(self.plan_card_requested.emit)
 
@@ -460,7 +459,7 @@ class Sector4v(BaseSectorWidget):
         self.btn_card_list.setIcon(QIcon(icon_path))
         self.btn_card_list.setIconSize(QSize(20, 20))
         self.btn_card_list.setMinimumHeight(32)
-        self.btn_card_list.setStyleSheet(button_style)
+        set_widget_style(self.btn_card_list, button_style)
         self.btn_card_list.clicked.connect(self.archive_requested.emit)
 
         # Кнопка "Отчет за сутки"
@@ -469,7 +468,7 @@ class Sector4v(BaseSectorWidget):
         self.btn_daily_print.setIcon(QIcon(icon_daily_path))
         self.btn_daily_print.setIconSize(QSize(20, 20))
         self.btn_daily_print.setMinimumHeight(32)
-        self.btn_daily_print.setStyleSheet(button_style)
+        set_widget_style(self.btn_daily_print, button_style)
         self.btn_daily_print.clicked.connect(self.daily_report_requested.emit)
 
         # Кнопка "Общий отчет"
@@ -478,12 +477,12 @@ class Sector4v(BaseSectorWidget):
         self.btn_all_print.setIcon(QIcon(icon_all_path))
         self.btn_all_print.setIconSize(QSize(20, 20))
         self.btn_all_print.setMinimumHeight(32)
-        self.btn_all_print.setStyleSheet(button_style)
+        set_widget_style(self.btn_all_print, button_style)
         self.btn_all_print.clicked.connect(self.full_report_requested.emit)
 
         self.btn_recovery_transfer = QPushButton(" Перевод в отделение")
         self.btn_recovery_transfer.setMinimumHeight(32)
-        self.btn_recovery_transfer.setStyleSheet(button_style)
+        set_widget_style(self.btn_recovery_transfer, button_style)
         self.btn_recovery_transfer.setMinimumWidth(self.btn_recovery_transfer.sizeHint().width() + 10)
         self.btn_recovery_transfer.clicked.connect(self.recovery_transfer_requested.emit)
         self.btn_recovery_transfer.setVisible(False)
@@ -494,7 +493,7 @@ class Sector4v(BaseSectorWidget):
             self.btn_recovery_cancel_transfer.setIcon(QIcon(cancel_icon_path))
             self.btn_recovery_cancel_transfer.setIconSize(QSize(20, 20))
         self.btn_recovery_cancel_transfer.setMinimumHeight(32)
-        self.btn_recovery_cancel_transfer.setStyleSheet(button_style)
+        set_widget_style(self.btn_recovery_cancel_transfer, button_style)
         self.btn_recovery_cancel_transfer.clicked.connect(self.recovery_cancel_transfer_requested.emit)
         self.btn_recovery_cancel_transfer.setVisible(False)
         
@@ -544,7 +543,7 @@ class Sector4v(BaseSectorWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
-        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(self.scroll_area, "background: transparent; border: none;")
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # Hide the horizontal bar during startup layout recalculation in W1 rows.
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -557,7 +556,7 @@ class Sector4v(BaseSectorWidget):
         
         self.main_layout_v.addWidget(self.content_area)
 
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_4v_main_container {
                 background-color: #f8f9fa !important;
             }

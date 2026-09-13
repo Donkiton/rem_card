@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from copy import deepcopy
 import re
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -147,13 +148,13 @@ class TemplateDilutionReplaceDialog(BaseStyledDialog):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.setStyleSheet(_admin_drugs_table_style())
+        set_widget_style(self.table, _admin_drugs_table_style())
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.content_layout.addWidget(self.table, 1)
 
         tools_layout = QHBoxLayout()
         self.status_label = QLabel("Выберите растворитель и нажмите «Найти».")
-        self.status_label.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(self.status_label, "border: none; background: transparent;")
         tools_layout.addWidget(self.status_label, 1)
 
         self.btn_remove = QPushButton("Убрать из замены")
@@ -664,7 +665,7 @@ class TemplateDrugSearchWidget(QWidget):
         
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Поиск препарата для добавления...")
-        self.input_field.setStyleSheet("""
+        set_widget_style(self.input_field, """
             QLineEdit {
                 font-size: 14px; 
                 padding: 6px;
@@ -678,7 +679,7 @@ class TemplateDrugSearchWidget(QWidget):
         self.list_widget = QListWidget(self)
         self.list_widget.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
         self.list_widget.setFocusPolicy(Qt.NoFocus)
-        self.list_widget.setStyleSheet("border: 1px solid gray; background-color: white; font-size: 14px;")
+        set_widget_style(self.list_widget, "border: 1px solid gray; background-color: white; font-size: 14px;")
         self.list_widget.hide()
         
         self.input_field.textChanged.connect(self.on_text_changed)
@@ -762,7 +763,7 @@ class TemplatesDictWidget(QWidget):
 
         self.frame = QFrame()
         self.frame.setObjectName("adminDictFrame")
-        self.frame.setStyleSheet("""
+        set_widget_style(self.frame, """
             QFrame#adminDictFrame {
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
@@ -772,12 +773,12 @@ class TemplatesDictWidget(QWidget):
         layout = QVBoxLayout(self.frame)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(5)
-        self.setStyleSheet("QLabel { background: transparent; } QGroupBox { background: transparent; }")
+        set_widget_style(self, "QLabel { background: transparent; } QGroupBox { background: transparent; }")
         
         header_layout = QHBoxLayout()
         header = QLabel("Справочник шаблонов (Клин. протоколов)")
         header.setProperty("heading", "true")
-        header.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(header, "border: none; background: transparent;")
         header_layout.addWidget(header)
         header_layout.addStretch()
         
@@ -854,7 +855,7 @@ class TemplatesDictWidget(QWidget):
         
         # 2. Таблица
         self.table = QTableWidget()
-        self.table.setStyleSheet(_admin_drugs_table_style())
+        set_widget_style(self.table, _admin_drugs_table_style())
         self.table.setColumnCount(5) # Было 6, убрали Кратность
         self.table.setHorizontalHeaderLabels(["Препарат", "Доза", "Путь", "Длит.", "Растворитель"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -1120,7 +1121,7 @@ class TemplatesDictWidget(QWidget):
             return self._row_drag_indicator
         indicator = QFrame(self.table.viewport())
         indicator.setFixedHeight(3)
-        indicator.setStyleSheet("background-color: #2f80ed; border-radius: 1px;")
+        set_widget_style(indicator, "background-color: #2f80ed; border-radius: 1px;")
         indicator.hide()
         self._row_drag_indicator = indicator
         return indicator
@@ -1135,14 +1136,12 @@ class TemplatesDictWidget(QWidget):
         ghost = QLabel(self._format_template_drug_text(self.current_drugs[source_row]), self.table.viewport())
         ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         ghost.setFixedSize(max(160, self.table.viewport().width() - 16), max(28, rect.height() - 6))
-        ghost.setStyleSheet(
-            "background-color: rgba(255, 255, 255, 235);"
+        set_widget_style(ghost, "background-color: rgba(255, 255, 255, 235);"
             "border: 1.5px solid #2f80ed;"
             "border-radius: 6px;"
             "padding-left: 8px;"
             "font-size: 9pt;"
-            "color: #1f2d3d;"
-        )
+            "color: #1f2d3d;")
         self._row_drag_ghost = ghost
         state["active"] = True
         self._row_drag_state = state

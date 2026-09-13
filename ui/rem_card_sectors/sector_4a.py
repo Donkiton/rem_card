@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel)
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.styles.theme import COLOR_DANGER, COLOR_PRIMARY
@@ -7,7 +8,7 @@ class Sector4a(BaseSectorWidget):
         super().__init__("4а", parent)
         self.label.hide() # Скрываем стандартный заголовок
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
 
         self.init_ui()
 
@@ -31,10 +32,10 @@ class Sector4a(BaseSectorWidget):
         balance_layout.setSpacing(0)
         
         balance_lbl = QLabel("Баланс:")
-        balance_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #2c3e50; border: none; background: transparent;")
+        set_widget_style(balance_lbl, "font-weight: bold; font-size: 14px; color: #2c3e50; border: none; background: transparent;")
         
         self.balance_val = QLabel("0 мл")
-        self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {COLOR_PRIMARY}; border: none; background: transparent;")
+        set_widget_style(self.balance_val, f"font-weight: bold; font-size: 14px; color: {COLOR_PRIMARY}; border: none; background: transparent;")
         
         balance_layout.addWidget(balance_lbl)
         balance_layout.addWidget(self.balance_val)
@@ -44,7 +45,7 @@ class Sector4a(BaseSectorWidget):
         self.main_layout_v.addWidget(self.data_area)
 
         # Применяем QSS стили для полностью замкнутой рамки с закруглениями со всех сторон
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_4a_main_container {
                 background-color: #f8f9fa !important;
             }
@@ -75,8 +76,8 @@ class Sector4a(BaseSectorWidget):
         
         # Убран пробел после : (в setText) и шрифт уменьшен до 14px
         self.balance_val.setText(f"{prefix_cur}{balance_cur}/{prefix_day}{balance_day} мл")
-        self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {color_cur}; border: none; background: transparent;")
+        set_widget_style(self.balance_val, f"font-weight: bold; font-size: 14px; color: {color_cur}; border: none; background: transparent;")
 
     def set_loading_state(self):
         self.balance_val.setText("—/— мл")
-        self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {COLOR_PRIMARY}; border: none; background: transparent;")
+        set_widget_style(self.balance_val, f"font-weight: bold; font-size: 14px; color: {COLOR_PRIMARY}; border: none; background: transparent;")

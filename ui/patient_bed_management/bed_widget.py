@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QVBoxLayout, QLabel, QFrame, QGraphicsDropShadowEffect
 from PySide6.QtCore import Signal, Qt, QMimeData
 from PySide6.QtGui import QCursor, QColor, QDrag
@@ -38,21 +39,21 @@ class BedWidget(QFrame):
 
         # 1. Название койки
         self.bed_label = QLabel(format_patient_bed_label(self.bed_number, numbered=True, uppercase=True))
-        self.bed_label.setStyleSheet(STYLE_PATIENT_BED_LABEL)
+        set_widget_style(self.bed_label, STYLE_PATIENT_BED_LABEL)
 
         # 2. Номер истории болезни (ИБ № *)
         self.history_label = QLabel()
-        self.history_label.setStyleSheet(STYLE_PATIENT_BED_HISTORY)
+        set_widget_style(self.history_label, STYLE_PATIENT_BED_HISTORY)
 
         # 3. ФИО пациента
         self.patient_label = QLabel("Свободно")
-        self.patient_label.setStyleSheet(STYLE_PATIENT_BED_PATIENT)
+        set_widget_style(self.patient_label, STYLE_PATIENT_BED_PATIENT)
         self.patient_label.setWordWrap(True)
         self.patient_label.setMinimumHeight(50)
 
         # 4. Статус (Занято / Свободно)
         self.status_indicator = QLabel("● Свободно")
-        self.status_indicator.setStyleSheet(STYLE_PATIENT_BED_STATUS_FREE)
+        set_widget_style(self.status_indicator, STYLE_PATIENT_BED_STATUS_FREE)
 
         self.layout.addWidget(self.bed_label)
         self.layout.addWidget(self.history_label)
@@ -65,7 +66,7 @@ class BedWidget(QFrame):
     def _update_display(self):
         if self.status == "FREE":
             self.status_indicator.setText("● СВОБОДНО")
-            self.status_indicator.setStyleSheet(STYLE_PATIENT_BED_STATUS_FREE)
+            set_widget_style(self.status_indicator, STYLE_PATIENT_BED_STATUS_FREE)
             self.patient_label.setText("") # Очищаем ФИО если свободно
             self.history_label.setText("") # Очищаем ИБ если свободно
             self.history_label.hide()
@@ -75,9 +76,9 @@ class BedWidget(QFrame):
             self.history_label.show()
             self.patient_label.show()
             self.status_indicator.setText("ЗАНЯТО")
-            self.status_indicator.setStyleSheet(STYLE_PATIENT_BED_STATUS_BUSY)
+            set_widget_style(self.status_indicator, STYLE_PATIENT_BED_STATUS_BUSY)
 
-        self.setStyleSheet(get_patient_bed_card_style(self.status))
+        set_widget_style(self, get_patient_bed_card_style(self.status))
 
     def set_patient_info(self, full_name: str, history_number: str = "", diagnosis: str = ""):
         if self.status != "FREE":
@@ -88,7 +89,7 @@ class BedWidget(QFrame):
             self.history_label.setText("")
 
     def enterEvent(self, event):
-        self.setStyleSheet(get_patient_bed_card_style(self.status, hovered=True))
+        set_widget_style(self, get_patient_bed_card_style(self.status, hovered=True))
         self.shadow.setBlurRadius(25)
         super().enterEvent(event)
 
@@ -137,7 +138,7 @@ class BedWidget(QFrame):
                 event.ignore()
                 return
             event.acceptProposedAction()
-            self.setStyleSheet(get_patient_bed_card_style(self.status, drop_target=True))
+            set_widget_style(self, get_patient_bed_card_style(self.status, drop_target=True))
 
     def dragLeaveEvent(self, event):
         self._update_display()

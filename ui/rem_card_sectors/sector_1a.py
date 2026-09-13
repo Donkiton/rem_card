@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QLabel
 from PySide6.QtCore import Qt
 
@@ -9,7 +10,7 @@ class Sector1a(BaseSectorWidget):
         super().__init__("1a", parent)
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
 
         self._ui_ready = False
         self.main_container = None
@@ -44,7 +45,7 @@ class Sector1a(BaseSectorWidget):
         self.scroll_area.setFrameShape(QScrollArea.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(self.scroll_area, "background: transparent; border: none;")
 
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("sector_scroll_content")
@@ -64,8 +65,7 @@ class Sector1a(BaseSectorWidget):
         self.scroll_area.setWidget(self.scroll_content)
         self.main_layout_v.addWidget(self.scroll_area)
 
-        self.main_container.setStyleSheet(
-            """
+        set_widget_style(self.main_container, """
             QWidget#sector_1a_main_container {
                 background-color: #f8f9fa;
                 border: 1.5px solid #bdc3c7;
@@ -84,8 +84,7 @@ class Sector1a(BaseSectorWidget):
             QWidget#sector_scroll_content {
                 background-color: transparent;
             }
-            """
-        )
+            """)
 
         super().set_content(self.main_container)
         self._ui_ready = True

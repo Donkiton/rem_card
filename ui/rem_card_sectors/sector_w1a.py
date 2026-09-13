@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import time
 from datetime import datetime, timedelta
 
@@ -61,7 +62,7 @@ class SectorW1a(BaseSectorWidget):
         self._display_enabled = self._read_display_enabled()
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
 
         self.cards = {}
         self._card_signatures = {}
@@ -112,7 +113,7 @@ class SectorW1a(BaseSectorWidget):
         self.scroll_area.setFrameShape(QScrollArea.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(self.scroll_area, "background: transparent; border: none;")
 
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("sector_w1a_scroll_content")
@@ -134,7 +135,7 @@ class SectorW1a(BaseSectorWidget):
         self.empty_label = QLabel("Нет ближайших назначений")
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setWordWrap(True)
-        self.empty_label.setStyleSheet("color: #7f8c8d; font-style: italic; padding: 10px 4px;")
+        set_widget_style(self.empty_label, "color: #7f8c8d; font-style: italic; padding: 10px 4px;")
         self.content_layout.addWidget(self.empty_label)
 
         self.scroll_layout.addWidget(self.cards_container, 0, Qt.AlignTop)
@@ -142,8 +143,7 @@ class SectorW1a(BaseSectorWidget):
         self.scroll_area.setWidget(self.scroll_content)
         self.main_layout_v.addWidget(self.scroll_area)
 
-        self.main_container.setStyleSheet(
-            """
+        set_widget_style(self.main_container, """
             QWidget#sector_w1a_main_container {
                 background-color: #f8f9fa;
                 border: 1.5px solid #bdc3c7;
@@ -184,8 +184,7 @@ class SectorW1a(BaseSectorWidget):
                 border-bottom-left-radius: 4px;
                 border-bottom-right-radius: 4px;
             }
-            """
-        )
+            """)
 
         self.set_content(self.main_container)
         self.main_container.setVisible(self._display_enabled)
@@ -516,15 +515,13 @@ class SectorW1a(BaseSectorWidget):
         frame = QFrame()
         frame.setObjectName("w1a_patient_group_card")
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-        frame.setStyleSheet(
-            """
+        set_widget_style(frame, """
             QFrame#w1a_patient_group_card {
                 background-color: #ffffff;
                 border: 1.6px solid #7f9fbd;
                 border-radius: 5px;
             }
-            """
-        )
+            """)
 
         frame_layout = QVBoxLayout(frame)
         frame_layout.setContentsMargins(0, 0, 0, 0)
@@ -535,8 +532,7 @@ class SectorW1a(BaseSectorWidget):
         header.setWordWrap(True)
         header.setAlignment(Qt.AlignCenter)
         header.setFixedHeight(26)
-        header.setStyleSheet(
-            """
+        set_widget_style(header, """
             QLabel#w1a_patient_group_header {
                 background-color: #d7eaf8;
                 color: #173b57;
@@ -548,22 +544,19 @@ class SectorW1a(BaseSectorWidget):
                 border-top-right-radius: 4px;
                 padding: 5px 6px;
             }
-            """
-        )
+            """)
         frame_layout.addWidget(header)
 
         body = QFrame()
         body.setObjectName("w1a_patient_group_body")
-        body.setStyleSheet(
-            """
+        set_widget_style(body, """
             QFrame#w1a_patient_group_body {
                 background-color: #ffffff;
                 border: none;
                 border-bottom-left-radius: 4px;
                 border-bottom-right-radius: 4px;
             }
-            """
-        )
+            """)
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(5, 5, 5, 5)
         body_layout.setSpacing(4)

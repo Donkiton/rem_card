@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import pathlib
 import datetime
 import re
@@ -262,24 +263,24 @@ class NurseSectorPrint(BaseSectorWidget):
 
     def _init_ui(self):
         main_frame = QFrame()
-        main_frame.setStyleSheet('QFrame { border: 1.5px solid #bdc3c7; border-radius: 5px; background-color: #ffffff; }')
+        set_widget_style(main_frame, 'QFrame { border: 1.5px solid #bdc3c7; border-radius: 5px; background-color: #ffffff; }')
         layout = QVBoxLayout(main_frame); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0)
         
         lbl = QLabel("Печать карты (Медсестра)")
         lbl.setFixedHeight(30); lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet('font-weight: bold; color: #495057; background: #e9ecef; border: none;')
+        set_widget_style(lbl, 'font-weight: bold; color: #495057; background: #e9ecef; border: none;')
         
         body = QWidget(); body_layout = QVBoxLayout(body); body_layout.setContentsMargins(10,10,10,10); body_layout.setSpacing(10)
         self.cb_vitals = QCheckBox("Таблица показателей"); self.cb_balance = QCheckBox("Баланс"); self.cb_prescriptions = QCheckBox("Назначения"); self.cb_events = QCheckBox("События")
         for cb in [self.cb_vitals, self.cb_prescriptions, self.cb_balance, self.cb_events]: body_layout.addWidget(cb)
             
-        self.status_label = QLabel(""); self.status_label.setStyleSheet("color: #7f8c8d; font-style: italic; border: none;"); self.status_label.setAlignment(Qt.AlignCenter); body_layout.addWidget(self.status_label)
+        self.status_label = QLabel(""); set_widget_style(self.status_label, "color: #7f8c8d; font-style: italic; border: none;"); self.status_label.setAlignment(Qt.AlignCenter); body_layout.addWidget(self.status_label)
         
         btn_layout = QHBoxLayout()
         btn_style = "QPushButton { background-color: #f8f9fa; border: 1px solid #ced4da; border-radius: 4px; color: #495057; font-weight: bold; height: 32px; } QPushButton:hover { background-color: #e2e6ea; }"
-        self.btn_gen = QPushButton("Отчет за сутки"); self.btn_gen.setStyleSheet(btn_style); self.btn_gen.clicked.connect(self.generate_pdf)
-        self.btn_open = QPushButton("Открыть PDF"); self.btn_open.setStyleSheet(btn_style); self.btn_open.setEnabled(False); self.btn_open.clicked.connect(self.open_pdf)
-        self.btn_full = QPushButton("Общий отчет"); self.btn_full.setStyleSheet(btn_style); self.btn_full.clicked.connect(self.generate_full_report)
+        self.btn_gen = QPushButton("Отчет за сутки"); set_widget_style(self.btn_gen, btn_style); self.btn_gen.clicked.connect(self.generate_pdf)
+        self.btn_open = QPushButton("Открыть PDF"); set_widget_style(self.btn_open, btn_style); self.btn_open.setEnabled(False); self.btn_open.clicked.connect(self.open_pdf)
+        self.btn_full = QPushButton("Общий отчет"); set_widget_style(self.btn_full, btn_style); self.btn_full.clicked.connect(self.generate_full_report)
         
         for b in [self.btn_gen, self.btn_open, self.btn_full]: btn_layout.addWidget(b)
         body_layout.addStretch(); body_layout.addLayout(btn_layout)

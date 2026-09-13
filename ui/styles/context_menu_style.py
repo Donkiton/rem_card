@@ -1,10 +1,10 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLineEdit, QMenu, QPlainTextEdit, QTextEdit, QWidget
 
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.theme_tokens import token
 
 
@@ -30,7 +30,7 @@ _ACTION_ICON_NAMES = {
 
 
 def build_context_menu_style(tokens: dict[str, str] | None = None) -> str:
-    tokens = tokens or get_theme_manager().current_tokens()
+    tokens = tokens or style_tokens()
     t = lambda key, default="": token(tokens, key, default)
     return f"""
         QMenu {{
@@ -61,7 +61,7 @@ def build_context_menu_style(tokens: dict[str, str] | None = None) -> str:
 
 
 def apply_context_menu_style(menu: QMenu) -> None:
-    menu.setStyleSheet(build_context_menu_style())
+    set_widget_style(menu, build_context_menu_style())
 
 
 def _action_key(text: str) -> str:
@@ -81,7 +81,7 @@ def _fallback_action_icon(action_key: str) -> QIcon:
     if not icon.isNull():
         return icon
 
-    tokens = get_theme_manager().current_tokens()
+    tokens = style_tokens()
     color = QColor(token(tokens, "text.secondary", "#495057"))
     pixmap = QPixmap(16, 16)
     pixmap.fill(Qt.transparent)

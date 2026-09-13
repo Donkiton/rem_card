@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QSizePolicy, QWidget, QVBoxLayout
 
 from rem_card.ui.shared.base_sector import BaseSectorWidget
@@ -10,7 +11,7 @@ class SectorW1c(BaseSectorWidget):
         super().__init__("W1c", parent)
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         self.init_ui()
 
     def init_ui(self):
@@ -25,14 +26,12 @@ class SectorW1c(BaseSectorWidget):
         self.main_layout_v.setContentsMargins(2, 2, 2, 2)
         self.main_layout_v.setSpacing(0)
 
-        self.main_container.setStyleSheet(
-            """
+        set_widget_style(self.main_container, """
             QWidget#sector_w1c_main_container {
                 background-color: #f8f9fa;
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
             }
-            """
-        )
+            """)
 
         self.set_content(self.main_container)

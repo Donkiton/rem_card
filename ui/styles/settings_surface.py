@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
 import os
 
@@ -25,7 +27,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.theme_tokens import token
 from rem_card.app.paths import get_icon_dir
 
@@ -91,7 +92,7 @@ def is_settings_context(widget: QWidget | None) -> bool:
 def apply_settings_surface(root: QWidget) -> None:
     """Apply one settings design language to a page or dialog tree."""
 
-    tokens = get_theme_manager().current_tokens()
+    tokens = style_tokens()
     root.setProperty("settingsContext", True)
     root.setProperty("settingsSurface", "dialog" if isinstance(root, QDialog) else "page")
 
@@ -111,7 +112,7 @@ def apply_settings_surface(root: QWidget) -> None:
     for button in buttons:
         role = str(button.property("settingsSurfaceRole") or "")
         if role in {"primary", "secondary", "danger"}:
-            button.setStyleSheet(_surface_button_style(tokens, role))
+            set_widget_style(button, _surface_button_style(tokens, role))
 
     for tool_button in root.findChildren(QToolButton):
         if tool_button.objectName().startswith(("Title", "qt_calendar")):
@@ -127,7 +128,7 @@ def apply_settings_surface(root: QWidget) -> None:
             view.setProperty("settingsSurfaceControl", True)
             if isinstance(view, QTableView):
                 view.setAlternatingRowColors(True)
-                view.setStyleSheet("")
+                set_widget_style(view, "")
 
     field_types = (
         QLineEdit,
@@ -160,21 +161,19 @@ def apply_settings_surface(root: QWidget) -> None:
             field.setMinimumHeight(max(38, field.minimumHeight()))
             if field.maximumHeight() < 38:
                 field.setMaximumHeight(38)
-        direct_style = field.styleSheet().casefold()
+        direct_style = source_style(field).casefold()
         if any(
             marker in direct_style
             for marker in ("background-color: white", "#ffffff", "border: 1px solid gray")
         ):
-            field.setStyleSheet("")
+            set_widget_style(field, "")
 
     original_style = root.property("settingsSurfaceOriginalStyle")
     if original_style is None:
-        original_style = root.styleSheet()
+        original_style = source_style(root)
         root.setProperty("settingsSurfaceOriginalStyle", original_style)
-    root.setStyleSheet(
-        f"{str(original_style or '')}\n"
-        f"{build_settings_surface_style(tokens)}"
-    )
+    set_widget_style(root, f"{str(original_style or '')}\n"
+        f"{build_settings_surface_style(tokens)}")
 
     root.style().unpolish(root)
     root.style().polish(root)
@@ -212,7 +211,7 @@ def _polish_button(button: QPushButton) -> None:
     button.setProperty("settingsSurfaceRole", role)
     if object_name in {"", "DialogOkBtn"}:
         button.setObjectName("SettingsSurfaceButton")
-    button.setStyleSheet("")
+    set_widget_style(button, "")
 
 
 def _primary_button_priority(button: QPushButton) -> int:

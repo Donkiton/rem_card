@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QLineEdit, QGridLayout)
 from PySide6.QtCore import Qt, Signal
@@ -44,9 +45,9 @@ class Sector2b_v(QWidget):
         # Заголовок с общим объемом
         header_layout = QHBoxLayout()
         header_lbl = QLabel("Всего выведено за текущий час:")
-        header_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #495057; border: none; background: transparent;")
+        set_widget_style(header_lbl, "font-weight: bold; font-size: 14px; color: #495057; border: none; background: transparent;")
         self.total_out_val = QLabel("0 мл")
-        self.total_out_val.setStyleSheet(self.val_style)
+        set_widget_style(self.total_out_val, self.val_style)
         header_layout.addWidget(header_lbl)
         header_layout.addStretch()
         header_layout.addWidget(self.total_out_val)
@@ -55,7 +56,7 @@ class Sector2b_v(QWidget):
         # Разделитель
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color: #e0e0e0; border: none; background-color: #e0e0e0; max-height: 1px;")
+        set_widget_style(line, "color: #e0e0e0; border: none; background-color: #e0e0e0; max-height: 1px;")
         self.data_layout.addWidget(line)
         
         # Сетка для полей данных (обеспечивает выравнивание)
@@ -82,15 +83,15 @@ class Sector2b_v(QWidget):
         # Разделитель перед балансом
         line2 = QFrame()
         line2.setFrameShape(QFrame.HLine)
-        line2.setStyleSheet("color: #bdc3c7; border: none; background-color: #bdc3c7; max-height: 1px;")
+        set_widget_style(line2, "color: #bdc3c7; border: none; background-color: #bdc3c7; max-height: 1px;")
         self.data_layout.addWidget(line2)
         
         # ИТОГОВЫЙ БАЛАНС
         balance_layout = QHBoxLayout()
         balance_lbl = QLabel("Баланс:")
-        balance_lbl.setStyleSheet("font-weight: bold; font-size: 16px; color: #2c3e50; border: none; background: transparent;")
+        set_widget_style(balance_lbl, "font-weight: bold; font-size: 16px; color: #2c3e50; border: none; background: transparent;")
         self.balance_val = QLabel("0 мл")
-        self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY}; border: none; background: transparent;")
+        set_widget_style(self.balance_val, f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY}; border: none; background: transparent;")
         balance_layout.addWidget(balance_lbl)
         balance_layout.addStretch()
         balance_layout.addWidget(self.balance_val)
@@ -105,7 +106,7 @@ class Sector2b_v(QWidget):
         self.main_layout_v.addWidget(self.bottom_corner)
 
         # Применяем QSS стили
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#balance_header {
                 font-weight: bold; font-size: 15px; color: #2c3e50 !important; 
                 background-color: #e9ecef !important;
@@ -140,7 +141,7 @@ class Sector2b_v(QWidget):
         """Вспомогательный метод для добавления строки в сетку."""
         # 1. Иконка
         icon_lbl = QLabel()
-        icon_lbl.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(icon_lbl, "border: none; background: transparent;")
         icon_path = os.path.join(self.icons_dir, icon_name)
         icon_h = 16
         if icon_name == "balans_drenazh.png": icon_h = 14
@@ -152,14 +153,14 @@ class Sector2b_v(QWidget):
             
         # 2. Название
         text_lbl = QLabel(title)
-        text_lbl.setStyleSheet(self.label_style)
+        set_widget_style(text_lbl, self.label_style)
         
         # 3. Поле ввода
         val_input = QLineEdit()
         val_input.setPlaceholderText("0")
         val_input.setFixedWidth(45)
         val_input.setValidator(QIntValidator(0, 99999))
-        val_input.setStyleSheet("""
+        set_widget_style(val_input, """
             QLineEdit {
                 font-weight: 600; color: #495057; font-size: 12px; 
                 border: 1px solid #ced4da; border-radius: 3px; 
@@ -170,16 +171,16 @@ class Sector2b_v(QWidget):
         
         # 4. Разделитель
         slash_lbl = QLabel("/")
-        slash_lbl.setStyleSheet("color: #adb5bd; font-weight: bold;")
+        set_widget_style(slash_lbl, "color: #adb5bd; font-weight: bold;")
         
         # 5. Значение X (из сетки)
         x_val_lbl = QLabel("0")
         x_val_lbl.setFixedWidth(40)
-        x_val_lbl.setStyleSheet(f"font-weight: 600; color: {COLOR_PRIMARY}; font-size: 12px;")
+        set_widget_style(x_val_lbl, f"font-weight: 600; color: {COLOR_PRIMARY}; font-size: 12px;")
         
         # 6. Единицы
         unit_lbl = QLabel("мл")
-        unit_lbl.setStyleSheet(f"font-size: 11px; color: {COLOR_PRIMARY};")
+        set_widget_style(unit_lbl, f"font-size: 11px; color: {COLOR_PRIMARY};")
         
         # Добавляем в QGridLayout
         self.grid_layout.addWidget(icon_lbl, row, 0, Qt.AlignCenter)
@@ -209,7 +210,7 @@ class Sector2b_v(QWidget):
         color = COLOR_PRIMARY if balance_cur >= 0 else COLOR_DANGER
         
         self.balance_val.setText(f"{prefix_cur}{balance_cur}/{balance_day} мл")
-        self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {color};")
+        set_widget_style(self.balance_val, f"font-weight: bold; font-size: 16px; color: {color};")
         self.total_out_val.setText(f"{int(total_out_current_hour)} мл")
 
     def update_quick_values(self, hour_data: dict):
@@ -224,7 +225,7 @@ class Sector2b_v(QWidget):
 
     def set_loading_state(self):
         self.balance_val.setText("—/— мл")
-        self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY};")
+        set_widget_style(self.balance_val, f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY};")
         self.total_out_val.setText("— мл")
         self.diurez_x.setText("—")
         self.drenazh_x.setText("—")
@@ -245,4 +246,4 @@ class Sector2b_v(QWidget):
         """
         for field in [self.diurez_val, self.drenazh_val, self.zond_val, self.rvota_val, self.other_val]:
             field.setReadOnly(not enabled)
-            field.setStyleSheet(style)
+            set_widget_style(field, style)

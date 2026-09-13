@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -18,8 +19,8 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
+from rem_card.ui.shared.theme_switch import ThemeSwitch
 from rem_card.ui.styles.admin_settings_styles import build_admin_settings_style
-from rem_card.ui.styles.theme_manager import get_theme_manager
 
 
 class AdminMainWidget(QWidget):
@@ -247,6 +248,11 @@ class AdminMainWidget(QWidget):
             (self.btn_background_settings, "Фон приложения", "Фон, прозрачность и оформление рабочей области.", "обои изображение прозрачность"),
             (self.btn_remcard_icon_settings, "Иконки RemCard", "Набор иконок основной карты пациента.", "значки рем карта"),
         ]
+        self.theme_switch = ThemeSwitch(self)
+        if self.theme_switch.runtime_enabled:
+            interface_actions.append(
+                (self.theme_switch, "Цветовая тема", "Светлая или тёмная тема для этого рабочего места.", "цвет оформление светлая темная тёмная")
+            )
 
         maintenance_actions = [
             (self.btn_database_info, "Состояние баз данных", "Пути, доступность и технические сведения о хранилищах.", "бд база статус путь"),
@@ -347,9 +353,7 @@ class AdminMainWidget(QWidget):
         if self.settings_categories:
             self._select_settings_category(0)
 
-        self.setStyleSheet(
-            build_admin_settings_style(get_theme_manager().current_tokens())
-        )
+        set_widget_style(self, build_admin_settings_style(style_tokens()))
 
         self.stack.addWidget(self.menu_widget)
         self.stack.setCurrentWidget(self.menu_widget)
@@ -519,11 +523,14 @@ class AdminMainWidget(QWidget):
         layout.addWidget(icon_label, 0, Qt.AlignLeft)
         layout.addWidget(action_title)
         layout.addWidget(action_description, 1)
-        button.setObjectName("SettingsDangerButton" if danger else "SettingsActionButton")
+        if not isinstance(button, ThemeSwitch):
+            button.setObjectName("SettingsDangerButton" if danger else "SettingsActionButton")
         button.setCursor(Qt.PointingHandCursor)
-        button.setMinimumHeight(36)
+        if not isinstance(button, ThemeSwitch):
+            button.setMinimumHeight(36)
         button.setMaximumWidth(260)
-        button.setAccessibleDescription(description)
+        if not isinstance(button, ThemeSwitch):
+            button.setAccessibleDescription(description)
         layout.addWidget(button, 0, Qt.AlignLeft)
 
         search_blob = " ".join((title, description, keywords, button.text())).casefold()

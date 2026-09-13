@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 from collections import OrderedDict
@@ -122,11 +123,9 @@ class DietIntakeWidget(QWidget):
         self.template_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.template_combo.setMinimumContentsLength(0)
         self.template_combo.currentIndexChanged.connect(self._on_template_selected)
-        self.template_combo.view().setStyleSheet(
-            "QAbstractItemView { background: white; color: #111; "
+        set_widget_style(self.template_combo.view(), "QAbstractItemView { background: white; color: #111; "
             "selection-background-color: #e9ecef; selection-color: #000; "
-            "border: 1px solid #bdc3c7; outline: 0; }"
-        )
+            "border: 1px solid #bdc3c7; outline: 0; }")
         template_layout.addWidget(self.template_label)
         template_layout.addWidget(self.template_combo, 1)
         self.data_layout.addWidget(self.template_frame)
@@ -172,7 +171,7 @@ class DietIntakeWidget(QWidget):
 
         self.empty_label = QLabel("")
         self.empty_label.setAlignment(Qt.AlignCenter)
-        self.empty_label.setStyleSheet(f"color: {COLOR_SECONDARY}; font-size: 11px; border: none; background: transparent;")
+        set_widget_style(self.empty_label, f"color: {COLOR_SECONDARY}; font-size: 11px; border: none; background: transparent;")
         self.data_layout.addWidget(self.empty_label)
         self.data_layout.addStretch()
 
@@ -182,8 +181,7 @@ class DietIntakeWidget(QWidget):
         self.prn_time.returnPressed.connect(self.btn_save.animateClick)
         self.prn_amount.returnPressed.connect(self.btn_save.animateClick)
 
-        self.setStyleSheet(
-            """
+        set_widget_style(self, """
             QWidget#diet_intake_widget {
                 background-color: #f8f9fa;
             }
@@ -300,8 +298,7 @@ class DietIntakeWidget(QWidget):
                 background: #f8f9fa;
             }
             """
-            .replace("__DIET_COMBO_ARROW_IMAGE__", DIET_COMBO_ARROW_IMAGE)
-        )
+            .replace("__DIET_COMBO_ARROW_IMAGE__", DIET_COMBO_ARROW_IMAGE))
 
     def set_external_sector_header(self, enabled: bool):
         self._external_sector_header = bool(enabled)
