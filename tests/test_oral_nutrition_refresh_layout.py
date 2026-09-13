@@ -70,8 +70,8 @@ def _snapshot(amount, planned):
 def test_fact_add_and_edit_do_not_move_or_resize_sections(monkeypatch, role, planned, width):
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(
-        "rem_card.ui.shared.components.oral_nutrition_widget.get_theme_manager",
-        lambda: SimpleNamespace(current_tokens=lambda: {}),
+        "rem_card.ui.shared.components.oral_nutrition_widget.style_tokens",
+        lambda: {},
     )
     monkeypatch.setattr(
         "rem_card.ui.shared.components.oral_nutrition_widget.AsyncCallThread", _SnapshotWorker,

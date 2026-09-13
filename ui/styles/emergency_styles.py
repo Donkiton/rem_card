@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 
 # Startup and outage dialogs must remain usable when both the medical and
@@ -101,4 +102,4 @@ QPushButton#DialogSecondaryBtn:hover { background: #e2e8f0; }
 
 def apply_emergency_dialog_style(dialog) -> None:
     if dialog is not None:
-        dialog.setStyleSheet(EMERGENCY_DIALOG_STYLE)
+        set_widget_style(dialog, EMERGENCY_DIALOG_STYLE)

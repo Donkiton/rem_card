@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import re
 from typing import Any
@@ -61,8 +62,7 @@ class LabAnalysisTemplateDialog(BaseStyledDialog):
 
     def _build_ui(self):
         self.content_widget.setObjectName("lab_template_dialog")
-        self.content_widget.setStyleSheet(
-            """
+        set_widget_style(self.content_widget, """
             QLineEdit, QComboBox, QTimeEdit {
                 background: #ffffff;
                 border: 1px solid #c8d2dc;
@@ -83,8 +83,7 @@ class LabAnalysisTemplateDialog(BaseStyledDialog):
                 padding: 6px;
                 font-weight: bold;
             }
-            """
-        )
+            """)
 
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Название анализа")
@@ -209,8 +208,7 @@ class LabMaterialsDialog(BaseStyledDialog):
         self._update_buttons()
 
     def _build_ui(self):
-        self.content_widget.setStyleSheet(
-            """
+        set_widget_style(self.content_widget, """
             QLineEdit {
                 background: #ffffff;
                 border: 1px solid #c8d2dc;
@@ -231,8 +229,7 @@ class LabMaterialsDialog(BaseStyledDialog):
                 padding: 6px;
                 font-weight: bold;
             }
-            """
-        )
+            """)
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Материал", "Код", "Тип"])
@@ -441,20 +438,18 @@ class LabAnalysisCatalogWidget(QWidget):
 
         self.frame = QFrame()
         self.frame.setObjectName("adminDictFrame")
-        self.frame.setStyleSheet(
-            """
+        set_widget_style(self.frame, """
             QFrame#adminDictFrame {
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
                 background-color: transparent;
             }
-            """
-        )
+            """)
         layout = QVBoxLayout(self.frame)
 
         header = QLabel("Справочник анализов")
         header.setProperty("heading", "true")
-        header.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(header, "border: none; background: transparent;")
         layout.addWidget(header)
 
         self.search_input = QLineEdit()
@@ -463,7 +458,7 @@ class LabAnalysisCatalogWidget(QWidget):
         layout.addWidget(self.search_input)
 
         self.table = QTableWidget(0, 4)
-        self.table.setStyleSheet("background-color: white;")
+        set_widget_style(self.table, "background-color: white;")
         self.table.setHorizontalHeaderLabels(["Анализ", "Материал", "Времена", "Комментарий"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)

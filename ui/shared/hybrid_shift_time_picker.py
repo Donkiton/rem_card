@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -113,7 +114,7 @@ class HybridShiftTimePicker(QWidget):
             minute_grid.addWidget(btn, idx // 6, idx % 6)
         root.addLayout(minute_grid)
 
-        self.setStyleSheet("""
+        set_widget_style(self, """
             QLineEdit#hybrid_time_input {
                 min-height: 25px;
                 font-size: 16px;

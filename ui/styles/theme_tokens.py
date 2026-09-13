@@ -34,6 +34,7 @@ def default_role_settings() -> dict[str, Any]:
 def default_settings_payload() -> dict[str, Any]:
     return {
         "version": STYLE_SETTINGS_VERSION,
+        "mode": DEFAULT_MODE,
         "custom_presets": {},
         "active": {
             "doctor": default_role_settings(),

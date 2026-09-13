@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from typing import Callable, Iterable
 
@@ -156,7 +157,7 @@ class EmergencyPasswordDialog(NonClosableEmergencyDialog):
         self.error_label = QLabel("")
         self.error_label.setObjectName("DialogMessageText")
         self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #B00020; font-weight: 600;")
+        set_widget_style(self.error_label, "color: #B00020; font-weight: 600;")
         self.error_label.hide()
         self.content_layout.addWidget(self.error_label)
 

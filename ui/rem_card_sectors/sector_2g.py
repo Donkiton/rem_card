@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import QVBoxLayout, QLabel, QWidget
 from PySide6.QtCore import Qt
@@ -64,7 +65,7 @@ class Sector2g(BaseSectorWidget):
         self.main_layout_v.addWidget(self.legend_area)
         self.main_layout_v.addWidget(self.bottom_corner)
         
-        self.main_container.setStyleSheet(f"""
+        set_widget_style(self.main_container, f"""
             QWidget#sector_2g_main_container {{
                 background-color: {BG_MAIN} !important;
             }}
@@ -126,7 +127,7 @@ class Sector2g(BaseSectorWidget):
                 border-bottom: none !important;
             }}
         """
-        item.setStyleSheet(style)
+        set_widget_style(item, style)
         return item
 
     def update_legend(self, settings: dict):

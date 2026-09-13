@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
@@ -84,7 +85,7 @@ class DiluentsDictWidget(QWidget):
 
         self.frame = QFrame()
         self.frame.setObjectName("adminDictFrame")
-        self.frame.setStyleSheet("""
+        set_widget_style(self.frame, """
             QFrame#adminDictFrame {
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
@@ -95,11 +96,11 @@ class DiluentsDictWidget(QWidget):
         
         header = QLabel("Справочник Растворителей")
         header.setProperty("heading", "true")
-        header.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(header, "border: none; background: transparent;")
         layout.addWidget(header)
         
         self.table = QTableWidget()
-        self.table.setStyleSheet("background-color: white;")
+        set_widget_style(self.table, "background-color: white;")
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["Название (Латынь)", "Отображение", "Объемы"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)

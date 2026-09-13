@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 
@@ -106,9 +108,8 @@ class CalculationLauncherDialog(BaseStyledDialog):
         self.accept()
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            f"""
-            {self.styleSheet()}
+        set_widget_style(self, f"""
+            {source_style(self)}
             QLabel#CalculationLauncherIntro {{
                 color: {TEXT_SECONDARY};
                 font-size: 13px;
@@ -140,8 +141,7 @@ class CalculationLauncherDialog(BaseStyledDialog):
                 color: {TEXT_MUTED};
                 border: 1px solid {BORDER_COLOR};
             }}
-            """
-        )
+            """)
 
 
 def run_calculation_launcher(

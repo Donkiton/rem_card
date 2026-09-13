@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 
@@ -376,7 +377,7 @@ def apply_procedure_combo_style(root: QWidget) -> None:
         combos.append(root)
     combos.extend(root.findChildren(QComboBox))
     for combo in combos:
-        combo.setStyleSheet(PROCEDURE_COMBO_STYLE)
+        set_widget_style(combo, PROCEDURE_COMBO_STYLE)
         _disable_combo_wheel(combo, combo)
         line_edit = combo.lineEdit()
         if line_edit is not None:
@@ -384,7 +385,7 @@ def apply_procedure_combo_style(root: QWidget) -> None:
         try:
             view = combo.view()
             view.setAlternatingRowColors(True)
-            view.setStyleSheet(PROCEDURE_COMBO_VIEW_STYLE)
+            set_widget_style(view, PROCEDURE_COMBO_VIEW_STYLE)
         except Exception:
             pass
 
@@ -414,8 +415,8 @@ def apply_procedure_datetime_style(root: QWidget) -> None:
         edits.append(root)
     edits.extend(root.findChildren(QDateTimeEdit))
     for edit in edits:
-        edit.setStyleSheet(PROCEDURE_DATETIME_STYLE)
+        set_widget_style(edit, PROCEDURE_DATETIME_STYLE)
         try:
-            edit.calendarWidget().setStyleSheet(PROCEDURE_CALENDAR_STYLE)
+            set_widget_style(edit.calendarWidget(), PROCEDURE_CALENDAR_STYLE)
         except Exception:
             pass

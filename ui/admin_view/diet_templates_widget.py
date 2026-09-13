@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtCore import Qt, QTime
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -98,8 +99,7 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.schedule_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.schedule_table.setSelectionMode(QTableWidget.SingleSelection)
         self.schedule_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.schedule_table.setStyleSheet(
-            """
+        set_widget_style(self.schedule_table, """
             QTableWidget#DietTemplateScheduleTable {
                 outline: none;
                 selection-background-color: transparent;
@@ -107,8 +107,7 @@ class DietTemplateDialog(SavedFramelessDialogMixin, BaseStyledDialog):
             QTableWidget#DietTemplateScheduleTable::item:selected {
                 background-color: transparent;
             }
-            """
-        )
+            """)
 
         form = QVBoxLayout()
         form.addWidget(QLabel("Название"))
@@ -342,24 +341,22 @@ class DietTemplatesWidget(QWidget):
 
         self.frame = QFrame()
         self.frame.setObjectName("adminDictFrame")
-        self.frame.setStyleSheet(
-            """
+        set_widget_style(self.frame, """
             QFrame#adminDictFrame {
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
                 background-color: transparent;
             }
-            """
-        )
+            """)
         layout = QVBoxLayout(self.frame)
 
         header = QLabel("Шаблоны питания")
         header.setProperty("heading", "true")
-        header.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(header, "border: none; background: transparent;")
         layout.addWidget(header)
 
         self.table = QTableWidget()
-        self.table.setStyleSheet("background-color: white;")
+        set_widget_style(self.table, "background-color: white;")
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Название", "Описание", "Расписание", "По умолчанию"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)

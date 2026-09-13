@@ -1,10 +1,13 @@
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import themed_qcolor
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QDateTime, QSettings, QTimer
-from PySide6.QtGui import QColor, QDoubleValidator, QFont, QPainter, QPen, QPixmap
+from PySide6.QtGui import QDoubleValidator, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QVBoxLayout,
@@ -102,14 +105,14 @@ class IvlHistoryTable(QTableWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         viewport = self.viewport().rect()
         if viewport.height() < 140:
-            painter.setPen(QColor("#17213a"))
+            painter.setPen(themed_qcolor("#17213a", "text"))
             title_font = QFont(self.font())
             title_font.setPointSize(10)
             title_font.setBold(True)
             painter.setFont(title_font)
             painter.drawText(viewport.adjusted(0, 8, 0, 0), Qt.AlignHCenter | Qt.AlignTop, "Нет событий")
 
-            painter.setPen(QColor("#51607a"))
+            painter.setPen(themed_qcolor("#51607a", "text"))
             text_font = QFont(self.font())
             text_font.setPointSize(8)
             painter.setFont(text_font)
@@ -128,16 +131,16 @@ class IvlHistoryTable(QTableWidget):
         icon_x = center_x - icon_w // 2
         icon_y = center_y - 52
 
-        pen = QPen(QColor("#b8d6f6"), 5)
+        pen = QPen(themed_qcolor("#b8d6f6", "text"), 5)
         painter.setPen(pen)
-        painter.setBrush(QColor("#edf6ff"))
+        painter.setBrush(themed_qcolor("#edf6ff", "background"))
         painter.drawRoundedRect(icon_x, icon_y, icon_w, icon_h, 8, 8)
 
-        painter.setPen(QPen(QColor("#b8d6f6"), 4))
-        painter.setBrush(QColor("#d9ecff"))
+        painter.setPen(QPen(themed_qcolor("#b8d6f6", "text"), 4))
+        painter.setBrush(themed_qcolor("#d9ecff", "background"))
         painter.drawRoundedRect(center_x - 14, icon_y - 5, 28, 11, 5, 5)
 
-        painter.setPen(QPen(QColor("#b8d6f6"), 3))
+        painter.setPen(QPen(themed_qcolor("#b8d6f6", "text"), 3))
         base_y = icon_y + 28
         points = [
             (icon_x + 10, base_y),
@@ -150,7 +153,7 @@ class IvlHistoryTable(QTableWidget):
         for start, end in zip(points, points[1:]):
             painter.drawLine(start[0], start[1], end[0], end[1])
 
-        painter.setPen(QPen(QColor("#d1e5fb"), 3))
+        painter.setPen(QPen(themed_qcolor("#d1e5fb", "text"), 3))
         for x, y in (
             (icon_x - 18, icon_y + 8),
             (icon_x - 26, icon_y + 34),
@@ -161,14 +164,14 @@ class IvlHistoryTable(QTableWidget):
             painter.drawLine(x - 3, y, x + 3, y)
             painter.drawLine(x, y - 3, x, y + 3)
 
-        painter.setPen(QColor("#17213a"))
+        painter.setPen(themed_qcolor("#17213a", "text"))
         title_font = QFont(self.font())
         title_font.setPointSize(10)
         title_font.setBold(True)
         painter.setFont(title_font)
         painter.drawText(viewport.adjusted(0, center_y + 13, 0, 0), Qt.AlignHCenter | Qt.AlignTop, "Нет событий")
 
-        painter.setPen(QColor("#51607a"))
+        painter.setPen(themed_qcolor("#51607a", "text"))
         text_font = QFont(self.font())
         text_font.setPointSize(8)
         painter.setFont(text_font)
@@ -266,7 +269,7 @@ class SectorIvl(BaseSectorWidget):
             widget.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             view = widget.view()
             if view is not None:
-                view.setStyleSheet(IVL_COMBO_VIEW_STYLE)
+                set_widget_style(view, IVL_COMBO_VIEW_STYLE)
 
     def _fit_fixed_width_button(self, button: QPushButton):
         font = QFont(button.font())
@@ -395,8 +398,7 @@ class SectorIvl(BaseSectorWidget):
         main_frame.setObjectName("ivl_screen")
         main_frame.setAttribute(Qt.WA_StyledBackground, True)
         main_frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
-        main_frame.setStyleSheet(
-            """
+        set_widget_style(main_frame, """
             QFrame#ivl_screen {
                 background-color: #f8f9fa;
                 border: 1.5px solid #bdc3c7;
@@ -719,8 +721,7 @@ class SectorIvl(BaseSectorWidget):
             QScrollArea#ivl_scroll_area > QWidget > QWidget {
                 background-color: #f8f9fa;
             }
-            """.replace("__IVL_COMBO_ARROW_IMAGE__", IVL_COMBO_ARROW_IMAGE)
-        )
+            """.replace("__IVL_COMBO_ARROW_IMAGE__", IVL_COMBO_ARROW_IMAGE))
 
         root = QVBoxLayout(main_frame)
         root.setContentsMargins(0, 0, 0, 0)
@@ -944,7 +945,7 @@ class SectorIvl(BaseSectorWidget):
 
         params_frame = QFrame()
         params_frame.setObjectName("ivl_params_frame")
-        params_frame.setStyleSheet("QFrame#ivl_params_frame { border: none; background: transparent; }")
+        set_widget_style(params_frame, "QFrame#ivl_params_frame { border: none; background: transparent; }")
         self.params_grid = QGridLayout(params_frame)
         self.params_grid.setContentsMargins(0, 0, 0, 0)
         self.params_grid.setHorizontalSpacing(8)
@@ -1036,7 +1037,7 @@ class SectorIvl(BaseSectorWidget):
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         scroll_area.setMinimumSize(0, 0)
-        scroll_area.setStyleSheet(main_frame.styleSheet())
+        set_widget_style(scroll_area, source_style(main_frame))
         scroll_area.setWidget(main_frame)
 
         self.set_content(scroll_area)

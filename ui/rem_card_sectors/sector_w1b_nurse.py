@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel)
 from PySide6.QtCore import Qt, QSize
 from rem_card.ui.shared.base_sector import BaseSectorWidget
@@ -15,7 +16,7 @@ class SectorW1bNurse(BaseSectorWidget):
         self._display_enabled = self._read_display_enabled()
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         self.init_ui()
 
     def init_ui(self):
@@ -35,11 +36,11 @@ class SectorW1bNurse(BaseSectorWidget):
         # 2. Надпись в центре
         self.empty_label = QLabel("сектор W1b-nurse")
         self.empty_label.setAlignment(Qt.AlignCenter)
-        self.empty_label.setStyleSheet("color: #bdc3c7; font-style: italic;")
+        set_widget_style(self.empty_label, "color: #bdc3c7; font-style: italic;")
         self.main_layout_v.addWidget(self.empty_label)
 
         # QSS стиль (такой же как в W1b)
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_w1b_nurse_main_container {
                 background-color: #f8f9fa;
                 border: 1.5px solid #bdc3c7;

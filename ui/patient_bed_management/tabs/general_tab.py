@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from datetime import datetime
 
 from PySide6.QtWidgets import (
@@ -57,7 +58,7 @@ class GeneralTabWidget(QWidget):
         label = QLabel(label_text.rstrip(":"))
         label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         label.setMinimumHeight(34)
-        label.setStyleSheet("color: #17233f; font-size: 14px; font-weight: 400;")
+        set_widget_style(label, "color: #17233f; font-size: 14px; font-weight: 400;")
         self._row_labels.append(label)
         self.form_layout.addWidget(label, self._row, 0)
         self.form_layout.addWidget(field_widget, self._row, 1)
@@ -110,7 +111,7 @@ class GeneralTabWidget(QWidget):
         self.age_preview_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.age_preview_label.setWordWrap(True)
         self.age_preview_label.setMinimumWidth(0)
-        self.age_preview_label.setStyleSheet("color: #64748b; font-size: 13px; font-weight: 800;")
+        set_widget_style(self.age_preview_label, "color: #64748b; font-size: 13px; font-weight: 800;")
 
         birth_layout.addWidget(self.birth_date_input)
         birth_layout.addWidget(self.age_preview_label, 1)
@@ -121,8 +122,7 @@ class GeneralTabWidget(QWidget):
 
         self.admission_datetime_field = QFrame()
         self.admission_datetime_field.setFixedSize(300, 34)
-        self.admission_datetime_field.setStyleSheet(
-            """
+        set_widget_style(self.admission_datetime_field, """
             QFrame {
                 background: #ffffff;
                 border: 1px solid #dbe5ef;
@@ -138,8 +138,7 @@ class GeneralTabWidget(QWidget):
                 selection-background-color: #0d6efd;
                 selection-color: #ffffff;
             }
-            """
-        )
+            """)
         admission_datetime_layout = QHBoxLayout(self.admission_datetime_field)
         admission_datetime_layout.setContentsMargins(9, 0, 9, 0)
         admission_datetime_layout.setSpacing(9)
@@ -162,7 +161,7 @@ class GeneralTabWidget(QWidget):
         self.admission_date_input.setCalendarPopup(True)
         self.admission_date_input.setFixedHeight(34)
         self.admission_date_input.setFixedWidth(143)
-        self.admission_date_input.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
+        set_widget_style(self.admission_date_input, STYLE_FORM_DATETIME_EDIT)
         self.admission_date_input.hide()
 
         self.admission_time_input = QTimeEdit()
@@ -171,7 +170,7 @@ class GeneralTabWidget(QWidget):
         self.admission_time_input.setDisplayFormat("HH:mm")
         self.admission_time_input.setFixedHeight(34)
         self.admission_time_input.setFixedWidth(117)
-        self.admission_time_input.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
+        set_widget_style(self.admission_time_input, STYLE_FORM_DATETIME_EDIT)
         self.admission_time_input.hide()
         self.admission_date_input.dateChanged.connect(self._on_hidden_admission_datetime_changed)
         self.admission_time_input.timeChanged.connect(self._on_hidden_admission_datetime_changed)

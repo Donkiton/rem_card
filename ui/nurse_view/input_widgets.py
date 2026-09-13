@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QLabel, QLineEdit, QPushButton, QDateTimeEdit, QComboBox, QGroupBox)
 from PySide6.QtCore import QDateTime
@@ -50,7 +51,7 @@ class VitalsInputWidget(QWidget):
         grid.addWidget(self.cvp, 4, 2)
         
         self.save_btn = QPushButton("Сохранить")
-        self.save_btn.setStyleSheet("background-color: #2c3e50; color: white; height: 30px;")
+        set_widget_style(self.save_btn, "background-color: #2c3e50; color: white; height: 30px;")
         grid.addWidget(self.save_btn, 5, 0, 1, 3)
         
         self.layout.addWidget(group)
@@ -89,7 +90,7 @@ class BalanceSummaryWidget(QWidget):
         self.total_label = QLabel("Баланс: 0 мл")
         
         for lbl in [self.in_label, self.out_label, self.total_label]:
-            lbl.setStyleSheet("font-weight: bold; font-size: 14px;")
+            set_widget_style(lbl, "font-weight: bold; font-size: 14px;")
             self.layout.addWidget(lbl)
         
     def update_summary(self, summary: dict):

@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy)
 from PySide6.QtCore import Qt
@@ -9,7 +10,7 @@ class Sector3a(BaseSectorWidget):
         super().__init__("3а", parent)
         self.label.hide() # Скрываем стандартный заголовок
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
 
         self.rem_card_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.icons_dir = os.path.join(self.rem_card_root, "icon")
@@ -43,9 +44,9 @@ class Sector3a(BaseSectorWidget):
         # Заголовок "Введено" внутри области данных
         header_layout = QHBoxLayout()
         header_lbl_in = QLabel("Всего:")
-        header_lbl_in.setStyleSheet("font-weight: bold; font-size: 14px; color: #495057; border: none; background: transparent;")
+        set_widget_style(header_lbl_in, "font-weight: bold; font-size: 14px; color: #495057; border: none; background: transparent;")
         self.total_in_val = QLabel("0 мл")
-        self.total_in_val.setStyleSheet("font-weight: bold; color: #28a745; font-size: 14px; border: none; background: transparent;")
+        set_widget_style(self.total_in_val, "font-weight: bold; color: #28a745; font-size: 14px; border: none; background: transparent;")
         header_layout.addWidget(header_lbl_in)
         header_layout.addStretch()
         header_layout.addWidget(self.total_in_val)
@@ -54,7 +55,7 @@ class Sector3a(BaseSectorWidget):
         # Разделитель
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color: #e0e0e0; border: none; background-color: #e0e0e0; max-height: 1px;")
+        set_widget_style(line, "color: #e0e0e0; border: none; background-color: #e0e0e0; max-height: 1px;")
         self.data_layout.addWidget(line)
 
         # Поля данных
@@ -68,7 +69,7 @@ class Sector3a(BaseSectorWidget):
         self.main_layout_v.addWidget(self.data_area)
 
         # Применяем QSS стили, аналогичные сектору 3б (эталон)
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_3a_main_container {
                 background-color: #f8f9fa !important;
             }
@@ -105,7 +106,7 @@ class Sector3a(BaseSectorWidget):
         icon_lbl = QLabel()
         icon_lbl.setFixedSize(12, 16)
         icon_lbl.setAlignment(Qt.AlignCenter)
-        icon_lbl.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(icon_lbl, "border: none; background: transparent;")
         icon_path = os.path.join(self.icons_dir, icon_name)
         
         if os.path.exists(icon_path):
@@ -120,7 +121,7 @@ class Sector3a(BaseSectorWidget):
                 icon_lbl.setPixmap(scaled_pixmap)
             
         text_lbl = QLabel(title)
-        text_lbl.setStyleSheet("font-size: 12px; color: #495057; border: none; background: transparent;")
+        set_widget_style(text_lbl, "font-size: 12px; color: #495057; border: none; background: transparent;")
         text_lbl.ensurePolished()
         text_lbl.setFixedWidth(text_lbl.sizeHint().width())
         text_lbl.setFixedHeight(max(16, text_lbl.sizeHint().height() + 2))
@@ -128,7 +129,7 @@ class Sector3a(BaseSectorWidget):
         text_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         
         val_lbl = QLabel(value)
-        val_lbl.setStyleSheet("font-weight: 600; color: #495057; font-size: 12px; border: none; background: transparent;")
+        set_widget_style(val_lbl, "font-weight: 600; color: #495057; font-size: 12px; border: none; background: transparent;")
         val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         val_lbl.setMinimumWidth(0)
         val_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)

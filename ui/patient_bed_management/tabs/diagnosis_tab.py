@@ -13,8 +13,9 @@ from rem_card.services.mkb import MKBMatch, MKBService, normalize_code_query
 from rem_card.ui.patient_bed_management.diagnosis_search import DiagnosisCompleter
 from rem_card.ui.patient_bed_management.form_widgets import line_icon
 from rem_card.ui.styles.diagnosis_styles import (
-    LIGHT_DIAGNOSIS_PALETTE, DiagnosisPalette, diagnosis_widget_style,
+    LIGHT_DIAGNOSIS_PALETTE, DARK_DIAGNOSIS_PALETTE, DiagnosisPalette, diagnosis_widget_style,
 )
+from rem_card.ui.styles.theme_runtime import current_mode, register_theme_callback, set_widget_style
 from rem_card.ui.styles.theme import (
     STYLE_FORM_DATETIME_EDIT, STYLE_PATIENT_OPERATION_FIELD,
     STYLE_PATIENT_OPERATION_LABEL, STYLE_PATIENT_OPERATIONS_GROUP,
@@ -100,12 +101,13 @@ class DiagnosisTabWidget(QWidget):
         self.diagnosis_text_input.textChanged.connect(self._on_manual_text_changed)
         self.diagnosis_code_input.installEventFilter(self)
         self.diagnosis_text_input.installEventFilter(self)
-        self.apply_palette(LIGHT_DIAGNOSIS_PALETTE)
+        self._apply_current_theme()
+        register_theme_callback(self, self._apply_current_theme)
         self._update_status()
 
         if self.show_operations:
             self.operations_group = QGroupBox("Список операций")
-            self.operations_group.setStyleSheet(STYLE_PATIENT_OPERATIONS_GROUP)
+            set_widget_style(self.operations_group, STYLE_PATIENT_OPERATIONS_GROUP)
             self.ops_container = QWidget()
             self.ops_container.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
             self.operations_list_layout = QVBoxLayout(self.ops_container)
@@ -128,6 +130,9 @@ class DiagnosisTabWidget(QWidget):
             qt_palette = field.palette()
             qt_palette.setColor(QPalette.PlaceholderText, QColor(palette.muted))
             field.setPalette(qt_palette)
+
+    def _apply_current_theme(self):
+        self.apply_palette(DARK_DIAGNOSIS_PALETTE if current_mode() == "dark" else LIGHT_DIAGNOSIS_PALETTE)
 
     def set_label_column_width(self, width: int):
         self.code_label.setMinimumWidth(max(120, int(width)))
@@ -291,18 +296,18 @@ class DiagnosisTabWidget(QWidget):
         row_layout.setAlignment(Qt.AlignVCenter)
 
         label = QLabel(f"Операция {num}:")
-        label.setStyleSheet(STYLE_PATIENT_OPERATION_LABEL)
+        set_widget_style(label, STYLE_PATIENT_OPERATION_LABEL)
 
         edit = QLineEdit()
         edit.setPlaceholderText("Введите название операции")
-        edit.setStyleSheet(STYLE_PATIENT_OPERATION_FIELD)
+        set_widget_style(edit, STYLE_PATIENT_OPERATION_FIELD)
 
         dt_edit = QDateTimeEdit()
         dt_edit.setDateTime(QDateTime.currentDateTime())
         dt_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
         dt_edit.setCalendarPopup(True)
         dt_edit.setFixedWidth(250)
-        dt_edit.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
+        set_widget_style(dt_edit, STYLE_FORM_DATETIME_EDIT)
 
         row_layout.addWidget(label)
         row_layout.addWidget(edit, 1)

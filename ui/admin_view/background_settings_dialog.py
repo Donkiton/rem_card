@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from copy import deepcopy
 from datetime import date
@@ -228,8 +230,7 @@ class BackgroundSettingsDialog(BaseStyledDialog):
         footer.addWidget(self.save_btn)
         main_layout.addLayout(footer)
 
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + """
             QFrame#BackgroundSettingsPanel {
                 background-color: #ffffff;
@@ -263,8 +264,7 @@ class BackgroundSettingsDialog(BaseStyledDialog):
             QLabel#BackgroundFileLabel {
                 color: #2c3e50;
             }
-            """
-        )
+            """)
 
     def _prepare_date_edit(self, edit: QDateEdit):
         current_year = QDate.currentDate().year()
@@ -275,8 +275,7 @@ class BackgroundSettingsDialog(BaseStyledDialog):
         calendar.setMinimumDate(QDate(current_year, 1, 1))
         calendar.setMaximumDate(QDate(current_year, 12, 31))
         calendar.setFirstDayOfWeek(Qt.Monday)
-        calendar.setStyleSheet(
-            """
+        set_widget_style(calendar, """
             QCalendarWidget QWidget {
                 background-color: #ffffff;
                 color: #212529;
@@ -321,8 +320,7 @@ class BackgroundSettingsDialog(BaseStyledDialog):
             QCalendarWidget QAbstractItemView:disabled {
                 color: #9aa7b3;
             }
-            """
-        )
+            """)
 
     def _entry_by_id(self, entry_id: str | None) -> dict | None:
         for entry in self.entries:

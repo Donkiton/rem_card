@@ -1,9 +1,9 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens, themed_qcolor, register_theme_callback
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
 from PySide6.QtCore import QDateTime, QEvent, QTimer, Qt, Signal
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -38,7 +38,6 @@ from rem_card.ui.styles.oral_nutrition_styles import (
     build_oral_nutrition_dialog_style,
     build_oral_nutrition_style,
 )
-from rem_card.ui.styles.theme_manager import get_theme_manager
 
 
 logger = logging.getLogger(__name__)
@@ -85,13 +84,13 @@ class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         }
         self._build_ui()
         self._fill()
-        apply_oral_popup_styles(self, get_theme_manager().current_tokens())
+        apply_oral_popup_styles(self, style_tokens())
         self._restore_saved_geometry()
 
     def _build_ui(self):
-        tokens = get_theme_manager().current_tokens()
+        tokens = style_tokens()
         self.content_widget.setObjectName("OralNutritionDialogBody")
-        self.content_widget.setStyleSheet(build_oral_nutrition_dialog_style(tokens))
+        set_widget_style(self.content_widget, build_oral_nutrition_dialog_style(tokens))
         self.content_layout.setContentsMargins(14, 12, 14, 14)
         self.content_layout.setSpacing(10)
 
@@ -414,9 +413,9 @@ class OralFactDialog(BaseStyledDialog):
         self.planned_item = planned_item or {}
         self.event = event
         self.shift_date = shift_date
-        tokens = get_theme_manager().current_tokens()
+        tokens = style_tokens()
         self.content_widget.setObjectName("OralNutritionDialogBody")
-        self.content_widget.setStyleSheet(build_oral_nutrition_dialog_style(tokens))
+        set_widget_style(self.content_widget, build_oral_nutrition_dialog_style(tokens))
         self.content_layout.setContentsMargins(14, 12, 14, 14)
         fact_frame, fact_layout = _dialog_section("Фактические данные")
         layout = QGridLayout()
@@ -511,6 +510,7 @@ class OralNutritionWidget(QWidget):
         self._write_success_ready.connect(self._apply_write_success, Qt.QueuedConnection)
         self._write_failure_ready.connect(self._apply_write_failure, Qt.QueuedConnection)
         self._build_ui()
+        register_theme_callback(self, self._refresh_percentage_colors)
 
     def _build_ui(self):
         self.setObjectName("OralNutritionRoot")
@@ -537,7 +537,7 @@ class OralNutritionWidget(QWidget):
         root.setSpacing(8)
         outer_layout.addWidget(self.outer_body, 1)
         page_layout.addWidget(self.outer_frame, 1)
-        self.setStyleSheet(build_oral_nutrition_style(get_theme_manager().current_tokens()))
+        set_widget_style(self, build_oral_nutrition_style(style_tokens()))
 
         self.summary_frame = QFrame()
         self.summary_frame.setObjectName("OralNutritionSummary")
@@ -925,12 +925,26 @@ class OralNutritionWidget(QWidget):
                 try:
                     percent = float(str(value).rstrip("%"))
                     if percent < 50:
-                        item.setForeground(QColor("#c0392b"))
+                        item.setForeground(themed_qcolor("#c0392b", "text"))
                     elif percent >= 80:
-                        item.setForeground(QColor("#1e8449"))
+                        item.setForeground(themed_qcolor("#1e8449", "text"))
                 except ValueError:
                     pass
             self.intake_table.setItem(row, column, item)
+
+    def _refresh_percentage_colors(self):
+        for row in range(self.intake_table.rowCount()):
+            item = self.intake_table.item(row, 5)
+            if item is None or not item.text().endswith("%"):
+                continue
+            try:
+                percent = float(item.text().rstrip("%"))
+            except ValueError:
+                continue
+            if percent < 50:
+                item.setForeground(themed_qcolor("#c0392b", "text"))
+            elif percent >= 80:
+                item.setForeground(themed_qcolor("#1e8449", "text"))
 
     @staticmethod
     def _number(value) -> str:

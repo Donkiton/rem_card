@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import pathlib
 import datetime
 import html
@@ -589,7 +590,7 @@ class SectorPrint(BaseSectorWidget):
 
     def _init_ui(self):
         main_frame = QFrame()
-        main_frame.setStyleSheet('QFrame { border: 1.5px solid #bdc3c7; border-radius: 5px; background-color: #ffffff; }')
+        set_widget_style(main_frame, 'QFrame { border: 1.5px solid #bdc3c7; border-radius: 5px; background-color: #ffffff; }')
         layout = QVBoxLayout(main_frame)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -597,7 +598,7 @@ class SectorPrint(BaseSectorWidget):
         header_label = QLabel("Печать карты")
         header_label.setFixedHeight(30)
         header_label.setAlignment(Qt.AlignCenter)
-        header_label.setStyleSheet('font-weight: bold; color: #495057; background: #e9ecef; border: none; border-bottom: 0.5px solid #bdc3c7; border-top-left-radius: 3px; border-top-right-radius: 3px;')
+        set_widget_style(header_label, 'font-weight: bold; color: #495057; background: #e9ecef; border: none; border-bottom: 0.5px solid #bdc3c7; border-top-left-radius: 3px; border-top-right-radius: 3px;')
         
         body_widget = QWidget()
         body_layout = QVBoxLayout(body_widget)
@@ -630,7 +631,7 @@ class SectorPrint(BaseSectorWidget):
             body_layout.addWidget(cb)
             
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #7f8c8d; font-style: italic; border: none;")
+        set_widget_style(self.status_label, "color: #7f8c8d; font-style: italic; border: none;")
         self.status_label.setAlignment(Qt.AlignCenter)
         body_layout.addWidget(self.status_label)
         
@@ -643,18 +644,18 @@ class SectorPrint(BaseSectorWidget):
         """
         self.btn_generate = QPushButton("Отчет за сутки")
         self.btn_generate.setFixedHeight(32)
-        self.btn_generate.setStyleSheet(btn_style)
+        set_widget_style(self.btn_generate, btn_style)
         self.btn_generate.clicked.connect(self.generate_pdf)
         
         self.btn_open = QPushButton("Открыть PDF")
         self.btn_open.setFixedHeight(32)
-        self.btn_open.setStyleSheet(btn_style)
+        set_widget_style(self.btn_open, btn_style)
         self.btn_open.setEnabled(False)
         self.btn_open.clicked.connect(self.open_pdf)
         
         self.btn_print = QPushButton("Общий отчет")
         self.btn_print.setFixedHeight(32)
-        self.btn_print.setStyleSheet(btn_style)
+        set_widget_style(self.btn_print, btn_style)
         self.btn_print.setEnabled(True)
         self.btn_print.clicked.connect(self.generate_full_report)
         

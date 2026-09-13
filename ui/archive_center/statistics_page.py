@@ -37,6 +37,7 @@ from rem_card.ui.shared.archive_date_edit import ArchiveDateEdit
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
+from rem_card.ui.shared.themed_html import set_themed_html
 from rem_card.ui.shared.persistent_file_dialog import PersistentSaveFileDialog
 from rem_card.services.analytics.platform import (
     AnalyticsEngine, AnalyticsPeriod, CohortDefinition, MetricScope, SnapshotCache,
@@ -244,7 +245,7 @@ class ArchiveStatisticsPage(QWidget):
         self.report.setObjectName("ArchiveStatisticsReport")
         self.report.setOpenExternalLinks(False)
         self.report.setLineWrapMode(QTextBrowser.WidgetWidth)
-        self.report.setHtml(self._empty_html())
+        set_themed_html(self.report, self._empty_html())
         body.addWidget(self.report, 1)
         layout.addLayout(body, 1)
 
@@ -520,7 +521,7 @@ class ArchiveStatisticsPage(QWidget):
             return
         kind, html, snapshot, snapshot_error = payload
         if kind == "report":
-            self.report.setHtml(html or self._empty_html())
+            set_themed_html(self.report, html or self._empty_html())
             self._loaded = True
         if self.analytics_workspace is not None:
             if snapshot is not None:

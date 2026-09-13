@@ -1,7 +1,7 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
 from rem_card.ui.styles.sector_styles import build_remcard_tab_button_style, build_remcard_tab_frame_style
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget, QLabel
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QPixmap
@@ -15,9 +15,9 @@ class Sector2b(BaseSectorWidget):
         super().__init__("2б (Вкладки)", parent)
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         self.setContentsMargins(0, 0, 0, 0)
-        tokens = get_theme_manager().current_tokens()
+        tokens = style_tokens()
         
-        self.setStyleSheet(build_remcard_tab_frame_style(tokens))
+        set_widget_style(self, build_remcard_tab_frame_style(tokens))
 
         self.label.hide()
         # В режиме конструктора нам может понадобиться заголовок, если мы скроем контент
@@ -26,7 +26,7 @@ class Sector2b(BaseSectorWidget):
         # Основной контейнер с минимальной высотой для вкладок (теперь может растягиваться)
         self.tabs_container = QWidget(self)
         self.tabs_container.setFixedHeight(36) # Фиксируем по высоте кнопок + небольшой запас
-        self.tabs_container.setStyleSheet("")
+        set_widget_style(self.tabs_container, "")
         self.tabs_layout = QHBoxLayout(self.tabs_container)
         self.tabs_layout.setContentsMargins(5, 0, 5, 0) # Убираем верхний отступ
         self.tabs_layout.setSpacing(10)
@@ -87,7 +87,7 @@ class Sector2b(BaseSectorWidget):
         btn.setChecked(active)
         btn.setFixedHeight(32) # Увеличили высоту для соответствия стилю
         
-        btn.setStyleSheet(build_remcard_tab_button_style(get_theme_manager().current_tokens()))
+        set_widget_style(btn, build_remcard_tab_button_style(style_tokens()))
         
         if enabled:
             btn.clicked.connect(lambda: self.on_tab_clicked(text))

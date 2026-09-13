@@ -80,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "REMCARD_BAZA_DIR": str(Path(temp) / "baza"),
             "REMCARD_CI_SETTINGS_DIR": str(Path(temp) / "settings"),
+            "REMCARD_STYLE_SETTINGS_PATH": str(Path(temp) / "appearance" / "style_settings.json"),
         })
         results = [
             run_command(command, log=report_dir / f"{name}.log", env=env, timeout=args.timeout_s)

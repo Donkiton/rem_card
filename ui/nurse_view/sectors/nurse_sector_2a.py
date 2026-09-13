@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.styles.sector_styles import (
     build_remcard_current_time_label_style,
@@ -5,7 +6,6 @@ from rem_card.ui.styles.sector_styles import (
     build_remcard_title_label_style,
     build_remcard_top_header_style,
 )
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 from PySide6.QtCore import QTimer
 from datetime import datetime, timedelta
@@ -16,9 +16,9 @@ class NurseSector2a(BaseSectorWidget):
         super().__init__("2а", parent)
         self.label.hide()
         self.setObjectName("nurse_sector_2a_frame")
-        tokens = get_theme_manager().current_tokens()
+        tokens = style_tokens()
 
-        self.setStyleSheet(build_remcard_top_header_style(tokens, "nurse_sector_2a_frame", "nurse_sector_2a_info_widget"))
+        set_widget_style(self, build_remcard_top_header_style(tokens, "nurse_sector_2a_frame", "nurse_sector_2a_info_widget"))
         
         self.info_widget = QWidget()
         self.info_widget.setObjectName("nurse_sector_2a_info_widget")
@@ -26,13 +26,13 @@ class NurseSector2a(BaseSectorWidget):
         self.info_layout.setContentsMargins(10, 0, 10, 0)
         
         self.lbl_title = QLabel("Реанимационная карта (Медсестра)")
-        self.lbl_title.setStyleSheet(build_remcard_title_label_style(tokens))
+        set_widget_style(self.lbl_title, build_remcard_title_label_style(tokens))
         
         self.lbl_period = QLabel("-")
-        self.lbl_period.setStyleSheet(build_remcard_period_label_style(tokens))
+        set_widget_style(self.lbl_period, build_remcard_period_label_style(tokens))
         
         self.lbl_current_time = QLabel()
-        self.lbl_current_time.setStyleSheet(build_remcard_current_time_label_style(tokens))
+        set_widget_style(self.lbl_current_time, build_remcard_current_time_label_style(tokens))
         
         self.info_layout.addWidget(self.lbl_title)
         self.info_layout.addWidget(self.lbl_period)

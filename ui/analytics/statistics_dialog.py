@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from datetime import datetime, timedelta
 
@@ -25,6 +26,7 @@ from rem_card.services.analytics.detailed_statistics_service import (
 )
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
 from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
+from rem_card.ui.shared.themed_html import set_themed_html
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 from rem_card.ui.styles.theme import (
     STYLE_ANALYTICS_CHECKBOX,
@@ -80,7 +82,7 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
         self.bg_container = QWidget(self)
         self.bg_container.setMouseTracking(True)
         self.bg_container.setObjectName("bg_container")
-        self.bg_container.setStyleSheet(STYLE_ANALYTICS_DIALOG_CONTAINER)
+        set_widget_style(self.bg_container, STYLE_ANALYTICS_DIALOG_CONTAINER)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(30)
@@ -102,7 +104,7 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
     def _build_header(self):
         header = QWidget()
         header.setFixedHeight(60)
-        header.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
+        set_widget_style(header, STYLE_TRANSPARENT_WIDGET)
         h_layout = QHBoxLayout(header)
         h_layout.setContentsMargins(8, 0, 0, 0)
 
@@ -110,13 +112,13 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
         title_block.setSpacing(2)
 
         title = QLabel("СТАТИСТИЧЕСКИЙ ОТЧЕТ")
-        title.setStyleSheet(STYLE_ANALYTICS_TITLE)
+        set_widget_style(title, STYLE_ANALYTICS_TITLE)
         title_block.addWidget(title)
 
         period_label = QLabel(
             f"Период (из архива): {self._start_dt.strftime('%d.%m.%Y')} - {self._end_dt.strftime('%d.%m.%Y')}"
         )
-        period_label.setStyleSheet(STYLE_ANALYTICS_PERIOD)
+        set_widget_style(period_label, STYLE_ANALYTICS_PERIOD)
         title_block.addWidget(period_label)
 
         h_layout.addLayout(title_block)
@@ -125,7 +127,7 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
         close_button = QPushButton("×")
         close_button.setFixedSize(30, 30)
         close_button.setCursor(Qt.PointingHandCursor)
-        close_button.setStyleSheet(STYLE_DIALOG_CLOSE_BUTTON)
+        set_widget_style(close_button, STYLE_DIALOG_CLOSE_BUTTON)
         close_button.clicked.connect(self.reject)
         h_layout.addWidget(close_button)
 
@@ -141,7 +143,7 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
         left_layout.setSpacing(10)
 
         ctrl_frame = QFrame()
-        ctrl_frame.setStyleSheet(STYLE_ANALYTICS_CONTROL_FRAME)
+        set_widget_style(ctrl_frame, STYLE_ANALYTICS_CONTROL_FRAME)
         ctrl_layout = QVBoxLayout(ctrl_frame)
         ctrl_layout.setSpacing(5)
 
@@ -152,12 +154,12 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
 
         for button in ctrl_buttons:
             button.setCursor(Qt.PointingHandCursor)
-            button.setStyleSheet(STYLE_ANALYTICS_OPTION_BUTTON)
+            set_widget_style(button, STYLE_ANALYTICS_OPTION_BUTTON)
             ctrl_layout.addWidget(button)
 
         self.chk_include_recovery = QCheckBox("Учитывать пробуждение")
         self.chk_include_recovery.setChecked(False)
-        self.chk_include_recovery.setStyleSheet(STYLE_ANALYTICS_CHECKBOX)
+        set_widget_style(self.chk_include_recovery, STYLE_ANALYTICS_CHECKBOX)
         ctrl_layout.addWidget(self.chk_include_recovery)
 
         self.btn_select_all.clicked.connect(self._select_all)
@@ -167,22 +169,22 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(STYLE_ANALYTICS_SCROLL_AREA)
+        set_widget_style(scroll, STYLE_ANALYTICS_SCROLL_AREA)
 
         cb_container = QWidget()
-        cb_container.setStyleSheet(STYLE_ANALYTICS_CHECKBOX_CONTAINER)
+        set_widget_style(cb_container, STYLE_ANALYTICS_CHECKBOX_CONTAINER)
         cb_layout = QVBoxLayout(cb_container)
         cb_layout.setSpacing(7)
 
         for group_name, items in self.section_groups.items():
             group_lbl = QLabel(group_name.upper())
-            group_lbl.setStyleSheet(STYLE_ANALYTICS_GROUP_LABEL)
+            set_widget_style(group_lbl, STYLE_ANALYTICS_GROUP_LABEL)
             cb_layout.addWidget(group_lbl)
 
             for key, caption in items.items():
                 cb = QCheckBox(caption)
                 cb.setChecked(False)
-                cb.setStyleSheet(STYLE_ANALYTICS_CHECKBOX)
+                set_widget_style(cb, STYLE_ANALYTICS_CHECKBOX)
                 cb_layout.addWidget(cb)
                 self.checkboxes[key] = cb
 
@@ -193,21 +195,21 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
         self.preview_btn = QPushButton("ПРЕДПРОСМОТР ОТЧЕТА")
         self.preview_btn.setCursor(Qt.PointingHandCursor)
         self.preview_btn.setFixedHeight(40)
-        self.preview_btn.setStyleSheet(STYLE_ANALYTICS_PREVIEW_BUTTON)
+        set_widget_style(self.preview_btn, STYLE_ANALYTICS_PREVIEW_BUTTON)
         self.preview_btn.clicked.connect(self._on_preview_clicked)
         left_layout.addWidget(self.preview_btn)
 
         self.save_pdf_btn = QPushButton("СОХРАНИТЬ ОТЧЕТ В PDF")
         self.save_pdf_btn.setCursor(Qt.PointingHandCursor)
         self.save_pdf_btn.setFixedHeight(45)
-        self.save_pdf_btn.setStyleSheet(STYLE_ANALYTICS_PRIMARY_BUTTON)
+        set_widget_style(self.save_pdf_btn, STYLE_ANALYTICS_PRIMARY_BUTTON)
         self.save_pdf_btn.clicked.connect(self._on_save_pdf_clicked)
         left_layout.addWidget(self.save_pdf_btn)
 
         content.addWidget(left_widget, 1)
 
         self.report_text = QTextBrowser()
-        self.report_text.setStyleSheet(STYLE_ANALYTICS_TEXT_BROWSER)
+        set_widget_style(self.report_text, STYLE_ANALYTICS_TEXT_BROWSER)
         content.addWidget(self.report_text, 2)
 
     def _select_all(self):
@@ -266,7 +268,7 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
     def _on_statistics_ready(self, html: str, save_pdf: bool):
         if self._closing:
             return
-        self.report_text.setHtml(html)
+        set_themed_html(self.report_text, html)
         if save_pdf:
             self._start_statistics_pdf_worker(html)
             return
@@ -317,7 +319,7 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
         self.preview_btn.setEnabled(not busy)
         self.save_pdf_btn.setEnabled(not busy)
         if text:
-            self.report_text.setHtml(f"<p>{text}</p>")
+            set_themed_html(self.report_text, f"<p>{text}</p>")
 
     def _clear_statistics_worker(self):
         self._stats_worker = None

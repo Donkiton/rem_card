@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout, QPushButton
 from PySide6.QtGui import QIcon
@@ -47,13 +48,13 @@ class ControlPanel(QWidget):
         self.btn_save = QPushButton(" Сохранить")
         self.btn_save.setIconSize(QSize(18, 18))
         self.btn_save.setMinimumHeight(button_min_h)
-        self.btn_save.setStyleSheet(button_style)
+        set_widget_style(self.btn_save, button_style)
 
         # 2. Кнопка Очистить лист
         self.btn_clean_sheet = QPushButton(" Очистить лист")
         self.btn_clean_sheet.setIconSize(QSize(18, 18))
         self.btn_clean_sheet.setMinimumHeight(button_min_h)
-        self.btn_clean_sheet.setStyleSheet(button_style)
+        set_widget_style(self.btn_clean_sheet, button_style)
         clean_icon = os.path.join(self.icon_dir, "clean.png")
         self.btn_clean_sheet.setIcon(QIcon(clean_icon))
         
@@ -61,7 +62,7 @@ class ControlPanel(QWidget):
         self.btn_clear = QPushButton(" Очистить назначения")
         self.btn_clear.setIconSize(QSize(18, 18))
         self.btn_clear.setMinimumHeight(button_min_h)
-        self.btn_clear.setStyleSheet(button_style)
+        set_widget_style(self.btn_clear, button_style)
         clear_orders_icon = os.path.join(self.icon_dir, "garbage.png") # Используем иконку мусорки
         self.btn_clear.setIcon(QIcon(clear_orders_icon))
 
@@ -69,7 +70,7 @@ class ControlPanel(QWidget):
         self.btn_yesterday = QPushButton(" Вчерашние назначения")
         self.btn_yesterday.setIconSize(QSize(18, 18))
         self.btn_yesterday.setMinimumHeight(button_min_h)
-        self.btn_yesterday.setStyleSheet(button_style)
+        set_widget_style(self.btn_yesterday, button_style)
         yesterday_icon = os.path.join(self.icon_dir, "yesterday.png")
         self.btn_yesterday.setIcon(QIcon(yesterday_icon))
 
@@ -77,7 +78,7 @@ class ControlPanel(QWidget):
         self.btn_rollback = QPushButton(" Отменить изменения")
         self.btn_rollback.setIconSize(QSize(18, 18))
         self.btn_rollback.setMinimumHeight(button_min_h)
-        self.btn_rollback.setStyleSheet(button_style)
+        set_widget_style(self.btn_rollback, button_style)
         rollback_icon = os.path.join(self.icon_dir, "otmena.png")
         self.btn_rollback.setIcon(QIcon(rollback_icon))
 
@@ -85,7 +86,7 @@ class ControlPanel(QWidget):
         self.btn_templates = QPushButton(" Шаблоны")
         self.btn_templates.setIconSize(QSize(18, 18))
         self.btn_templates.setMinimumHeight(button_min_h)
-        self.btn_templates.setStyleSheet(button_style)
+        set_widget_style(self.btn_templates, button_style)
         # Иконка для шаблонов (например, archivepacient или другая)
         templates_icon = os.path.join(self.icon_dir, "archivepacient.png")
         if os.path.exists(templates_icon):
@@ -95,7 +96,7 @@ class ControlPanel(QWidget):
         self.btn_pokaz = QPushButton(" Показатели")
         self.btn_pokaz.setIconSize(QSize(18, 18))
         self.btn_pokaz.setMinimumHeight(button_min_h)
-        self.btn_pokaz.setStyleSheet(button_style)
+        set_widget_style(self.btn_pokaz, button_style)
         pokaz_icon = os.path.join(self.icon_dir, "pokaz.png")
         if os.path.exists(pokaz_icon):
             self.btn_pokaz.setIcon(QIcon(pokaz_icon))

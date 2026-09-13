@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, QLabel)
@@ -15,7 +16,7 @@ class Sector2d(BaseSectorWidget):
         super().__init__("2д", parent)
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         
         # Определяем базовый путь к иконкам
         self.rem_card_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -48,7 +49,7 @@ class Sector2d(BaseSectorWidget):
         
         # Секция редактирования
         self.status_lbl = QLabel("Выберите ячейку...")
-        self.status_lbl.setStyleSheet("font-weight: bold; color: #495057; font-size: 13px;")
+        set_widget_style(self.status_lbl, "font-weight: bold; color: #495057; font-size: 13px;")
         self.status_lbl.setAlignment(Qt.AlignCenter)
         self.content_layout.addWidget(self.status_lbl)
 
@@ -86,7 +87,7 @@ class Sector2d(BaseSectorWidget):
         self.btn_delete.setMinimumHeight(32)
         self.btn_delete.setEnabled(False)
         # Удалить оставляем в стиле danger, так как в 1б её нет
-        self.btn_delete.setStyleSheet("""
+        set_widget_style(self.btn_delete, """
             QPushButton {
                 background-color: #dc3545; color: white; font-weight: bold; 
                 padding: 6px; border-radius: 4px; border: none;
@@ -102,7 +103,7 @@ class Sector2d(BaseSectorWidget):
         self.main_layout_v.addWidget(self.content_area)
 
         # Стилизация под тему врача
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_2d_main_container {
                 background-color: #f8f9fa !important;
             }

@@ -1,3 +1,5 @@
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from datetime import datetime, timedelta
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QLabel, QApplication,
                              QLineEdit, QPushButton, QHBoxLayout)
@@ -89,7 +91,7 @@ class VitalsWidget(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        self.setStyleSheet("""
+        set_widget_style(self, """
             QLabel { font-size: 12.5px; }
             QLineEdit { font-size: 12.5px; height: 19px; }
             QPushButton { font-size: 12.5px; }
@@ -124,7 +126,7 @@ class VitalsWidget(QWidget):
         self.save_btn.setIcon(QIcon(icon_path))
         self.save_btn.setIconSize(QSize(18, 18))
         self.save_btn.setMinimumHeight(32)
-        self.save_btn.setStyleSheet("""
+        set_widget_style(self.save_btn, """
             QPushButton {
                 font-size: 13px; 
                 font-weight: bold; 
@@ -144,7 +146,7 @@ class VitalsWidget(QWidget):
         self.undo_btn.setIcon(QIcon(undo_icon_path))
         self.undo_btn.setIconSize(QSize(18, 18))
         self.undo_btn.setMinimumHeight(32)
-        self.undo_btn.setStyleSheet(self.save_btn.styleSheet()) # Тот же стиль
+        set_widget_style(self.undo_btn, source_style(self.save_btn)) # Тот же стиль
         
         # Настройка нажатия Enter для всех полей ввода.
         for field in [self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp]:

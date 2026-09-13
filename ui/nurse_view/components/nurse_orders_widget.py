@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QTableView,
     QHeaderView, QAbstractItemView, QFrame, QSizePolicy
@@ -1625,7 +1626,7 @@ class NurseOrdersWidget(QWidget):
         
         self.frame_container = QFrame()
         self.frame_container.setObjectName("orders_frame_container")
-        self.frame_container.setStyleSheet(f"""
+        set_widget_style(self.frame_container, f"""
             QFrame#orders_frame_container {{ 
                 border: 1.5px solid {BORDER_COLOR}; 
                 border-radius: 5px; 
@@ -1657,18 +1658,16 @@ class NurseOrdersWidget(QWidget):
         self.table_view.setFocusPolicy(Qt.NoFocus)
         self.table_view.setShowGrid(False)
         
-        self.table_view.setStyleSheet(
-            f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} "
+        set_widget_style(self.table_view, f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} "
             f"QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 4px; border: 1 solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 9pt; }}"
-            + STYLE_ORDERS_VERTICAL_SCROLLBAR
-        )
+            + STYLE_ORDERS_VERTICAL_SCROLLBAR)
         self.table_clip_layout.addWidget(self.table_view)
 
         self.bottom_footer = QWidget()
         self.bottom_footer.setFixedHeight(15)
         self.frame_layout.addWidget(self.bottom_footer)
 
-        self.setStyleSheet(f"NurseOrdersWidget {{ background-color: {BG_MAIN}; }} QWidget#table_clip {{ background-color: {BG_CARD}; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QWidget#orders_footer_frame {{ background-color: {BG_MAIN}; border-top: 1px solid {BORDER_COLOR}; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }} QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 6px; border: none; border-bottom: 0.5px solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 10pt; }} QHeaderView {{ background-color: {BG_LIGHT}; border-top-left-radius: 5px; border-top-right-radius: 5px; }}")
+        set_widget_style(self, f"NurseOrdersWidget {{ background-color: {BG_MAIN}; }} QWidget#table_clip {{ background-color: {BG_CARD}; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QWidget#orders_footer_frame {{ background-color: {BG_MAIN}; border-top: 1px solid {BORDER_COLOR}; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }} QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 6px; border: none; border-bottom: 0.5px solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 10pt; }} QHeaderView {{ background-color: {BG_LIGHT}; border-top-left-radius: 5px; border-top-right-radius: 5px; }}")
 
     def update_now_marker(self):
         if hasattr(self, 'table_view'): self.table_view.viewport().update()

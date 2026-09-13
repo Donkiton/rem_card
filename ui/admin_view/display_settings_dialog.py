@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
 from copy import deepcopy
 
@@ -32,12 +34,11 @@ from rem_card.ui.shared.display_settings_storage import (
     role_display_settings_from_payload,
     sector8_button_options,
 )
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.theme_tokens import token
 
 
 def _display_list_style() -> str:
-    tokens = get_theme_manager().current_tokens()
+    tokens = style_tokens()
 
     def t(key: str, default: str = "") -> str:
         return token(tokens, key, default)
@@ -140,7 +141,7 @@ class OrderedVisibilityList(QWidget):
         self.rows_layout.setSpacing(0)
         self.scroll.setWidget(self.rows_widget)
         root_layout.addWidget(self.scroll)
-        self.setStyleSheet(_display_list_style())
+        set_widget_style(self, _display_list_style())
 
     def _clear_rows(self):
         self._row_widgets = {}
@@ -693,7 +694,7 @@ class DisplaySettingsDialog(BaseStyledDialog):
         footer.addWidget(cancel_btn)
         footer.addWidget(self.save_btn)
         main_layout.addLayout(footer)
-        self.setStyleSheet(f"{self.styleSheet()}\n{_display_list_style()}")
+        set_widget_style(self, f"{source_style(self)}\n{_display_list_style()}")
 
     def _clear_container(self, layout: QVBoxLayout):
         while layout.count():

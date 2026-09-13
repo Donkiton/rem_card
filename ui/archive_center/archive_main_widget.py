@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -16,7 +17,6 @@ from PySide6.QtWidgets import (
 from rem_card.ui.doctor_view.archive_widget import ARCHIVE_MODE_OPERBLOCK, ARCHIVE_MODE_RAO, ArchiveWidget
 from rem_card.ui.styles.admin_settings_styles import build_admin_settings_style
 from rem_card.ui.styles.archive_center_styles import build_archive_center_style
-from rem_card.ui.styles.theme_manager import get_theme_manager
 
 from .statistics_page import ArchiveStatisticsPage
 from .graphs_page import ArchiveGraphsPage
@@ -203,8 +203,8 @@ class ArchiveMainWidget(QWidget):
             archive.edit_requested.connect(self.edit_requested)
             archive.delete_requested.connect(self.delete_requested)
 
-        tokens = get_theme_manager().current_tokens()
-        self.setStyleSheet(build_admin_settings_style(tokens) + build_archive_center_style(tokens))
+        tokens = style_tokens()
+        set_widget_style(self, build_admin_settings_style(tokens) + build_archive_center_style(tokens))
         # Начальная страница выбирается синхронно. Загрузка архива запускается
         # менеджером компоновки после добавления виджета в рабочий stack.
         initial_index = max(0, min(self._initial_destination, self.content_stack.count() - 1))

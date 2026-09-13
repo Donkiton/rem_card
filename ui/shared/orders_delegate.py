@@ -2,7 +2,7 @@ import os
 import re
 from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 from PySide6.QtCore import Qt, QRect, QPoint
-from PySide6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygon
+from PySide6.QtGui import QPainter, QColor, QPalette, QPen, QPixmap, QPolygon
 from datetime import datetime, timedelta
 from ...data.dto.remcard_dto import OrderType
 from ...services.order_domain_service import (
@@ -10,12 +10,16 @@ from ...services.order_domain_service import (
     NURSE_MARK_NOT_EXECUTED,
 )
 from ...services.order_service import CVP_QUICK_ORDER_KEY, CVP_QUICK_ORDER_TEXT
-from ..styles.theme import BG_ALT_ROW
+
+try:
+    from ..styles.theme_runtime import theme_color
+except ImportError:  # Compatibility while opening an older installed release.
+    def theme_color(value, role=None):
+        return str(value)
 
 class OrdersDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.now_line_color = QColor(231, 76, 60, 150) # Прозрачный красный
         self._icon_cache = {}
         self._scaled_icon_cache = {}
         from rem_card.app.paths import get_icon_dir
@@ -24,6 +28,14 @@ class OrdersDelegate(QStyledItemDelegate):
             NURSE_MARK_NOT_EXECUTED: os.path.join(get_icon_dir(), "notdone.png"),
         }
         self._save_icon_path = os.path.join(get_icon_dir(), "savecard.png")
+
+    @staticmethod
+    def _themed_color(value: str, role: str | None = None) -> QColor:
+        return QColor(theme_color(value, role))
+
+    @staticmethod
+    def _palette_color(option: QStyleOptionViewItem, role: QPalette.ColorRole) -> QColor:
+        return option.palette.color(QPalette.Active, role)
 
     def _get_icon_pixmap(self, path: str):
         if not path:
@@ -107,7 +119,7 @@ class OrdersDelegate(QStyledItemDelegate):
 
     def _paint_grid(self, painter: QPainter, rect: QRect):
         painter.save()
-        painter.setPen(QPen(QColor(220, 221, 225), 0.5))
+        painter.setPen(QPen(self._themed_color("#dcddE1", "chart.grid"), 0.5))
         painter.drawLine(rect.left(), rect.top(), rect.right(), rect.top())
         painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
         painter.drawLine(rect.left(), rect.top(), rect.left(), rect.bottom())
@@ -240,20 +252,20 @@ class OrdersDelegate(QStyledItemDelegate):
 
         painter.save()
         if getattr(order, "_pending_delete", False):
-            painter.fillRect(option.rect, QColor(255, 245, 232))
+            painter.fillRect(option.rect, self._themed_color("#fff5e8", "background"))
         elif option.features & QStyleOptionViewItem.Alternate:
-            painter.fillRect(option.rect, QColor(BG_ALT_ROW))
+            painter.fillRect(option.rect, self._palette_color(option, QPalette.AlternateBase))
         else:
-            painter.fillRect(option.rect, Qt.white)
+            painter.fillRect(option.rect, self._palette_color(option, QPalette.Base))
 
-        painter.setPen(QPen(QColor(220, 221, 225), 0.5))
+        painter.setPen(QPen(self._themed_color("#dcddE1", "chart.grid"), 0.5))
         painter.drawRect(option.rect)
 
         display = self._build_order_display(order, model)
         if display.get("single_line_centered"):
-            self._draw_single_line_order_text(painter, option.rect, display["line1"])
+            self._draw_single_line_order_text(painter, option, display["line1"])
         else:
-            self._draw_order_text(painter, option.rect, display["line1"], display["line2"])
+            self._draw_order_text(painter, option, display["line1"], display["line2"])
 
         if display["show_savecard"]:
             pixmap = self._get_scaled_savecard_pixmap(16)
@@ -264,21 +276,23 @@ class OrdersDelegate(QStyledItemDelegate):
 
         painter.restore()
 
-    def _draw_order_text(self, painter: QPainter, rect: QRect, line1_text: str, line2_text: str):
-        painter.setPen(Qt.black)
+    def _draw_order_text(self, painter: QPainter, option: QStyleOptionViewItem, line1_text: str, line2_text: str):
+        painter.setPen(self._palette_color(option, QPalette.Text))
+        rect = option.rect
         rect1 = QRect(rect.left() + 5, rect.top() + 5, rect.width() - 10, 20)
         font_metrics = painter.fontMetrics()
         elided_line1 = font_metrics.elidedText(line1_text, Qt.ElideRight, rect1.width())
         painter.drawText(rect1, Qt.AlignLeft | Qt.AlignVCenter, elided_line1)
 
         if line2_text:
-            painter.setPen(QColor(120, 120, 120))
+            painter.setPen(self._themed_color("#787878", "text.secondary"))
             rect2 = QRect(rect.left() + 5, rect.top() + 25, rect.width() - 10, 15)
             elided_line2 = font_metrics.elidedText(line2_text, Qt.ElideRight, rect2.width())
             painter.drawText(rect2, Qt.AlignLeft | Qt.AlignVCenter, elided_line2)
 
-    def _draw_single_line_order_text(self, painter: QPainter, rect: QRect, line_text: str):
-        painter.setPen(Qt.black)
+    def _draw_single_line_order_text(self, painter: QPainter, option: QStyleOptionViewItem, line_text: str):
+        painter.setPen(self._palette_color(option, QPalette.Text))
+        rect = option.rect
         text_rect = QRect(rect.left() + 5, rect.top(), rect.width() - 10, rect.height())
         font_metrics = painter.fontMetrics()
         elided_line = font_metrics.elidedText(line_text, Qt.ElideRight, text_rect.width())
@@ -288,12 +302,14 @@ class OrdersDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing, False)
         rect = option.rect
+        text_color = self._palette_color(option, QPalette.Text)
+        painter.setPen(text_color)
 
         if admin:
             self._paint_admin(painter, rect, admin)
 
         self._draw_now_marker(painter, rect, hour_dt, now)
-        self._draw_hour_separator(painter, rect, hour_dt)
+        self._draw_hour_separator(painter, rect, hour_dt, text_color)
 
         painter.restore()
 
@@ -310,7 +326,7 @@ class OrdersDelegate(QStyledItemDelegate):
             pass
 
     def _paint_cancelled_admin(self, painter: QPainter, rect: QRect, *, pending: bool = False):
-        painter.setPen(QColor(95, 106, 117) if pending else Qt.black)
+        painter.setPen(self._themed_color("#5f6a75", "text.muted") if pending else painter.pen().color())
         font = painter.font()
         font.setBold(True)
         painter.setFont(font)
@@ -318,7 +334,7 @@ class OrdersDelegate(QStyledItemDelegate):
 
     def _paint_planned_admin(self, painter: QPainter, rect: QRect, admin, *, pending: bool = False):
         painter.save()
-        painter.setPen(QColor(95, 106, 117) if pending else Qt.black)
+        painter.setPen(self._themed_color("#5f6a75", "text.muted") if pending else painter.pen().color())
         font = painter.font()
         font.setBold(True)
         painter.setFont(font)
@@ -347,7 +363,8 @@ class OrdersDelegate(QStyledItemDelegate):
     def _draw_chain(self, painter: QPainter, rect: QRect, cell_role: str, mark: str, *, pending: bool = False):
         line_y = int(rect.center().y())
         cx = int(rect.center().x())
-        painter.setPen(QPen(QColor(95, 106, 117) if pending else Qt.black, 1.5))
+        color = self._themed_color("#5f6a75", "text.muted") if pending else painter.pen().color()
+        painter.setPen(QPen(color, 1.5))
 
         if cell_role == "start":
             painter.drawLine(cx + 10, line_y, rect.right(), line_y)
@@ -365,7 +382,7 @@ class OrdersDelegate(QStyledItemDelegate):
                 self._draw_centered_pixmap(painter, rect, body_mark_pixmap)
 
     def _draw_chain_arrow(self, painter: QPainter, cx: int, line_y: int, *, pending: bool = False):
-        painter.setBrush(QColor(95, 106, 117) if pending else Qt.black)
+        painter.setBrush(self._themed_color("#5f6a75", "text.muted") if pending else painter.pen().color())
         arrow_size = 5
         arrow = QPolygon([
             QPoint(cx - 10, line_y),
@@ -384,11 +401,13 @@ class OrdersDelegate(QStyledItemDelegate):
             minute_ratio = now.minute / 60.0
             pos_x = rect.left() + int(rect.width() * minute_ratio)
 
-            painter.setPen(QPen(self.now_line_color, 2))
+            now_color = self._themed_color("#e74c3c", "paint")
+            now_color.setAlpha(150)
+            painter.setPen(QPen(now_color, 2))
             painter.drawLine(pos_x, rect.top(), pos_x, rect.bottom())
 
-    def _draw_hour_separator(self, painter: QPainter, rect: QRect, hour_dt):
+    def _draw_hour_separator(self, painter: QPainter, rect: QRect, hour_dt, text_color: QColor):
         if hour_dt.hour in [13, 19, 1]:
-            painter.setPen(QPen(Qt.black, 1.5))
+            painter.setPen(QPen(text_color, 1.5))
             x = rect.right() + 1.0
             painter.drawLine(x, rect.top(), x, rect.bottom())

@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
 import os
 from datetime import datetime
@@ -19,7 +21,6 @@ from PySide6.QtWidgets import (
 from rem_card.app.db_cycle_registry import DB_CYCLE_MAX_AGE_DAYS, DbCycleInfo, list_db_cycles
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.theme_tokens import token
 
 
@@ -129,10 +130,9 @@ class DbRotationDialog(BaseStyledDialog):
         root.addLayout(buttons)
 
     def _apply_local_style(self):
-        tokens = get_theme_manager().current_tokens()
+        tokens = style_tokens()
         t = lambda key, default="": token(tokens, key, default)
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + f"""
             QFrame#DbRotationHeader {{
                 background-color: {t("surface.subtle")};
@@ -205,8 +205,7 @@ class DbRotationDialog(BaseStyledDialog):
                 background-color: {t("field.disabled_bg")};
                 color: {t("text.disabled")};
             }}
-            """
-        )
+            """)
 
     def reload_cycles(self):
         current_path = self._current_db_path()

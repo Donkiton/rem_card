@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (
     QHBoxLayout, QPushButton, QLabel, QComboBox
 )
@@ -17,7 +18,7 @@ class TemplateSelectionDialog(BaseStyledDialog):
 
         engine.reload_if_changed(force_check=True)
         
-        self.content_widget.setStyleSheet(f"""
+        set_widget_style(self.content_widget, f"""
             QLabel {{ font-size: 14px; font-weight: bold; color: #2c3e50; background-color: transparent; }}
             QComboBox {{ 
                 background-color: {BG_CARD}; 

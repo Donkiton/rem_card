@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 from typing import Any
@@ -70,8 +72,7 @@ class SettingsImportPathDialog(BaseStyledDialog):
         footer.addWidget(ok_btn)
         root.addLayout(footer)
 
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + """
             QLineEdit {
                 background: #ffffff;
@@ -84,8 +85,7 @@ class SettingsImportPathDialog(BaseStyledDialog):
             QLineEdit:focus {
                 border-color: #7f9fbd;
             }
-            """
-        )
+            """)
 
     def _browse(self):
         dialog = SettingsImportFolderDialog(self.path_edit.text().strip(), parent=self)
@@ -179,8 +179,7 @@ class SettingsImportFolderDialog(BaseStyledDialog):
         footer.addWidget(select_btn)
         root.addLayout(footer)
 
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + """
             QLineEdit {
                 background: #ffffff;
@@ -255,8 +254,7 @@ class SettingsImportFolderDialog(BaseStyledDialog):
                 border: none;
                 width: 0px;
             }
-            """
-        )
+            """)
 
         start_path = self._normalize_initial_path(initial_path)
         self._set_root_path(start_path)
@@ -389,8 +387,7 @@ class SettingsImportPreviewDialog(BaseStyledDialog):
         root.addLayout(footer)
 
         self.table.itemChanged.connect(lambda *_args: self._update_selected_label())
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + """
             QLabel {
                 color: #2c3e50;
@@ -462,8 +459,7 @@ class SettingsImportPreviewDialog(BaseStyledDialog):
                 border: none;
                 width: 0px;
             }
-            """
-        )
+            """)
 
     def _populate(self):
         counts = {"insert": 0, "update": 0, "delete": 0}

@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea
@@ -126,8 +127,8 @@ class NurseBedsSelectionWidget(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QScrollArea.NoFrame)
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.viewport().setStyleSheet("background: transparent;")
-        self.scroll.setStyleSheet("""
+        set_widget_style(self.scroll.viewport(), "background: transparent;")
+        set_widget_style(self.scroll, """
             QScrollArea {
                 background: transparent;
                 border: none;
@@ -142,7 +143,7 @@ class NurseBedsSelectionWidget(QWidget):
         
         self.container = QWidget()
         self.container.setObjectName("beds_container")
-        self.container.setStyleSheet("QWidget#beds_container { background: transparent; }")
+        set_widget_style(self.container, "QWidget#beds_container { background: transparent; }")
         
         self.list_layout = QVBoxLayout(self.container)
         self.list_layout.setContentsMargins(0, 0, 3, 0)

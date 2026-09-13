@@ -1,7 +1,7 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
 from rem_card.ui.styles.sector_styles import build_remcard_tab_button_style, build_remcard_tab_frame_style
-from rem_card.ui.styles.theme_manager import get_theme_manager
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget, QLabel
 from PySide6.QtCore import Signal
 
@@ -13,9 +13,9 @@ class NurseSector2b(BaseSectorWidget):
         super().__init__("2б (Вкладки)", parent)
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         self.setContentsMargins(0, 0, 0, 0)
-        tokens = get_theme_manager().current_tokens()
+        tokens = style_tokens()
         
-        self.setStyleSheet(build_remcard_tab_frame_style(tokens))
+        set_widget_style(self, build_remcard_tab_frame_style(tokens))
 
         self.label.hide()
         
@@ -76,7 +76,7 @@ class NurseSector2b(BaseSectorWidget):
         btn.setChecked(active)
         btn.setFixedHeight(32)
         
-        btn.setStyleSheet(build_remcard_tab_button_style(get_theme_manager().current_tokens()))
+        set_widget_style(btn, build_remcard_tab_button_style(style_tokens()))
         if enabled:
             btn.clicked.connect(lambda: self.on_tab_clicked(text))
         return btn

@@ -288,7 +288,12 @@ def _apply_basic_app_theme(app):
     """Cheap baseline styling for startup without global QSS repolish costs."""
     if app is None:
         return
-    _install_no_button_focus_rect_style(app)
+    try:
+        from rem_card.ui.styles.focus_rect_style import apply_application_theme_style
+
+        apply_application_theme_style(app, "light")
+    except Exception:
+        _install_no_button_focus_rect_style(app)
     try:
         from PySide6.QtGui import QColor, QFont, QPalette
         from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
@@ -334,34 +339,42 @@ def _install_no_button_focus_rect_style(app):
         pass
 
 
+def _reset_runtime_theme_to_light(app):
+    try:
+        from rem_card.ui.styles import theme_runtime
+        from rem_card.ui.styles.focus_rect_style import apply_application_theme_style
+
+        apply_application_theme_style(app, "light")
+        theme_runtime.refresh_registered_styles("light")
+    except Exception:
+        pass
+
+
 def _apply_app_theme(app, role: Optional[str] = None):
     _install_no_button_focus_rect_style(app)
-    # Оперблок использует фиксированную светлую тему. Даже принудительное
-    # REMCARD_FULL_RUNTIME_THEME не должно втягивать его в динамическую тему и
-    # связанную с ней БД настроек до bootstrap.
-    if is_operblock_role(role):
+    feature_value = str(os.environ.get(FULL_RUNTIME_THEME_ENV, "1")).strip().lower()
+    if feature_value in {"0", "false", "no", "off"}:
         _apply_basic_app_theme(app)
         return
-    if not _env_flag_enabled(FULL_RUNTIME_THEME_ENV):
-        _apply_basic_app_theme(app)
-        return
+    manager = None
     try:
+        from PySide6.QtGui import QFont
         from rem_card.ui.styles.theme_manager import get_theme_manager
+        from rem_card.ui.styles.context_menu_style import install_global_text_edit_context_menus
 
+        app.setFont(QFont("Segoe UI", 10))
+        install_global_text_edit_context_menus(app)
         manager = get_theme_manager()
         manager.load(role or "system")
         manager.apply_to_app(app, role or "system")
     except Exception:
-        try:
-            from rem_card.ui.styles.theme import GLOBAL_STYLE
-            from rem_card.ui.styles.context_menu_style import install_global_text_edit_context_menus
-            from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
-
-            app.setStyleSheet(GLOBAL_STYLE)
-            apply_tooltip_palette(app)
-            install_global_text_edit_context_menus(app)
-        except Exception:
-            pass
+        if manager is not None:
+            try:
+                manager.disable_runtime()
+            except Exception:
+                pass
+        _reset_runtime_theme_to_light(app)
+        _apply_basic_app_theme(app)
 
 
 def _write_startup_local_log(message: str):

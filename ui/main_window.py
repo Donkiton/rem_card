@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel
 from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer, Slot, Signal, QEventLoop
 
@@ -195,7 +196,7 @@ class MainWindow(QMainWindow):
 
         self.main_container = QFrame()
         self.main_container.setObjectName("MainFrame")
-        self.main_container.setStyleSheet(f"""
+        set_widget_style(self.main_container, f"""
             QFrame#MainFrame {{ 
                 background-color: {BG_MAIN} !important; 
                 border: 1px solid #bdc3c7; 
@@ -229,8 +230,7 @@ class MainWindow(QMainWindow):
             )
             self._emergency_banner.setObjectName("EmergencyModeBanner")
             self._emergency_banner.setWordWrap(True)
-            self._emergency_banner.setStyleSheet(
-                """
+            set_widget_style(self._emergency_banner, """
                 QLabel#EmergencyModeBanner {
                     background-color: #fff3cd;
                     color: #5f4300;
@@ -238,15 +238,13 @@ class MainWindow(QMainWindow):
                     padding: 8px 14px;
                     font-weight: 700;
                 }
-                """
-            )
+                """)
             self.main_layout.addWidget(self._emergency_banner)
 
             if runtime_mode == "emergency":
                 self._restore_probe_status_label = QLabel("Ожидание восстановления сетевой базы")
                 self._restore_probe_status_label.setObjectName("EmergencyRestoreProbeStatus")
-                self._restore_probe_status_label.setStyleSheet(
-                    """
+                set_widget_style(self._restore_probe_status_label, """
                     QLabel#EmergencyRestoreProbeStatus {
                         background-color: #e8f2ff;
                         color: #174264;
@@ -254,8 +252,7 @@ class MainWindow(QMainWindow):
                         padding: 5px 14px;
                         font-weight: 600;
                     }
-                    """
-                )
+                    """)
                 self.main_layout.addWidget(self._restore_probe_status_label)
             else:
                 self._restore_probe_status_label = None
@@ -309,10 +306,7 @@ class MainWindow(QMainWindow):
         if overlay is None:
             from rem_card.ui.shared.loading_overlay import LoadingOverlay
 
-            overlay = LoadingOverlay(
-                self.main_container,
-                gif_path=os.path.join(get_icon_dir(), "loading.gif"),
-            )
+            overlay = LoadingOverlay(self.main_container)
             self._loading_overlay = overlay
         self._position_loading_overlay()
         return overlay
@@ -721,8 +715,7 @@ class MainWindow(QMainWindow):
         )
         self._emergency_banner.setObjectName("EmergencyModeBanner")
         self._emergency_banner.setWordWrap(True)
-        self._emergency_banner.setStyleSheet(
-            """
+        set_widget_style(self._emergency_banner, """
             QLabel#EmergencyModeBanner {
                 background-color: #fff3cd;
                 color: #5f4300;
@@ -730,8 +723,7 @@ class MainWindow(QMainWindow):
                 padding: 8px 14px;
                 font-weight: 700;
             }
-            """
-        )
+            """)
         self.main_layout.insertWidget(1, self._emergency_banner)
 
     def _show_operblock_migration_dialog(self):

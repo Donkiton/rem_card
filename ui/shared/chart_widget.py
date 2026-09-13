@@ -6,9 +6,14 @@ from PySide6.QtCore import Qt, Signal, QEvent, QPointF, QRect, QTimeLine
 from PySide6.QtGui import QPainter, QFont, QColor, QPainterPath
 from datetime import datetime, timedelta
 from .chart_data_processor import ChartDataProcessor
-from ..styles.theme import (BG_MAIN, BG_LIGHT, BORDER_COLOR, COLOR_VITAL_AD_LINE,
-                            COLOR_VITAL_AD_BG, COLOR_VITAL_PULSE, COLOR_VITAL_SPO2,
-                            COLOR_VITAL_TEMP, COLOR_VITAL_RESP, COLOR_VITAL_CVP)
+from ..styles.chart_styles import chart_paint_colors, chart_widget_style, vital_colors
+from ..styles.theme_manager import get_theme_manager
+
+try:
+    from ..styles.theme_runtime import register_theme_callback
+except ImportError:  # Compatibility while opening an older installed release.
+    def register_theme_callback(_widget, _callback):
+        return None
 
 pg.setConfigOption("background", "transparent")
 pg.setConfigOption("foreground", "k")
@@ -88,14 +93,16 @@ class TimeHeader(QWidget):
             p2 = view.mapFromScene(vb.mapViewToScene(pg.Point(self.highlighted_hour + 1, 0)))
             
             highlight_rect = QRect(p1.x() + 7, 0, p2.x() - p1.x(), self.height())
-            painter.fillRect(highlight_rect, QColor(100, 150, 255, 60))
+            highlight = QColor(self.chart._paint_colors["hover"])
+            highlight.setAlpha(100)
+            painter.fillRect(highlight_rect, highlight)
 
         # 2. РћС‚СЂРёСЃРѕРІРєР° С‚РµРєСЃС‚Р° РІСЂРµРјРµРЅРё (Р‘Р•Р— РЎРњР•Р©Р•РќРРЇ, РєР°Рє Р±С‹Р»Рѕ РґРѕ РїСЂР°РІРѕРє)
         if not self.chart.start_time:
             painter.end()
             return
 
-        painter.setPen(Qt.black)
+        painter.setPen(QColor(self.chart._paint_colors["text"]))
         vb = self.chart.plot_widget.getViewBox()
         view = self.chart.plot_widget
 
@@ -158,13 +165,22 @@ class TooltipItem(pg.TextItem):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setOpacity(1.0)
+        self._paint_colors = {
+            "tooltip_border": "#544d4d",
+            "tooltip_bg": "#ebecef",
+            "text": "#2c3e50",
+        }
+
+    def apply_theme(self, colors: dict[str, str]):
+        self._paint_colors = dict(colors)
+        self.setColor(self._paint_colors["text"])
+        self.update()
         
     def paint(self, p, *args):
         # РћС‚СЂРёСЃРѕРІС‹РІР°РµРј РєР°СЃС‚РѕРјРЅС‹Р№ С„РѕРЅ СЃ Р·Р°РєСЂСѓРіР»РµРЅРЅС‹РјРё РєСЂР°СЏРјРё
         p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(pg.mkPen('#544d4d', width=1))
-        # Р“Р°СЂР°РЅС‚РёСЂРѕРІР°РЅРЅРѕ РЅРµРїСЂРѕР·СЂР°С‡РЅС‹Р№ С„РѕРЅ #ebecef
-        p.setBrush(pg.mkBrush(QColor('#ebecef')))
+        p.setPen(pg.mkPen(self._paint_colors["tooltip_border"], width=1))
+        p.setBrush(pg.mkBrush(QColor(self._paint_colors["tooltip_bg"])))
         
         rect = self.boundingRect()
         p.drawRoundedRect(rect, 5, 5)
@@ -182,6 +198,17 @@ class ChartWidget(QWidget):
         self._grid_lines = []
         self._range_changed_handler = self._on_view_range_changed
         self._original_send_hover_events = None
+        self._curve_specs = (
+            ("sys", "ad", 2),
+            ("dia", "ad", 2),
+            ("pulse", "pulse", 3),
+            ("spo2", "spo2", 2),
+            ("temp", "temp", 2),
+            ("rr", "rr", 2),
+            ("cvp", "cvp", 2),
+        )
+        self.colors = vital_colors(get_theme_manager().current_tokens())
+        self._paint_colors = chart_paint_colors(get_theme_manager().current_tokens())
         
         # Р“Р»РѕР±Р°Р»СЊРЅРѕРµ РїРѕРґР°РІР»РµРЅРёРµ РІРѕСЂРЅРёРЅРіРѕРІ numpy РґР»СЏ СЌС‚РѕРіРѕ РІРёРґР¶РµС‚Р° (СЂРµС€Р°РµС‚ РїСЂРѕР±Р»РµРјСѓ All-NaN slice РІ pyqtgraph)
         # РџРѕРґР°РІР»СЏРµРј РІСЃРµ RuntimeWarning, С‚Р°Рє РєР°Рє pyqtgraph С‡Р°СЃС‚Рѕ РіРµРЅРµСЂРёСЂСѓРµС‚ РёС… РїСЂРё СЂР°Р±РѕС‚Рµ СЃ NaN
@@ -207,9 +234,9 @@ class ChartWidget(QWidget):
         self.plot_widget = pg.PlotWidget()
         self.plot_widget.setBackground('transparent') # РџСЂРѕР·СЂР°С‡РЅС‹Р№ С„РѕРЅ РІСЃРµРіРѕ РІРёРґР¶РµС‚Р°
         
-        # Р—Р°РєСЂР°С€РёРІР°РµРј Р±РµР»С‹Рј С‚РѕР»СЊРєРѕ СЃР°РјСѓ РѕР±Р»Р°СЃС‚СЊ РіСЂР°С„РёРєР° (ViewBox)
+        # Р—Р°РєСЂР°С€РёРІР°РµРј С‚РѕР»СЊРєРѕ СЃР°РјСѓ РѕР±Р»Р°СЃС‚СЊ РіСЂР°С„РёРєР° (ViewBox)
         vb = self.plot_widget.getViewBox()
-        vb.setBackgroundColor('w')
+        vb.setBackgroundColor(self._paint_colors["plot_bg"])
         
         # РџРѕРґРєР»СЋС‡Р°РµРј СЃРёРіРЅР°Р» РёР·РјРµРЅРµРЅРёСЏ РґРёР°РїР°Р·РѕРЅР° Рє РѕР±РЅРѕРІР»РµРЅРёСЋ Р·Р°РіРѕР»РѕРІРєР°, 
         # С‡С‚РѕР±С‹ РІСЂРµРјСЏ РІСЃРµРіРґР° "СЃР°РјРѕ" РІС‹СЂР°РІРЅРёРІР°Р»РѕСЃСЊ РїРѕ СЃРµС‚РєРµ РїРѕСЃР»Рµ СЂР°СЃС‡РµС‚РѕРІ РґРІРёР¶РєР°
@@ -241,16 +268,6 @@ class ChartWidget(QWidget):
         self.status_service = None
         self.admission_id = None
         
-        self.colors = {
-            'ad': COLOR_VITAL_AD_LINE,
-            'ad_fill': COLOR_VITAL_AD_BG,
-            'pulse': COLOR_VITAL_PULSE,
-            'spo2': COLOR_VITAL_SPO2,
-            'temp': COLOR_VITAL_TEMP,
-            'rr': COLOR_VITAL_RESP,
-            'cvp': COLOR_VITAL_CVP
-        }
-
         pg.setConfigOptions(antialias=True)
         
         self.curve_items = []
@@ -263,8 +280,11 @@ class ChartWidget(QWidget):
         self.current_vitals = []
         self._last_render_key = None
         
-        self.slice_line = pg.InfiniteLine(angle=90, movable=False, 
-                                          pen=pg.mkPen(color='#888', style=Qt.DashLine, width=2))
+        self.slice_line = pg.InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen(color=self._paint_colors["slice"], style=Qt.DashLine, width=2),
+        )
         self.slice_line.setZValue(100)
         self.slice_line.setAcceptHoverEvents(False)
         self.slice_line.setOpacity(0) # РР·РЅР°С‡Р°Р»СЊРЅРѕ РїСЂРѕР·СЂР°С‡РЅРѕ
@@ -301,25 +321,8 @@ class ChartWidget(QWidget):
         self.header_spacer.show()
         self.header_spacer.raise_()
 
-        self.setStyleSheet(f"""
-            QWidget#chart_header {{
-                background-color: {BG_LIGHT} !important;
-                border-top: 1.5px solid {BORDER_COLOR} !important;
-                border-right: 1.5px solid {BORDER_COLOR} !important;
-                border-bottom: 0.5px solid {BORDER_COLOR} !important;
-                border-top-right-radius: 5px !important;
-                border-top-left-radius: 0px !important;
-                border-left: none !important;
-            }}
-            QWidget#chart_body {{
-                background-color: {BG_MAIN} !important;
-                border-right: 1.5px solid {BORDER_COLOR} !important;
-                border-bottom: 1.5px solid {BORDER_COLOR} !important;
-                border-bottom-right-radius: 5px !important;
-                border-left: none !important;
-                border-top: none !important;
-            }}
-        """)
+        self.apply_theme()
+        register_theme_callback(self, self.apply_theme)
 
     def is_plot_alive(self) -> bool:
         try:
@@ -336,6 +339,40 @@ class ChartWidget(QWidget):
         if self._tearing_down or not _qt_object_alive(self.header_spacer):
             return
         self.header_spacer.update()
+
+    def apply_theme(self, *_args):
+        """Repaint plot surfaces in place without touching clinical data."""
+        if self._tearing_down:
+            return
+        tokens = get_theme_manager().current_tokens()
+        self.colors = vital_colors(tokens)
+        self._paint_colors = chart_paint_colors(tokens)
+        self.setStyleSheet(chart_widget_style(tokens))
+
+        if not self.is_plot_alive():
+            return
+
+        self.plot_widget.getViewBox().setBackgroundColor(self._paint_colors["plot_bg"])
+        axis_pen = pg.mkPen(self._paint_colors["axis"])
+        for axis_name in ("left", "right", "top", "bottom"):
+            axis = self.plot_widget.getAxis(axis_name)
+            axis.setPen(axis_pen)
+            axis.setTextPen(axis_pen)
+
+        for key, color_key, width in self._curve_specs:
+            curve = self._curve_by_key.get(key)
+            if curve is not None:
+                curve.setPen(pg.mkPen(self.colors[color_key], width=width))
+        for item in self.fill_items:
+            item.setBrush(pg.mkBrush(self.colors["ad_fill"]))
+        for key, item in self._scatter_items.items():
+            item.setBrush(pg.mkBrush(self.colors[key]))
+        for line in self._grid_lines:
+            line.setPen(pg.mkPen(self._paint_colors["grid"]))
+        self.slice_line.setPen(pg.mkPen(self._paint_colors["slice"], style=Qt.DashLine, width=2))
+        self.tooltip.apply_theme(self._paint_colors)
+        self.header_spacer.update()
+        self.plot_widget.viewport().update()
 
     def _disable_pyqtgraph_hover_events(self):
         try:
@@ -359,7 +396,7 @@ class ChartWidget(QWidget):
             line = pg.InfiniteLine(
                 pos=len(self._grid_lines) * step_hours,
                 angle=90,
-                pen=pg.mkPen(color=(0, 0, 0, 50)),
+                pen=pg.mkPen(color=self._paint_colors["grid"]),
             )
             line.setAcceptHoverEvents(False)
             self._grid_lines.append(line)
@@ -389,16 +426,7 @@ class ChartWidget(QWidget):
         self.header_spacer.update()
 
     def _init_reusable_plot_items(self):
-        curve_specs = (
-            ("sys", "ad", 2),
-            ("dia", "ad", 2),
-            ("pulse", "pulse", 3),
-            ("spo2", "spo2", 2),
-            ("temp", "temp", 2),
-            ("rr", "rr", 2),
-            ("cvp", "cvp", 2),
-        )
-        for key, color_key, width in curve_specs:
+        for key, color_key, width in self._curve_specs:
             curve = pg.PlotDataItem(pen=pg.mkPen(self.colors[color_key], width=width))
             curve.setZValue(10)
             curve.setAcceptHoverEvents(False)
@@ -601,7 +629,7 @@ class ChartWidget(QWidget):
             if closest_vital is not None:
                 time_str = closest_vital.timestamp.strftime('%H:%M')
                 
-                html = "<div style='font-family: Segoe UI; font-size: 13px; padding: 5px; background-color: #ebecef;'>"
+                html = "<div style='font-family: Segoe UI; font-size: 13px; padding: 5px;'>"
                 html += f"<b>Время: {time_str}</b><br>"
                 
                 def f_val(val):

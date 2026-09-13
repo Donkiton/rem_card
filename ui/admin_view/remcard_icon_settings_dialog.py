@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 from dataclasses import asdict
@@ -161,8 +163,7 @@ class RemCardIconSettingsDialog(BaseStyledDialog):
         footer.addWidget(close_btn)
         layout.addLayout(footer)
 
-        self.setStyleSheet(
-            self.styleSheet()
+        set_widget_style(self, source_style(self)
             + """
             QFrame#RemCardIconDetail {
                 background-color: #ffffff;
@@ -199,8 +200,7 @@ class RemCardIconSettingsDialog(BaseStyledDialog):
                 background-color: #d7eaf8;
                 color: #1f3447;
             }
-            """
-        )
+            """)
         self._ui_ready = True
 
     def _preview_block(self, title: str, *, current: bool) -> QWidget:

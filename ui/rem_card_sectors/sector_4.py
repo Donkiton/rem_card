@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from rem_card.services.shift_service import ShiftService
 from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
 from rem_card.ui.shared.base_sector import BaseSectorWidget
@@ -11,7 +12,7 @@ class Sector4(BaseSectorWidget):
         super().__init__("4", parent)
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         self._recovery_mode = False
         
         self.init_ui()
@@ -46,7 +47,7 @@ class Sector4(BaseSectorWidget):
         self.main_layout_v.addWidget(self.bottom_footer)
 
         # Стили
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_4_main_container {
                 background-color: #f8f9fa !important;
             }
@@ -87,19 +88,19 @@ class Sector4(BaseSectorWidget):
         self.info_layout.setSpacing(20)
         
         self.lbl_history = QLabel("№ -")
-        self.lbl_history.setStyleSheet(f"font-weight: bold; background: transparent; color: {COLOR_PRIMARY_DARK};")
+        set_widget_style(self.lbl_history, f"font-weight: bold; background: transparent; color: {COLOR_PRIMARY_DARK};")
         
         self.lbl_name = QLabel("-")
-        self.lbl_name.setStyleSheet("font-weight: bold; font-size: 14px; background: transparent;")
+        set_widget_style(self.lbl_name, "font-weight: bold; font-size: 14px; background: transparent;")
         
         self.lbl_age = QLabel("Возраст: -")
-        self.lbl_age.setStyleSheet("background: transparent;")
+        set_widget_style(self.lbl_age, "background: transparent;")
         
         self.lbl_days = QLabel("Сутки: -")
-        self.lbl_days.setStyleSheet("background: transparent;")
+        set_widget_style(self.lbl_days, "background: transparent;")
         
         self.lbl_diagnosis = QLabel("Диагноз: -")
-        self.lbl_diagnosis.setStyleSheet("background: transparent;")
+        set_widget_style(self.lbl_diagnosis, "background: transparent;")
         self.lbl_diagnosis.setWordWrap(True)
         
         self.info_layout.addWidget(self.lbl_history)

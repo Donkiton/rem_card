@@ -30,6 +30,7 @@ from rem_card.ui.shared.analytics_integration import (
 from rem_card.ui.shared.archive_date_edit import ArchiveDateEdit
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.persistent_file_dialog import PersistentSaveFileDialog
+from rem_card.ui.shared.themed_html import set_themed_html
 from rem_card.ui.styles.theme import ANALYTICS_CHART_COLORS
 from rem_card.services.analytics.platform import AnalyticsPeriod, CohortDefinition, MetricScope, StatisticsRepository, analytics_context_html, materialize_cohort_snapshot
 
@@ -189,7 +190,7 @@ class ArchiveGraphsPage(QWidget):
         self.report = QTextBrowser(self)
         self.report.setObjectName("ArchiveStatisticsReport")
         self.report.setOpenExternalLinks(False)
-        self.report.setHtml(
+        set_themed_html(self.report,
             "<div style='padding:28px;color:#6b7785;'>"
             "Выберите графики слева и нажмите «Показать графики»."
             "</div>"
@@ -398,7 +399,7 @@ class ArchiveGraphsPage(QWidget):
         html = str(getattr(result, "html", "") or "")
         self._latest_html = html
         self._latest_signature = request_signature or self._signature()
-        self.report.setHtml(html)
+        set_themed_html(self.report, html)
         self._set_busy(False, "")
         if save_after and self._pending_pdf_path:
             path = self._pending_pdf_path

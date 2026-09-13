@@ -6,15 +6,18 @@ import os
 
 from rem_card.app.paths import get_icon_dir
 from rem_card.ui.styles.chart_styles import analytics_chart_colors
-from rem_card.ui.styles.theme_manager import get_theme_manager
+from rem_card.ui.styles.theme_runtime import style_tokens
 from rem_card.ui.styles.tooltip_style import TOOLTIP_BG, TOOLTIP_BORDER, TOOLTIP_TEXT
 
 
 def get_current_tokens(role: str | None = None) -> dict:
+    from rem_card.ui.styles.theme_manager import get_theme_manager
     return get_theme_manager().tokens_for_role(role)
 
 
-_TOKENS = get_theme_manager().current_tokens()
+# Совместимые исходные стили всегда описывают светлую геометрию. Цвета
+# разрешаются theme_runtime при назначении/смене темы, не при импорте.
+_TOKENS = style_tokens()
 
 
 def _t(key: str, default: str = "") -> str:

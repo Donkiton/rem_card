@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 
@@ -149,8 +151,7 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
         footer.addWidget(self.apply_button)
         root.addLayout(footer)
 
-        self.setStyleSheet(
-            f"{self.styleSheet()}\n"
+        set_widget_style(self, f"{source_style(self)}\n"
             """
             QLabel#DevDatabaseCurrentPath {
                 background: #eef4f8;
@@ -184,8 +185,7 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
                 background: #dceaf7;
                 color: #1f2d3d;
             }
-            """
-        )
+            """)
 
     def _candidate_path(self) -> str:
         raw_path = self.path_edit.text().strip().strip('"')

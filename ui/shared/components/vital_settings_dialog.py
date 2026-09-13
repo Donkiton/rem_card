@@ -1,8 +1,10 @@
+from rem_card.ui.styles.theme_runtime import themed_qcolor
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QCheckBox, QGridLayout, QFrame, QSizePolicy)
 from PySide6.QtCore import Qt, Signal, Property, QPropertyAnimation, QEasingCurve, QPoint, QEvent
-from PySide6.QtGui import QColor, QPainter, QBrush, QPixmap, QIcon
+from PySide6.QtGui import QPainter, QBrush, QPixmap, QIcon
 
 from rem_card.ui.styles.theme import STYLE_CUSTOM_DIALOG
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -48,8 +50,8 @@ class ToggleSwitch(QCheckBox):
         track_rect = self.contentsRect()
         
         # Цвета
-        bg_color = QColor("#27ae60") if self.isChecked() else QColor("#bdc3c7")
-        thumb_color = QColor("#ffffff")
+        bg_color = themed_qcolor("#27ae60", "text") if self.isChecked() else themed_qcolor("#bdc3c7", "text")
+        thumb_color = themed_qcolor("#ffffff", "text")
         
         # Рисуем фон
         p.setBrush(QBrush(bg_color))
@@ -96,7 +98,7 @@ class VitalSettingsDialog(QDialog):
         self.load_settings()
 
     def init_ui(self):
-        self.setStyleSheet(STYLE_CUSTOM_DIALOG)
+        set_widget_style(self, STYLE_CUSTOM_DIALOG)
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -165,7 +167,7 @@ class VitalSettingsDialog(QDialog):
         row = 0
         for key, label_text in self.indicators:
             lbl = QLabel(label_text)
-            lbl.setStyleSheet("font-size: 13px; color: #2c3e50; font-weight: 500;")
+            set_widget_style(lbl, "font-size: 13px; color: #2c3e50; font-weight: 500;")
             switch = ToggleSwitch()
             switch.stateChanged.connect(self.check_validity)
             if key == "cvp":

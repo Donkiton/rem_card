@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -42,8 +43,7 @@ class OperBlockRouteSettingsWidget(QWidget):
 
         self.frame = QFrame()
         self.frame.setObjectName("adminDictFrame")
-        self.frame.setStyleSheet(
-            """
+        set_widget_style(self.frame, """
             QFrame#adminDictFrame {
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
@@ -52,13 +52,12 @@ class OperBlockRouteSettingsWidget(QWidget):
             QTableWidget {
                 background-color: white;
             }
-            """
-        )
+            """)
         layout = QVBoxLayout(self.frame)
 
         header = QLabel("Пути введения препаратов оперблока")
         header.setProperty("heading", "true")
-        header.setStyleSheet("border: none; background: transparent;")
+        set_widget_style(header, "border: none; background: transparent;")
         layout.addWidget(header)
 
         hint = QLabel(
@@ -66,7 +65,7 @@ class OperBlockRouteSettingsWidget(QWidget):
             "Цифра в отмеченной ячейке показывает порядок выбора пути по умолчанию."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("border: none; background: transparent; color: #5f6b7a;")
+        set_widget_style(hint, "border: none; background: transparent; color: #5f6b7a;")
         layout.addWidget(hint)
 
         self.table = QTableWidget()

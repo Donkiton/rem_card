@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PySide6.QtCore import Qt
 from rem_card.ui.shared.base_sector import BaseSectorWidget
@@ -8,7 +9,7 @@ class NurseSector7naB(BaseSectorWidget):
         super().__init__("7na_b_nurse", parent)
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         self.setup_ui()
 
     def setup_ui(self):
@@ -31,7 +32,7 @@ class NurseSector7naB(BaseSectorWidget):
         self.data_layout.setContentsMargins(5, 5, 5, 5)
         self.main_layout_v.addWidget(self.data_area, 1)
 
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_7na_b_nurse_main_container {
                 background-color: #f8f9fa;
             }

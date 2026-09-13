@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 import os
 
@@ -642,7 +644,7 @@ class ElectrolyteCalculatorDialog(BaseStyledDialog):
     def _apply_styles(self):
         arrow_image = _combo_arrow_image()
         style = (
-            self.styleSheet()
+            source_style(self)
             + """
             QScrollArea#ElectrolyteScroll {
                 background: transparent;
@@ -845,15 +847,15 @@ class ElectrolyteCalculatorDialog(BaseStyledDialog):
             }
             """
         ).replace("__ELECTROLYTE_COMBO_ARROW_IMAGE__", arrow_image)
-        self.setStyleSheet(style)
+        set_widget_style(self, style)
 
     def _apply_combo_view_styles(self):
         for combo in self.findChildren(QComboBox):
             try:
                 view = combo.view()
                 view.setAlternatingRowColors(True)
-                view.setStyleSheet(ELECTROLYTE_COMBO_VIEW_STYLE)
-                view.verticalScrollBar().setStyleSheet(ELECTROLYTE_COMBO_VIEW_STYLE)
+                set_widget_style(view, ELECTROLYTE_COMBO_VIEW_STYLE)
+                set_widget_style(view.verticalScrollBar(), ELECTROLYTE_COMBO_VIEW_STYLE)
             except Exception:
                 pass
 

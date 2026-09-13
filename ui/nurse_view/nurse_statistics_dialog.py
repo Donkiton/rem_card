@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QWidget, QFrame, QPushButton
 )
@@ -13,7 +14,7 @@ class PatientStatCard(QFrame):
     def __init__(self, patient_name, history_number, current_hour_data, total_day_data):
         super().__init__()
         self.setObjectName("patientStatCard")
-        self.setStyleSheet("""
+        set_widget_style(self, """
             QFrame#patientStatCard {
                 background-color: #ffffff;
                 border: 1px solid #ced4da;
@@ -27,7 +28,7 @@ class PatientStatCard(QFrame):
         layout.setContentsMargins(15, 15, 15, 15)
         
         header = QLabel(f"<b>№{history_number}</b> | {patient_name}")
-        header.setStyleSheet("font-size: 14px; color: #2c3e50;")
+        set_widget_style(header, "font-size: 14px; color: #2c3e50;")
         layout.addWidget(header)
         
         content_layout = QHBoxLayout()
@@ -37,7 +38,7 @@ class PatientStatCard(QFrame):
         line = QFrame()
         line.setFrameShape(QFrame.VLine)
         line.setFrameShadow(QFrame.Sunken)
-        line.setStyleSheet("color: #ced4da;")
+        set_widget_style(line, "color: #ced4da;")
         content_layout.addWidget(line)
         
         total_day_widget = self.create_data_block("На конец суток (ожидаемый расход)", total_day_data)
@@ -51,19 +52,19 @@ class PatientStatCard(QFrame):
         l.setContentsMargins(0,0,0,0)
         
         lbl_title = QLabel(f"<b>{title}</b>")
-        lbl_title.setStyleSheet("color: #495057;")
+        set_widget_style(lbl_title, "color: #495057;")
         l.addWidget(lbl_title)
         
         if not data:
             lbl_empty = QLabel("Нет расхода")
-            lbl_empty.setStyleSheet("color: #adb5bd; font-style: italic;")
+            set_widget_style(lbl_empty, "color: #adb5bd; font-style: italic;")
             l.addWidget(lbl_empty)
         else:
             text = ""
             for item in data:
                 text += f"• {item}\n"
             lbl_data = QLabel(text.strip())
-            lbl_data.setStyleSheet("color: #212529;")
+            set_widget_style(lbl_data, "color: #212529;")
             l.addWidget(lbl_data)
             
         l.addStretch()
@@ -92,7 +93,7 @@ class NurseStatisticsDialog(QDialog):
         # Основной контейнер с рамкой и скруглением как в программе
         self.main_frame = QFrame(self)
         self.main_frame.setObjectName("MainFrame")
-        self.main_frame.setStyleSheet(f"""
+        set_widget_style(self.main_frame, f"""
             QFrame#MainFrame {{ 
                 background-color: {BG_MAIN}; 
                 border: 1.5px solid #bdc3c7; 
@@ -120,15 +121,15 @@ class NurseStatisticsDialog(QDialog):
         # Заголовок внутри отчета
         date_str = self.current_hour_dt.strftime("%d.%m.%Y")
         lbl_title = QLabel(f"Отчет по препаратам на {date_str}")
-        lbl_title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {COLOR_PRIMARY_DARK}; margin-bottom: 5px;")
+        set_widget_style(lbl_title, f"font-size: 20px; font-weight: bold; color: {COLOR_PRIMARY_DARK}; margin-bottom: 5px;")
         content_wrapper.addWidget(lbl_title)
         
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
-        self.scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        set_widget_style(self.scroll, "QScrollArea { border: none; background: transparent; }")
         
         self.content_widget = QWidget()
-        self.content_widget.setStyleSheet("background: transparent;")
+        set_widget_style(self.content_widget, "background: transparent;")
         self.content_layout = QVBoxLayout(self.content_widget)
         self.content_layout.setAlignment(Qt.AlignTop)
         
@@ -139,11 +140,9 @@ class NurseStatisticsDialog(QDialog):
         btn_layout.addStretch()
         btn_close = QPushButton("Закрыть")
         btn_close.setFixedWidth(120)
-        btn_close.setStyleSheet(
-            f"QPushButton {{ background-color: {COLOR_SECONDARY}; color: {TEXT_ON_DARK}; "
+        set_widget_style(btn_close, f"QPushButton {{ background-color: {COLOR_SECONDARY}; color: {TEXT_ON_DARK}; "
             "border-radius: 4px; padding: 6px; } "
-            f"QPushButton:hover {{ background-color: {COLOR_SECONDARY}; }}"
-        )
+            f"QPushButton:hover {{ background-color: {COLOR_SECONDARY}; }}")
         btn_close.clicked.connect(self.close)
         btn_layout.addWidget(btn_close)
         btn_layout.addSpacing(10) # Сдвиг влево от правого края на 10 пикселей

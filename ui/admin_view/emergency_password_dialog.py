@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton
@@ -21,10 +22,8 @@ class EmergencyPasswordSettingsDialog(BaseStyledDialog):
         self.current_password_label = QLabel("")
         self.current_password_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.current_password_label.setAlignment(Qt.AlignCenter)
-        self.current_password_label.setStyleSheet(
-            "font-size: 18px; font-weight: 700; padding: 10px 14px; "
-            "border: 1px solid #8BA3C7; border-radius: 6px; background: #F4F7FC;"
-        )
+        set_widget_style(self.current_password_label, "font-size: 18px; font-weight: 700; padding: 10px 14px; "
+            "border: 1px solid #8BA3C7; border-radius: 6px; background: #F4F7FC;")
         self.content_layout.addWidget(self.current_password_label)
 
         self.new_password_edit = QLineEdit()
@@ -41,7 +40,7 @@ class EmergencyPasswordSettingsDialog(BaseStyledDialog):
         self.error_label = QLabel("")
         self.error_label.setObjectName("DialogMessageText")
         self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #B00020; font-weight: 600;")
+        set_widget_style(self.error_label, "color: #B00020; font-weight: 600;")
         self.error_label.hide()
         self.content_layout.addWidget(self.error_label)
 

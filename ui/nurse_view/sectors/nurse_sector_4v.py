@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget, QPushButton, QFrame)
@@ -33,7 +34,7 @@ class VitalBadge(QFrame):
 
     def update_style(self, font_size: int, width: int):
         self.setFixedWidth(width)
-        self.setStyleSheet(f"""
+        set_widget_style(self, f"""
             QFrame#vital_badge_frame {{
                 background-color: {self.bg_color};
                 border-radius: 7px;
@@ -62,7 +63,7 @@ class NurseSector4v(BaseSectorWidget):
         super().__init__("4в", parent)
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
-        self.setStyleSheet("background: transparent;")
+        set_widget_style(self, "background: transparent;")
         
         self.icon_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "icon")
         self.icon_dir = os.path.normpath(self.icon_dir)
@@ -84,7 +85,7 @@ class NurseSector4v(BaseSectorWidget):
 
         # Внутренний виджет для скролла
         self.inner_content = QWidget()
-        self.inner_content.setStyleSheet("background: transparent;")
+        set_widget_style(self.inner_content, "background: transparent;")
         self.content_layout = QHBoxLayout(self.inner_content)
         self.content_layout.setContentsMargins(7, 0, 10, 0)
         self.content_layout.setSpacing(10)
@@ -118,7 +119,7 @@ class NurseSector4v(BaseSectorWidget):
         self.btn_yest_card.setIcon(QIcon(yest_icon_path))
         self.btn_yest_card.setIconSize(QSize(20, 20))
         self.btn_yest_card.setMinimumHeight(32)
-        self.btn_yest_card.setStyleSheet(button_style)
+        set_widget_style(self.btn_yest_card, button_style)
         self.btn_yest_card.clicked.connect(self.yest_card_requested.emit)
 
         # Кнопка "Показать карту"
@@ -127,7 +128,7 @@ class NurseSector4v(BaseSectorWidget):
         self.btn_show_card.setIcon(QIcon(show_icon_path))
         self.btn_show_card.setIconSize(QSize(20, 20))
         self.btn_show_card.setMinimumHeight(32)
-        self.btn_show_card.setStyleSheet(button_style)
+        set_widget_style(self.btn_show_card, button_style)
         self.btn_show_card.clicked.connect(self.show_card_requested.emit)
 
         # Кнопка "Список карт"
@@ -136,7 +137,7 @@ class NurseSector4v(BaseSectorWidget):
         self.btn_card_list.setIcon(QIcon(icon_path))
         self.btn_card_list.setIconSize(QSize(20, 20))
         self.btn_card_list.setMinimumHeight(32)
-        self.btn_card_list.setStyleSheet(button_style)
+        set_widget_style(self.btn_card_list, button_style)
         self.btn_card_list.clicked.connect(self.archive_requested.emit)
         
         # Кнопка "Отчет за сутки"
@@ -145,7 +146,7 @@ class NurseSector4v(BaseSectorWidget):
         self.btn_daily_print.setIcon(QIcon(icon_daily_path))
         self.btn_daily_print.setIconSize(QSize(20, 20))
         self.btn_daily_print.setMinimumHeight(32)
-        self.btn_daily_print.setStyleSheet(button_style)
+        set_widget_style(self.btn_daily_print, button_style)
         self.btn_daily_print.clicked.connect(self.daily_report_requested.emit)
 
         # Кнопка "Общий отчет"
@@ -154,12 +155,12 @@ class NurseSector4v(BaseSectorWidget):
         self.btn_all_print.setIcon(QIcon(icon_all_path))
         self.btn_all_print.setIconSize(QSize(20, 20))
         self.btn_all_print.setMinimumHeight(32)
-        self.btn_all_print.setStyleSheet(button_style)
+        set_widget_style(self.btn_all_print, button_style)
         self.btn_all_print.clicked.connect(self.full_report_requested.emit)
 
         self.btn_recovery_transfer = QPushButton(" Перевод в отделение")
         self.btn_recovery_transfer.setMinimumHeight(32)
-        self.btn_recovery_transfer.setStyleSheet(button_style)
+        set_widget_style(self.btn_recovery_transfer, button_style)
         self.btn_recovery_transfer.setMinimumWidth(self.btn_recovery_transfer.sizeHint().width() + 10)
         self.btn_recovery_transfer.clicked.connect(self.recovery_transfer_requested.emit)
         self.btn_recovery_transfer.setVisible(False)
@@ -170,7 +171,7 @@ class NurseSector4v(BaseSectorWidget):
             self.btn_recovery_cancel_transfer.setIcon(QIcon(cancel_icon_path))
             self.btn_recovery_cancel_transfer.setIconSize(QSize(20, 20))
         self.btn_recovery_cancel_transfer.setMinimumHeight(32)
-        self.btn_recovery_cancel_transfer.setStyleSheet(button_style)
+        set_widget_style(self.btn_recovery_cancel_transfer, button_style)
         self.btn_recovery_cancel_transfer.clicked.connect(self.recovery_cancel_transfer_requested.emit)
         self.btn_recovery_cancel_transfer.setVisible(False)
         
@@ -218,7 +219,7 @@ class NurseSector4v(BaseSectorWidget):
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
-        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        set_widget_style(self.scroll_area, "background: transparent; border: none;")
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # Hide the horizontal bar during startup layout recalculation in W1 rows.
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -231,7 +232,7 @@ class NurseSector4v(BaseSectorWidget):
         
         self.main_layout_v.addWidget(self.content_area)
 
-        self.main_container.setStyleSheet("""
+        set_widget_style(self.main_container, """
             QWidget#sector_4v_main_container {
                 background-color: #f8f9fa !important;
             }

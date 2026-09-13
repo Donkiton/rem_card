@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 
 from PySide6.QtCore import QSize, Signal
@@ -68,7 +69,7 @@ class Sector7anal_b(Sector7TabB):
         self.btn_yesterday_labs = QPushButton(" Вчерашнее")
         self.btn_yesterday_labs.setIconSize(QSize(18, 18))
         self.btn_yesterday_labs.setMinimumHeight(32)
-        self.btn_yesterday_labs.setStyleSheet(button_style)
+        set_widget_style(self.btn_yesterday_labs, button_style)
         self.btn_yesterday_labs.setToolTip("Загрузить вчерашние анализы")
         self.btn_yesterday_labs.setIcon(QIcon(os.path.join(self.icon_dir, "yesterday.png")))
         self.btn_yesterday_labs.clicked.connect(self.yesterday_labs_requested.emit)

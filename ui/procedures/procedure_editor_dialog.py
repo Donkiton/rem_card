@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from datetime import datetime
 from pathlib import Path
@@ -107,7 +108,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         raise ValueError("Этот тип процедуры пока не реализован.")
 
     def _build_ui(self):
-        self.setStyleSheet(PROCEDURE_DIALOG_STYLE)
+        set_widget_style(self, PROCEDURE_DIALOG_STYLE)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 10, 10, 10)
@@ -145,8 +146,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
 
         self.header_label = QLabel()
         self.header_label.setObjectName("procedure_header")
-        self.header_label.setStyleSheet(
-            """
+        set_widget_style(self.header_label, """
             QLabel#procedure_header {
                 background: #ffffff;
                 border: 1.5px solid #bdc3c7;
@@ -155,8 +155,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
                 font-weight: bold;
                 color: #243b53;
             }
-            """
-        )
+            """)
         body_layout.addWidget(self.header_label)
 
         self.tabs = QTabWidget()

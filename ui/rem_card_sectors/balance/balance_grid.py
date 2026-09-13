@@ -1,9 +1,9 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 from PySide6.QtWidgets import (QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen
 from datetime import datetime
 from rem_card.ui.styles.sector_styles import build_balance_grid_style
-from rem_card.ui.styles.theme_manager import get_theme_manager
 
 class BalanceGridWidget(QTableWidget):
     """Почасовая сетка для отображения и выбора ячеек баланса выведения."""
@@ -31,13 +31,13 @@ class BalanceGridWidget(QTableWidget):
         
         v_header = self.verticalHeader()
         v_header.setSectionResizeMode(QHeaderView.Stretch)
-        v_header.setStyleSheet("font-weight: bold;")
+        set_widget_style(v_header, "font-weight: bold;")
 
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setFocusPolicy(Qt.NoFocus)
         
-        self.setStyleSheet(build_balance_grid_style(get_theme_manager().current_tokens()))
+        set_widget_style(self, build_balance_grid_style(style_tokens()))
 
         self.cellClicked.connect(self._on_cell_clicked)
 

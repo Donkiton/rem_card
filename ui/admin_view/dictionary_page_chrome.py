@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style, style_tokens
 
 from collections.abc import Iterable
 
@@ -18,7 +20,6 @@ from PySide6.QtWidgets import (
 
 from rem_card.ui.styles.admin_settings_styles import build_admin_dictionary_style
 from rem_card.ui.styles.settings_surface import apply_settings_surface
-from rem_card.ui.styles.theme_manager import get_theme_manager
 
 
 def prepare_embedded_settings_page(
@@ -93,10 +94,8 @@ def prepare_embedded_settings_page(
 
     dialog.btn_back = back_button
     dialog.dictionary_header = header
-    dialog.setStyleSheet(
-        f"{dialog.styleSheet()}\n"
-        f"{build_admin_dictionary_style(get_theme_manager().current_tokens())}"
-    )
+    set_widget_style(dialog, f"{source_style(dialog)}\n"
+        f"{build_admin_dictionary_style(style_tokens())}")
     apply_settings_surface(dialog)
     return dialog
 
@@ -122,9 +121,9 @@ def apply_dictionary_page_chrome(
 
     page.setObjectName("AdminDictionaryPage")
     frame.setObjectName("AdminDictionaryShell")
-    frame.setStyleSheet("")
+    set_widget_style(frame, "")
     table.setObjectName("AdminDictionaryTable")
-    table.setStyleSheet("")
+    set_widget_style(table, "")
     table.setAlternatingRowColors(True)
     table.verticalHeader().setDefaultSectionSize(42)
 
@@ -255,9 +254,7 @@ def apply_dictionary_page_chrome(
     page.dictionary_search_input = search_input
     page.dictionary_count_label = count_label
     page.dictionary_header = header
-    page.setStyleSheet(
-        build_admin_dictionary_style(get_theme_manager().current_tokens())
-    )
+    set_widget_style(page, build_admin_dictionary_style(style_tokens()))
     update_count()
     return search_input
 
@@ -281,7 +278,7 @@ def apply_settings_editor_page_chrome(
 
     page.setObjectName("AdminDictionaryPage")
     frame.setObjectName("AdminDictionaryShell")
-    frame.setStyleSheet("")
+    set_widget_style(frame, "")
     layout = frame.layout()
     if not isinstance(layout, QVBoxLayout):
         raise TypeError("Settings editor frame must use QVBoxLayout")
@@ -319,7 +316,7 @@ def apply_settings_editor_page_chrome(
 
     for table in tables:
         table.setObjectName("AdminDictionaryTable")
-        table.setStyleSheet("")
+        set_widget_style(table, "")
         table.setAlternatingRowColors(True)
     for button in primary_buttons:
         _style_action_button(button, "AdminDictionaryPrimaryButton")
@@ -332,9 +329,7 @@ def apply_settings_editor_page_chrome(
         button.setFixedWidth(42)
 
     page.dictionary_header = header
-    page.setStyleSheet(
-        build_admin_dictionary_style(get_theme_manager().current_tokens())
-    )
+    set_widget_style(page, build_admin_dictionary_style(style_tokens()))
     apply_settings_surface(page)
 
 

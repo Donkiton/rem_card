@@ -1,4 +1,6 @@
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.shared.theme_switch import get_theme_manager, runtime_theme_enabled
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 class Sector8(BaseSectorWidget):
     def __init__(self, parent=None):
@@ -8,13 +10,24 @@ class Sector8(BaseSectorWidget):
         self.setObjectName("sector_8_frame")
         self._frame_margin_left = 3
         self._frame_margin_right = 1
+        self._theme_manager = None
+        if runtime_theme_enabled():
+            try:
+                self._theme_manager = get_theme_manager()
+                signal = getattr(self._theme_manager, "theme_changed", None)
+                if signal is not None and hasattr(signal, "connect"):
+                    signal.connect(self._apply_frame_style)
+            except Exception:
+                self._theme_manager = None
         self._apply_frame_style()
 
         self.init_ui()
 
-    def _apply_frame_style(self):
-        # Устанавливаем стиль непосредственно для Sector8.
-        self.setStyleSheet(f"""
+    def _apply_frame_style(self, mode=None):
+        del mode
+        # Передаём исходный светлый QSS в runtime-реестр: он сохраняется для
+        # точного возврата при смене темы и преобразуется централизованно.
+        set_widget_style(self, f"""
             QFrame#sector_8_frame {{
                 background-color: #e9ecef;
                 border: 1px solid #bdc3c7;

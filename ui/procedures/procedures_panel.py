@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from pathlib import Path
 
@@ -38,8 +39,7 @@ class ProceduresPanel(QWidget):
 
         frame = QFrame()
         frame.setObjectName("procedures_frame")
-        frame.setStyleSheet(
-            """
+        set_widget_style(frame, """
             QFrame#procedures_frame {
                 border: none;
                 background-color: transparent;
@@ -67,8 +67,7 @@ class ProceduresPanel(QWidget):
                 border-bottom-right-radius: 5px;
             }
             """
-            + build_procedure_create_button_style()
-        )
+            + build_procedure_create_button_style())
         root.addWidget(frame, 1)
 
         layout = QVBoxLayout(frame)

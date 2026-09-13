@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLineEdit, QListWidget
@@ -34,7 +35,7 @@ class PrescriptionInputWidget(QWidget):
         # Строка поиска/ввода
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Введите препарат...")
-        self.input_field.setStyleSheet("""
+        set_widget_style(self.input_field, """
             QLineEdit {
                 font-size: 14px; 
                 padding: 5px;
@@ -52,7 +53,7 @@ class PrescriptionInputWidget(QWidget):
         self.list_widget = QListWidget(self)
         self.list_widget.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint)
         self.list_widget.setFocusPolicy(Qt.NoFocus)
-        self.list_widget.setStyleSheet("border: 1px solid gray; background-color: white; font-size: 14px;")
+        set_widget_style(self.list_widget, "border: 1px solid gray; background-color: white; font-size: 14px;")
         self.list_widget.hide()
         
         # Подключения

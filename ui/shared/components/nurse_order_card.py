@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from rem_card.app.paths import get_icon_dir
 import re
@@ -63,7 +64,7 @@ class StatusPopup(QFrame):
         self.btn_not_done.clicked.connect(lambda: self.actionSelected.emit("not_done"))
         layout.addWidget(self.btn_not_done)
 
-        self.setStyleSheet("""
+        set_widget_style(self, """
             QFrame#status_popup {
                 background-color: #f8f9fa;
                 border: 2px solid #bdc3c7;
@@ -120,7 +121,7 @@ class NurseOrderCard(QFrame):
     def get_bg_color(self): return self._bg_color
     def set_bg_color(self, color):
         self._bg_color = color
-        self.setStyleSheet(f"""
+        set_widget_style(self, f"""
             QFrame#order_card {{
                 background-color: {color.name()};
                 border: 1.2px solid #dee2e6;
@@ -264,7 +265,7 @@ class NurseOrderCard(QFrame):
         self.v_left_panel.addStretch(1) # Верхняя пружина для времени
 
         self.lbl_time = QLabel() # Время назначения
-        self.lbl_time.setStyleSheet("font-size: 14px; font-weight: bold; color: #34495e; padding: 0px; margin: 0px;")
+        set_widget_style(self.lbl_time, "font-size: 14px; font-weight: bold; color: #34495e; padding: 0px; margin: 0px;")
         self.lbl_time.setAlignment(Qt.AlignCenter)
         self.lbl_time.setFixedHeight(14) 
         self.v_left_panel.addWidget(self.lbl_time, 0, Qt.AlignCenter)
@@ -281,7 +282,7 @@ class NurseOrderCard(QFrame):
         self.lbl_signal.setCursor(Qt.PointingHandCursor)
         self.lbl_signal.setToolTip("Отметить выполнение")
         self.lbl_signal.clicked.connect(self.on_action_clicked)
-        self.lbl_signal.setStyleSheet("""
+        set_widget_style(self.lbl_signal, """
             padding: 0px;
             margin: 0px;
         """)
@@ -304,17 +305,17 @@ class NurseOrderCard(QFrame):
         # Убираем все пружины, чтобы карточка не раздувалась по вертикали
         self.lbl_line1 = QLabel() # Препарат + Доза
         self.lbl_line1.setWordWrap(True)
-        self.lbl_line1.setStyleSheet("font-size: 12px; font-weight: bold; color: #2c3e50; padding: 0px; margin: 0px;")
+        set_widget_style(self.lbl_line1, "font-size: 12px; font-weight: bold; color: #2c3e50; padding: 0px; margin: 0px;")
         self.v_text_layout.addWidget(self.lbl_line1)
 
         self.lbl_line2 = QLabel() # Растворитель
         self.lbl_line2.setWordWrap(True)
-        self.lbl_line2.setStyleSheet("font-size: 12px; font-weight: bold; color: #2c3e50; padding: 0px; margin: 0px;")
+        set_widget_style(self.lbl_line2, "font-size: 12px; font-weight: bold; color: #2c3e50; padding: 0px; margin: 0px;")
         self.v_text_layout.addWidget(self.lbl_line2)
 
         self.lbl_method_dur = QLabel() # Метод введения - Длительность
         self.lbl_method_dur.setWordWrap(True)
-        self.lbl_method_dur.setStyleSheet("font-size: 11px; font-weight: normal; color: #7f8c8d; padding: 0px; margin: 0px;")
+        set_widget_style(self.lbl_method_dur, "font-size: 11px; font-weight: normal; color: #7f8c8d; padding: 0px; margin: 0px;")
         self.v_text_layout.addWidget(self.lbl_method_dur)
         
         self.h_main_layout.addLayout(self.v_text_layout, 1)

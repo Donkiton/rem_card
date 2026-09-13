@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QFrame, QGraphicsDropShadowEffect, QSizePolicy
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
@@ -130,7 +131,7 @@ class SidePatientCard(QFrame):
         self._init_ui()
 
     def _init_ui(self):
-        self.setStyleSheet(STYLE_SIDE_PATIENT_CARD)
+        set_widget_style(self, STYLE_SIDE_PATIENT_CARD)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(30)
@@ -146,7 +147,7 @@ class SidePatientCard(QFrame):
         self.photo_label = QLabel()
         self.photo_label.setFixedSize(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE)
         self.photo_label.setAlignment(Qt.AlignCenter)
-        self.photo_label.setStyleSheet(STYLE_SIDE_PATIENT_PHOTO)
+        set_widget_style(self.photo_label, STYLE_SIDE_PATIENT_PHOTO)
 
         photo_center_layout = QHBoxLayout()
         photo_center_layout.addStretch()
@@ -162,7 +163,7 @@ class SidePatientCard(QFrame):
 
         self.history_label = self._create_info_label("ИБ № —", is_title=True, font_size=18)
         self.name_label = MultilineElidedLabel("ФИО Пациента", max_lines=1, hide_tooltip_for={"ФИО Пациента"})
-        self.name_label.setStyleSheet(STYLE_SIDE_PATIENT_NAME)
+        set_widget_style(self.name_label, STYLE_SIDE_PATIENT_NAME)
         self.name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         name_line_h = self.name_label.fontMetrics().height()
         self.name_label.setMinimumHeight(name_line_h + 16)
@@ -171,7 +172,7 @@ class SidePatientCard(QFrame):
         self.diagnosis_label.setWordWrap(True)
         self.diagnosis_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.diagnosis_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.diagnosis_label.setStyleSheet(STYLE_SIDE_PATIENT_DIAGNOSIS)
+        set_widget_style(self.diagnosis_label, STYLE_SIDE_PATIENT_DIAGNOSIS)
         diagnosis_line_h = self.diagnosis_label.fontMetrics().lineSpacing()
         self.diagnosis_label.setMinimumHeight(diagnosis_line_h + 8)
         self.admission_label = self._create_info_label("Дата поступления: —", font_size=18)
@@ -193,13 +194,13 @@ class SidePatientCard(QFrame):
         self.action_btn = QPushButton("ОТКРЫТЬ КАРТОЧКУ")
         self.action_btn.setFixedHeight(65)
         self.action_btn.setCursor(Qt.PointingHandCursor)
-        self.action_btn.setStyleSheet(STYLE_SIDE_PATIENT_ACTION_BUTTON)
+        set_widget_style(self.action_btn, STYLE_SIDE_PATIENT_ACTION_BUTTON)
         self.action_btn.clicked.connect(self._on_action_clicked)
         self.main_layout.addWidget(self.action_btn)
 
     def _create_info_label(self, text, is_bold=False, font_size=14, is_title=False):
         lbl = QLabel(text)
-        lbl.setStyleSheet(get_side_patient_label_style(font_size, is_title=is_title, is_bold=is_bold))
+        set_widget_style(lbl, get_side_patient_label_style(font_size, is_title=is_title, is_bold=is_bold))
         lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         return lbl
 
@@ -255,7 +256,7 @@ class SidePatientCard(QFrame):
             self.diagnosis_label.setToolTip("")
             self.admission_label.hide()
             self.status_text.setText("МЕСТО СВОБОДНО")
-            self.status_text.setStyleSheet(STYLE_SIDE_PATIENT_STATUS_FREE)
+            set_widget_style(self.status_text, STYLE_SIDE_PATIENT_STATUS_FREE)
             self.status_text.show()
             self.action_btn.setText("ЗАНЯТЬ КОЙКУ")
         else:

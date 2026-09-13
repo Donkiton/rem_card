@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from functools import partial
 from math import ceil
@@ -84,7 +85,7 @@ class PatientBedManagementWidget(QWidget):
 
         self.root_container = QWidget()
         self.root_container.setObjectName("patient_bed_root")
-        self.root_container.setStyleSheet(STYLE_PATIENT_BED_ROOT)
+        set_widget_style(self.root_container, STYLE_PATIENT_BED_ROOT)
         root_layout.addWidget(self.root_container)
 
         main_layout = QVBoxLayout(self.root_container)
@@ -110,16 +111,16 @@ class PatientBedManagementWidget(QWidget):
         header_card.setObjectName("patient_bed_header")
         header_card.setFixedHeight(80)
         header_card.setFixedWidth(250 * 3 + 15 * 2)
-        header_card.setStyleSheet(STYLE_PATIENT_BED_HEADER)
+        set_widget_style(header_card, STYLE_PATIENT_BED_HEADER)
         header_layout = QVBoxLayout(header_card)
         header_layout.setContentsMargins(15, 10, 15, 10)
         header_layout.setSpacing(2)
 
         title = QLabel("УПРАВЛЕНИЕ ПАЦИЕНТАМИ")
-        title.setStyleSheet(STYLE_PATIENT_BED_TITLE)
+        set_widget_style(title, STYLE_PATIENT_BED_TITLE)
         title.setAlignment(Qt.AlignCenter)
         subtitle = QLabel("ОАР №3 г. Амурск")
-        subtitle.setStyleSheet(STYLE_PATIENT_BED_SUBTITLE)
+        set_widget_style(subtitle, STYLE_PATIENT_BED_SUBTITLE)
         subtitle.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(title)
         header_layout.addWidget(subtitle)

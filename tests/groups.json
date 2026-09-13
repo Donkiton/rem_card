@@ -83,7 +83,6 @@
     "tests/test_db_wait_diagnostics.py"
   ],
   "ui": [
-    "tests/test_emergency_button_layout.py",
     "tests/test_admin_dictionary_chrome.py",
     "tests/test_admin_settings_import_async.py",
     "tests/test_admin_settings_navigation.py",
@@ -115,6 +114,7 @@
     "tests/test_drug_template_dilution_replace_dialog.py",
     "tests/test_duration_combo.py",
     "tests/test_electrolyte_calculator.py",
+    "tests/test_emergency_button_layout.py",
     "tests/test_emergency_outage_ui.py",
     "tests/test_emergency_peer_ui.py",
     "tests/test_emergency_review_ui.py",
@@ -149,11 +149,16 @@
     "tests/test_sector_ivl_mode_parameter_layout.py",
     "tests/test_settings_surface.py",
     "tests/test_snapshot_source_coherence.py",
+    "tests/test_storage_maintenance_dialog.py",
     "tests/test_sync_coordinator_refresh_policy.py",
+    "tests/test_theme_paint.py",
+    "tests/test_theme_html.py",
+    "tests/test_theme_runtime.py",
+    "tests/test_theme_styles.py",
+    "tests/test_theme_switch.py",
     "tests/test_transfusion_protocol_report_setting.py",
     "tests/test_user_reports_dialog.py",
     "tests/test_vital_settings_dialog_cvp_button.py",
-    "tests/test_w1_layout_handoff.py",
-    "tests/test_storage_maintenance_dialog.py"
+    "tests/test_w1_layout_handoff.py"
   ]
 }

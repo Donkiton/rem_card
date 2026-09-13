@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 import os
 import sqlite3
@@ -3757,7 +3758,7 @@ class OrdersWidget(QWidget):
         
         self.frame_container = QFrame()
         self.frame_container.setObjectName("orders_frame_container")
-        self.frame_container.setStyleSheet(f"""
+        set_widget_style(self.frame_container, f"""
             QFrame#orders_frame_container {{ 
                 border: 1.5px solid {BORDER_COLOR}; 
                 border-radius: 5px; 
@@ -3771,7 +3772,7 @@ class OrdersWidget(QWidget):
 
         # 1. Поле поиска
         self.top_container = QFrame()
-        self.top_container.setStyleSheet("background-color: transparent;")
+        set_widget_style(self.top_container, "background-color: transparent;")
         self.top_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         top_layout = QHBoxLayout(self.top_container)
         top_layout.setContentsMargins(0, 0, 0, 0)
@@ -3783,7 +3784,7 @@ class OrdersWidget(QWidget):
         top_layout.addWidget(self.input_widget, 1)
         self._refresh_status_label = QLabel("")
         self._refresh_status_label.setVisible(False)
-        self._refresh_status_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9pt; padding: 0 6px;")
+        set_widget_style(self._refresh_status_label, f"color: {TEXT_SECONDARY}; font-size: 9pt; padding: 0 6px;")
         top_layout.addWidget(self._refresh_status_label, 0)
         self.frame_layout.addWidget(self.top_container, 0)
 
@@ -3808,18 +3809,16 @@ class OrdersWidget(QWidget):
         self.table_view.clicked.connect(self.on_cell_clicked)
         self.table_view.viewport().installEventFilter(self)
         
-        self.table_view.setStyleSheet(
-            f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} "
+        set_widget_style(self.table_view, f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} "
             f"QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 4px; border: 1 solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 9pt; }}"
-            + STYLE_ORDERS_VERTICAL_SCROLLBAR
-        )
+            + STYLE_ORDERS_VERTICAL_SCROLLBAR)
         self.table_clip_layout.addWidget(self.table_view)
 
         self.bottom_footer = QWidget()
         self.bottom_footer.setFixedHeight(15)
         self.frame_layout.addWidget(self.bottom_footer)
 
-        self.setStyleSheet(f"OrdersWidget {{ background-color: {BG_MAIN}; }} QWidget#table_clip {{ background-color: {BG_CARD}; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QWidget#orders_footer_frame {{ background-color: {BG_MAIN}; border-top: 1px solid {BORDER_COLOR}; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }} QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 6px; border: none; border-bottom: 0.5px solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 10pt; }} QHeaderView {{ background-color: {BG_LIGHT}; border-top-left-radius: 5px; border-top-right-radius: 5px; }}")
+        set_widget_style(self, f"OrdersWidget {{ background-color: {BG_MAIN}; }} QWidget#table_clip {{ background-color: {BG_CARD}; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QWidget#orders_footer_frame {{ background-color: {BG_MAIN}; border-top: 1px solid {BORDER_COLOR}; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }} QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 6px; border: none; border-bottom: 0.5px solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 10pt; }} QHeaderView {{ background-color: {BG_LIGHT}; border-top-left-radius: 5px; border-top-right-radius: 5px; }}")
         
         self._bind_model_to_table()
         self.set_forced_read_only(self._forced_read_only)
@@ -4137,7 +4136,7 @@ class OrdersWidget(QWidget):
         indicator = QFrame(self.table_view.viewport())
         indicator.setObjectName("orders_row_drag_indicator")
         indicator.setFixedHeight(3)
-        indicator.setStyleSheet("background-color: #2f80ed; border-radius: 1px;")
+        set_widget_style(indicator, "background-color: #2f80ed; border-radius: 1px;")
         indicator.hide()
         self._row_drag_indicator = indicator
         return indicator
@@ -4154,16 +4153,14 @@ class OrdersWidget(QWidget):
         ghost.setObjectName("orders_row_drag_ghost")
         ghost.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         ghost.setFixedSize(max(120, rect.width() - 8), max(28, rect.height() - 8))
-        ghost.setStyleSheet(
-            "QLabel#orders_row_drag_ghost {"
+        set_widget_style(ghost, "QLabel#orders_row_drag_ghost {"
             "background-color: rgba(255, 255, 255, 235);"
             "border: 1.5px solid #2f80ed;"
             "border-radius: 6px;"
             "padding-left: 8px;"
             "font-size: 9pt;"
             "color: #1f2d3d;"
-            "}"
-        )
+            "}")
         self._row_drag_ghost = ghost
         state["active"] = True
         self._row_drag_state = state

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
 import json
 import logging
 import os
+from pathlib import Path
+import tempfile
 import time
 from typing import Any
 
@@ -22,6 +23,7 @@ from rem_card.ui.styles.theme_tokens import (
 
 STYLE_SETTINGS_ENV = "REMCARD_STYLE_SETTINGS_PATH"
 STYLE_SETTINGS_RELATIVE_PATH = os.path.join("settings", "color_scheme", "style_settings.json")
+THEME_SETTINGS_RELATIVE_PATH = os.path.join("rem_card", "appearance", "style_settings.json")
 logger = logging.getLogger(__name__)
 
 
@@ -34,7 +36,6 @@ def _resolve_dev_settings_base_dir(start_path: Path | None = None) -> str:
     for candidate in current.parents:
         if (candidate / "ui" / "styles").is_dir() and (candidate / "app").is_dir():
             return str(candidate)
-
     if _is_theme_storage_source_path(current):
         fallback_root = current.parents[2]
         logger.warning(
@@ -42,7 +43,6 @@ def _resolve_dev_settings_base_dir(start_path: Path | None = None) -> str:
             fallback_root,
         )
         return str(fallback_root)
-
     raise RuntimeError(
         "Не удалось определить dev-root для настроек цветовой схемы: "
         "не найден marker-root с ui/styles и app."
@@ -50,11 +50,13 @@ def _resolve_dev_settings_base_dir(start_path: Path | None = None) -> str:
 
 
 def get_style_settings_path() -> str:
+    """Legacy settings-root anchor used by display/background settings."""
     override = os.environ.get(STYLE_SETTINGS_ENV)
     if override:
         return os.path.abspath(os.path.normpath(override))
     try:
         from rem_card.app.runtime_paths import is_compiled
+
         compiled = is_compiled()
     except Exception:
         logger.warning("Не удалось определить режим запуска для настроек цветовой схемы.", exc_info=True)
@@ -63,87 +65,80 @@ def get_style_settings_path() -> str:
     return os.path.join(base_dir, STYLE_SETTINGS_RELATIVE_PATH)
 
 
+def get_theme_settings_path() -> str:
+    """Per-workstation appearance path used only by ThemeStorage."""
+    override = os.environ.get(STYLE_SETTINGS_ENV)
+    if override:
+        return os.path.abspath(os.path.normpath(override))
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        local_app_data = str(Path.home() / "AppData" / "Local")
+    return os.path.abspath(os.path.join(local_app_data, THEME_SETTINGS_RELATIVE_PATH))
+
+
 class ThemeStorage:
     def __init__(self, path: str | None = None):
-        self._file_mode = path is not None or bool(os.environ.get(STYLE_SETTINGS_ENV))
-        self.path = os.path.abspath(path or get_style_settings_path())
+        self.path = os.path.abspath(path or get_theme_settings_path())
         self.last_error: str | None = None
 
     def load(self) -> dict[str, Any]:
         self.last_error = None
-        if not self._file_mode:
-            try:
-                from rem_card.services.settings.settings_service import get_settings_service
-
-                payload = get_settings_service().get_app_setting("shared", "style_settings", default=None)
-                if isinstance(payload, dict):
-                    return self._normalize_payload(payload)
-                return self._default_and_save()
-            except Exception as exc:
-                self.last_error = str(exc)
-                raise
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
         except FileNotFoundError:
-            return self._default_and_save()
+            return default_settings_payload()
         except Exception as exc:
             self.last_error = str(exc)
-            self._quarantine_broken_file()
-            return self._default_and_save()
+            return default_settings_payload()
 
         if not isinstance(payload, dict):
             self.last_error = "Корневой объект настроек стиля не является JSON-объектом."
-            self._quarantine_broken_file()
-            return self._default_and_save()
+            return default_settings_payload()
 
         return self._normalize_payload(payload)
 
     def save(self, payload: dict[str, Any]) -> None:
         normalized = self._normalize_payload(payload)
-        if not self._file_mode:
-            from rem_card.services.settings.settings_service import STYLE_SETTINGS_KEY, get_settings_service
-
-            get_settings_service().set_app_setting(
-                "shared",
-                "style_settings",
-                normalized,
-                catalog_key=STYLE_SETTINGS_KEY,
-                entity_type="style_settings",
-                operation="update",
-            )
-            return
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)
-        tmp_path = f"{self.path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as fh:
-            json.dump(normalized, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, self.path)
-
-    def _quarantine_broken_file(self) -> None:
-        if not os.path.exists(self.path):
-            return
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        broken_path = f"{self.path}.{stamp}.broken"
+        tmp_path: str | None = None
         try:
-            os.replace(self.path, broken_path)
-        except Exception:
-            pass
-
-    def _default_and_save(self) -> dict[str, Any]:
-        payload = default_settings_payload()
-        try:
-            self.save(payload)
-        except Exception as exc:
-            self.last_error = str(exc)
-        return payload
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=directory,
+                prefix=f".{Path(self.path).name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as fh:
+                tmp_path = fh.name
+                json.dump(normalized, fh, ensure_ascii=False, indent=2)
+                fh.write("\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            for attempt in range(20):
+                try:
+                    os.replace(tmp_path, self.path)
+                    break
+                except PermissionError:
+                    if attempt == 19:
+                        raise
+                    # Windows can briefly deny replacing a target while a
+                    # concurrent process completes its own atomic replace.
+                    time.sleep(0.002 * (attempt + 1))
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except FileNotFoundError:
+                    pass
 
     def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = default_settings_payload()
         result["version"] = STYLE_SETTINGS_VERSION
+        result["mode"] = normalize_mode(payload.get("mode"))
         result["custom_presets"] = self._normalize_custom_presets(payload.get("custom_presets"))
         active = payload.get("active")
         if not isinstance(active, dict):

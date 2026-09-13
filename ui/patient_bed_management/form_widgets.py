@@ -1,4 +1,5 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_runtime import set_widget_style
 
 from functools import lru_cache
 
@@ -113,9 +114,7 @@ class IconBadge(QLabel):
         self.setFixedSize(side, side)
         self.setPixmap(line_icon(kind, color, icon_size).pixmap(QSize(icon_size, icon_size)))
         self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet(
-            f"background-color: {bg_color}; border: none; border-radius: {max(3, side // 5)}px;"
-        )
+        set_widget_style(self, f"background-color: {bg_color}; border: none; border-radius: {max(3, side // 5)}px;")
 
 
 class GenderSegmentedControl(QWidget):
@@ -177,8 +176,8 @@ class GenderSegmentedControl(QWidget):
                 padding: 0px 10px;
             }
         """
-        self.male_button.setStyleSheet(selected if self._current == "Мужской" else base)
-        self.female_button.setStyleSheet(selected if self._current == "Женский" else base)
+        set_widget_style(self.male_button, selected if self._current == "Мужской" else base)
+        set_widget_style(self.female_button, selected if self._current == "Женский" else base)
 
     def currentText(self) -> str:
         return self._current

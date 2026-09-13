@@ -1,4 +1,6 @@
 from __future__ import annotations
+from rem_card.ui.styles.theme_manager import get_theme_manager
+from rem_card.ui.styles.theme_runtime import register_theme_callback, set_widget_style
 
 import json
 import os
@@ -300,6 +302,7 @@ class SectorAnal(BaseSectorWidget):
         self._last_content_hash: str | None = None
         self._status_filter = "all"
         self._rendering_table = False
+        self._empty_table_item = None
         self._delete_pending = False
         self._load_yesterday_pending = False
         self._load_yesterday_worker = None
@@ -310,13 +313,13 @@ class SectorAnal(BaseSectorWidget):
         self._save_header_timer.timeout.connect(self._save_header_state)
 
         self._build_ui()
+        register_theme_callback(self, self._apply_theme_paint)
         self.set_lab_orders([])
 
     def _build_ui(self):
         main_frame = QFrame()
         main_frame.setObjectName("lab_main_frame")
-        main_frame.setStyleSheet(
-            """
+        set_widget_style(main_frame, """
             QFrame#lab_main_frame {
                 border: none;
                 background-color: transparent;
@@ -513,8 +516,7 @@ class SectorAnal(BaseSectorWidget):
                 border-color: lightgreen;
                 color: seagreen;
             }
-            """
-        )
+            """)
 
         root = QVBoxLayout(main_frame)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1410,6 +1412,7 @@ class SectorAnal(BaseSectorWidget):
         self.table.setUpdatesEnabled(False)
         try:
             self.table.setRowCount(0)
+            self._empty_table_item = None
             try:
                 self.table.clearSpans()
             except Exception:
@@ -1518,8 +1521,9 @@ class SectorAnal(BaseSectorWidget):
         item = QTableWidgetItem(message)
         item.setTextAlignment(Qt.AlignCenter)
         item.setFlags(Qt.ItemIsEnabled)
-        item.setForeground(QColor("#6b7785"))
+        item.setForeground(QColor(_empty_row_text_color()))
         self.table.setItem(0, 0, item)
+        self._empty_table_item = item
         self.table.setRowHeight(0, 96)
 
     def _set_text_item(
@@ -1658,6 +1662,18 @@ class SectorAnal(BaseSectorWidget):
                     widget.setProperty("selected", "true" if selected else "false")
                     widget.update()
 
+    def _apply_theme_paint(self, *_args) -> None:
+        """Recolor the table's existing items without querying or rebuilding rows."""
+        if not hasattr(self, "table"):
+            return
+        self._apply_visual_row_tones()
+        if self._empty_table_item is not None:
+            if self.table.item(0, 0) is self._empty_table_item:
+                self._empty_table_item.setForeground(QColor(_empty_row_text_color()))
+            else:
+                self._empty_table_item = None
+        self.table.viewport().update()
+
 
 class TransparentEmbeddedCell(QWidget):
     def paintEvent(self, event):
@@ -1712,7 +1728,18 @@ def _status_label(status: str) -> str:
 
 
 def _row_background(row_tone: str) -> str:
+    manager = get_theme_manager()
+    if manager.mode == "dark":
+        tokens = manager.current_tokens()
+        return str(tokens["table.row_alt_bg"] if row_tone == "odd" else tokens["table.row_bg"])
     return "#f4f8fc" if row_tone == "odd" else "#ffffff"
+
+
+def _empty_row_text_color() -> str:
+    manager = get_theme_manager()
+    if manager.mode == "dark":
+        return str(manager.current_tokens()["text.muted"])
+    return "#6b7785"
 
 
 def _material_key(material: str) -> str:

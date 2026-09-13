@@ -1,3 +1,4 @@
+from rem_card.ui.styles.theme_runtime import set_widget_style
 import os
 from datetime import datetime
 
@@ -90,7 +91,7 @@ class ArchiveWidget(QWidget):
 
         self.frame = QFrame(self)
         self.frame.setObjectName("ArchiveDataPanel" if self.embedded else "archiveMainFrame")
-        self.frame.setStyleSheet("" if self.embedded else STYLE_ARCHIVE_FRAME)
+        set_widget_style(self.frame, "" if self.embedded else STYLE_ARCHIVE_FRAME)
         layout = QVBoxLayout(self.frame)
         if self.embedded:
             layout.setContentsMargins(0, 0, 0, 0)
@@ -101,7 +102,7 @@ class ArchiveWidget(QWidget):
         header_layout = QHBoxLayout()
         self.archive_title = QLabel("Архив пациентов РАО")
         self.archive_title.setProperty("heading", "true")
-        self.archive_title.setStyleSheet(STYLE_ARCHIVE_TITLE)
+        set_widget_style(self.archive_title, STYLE_ARCHIVE_TITLE)
         
         header_layout.addWidget(self.archive_title, alignment=Qt.AlignCenter)
         if not self.embedded:
@@ -148,10 +149,10 @@ class ArchiveWidget(QWidget):
         self.table_filter.currentIndexChanged.connect(self._schedule_filter_reload)
 
         lbl_from = QLabel("С", self.filters_frame)
-        lbl_from.setStyleSheet(STYLE_TRANSPARENT_LABEL)
+        set_widget_style(lbl_from, STYLE_TRANSPARENT_LABEL)
         lbl_from.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lbl_to = QLabel("По", self.filters_frame)
-        lbl_to.setStyleSheet(STYLE_TRANSPARENT_LABEL)
+        set_widget_style(lbl_to, STYLE_TRANSPARENT_LABEL)
         lbl_to.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         filter_layout.addWidget(self.search_name, 0, 0, 1, 3)
@@ -171,7 +172,7 @@ class ArchiveWidget(QWidget):
         # Таблица архива
         self.table = QTableWidget(self.frame)
         self.table.setObjectName("ArchiveDataTable")
-        self.table.setStyleSheet("" if self.embedded else STYLE_ARCHIVE_TABLE)
+        set_widget_style(self.table, "" if self.embedded else STYLE_ARCHIVE_TABLE)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self._apply_table_headers()
@@ -195,7 +196,7 @@ class ArchiveWidget(QWidget):
 
         self.btn_prev_page = QPushButton("◀", self.pagination_frame)
         self.btn_prev_page.setObjectName("ArchivePageButton")
-        self.btn_prev_page.setStyleSheet("" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_prev_page, "" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_prev_page.clicked.connect(lambda: self._set_page(self.current_page - 1))
         self.pagination_bar.addWidget(self.btn_prev_page)
 
@@ -206,13 +207,13 @@ class ArchiveWidget(QWidget):
 
         self.btn_next_page = QPushButton("▶", self.pagination_frame)
         self.btn_next_page.setObjectName("ArchivePageButton")
-        self.btn_next_page.setStyleSheet("" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_next_page, "" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_next_page.clicked.connect(lambda: self._set_page(self.current_page + 1))
         self.pagination_bar.addWidget(self.btn_next_page)
 
         self.page_info = QLabel("Страница 1 из 1")
         self.page_info.setObjectName("ArchivePageInfo")
-        self.page_info.setStyleSheet("" if self.embedded else STYLE_ARCHIVE_PAGE_INFO)
+        set_widget_style(self.page_info, "" if self.embedded else STYLE_ARCHIVE_PAGE_INFO)
         self.pagination_bar.addWidget(self.page_info)
 
         self.pagination_bar.addStretch()
@@ -226,7 +227,7 @@ class ArchiveWidget(QWidget):
 
         self.btn_page_jump = QPushButton("Перейти", self.pagination_frame)
         self.btn_page_jump.setObjectName("ArchivePageButton")
-        self.btn_page_jump.setStyleSheet("" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_page_jump, "" if self.embedded else STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_page_jump.clicked.connect(self._jump_to_page_from_input)
         self.pagination_bar.addWidget(self.btn_page_jump)
 
@@ -246,7 +247,7 @@ class ArchiveWidget(QWidget):
 
             self.btn_mode_operblock = QPushButton("Оперблок")
             self.btn_mode_operblock.setCheckable(True)
-            self.btn_mode_operblock.setStyleSheet(STYLE_ARCHIVE_MODE_BUTTON)
+            set_widget_style(self.btn_mode_operblock, STYLE_ARCHIVE_MODE_BUTTON)
             self.btn_mode_operblock.setFixedHeight(35)
             self.btn_mode_operblock.toggled.connect(
                 lambda checked: checked and self.set_archive_source_mode(ARCHIVE_MODE_OPERBLOCK)
@@ -255,7 +256,7 @@ class ArchiveWidget(QWidget):
             self.btn_mode_rao = QPushButton("РАО")
             self.btn_mode_rao.setCheckable(True)
             self.btn_mode_rao.setChecked(True)
-            self.btn_mode_rao.setStyleSheet(STYLE_ARCHIVE_MODE_BUTTON)
+            set_widget_style(self.btn_mode_rao, STYLE_ARCHIVE_MODE_BUTTON)
             self.btn_mode_rao.setFixedHeight(35)
             self.btn_mode_rao.toggled.connect(
                 lambda checked: checked and self.set_archive_source_mode(ARCHIVE_MODE_RAO)
@@ -268,14 +269,14 @@ class ArchiveWidget(QWidget):
 
         self.btn_open = QPushButton(" Открыть карту", self.frame)
         self.btn_open.setObjectName("ArchiveSecondaryAction")
-        self.btn_open.setStyleSheet("" if self.embedded else STYLE_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_open, "" if self.embedded else STYLE_NEUTRAL_BUTTON)
         self.btn_open.setFixedHeight(35)
         self.btn_open.setEnabled(False)
         self.btn_open.clicked.connect(self.on_open_clicked)
 
         self.btn_edit = QPushButton(" Редактировать", self.frame)
         self.btn_edit.setObjectName("ArchiveSecondaryAction")
-        self.btn_edit.setStyleSheet("" if self.embedded else STYLE_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_edit, "" if self.embedded else STYLE_NEUTRAL_BUTTON)
         self.btn_edit.setFixedHeight(35)
         self.btn_edit.setEnabled(False)
         if not self.allow_edit:
@@ -283,7 +284,7 @@ class ArchiveWidget(QWidget):
         self.btn_edit.clicked.connect(self.on_edit_clicked)
 
         self.btn_report_stats = QPushButton(" Статистика", self.frame)
-        self.btn_report_stats.setStyleSheet(STYLE_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_report_stats, STYLE_NEUTRAL_BUTTON)
         self.btn_report_stats.setFixedHeight(35)
         self.btn_report_stats.setEnabled(False)
         self.btn_report_stats.clicked.connect(self.on_report_stats_clicked)
@@ -291,7 +292,7 @@ class ArchiveWidget(QWidget):
             self.btn_report_stats.hide()
 
         self.btn_graphs = QPushButton(" Сформировать графики", self.frame)
-        self.btn_graphs.setStyleSheet(STYLE_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_graphs, STYLE_NEUTRAL_BUTTON)
         self.btn_graphs.setFixedHeight(35)
         self.btn_graphs.setEnabled(True)
         self.btn_graphs.clicked.connect(self.on_graphs_clicked)
@@ -300,7 +301,7 @@ class ArchiveWidget(QWidget):
 
         self.btn_delete_last = QPushButton(" Удалить последнюю карту", self.frame)
         self.btn_delete_last.setObjectName("ArchiveDangerAction")
-        self.btn_delete_last.setStyleSheet("" if self.embedded else STYLE_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_delete_last, "" if self.embedded else STYLE_NEUTRAL_BUTTON)
         self.btn_delete_last.setFixedHeight(35)
         self.btn_delete_last.setEnabled(False)
         self.btn_delete_last.clicked.connect(self.on_delete_last_clicked)
@@ -309,7 +310,7 @@ class ArchiveWidget(QWidget):
 
         self.btn_delete = QPushButton(" Удалить все карты", self.frame)
         self.btn_delete.setObjectName("ArchiveDangerAction")
-        self.btn_delete.setStyleSheet("" if self.embedded else STYLE_NEUTRAL_BUTTON)
+        set_widget_style(self.btn_delete, "" if self.embedded else STYLE_NEUTRAL_BUTTON)
         self.btn_delete.setFixedHeight(35)
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self.on_delete_clicked)

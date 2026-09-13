@@ -1,3 +1,5 @@
+from rem_card.ui.styles.theme_runtime import source_style
+from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import QComboBox, QSizePolicy
 
 
@@ -27,9 +29,9 @@ def configure_duration_combo(combo: QComboBox) -> None:
 
 
 def apply_compact_duration_combo_style(combo: QComboBox) -> None:
-    current_style = combo.styleSheet()
+    current_style = source_style(combo)
     if _COMPACT_DURATION_COMBO_STYLE not in current_style:
-        combo.setStyleSheet(f"{current_style}\n{_COMPACT_DURATION_COMBO_STYLE}".strip())
+        set_widget_style(combo, f"{current_style}\n{_COMPACT_DURATION_COMBO_STYLE}".strip())
 
 
 def set_end_of_day_duration_text(combo: QComboBox) -> None:
