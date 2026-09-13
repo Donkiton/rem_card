@@ -121,6 +121,7 @@ class AdminMainWidget(QWidget):
         self.btn_emergency_password = QPushButton("Аварийный пароль")
         self.btn_db_rotation = QPushButton("Ручная ротация БД")
         self.btn_database_info = QPushButton("Информация о БД")
+        self.btn_storage_maintenance = QPushButton("Служебные файлы")
         self.btn_import_settings = QPushButton("Загрузить настройки")
         self.btn_switch_database = QPushButton("Смена базы")
         self.btn_backup_settings = QPushButton("Сделать бекап настроек")
@@ -253,6 +254,11 @@ class AdminMainWidget(QWidget):
             (self.btn_backup_main_db, "Резервная копия основной БД", "Создать безопасную копию основной базы RemCard.", "бекап backup база"),
         ]
 
+        # Temporary doctor entry point; move authorization to administrator
+        # when the unified launcher is introduced. The service has no role logic.
+        if self.role == "doctor":
+            maintenance_actions.append((self.btn_storage_maintenance, "Служебные файлы", "Инспекция и ручная очистка старых технических файлов.", "очистка логи диагностика"))
+
         system_actions = []
         if is_dev_version:
             system_actions.extend(
@@ -319,6 +325,7 @@ class AdminMainWidget(QWidget):
             self.btn_db_rotation,
             self.btn_import_settings,
             self.btn_switch_database,
+            self.btn_storage_maintenance,
         ):
             if button not in attached_buttons:
                 button.setParent(self.menu_widget)
@@ -348,6 +355,7 @@ class AdminMainWidget(QWidget):
         self.stack.setCurrentWidget(self.menu_widget)
 
         self.btn_drugs.clicked.connect(self.open_drugs)
+        self.btn_storage_maintenance.clicked.connect(self.open_storage_maintenance)
         self.btn_groups.clicked.connect(self.open_groups)
         self.btn_forms.clicked.connect(self.open_forms)
         self.btn_admin_types.clicked.connect(self.open_admin_types)
@@ -1195,6 +1203,24 @@ class AdminMainWidget(QWidget):
                 app.setProperty("remcard_restart_requested", False)
         else:
             app.quit()
+
+    def open_storage_maintenance(self):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from rem_card.ui.admin_view.storage_maintenance_dialog import StorageMaintenanceDialog
+
+        if self.role != "doctor":
+            return
+        try:
+            context = getattr(self._resolve_db_manager(), "runtime_context", None)
+            if context is None or context.mode != "network" or not context.baza_dir:
+                raise RuntimeError("Обслуживание доступно только для текущей основной базы в сетевом режиме.")
+            dialog = StorageMaintenanceDialog(context.baza_dir, self)
+            try:
+                dialog.exec()
+            finally:
+                dialog.deleteLater()
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Служебные файлы", str(exc))
 
     def open_database_info(self):
         from rem_card.ui.shared.custom_message_box import CustomMessageBox

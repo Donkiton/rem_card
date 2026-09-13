@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from rem_card.app.db_wait_diagnostics import observe, mark_stage
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.db_availability import DatabaseClosedError
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
@@ -1770,8 +1771,10 @@ class SQLiteWriteController:
         if conn is None:
             raise DatabaseClosedError("SQLite connection is closed")
         lock = self._get_conn_lock(conn)
-        with lock:
-            yield
+        with observe("connection_guard", resource=f"{self.db_path}:{id(conn)}", stage="connection_guard_wait") as diagnostic:
+            with lock:
+                diagnostic.stage("connection_guard_held")
+                yield
 
     @staticmethod
     def _write_metric_context(options: dict[str, Any], *, interactive: bool) -> dict[str, Any]:
@@ -2030,6 +2033,7 @@ class SQLiteWriteController:
         state: _WriteTransactionState,
     ) -> dict[str, Any] | None:
         active_payload, total_wait_ms = self._record_lock_wait_started(state)
+        mark_stage("file_lock_wait")
         if self.lock.acquire(
             self.owner_id,
             state.source,
@@ -2149,7 +2153,9 @@ class SQLiteWriteController:
             _set_active_sqlite_operation(state.thread_id, active_payload)
             if before_begin is not None:
                 before_begin()
+            mark_stage("sqlite_begin_wait")
             conn.execute("BEGIN IMMEDIATE")
+            mark_stage("transaction_body")
             cursor = conn.cursor()
             record_metric(
                 "sqlite_write_lock_acquired",
@@ -2451,7 +2457,8 @@ class SQLiteWriteController:
             raise DatabaseClosedError(f"SQLite connection is closed for {source}")
         started = time.perf_counter()
         status = "error"
-        with self.connection_guard(conn):
+        with observe(source, resource=f"{self.db_path}:{id(conn)}", stage="connection_guard_wait") as diagnostic, self.connection_guard(conn):
+            diagnostic.stage("connection_guard_acquired")
             if conn.in_transaction:
                 cursor = conn.cursor()
                 try:
@@ -2477,18 +2484,24 @@ class SQLiteWriteController:
                     original_busy_timeout_ms,
                     busy_timeout_overridden,
                 ) = self._override_interactive_busy_timeout(conn, state)
+                diagnostic.stage("transaction_begin_wait")
                 cursor = self._acquire_transaction_cursor(
                     conn,
                     state,
                     before_begin,
                 )
+                diagnostic.stage("transaction_body")
                 yield cursor
+                diagnostic.stage("commit")
                 self._commit_transaction(conn, state)
+                diagnostic.stage("committed")
                 status = "ok"
                 committed = True
             except Exception:
                 if conn.in_transaction:
+                    diagnostic.stage("rollback")
                     conn.execute("ROLLBACK")
+                    diagnostic.stage("rolled_back")
                 raise
             finally:
                 self._restore_busy_timeout(
@@ -2524,6 +2537,7 @@ class QueuedWriteTask:
     retryable: bool = True
     retries_left: int = 10
     enqueued_at: float = field(default_factory=time.perf_counter)
+    diagnostic_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 class LocalWriteQueue:
@@ -2619,30 +2633,41 @@ class LocalWriteQueue:
                     "write_queue_wait_ms",
                     round((time.perf_counter() - task.enqueued_at) * 1000.0, 3),
                     description=task.description,
+                    diagnostic_id=task.diagnostic_id,
                 )
 
-                while True:
-                    try:
-                        result = task.func()
-                        if task.on_success:
-                            task.on_success(result)
-                        break
-                    except sqlite3.OperationalError as exc:
-                        if task.retryable and task.retries_left > 0 and self._is_retryable_operational_error(exc):
-                            task.retries_left -= 1
-                            time.sleep(random.uniform(0.10, 0.30))
-                            continue
-                        if task.on_error:
-                            task.on_error(exc)
-                        else:
-                            self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
-                        break
-                    except Exception as exc:
-                        if task.on_error:
-                            task.on_error(exc)
-                        else:
-                            self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
-                        break
+                with observe(task.description, resource=f"queue:{id(self)}", stage="task_execute") as diagnostic:
+                    diagnostic.payload["task_id"] = task.diagnostic_id
+                    diagnostic.payload["queue_wait_ms"] = round((time.perf_counter() - task.enqueued_at) * 1000)
+                    diagnostic.payload["pending_at_start"] = self.pending_count()
+                    while True:
+                        try:
+                            diagnostic.stage("task_execute")
+                            result = task.func()
+                            diagnostic.stage("success_callback")
+                            if task.on_success:
+                                task.on_success(result)
+                            break
+                        except sqlite3.OperationalError as exc:
+                            if task.retryable and task.retries_left > 0 and self._is_retryable_operational_error(exc):
+                                diagnostic.retry()
+                                diagnostic.stage("task_retry_backoff")
+                                task.retries_left -= 1
+                                time.sleep(random.uniform(0.10, 0.30))
+                                continue
+                            diagnostic.stage("task_failed")
+                            if task.on_error:
+                                task.on_error(exc)
+                            else:
+                                self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
+                            break
+                        except Exception as exc:
+                            diagnostic.stage("task_failed")
+                            if task.on_error:
+                                task.on_error(exc)
+                            else:
+                                self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
+                            break
             finally:
                 if active_marked:
                     with self._active_lock:
