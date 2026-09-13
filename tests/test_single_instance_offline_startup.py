@@ -235,6 +235,7 @@ def test_existing_instance_is_handled_before_offline_guard(monkeypatch):
 
 def test_unresponsive_instance_blocks_false_offline_start(monkeypatch):
     warnings = []
+    waits = []
 
     class FakeApp:
         @staticmethod
@@ -264,13 +265,18 @@ def test_unresponsive_instance_blocks_false_offline_start(monkeypatch):
         "_show_startup_warning_without_settings",
         lambda title, message: warnings.append((title, message)),
     )
+    monkeypatch.setattr(
+        app_main, "_wait_for_previous_instance",
+        lambda *args: (waits.append(args) or (None, False, app_main.SINGLE_INSTANCE_UNRESPONSIVE)),
+    )
 
     with pytest.raises(SystemExit) as exc_info:
         app_main._main_impl(forced_role="operblock_planned")
 
     assert exc_info.value.code == 1
+    assert len(waits) == 1
     assert warnings and "не отвечает" in warnings[0][1]
-    assert "Локальный режим не был открыт" in warnings[0][1]
+    assert "Новый экземпляр пока не открыт" in warnings[0][1]
 
 
 def test_show_request_activates_window_and_sends_ack():
@@ -346,3 +352,78 @@ def test_offline_notice_is_deferred_until_window_event_loop(monkeypatch):
     assert len(callbacks) == 1
     callbacks[0]()
     assert shown and shown[0][0] == "Оперблок: локальный режим"
+
+
+@pytest.mark.parametrize("close_phase", ["initial_wait", "splash_finish"])
+def test_peer_close_during_startup_reaches_finalizer_without_reopening(monkeypatch, close_phase):
+    import importlib
+    from unittest.mock import Mock
+
+    log_module = importlib.import_module("rem_card.app.logger")
+    window_module = importlib.import_module("rem_card.ui.main_window")
+    window = SimpleNamespace(
+        _is_closing=False,
+        prepare_initial_role_ui_for_startup=lambda: True,
+        show=Mock(),
+    )
+    events = []
+
+    def process_events():
+        events.append("process_events")
+        if close_phase == "initial_wait":
+            window._is_closing = True
+
+    def finish_splash(_window):
+        if close_phase == "splash_finish":
+            window._is_closing = True
+
+    application = SimpleNamespace(processEvents=process_events, exec=Mock(), property=lambda _: False)
+    splash = SimpleNamespace(close=Mock(), finish=Mock(side_effect=finish_splash))
+    timer = SimpleNamespace(singleShot=Mock())
+    container = SimpleNamespace()
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)
+    monkeypatch.setattr(log_module, "init_crash_handler", Mock())
+    monkeypatch.setattr(window_module, "MainWindow", lambda **_: window)
+    monkeypatch.setattr(app_main, "_bootstrap_startup_container", lambda *a, **kw: (container, None, None))
+    monkeypatch.setattr(app_main, "_run_pending_operblock_offline_migration_before_window", Mock())
+    monkeypatch.setattr(app_main, "_startup_trace", Mock())
+    monkeypatch.setattr(app_main, "_opblock_startup_timer_start", lambda _: None)
+    monkeypatch.setattr(app_main, "_opblock_startup_record_since", Mock())
+    monkeypatch.setattr(app_main, "_connect_single_instance_requests", Mock())
+    monkeypatch.setattr(app_main, "_startup_w1_wait_ms", lambda: 100)
+    monkeypatch.setattr(app_main, "_initial_w1_state", lambda _: {"ready": close_phase == "splash_finish"})
+    state = app_main._StartupRuntimeState(role_lock=None, emergency_runtime_context=None)
+
+    app_main._run_startup_application(
+        args=SimpleNamespace(role="nurse", emergency_startup_request=""),
+        app=application, server=None, Qt=None, QTimer=timer, theme_ui_init_ms=0,
+        preselected_runtime_reason="", splash_controller=splash,
+        startup_started_at=0, state=state,
+    )
+
+    assert events == ["process_events"]
+    assert window._is_closing
+    window.show.assert_not_called()
+    timer.singleShot.assert_not_called()
+    application.exec.assert_not_called()
+    assert state.window is window and state.exit_code == 0
+
+
+def test_restart_parent_wait_does_not_terminate_a_live_process():
+    import subprocess
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert app_main._wait_for_restart_parent(child.pid, timeout_sec=0.05) is False
+        assert child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+    assert app_main._wait_for_restart_parent(child.pid, timeout_sec=0.2) is True
+
+
+def test_restart_parent_wait_does_not_accept_unknown_liveness(monkeypatch):
+    from rem_card.app.role_session_lock import RoleSessionLock
+
+    monkeypatch.setattr(RoleSessionLock, "_is_pid_alive_local", lambda _: None)
+    assert app_main._wait_for_restart_parent(os.getpid() + 1, timeout_sec=0.01) is False

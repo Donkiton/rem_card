@@ -445,7 +445,8 @@ def _check_pending_emergency_merge_startup_gate_exists(temp_root: str) -> tuple[
         "find_pending_emergency_merge_session",
         "merge_pending",
         "EmergencyMergeDryRunService",
-        "EmergencyModeAMergeService",
+        "EmergencyRowLevelMergeService",
+        "review_required",
         'role="nurse"',
     )
     missing = [token for token in main_required if token not in main_text]
@@ -526,19 +527,28 @@ def _check_emergency_acceptance_runner_does_not_require_real_smb(temp_root: str)
     return True, "ok"
 
 
-def _check_emergency_acceptance_runner_checks_no_json_fallback(temp_root: str) -> tuple[bool, str]:
+def _check_emergency_acceptance_runner_checks_no_empty_database_fallback(temp_root: str) -> tuple[bool, str]:
     from .emergency_merge import _emergency_acceptance_runner_text
     _ = temp_root
     text = _emergency_acceptance_runner_text()
+    scenario_start = text.find("def scenario_no_standby_empty_fallback_and_missing_settings_block(")
+    scenario_end = text.find("\ndef ", scenario_start + 1)
+    scenario = text[scenario_start: scenario_end if scenario_end > scenario_start else len(text)]
     required = (
         "scenario_no_standby_empty_fallback_and_missing_settings_block",
-        "empty_database_available",
+        "no_valid_standby",
+        "not decision.allowed",
+        "before == after",
         "active_session_invalid",
         "NO_JSON_FALLBACK_MARKER",
     )
-    missing = [token for token in required if token not in text]
+    missing = [token for token in required if token not in scenario]
     if missing:
-        return False, f"no JSON fallback checks missing: {missing}"
+        return False, f"no-empty-fallback acceptance checks missing: {missing}"
+    forbidden = ("empty_database_available", "start_or_resume_emergency_session(decision")
+    present = [token for token in forbidden if token in scenario]
+    if present:
+        return False, f"acceptance scenario still creates an empty emergency database: {present}"
     return True, "ok"
 
 

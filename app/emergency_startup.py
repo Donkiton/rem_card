@@ -46,16 +46,11 @@ ACTIVE_SESSION_OFFER_MESSAGE = (
     "RemCard откроет её на локальной аварийной базе."
 )
 
-EMPTY_EMERGENCY_DATABASE_MESSAGE = (
-    "Сетевая база RemCard недоступна.\n\n"
-    "Для перехода в аварийный режим работы нужно ввести аварийный пароль.\n\n"
-    "Проверенная аварийная копия базы на этом ПК не найдена. "
-    "После подтверждения RemCard создаст пустую локальную аварийную базу без пациентов."
-)
-
 NO_VALID_STANDBY_MESSAGE = (
     "Сетевая база RemCard недоступна.\n\n"
-    "На этом ПК нет проверенной аварийной копии базы. RemCard будет закрыт."
+    "На этом ПК нет проверенной аварийной копии с данными пациентов.\n"
+    "Продолжите работу на компьютере медсестры, где заранее подготовлена копия. "
+    "Создание пустой аварийной базы запрещено."
 )
 
 ACTIVE_SESSION_INVALID_MESSAGE = (
@@ -205,8 +200,10 @@ def _standby_metadata_matches_files(metadata: EmergencyStandbyMetadata, result) 
 
 
 def validate_active_session_for_startup(metadata: EmergencySessionMetadata) -> tuple[bool, str]:
-    if metadata.status not in {"active", "merge_failed"}:
+    if metadata.status not in {"active", "waiting", "merge_pending", "merging", "merge_failed"}:
         return False, f"session status is not resumable: {metadata.status}"
+    if not metadata.base_remote_db_path or not metadata.base_snapshot_hash:
+        return False, "У аварийной копии отсутствует подтверждённая исходная база"
     medical_validation = validate_medical_db_snapshot(metadata.local_db_path)
     if not medical_validation.ok:
         return False, f"local emergency DB validation failed: {medical_validation.reason}"
@@ -219,6 +216,13 @@ def validate_active_session_for_startup(metadata: EmergencySessionMetadata) -> t
         base_validation = validate_medical_db_snapshot(metadata.base_snapshot_path)
         if not base_validation.ok:
             return False, f"base snapshot validation failed: {base_validation.reason}"
+        if base_validation.file_hash != metadata.base_snapshot_hash:
+            return False, "base snapshot hash mismatch"
+        from rem_card.app.emergency_workflow import validate_emergency_patient_source
+
+        source_error = validate_emergency_patient_source(metadata.base_snapshot_path)
+        if source_error:
+            return False, source_error
     compatibility_error = emergency_metadata_compatibility_error(metadata)
     if compatibility_error:
         return False, compatibility_error
@@ -282,7 +286,7 @@ def find_resumable_active_session(store: EmergencyLocalStore) -> tuple[Emergency
             return None, f"active session metadata error: {exc}"
         if metadata.status == "merged":
             continue
-        if metadata.status not in {"active", "merge_failed"}:
+        if metadata.status not in {"active", "waiting", "merge_pending", "merging", "merge_failed"}:
             continue
         ok, reason = validate_active_session_for_startup(metadata)
         if not ok and _settings_schema_drift_reason(reason):
@@ -304,31 +308,8 @@ def find_resumable_active_session(store: EmergencyLocalStore) -> tuple[Emergency
     return None, "no resumable active session"
 
 
-def _standby_failure_allows_empty_database(status: str, reason: str) -> bool:
-    normalized_status = str(status or "").strip().lower()
-    normalized_reason = str(reason or "").strip().lower()
-    if normalized_status in {"metadata_error", "expired"}:
-        return True
-    markers = (
-        "metadata не найдена",
-        "metadata not found",
-        "file does not exist",
-        "does not exist",
-        "path is missing",
-        "не найд",
-        "не существует",
-    )
-    return any(marker in normalized_reason for marker in markers)
 
 
-def _valid_standby_settings_path(root: str) -> str:
-    path = standby_settings_db_path(root)
-    if not os.path.isfile(path):
-        return ""
-    validation = validate_settings_db_snapshot(path)
-    if not validation.ok:
-        return ""
-    return path
 
 
 def prepare_emergency_startup(role: str | None, root: str | None = None) -> EmergencyStartupDecision:
@@ -372,17 +353,6 @@ def prepare_emergency_startup(role: str | None, root: str | None = None) -> Emer
     if not standby_status.ok or standby_status.metadata is None:
         reason = standby_status.reason or "no valid standby"
         record_emergency_startup_metric("emergency_startup_no_valid_standby", reason=reason)
-        if _standby_failure_allows_empty_database(standby_status.status, reason):
-            return EmergencyStartupDecision(
-                role=role,
-                allowed=True,
-                status="empty_database_available",
-                user_message=EMPTY_EMERGENCY_DATABASE_MESSAGE,
-                root=resolved_root,
-                technical_reason=reason,
-                password_settings_db_path=_valid_standby_settings_path(resolved_root),
-                empty_database_allowed=True,
-            )
         return EmergencyStartupDecision(
             role=role,
             allowed=False,
@@ -395,17 +365,6 @@ def prepare_emergency_startup(role: str | None, root: str | None = None) -> Emer
     metadata_ok, metadata_reason = _standby_metadata_matches_files(standby_status.metadata, standby_status)
     if not metadata_ok:
         record_emergency_startup_metric("emergency_startup_no_valid_standby", reason=metadata_reason)
-        if _standby_failure_allows_empty_database(standby_status.status, metadata_reason):
-            return EmergencyStartupDecision(
-                role=role,
-                allowed=True,
-                status="empty_database_available",
-                user_message=EMPTY_EMERGENCY_DATABASE_MESSAGE,
-                root=resolved_root,
-                technical_reason=metadata_reason,
-                password_settings_db_path=_valid_standby_settings_path(resolved_root),
-                empty_database_allowed=True,
-            )
         return EmergencyStartupDecision(
             role=role,
             allowed=False,
@@ -413,6 +372,16 @@ def prepare_emergency_startup(role: str | None, root: str | None = None) -> Emer
             user_message=NO_VALID_STANDBY_MESSAGE,
             root=resolved_root,
             technical_reason=metadata_reason,
+        )
+
+    from rem_card.app.emergency_workflow import validate_emergency_patient_source
+
+    source_error = validate_emergency_patient_source(standby_status.metadata.medical_db_path)
+    if source_error:
+        return EmergencyStartupDecision(
+            role=role, allowed=False, status="no_valid_standby",
+            user_message=NO_VALID_STANDBY_MESSAGE, root=resolved_root,
+            technical_reason=source_error,
         )
 
     return EmergencyStartupDecision(
@@ -441,11 +410,6 @@ def start_or_resume_emergency_session(
         metadata = decision.active_session_metadata
     elif decision.standby_metadata is not None:
         metadata = store.create_active_session_from_standby(decision.standby_metadata)
-    elif decision.empty_database_allowed:
-        metadata = store.create_active_session_from_empty_database(
-            settings_source_path=decision.password_settings_db_path,
-            reason=decision.technical_reason or "standby unavailable",
-        )
     else:
         raise EmergencyStoreError("Нет standby metadata для запуска аварийного режима")
 

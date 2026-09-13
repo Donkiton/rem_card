@@ -1,5 +1,8 @@
 {
   "core": [
+    "tests/test_emergency_restore_stale_locks.py",
+    "tests/test_emergency_participants.py",
+    "tests/test_isolated_test_runtime.py",
     "tests/test_analytics_half_open_ranges.py",
     "tests/test_analytics_platform_comparison.py",
     "tests/test_analytics_platform_engine.py",
@@ -24,7 +27,10 @@
     "tests/test_data_update_monitor_connection_reuse.py",
     "tests/test_database_info_service.py",
     "tests/test_detailed_statistics_section_units.py",
+    "tests/test_emergency_authoritative_merge.py",
+    "tests/test_emergency_review.py",
     "tests/test_emergency_storage_retention.py",
+    "tests/test_emergency_workflow.py",
     "tests/test_jsonl_audit_log.py",
     "tests/test_lazy_operblock_service_proxy.py",
     "tests/test_lazy_startup_services.py",
@@ -75,6 +81,7 @@
     "tests/test_vitals_query_indexes.py"
   ],
   "ui": [
+    "tests/test_emergency_button_layout.py",
     "tests/test_admin_dictionary_chrome.py",
     "tests/test_admin_settings_import_async.py",
     "tests/test_admin_settings_navigation.py",
@@ -106,6 +113,10 @@
     "tests/test_drug_template_dilution_replace_dialog.py",
     "tests/test_duration_combo.py",
     "tests/test_electrolyte_calculator.py",
+    "tests/test_emergency_outage_ui.py",
+    "tests/test_emergency_peer_ui.py",
+    "tests/test_emergency_review_ui.py",
+    "tests/test_emergency_workflow_ui.py",
     "tests/test_file_dialog_test_isolation.py",
     "tests/test_icon_loading_cache.py",
     "tests/test_lab_analysis_assignment_dialog.py",

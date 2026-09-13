@@ -52,4 +52,16 @@ def validate_remote_identity_error(
     if fingerprint_path and not remote_identity_paths_match(fingerprint_path, remote_path):
         return f"remote identity mismatch: fingerprint path {fingerprint_path} != {remote_path}"
 
+    # A path can be reused after rotation. Never reconcile patients across cycles.
+    if session.base_snapshot_path and os.path.isfile(session.base_snapshot_path):
+        from rem_card.app.emergency_workflow import database_cycle
+
+        try:
+            base_cycle = database_cycle(session.base_snapshot_path)
+            remote_cycle = database_cycle(remote_path)
+        except Exception as exc:
+            return f"remote identity uncertain: cannot read database cycle: {exc}"
+        if base_cycle != remote_cycle:
+            return "remote identity mismatch: database cycle changed; восстановите исходный цикл базы"
+
     return ""

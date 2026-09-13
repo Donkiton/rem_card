@@ -2,11 +2,17 @@ from datetime import datetime
 import re
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal, Qt, Slot
 
+from rem_card.app.db_availability import (
+    DirectCentralFailureEvent,
+    set_database_unavailable_warnings_suppressed,
+    subscribe_direct_central_failure,
+)
 from rem_card.app.db_access_classifier import classify_database_access, classify_database_access_error
 from rem_card.app.foreground_activity import should_defer_for_foreground_resume
 from rem_card.app.logger import logger
@@ -23,6 +29,10 @@ from rem_card.services.sync_coordinator import SyncCoordinator
 
 OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS = 3
 OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS = (1000, 5000)
+
+
+class EmergencyWorkPausedError(RuntimeError):
+    pass
 
 
 def _sanitize_diagnostic_message(exc: Exception, *, limit: int = 240) -> str:
@@ -87,10 +97,20 @@ class DataService(QObject):
         self._outage_signal_emitted = False
         self._last_runtime_outage_shutdown_result = ""
         self._last_runtime_outage_queue_settled = None
+        self._direct_central_failure_unsubscribe = None
+        self._emergency_pause_lock = threading.RLock()
+        self._emergency_pause_state: dict[str, Any] | None = None
+        self._emergency_write_submissions = 0
+        self._poll_maintenance_active = 0
         self._monitor.changes_detected.connect(self._emit_coordinated_changes, Qt.QueuedConnection)
         self._monitor.monitor_error.connect(self._handle_monitor_error, Qt.QueuedConnection)
         self._success_callback_requested.connect(self._dispatch_success_callback, Qt.QueuedConnection)
         self._error_callback_requested.connect(self._dispatch_error_callback, Qt.QueuedConnection)
+        if self._uses_direct_central_runtime():
+            set_database_unavailable_warnings_suppressed(False)
+            self._direct_central_failure_unsubscribe = subscribe_direct_central_failure(
+                self._handle_direct_central_failure
+            )
         self._monitor.start()
         if hasattr(self.db, "set_local_replica_failure_callback"):
             self.db.set_local_replica_failure_callback(
@@ -99,6 +119,30 @@ class DataService(QObject):
 
     def set_runtime_role(self, role: str | None):
         self._runtime_role = str(role or "").strip().lower() or None
+
+    def _uses_direct_central_runtime(self) -> bool:
+        runtime_context = getattr(self.db, "runtime_context", None)
+        return str(getattr(runtime_context, "mode", "") or "") == "network"
+
+    def _handle_direct_central_failure(self, event: DirectCentralFailureEvent) -> bool:
+        """Route direct central failures even when a caller later swallows them."""
+        if not self._uses_direct_central_runtime():
+            return False
+        if event.runtime_mode and event.runtime_mode != "network":
+            return False
+        own_path = str(getattr(self.db, "db_path", "") or "")
+        if own_path and event.database_path:
+            import os
+
+            if os.path.normcase(os.path.abspath(own_path)) != os.path.normcase(os.path.abspath(event.database_path)):
+                return False
+        if self._shutting_down or self._network_outage_detected:
+            return True
+        self._handle_database_access_failure(
+            event.wrapped,
+            source=f"direct_central:{event.context}",
+        )
+        return True
 
     def _handle_local_replica_sync_failure(
         self,
@@ -267,47 +311,201 @@ class DataService(QObject):
         self.restore_probe_status.emit(dict(payload or {}))
 
     def run_poll_maintenance_tasks(self):
-        for task in list(self._poll_maintenance_tasks):
-            task_name = str(getattr(task, "__name__", "") or "poll_maintenance")
-            decision = should_defer_for_foreground_resume(
-                task_name,
-                source="data_service_poll",
-                write_queue_idle=self.is_write_queue_idle(),
-                active_foreground_action=False,
-            )
-            if decision.get("defer"):
-                continue
-            try:
-                task()
-            except Exception as exc:
-                logger.warning("DataService poll maintenance task failed: %s", exc, exc_info=True)
+        with self._emergency_pause_lock:
+            if self._emergency_pause_state is not None:
+                return
+            self._poll_maintenance_active += 1
+        try:
+            for task in list(self._poll_maintenance_tasks):
+                task_name = str(getattr(task, "__name__", "") or "poll_maintenance")
+                decision = should_defer_for_foreground_resume(
+                    task_name,
+                    source="data_service_poll",
+                    write_queue_idle=self.is_write_queue_idle(),
+                    active_foreground_action=False,
+                )
+                if decision.get("defer"):
+                    continue
+                try:
+                    task()
+                except Exception as exc:
+                    logger.warning("DataService poll maintenance task failed: %s", exc, exc_info=True)
+        finally:
+            with self._emergency_pause_lock:
+                self._poll_maintenance_active = max(0, self._poll_maintenance_active - 1)
 
     def run_write(self, description: str, operation: Callable):
-        if self._reject_write_if_outage(description):
-            raise RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
-        operation_uuid = self._record_operblock_write_intent(description)
-        metadata = self._opblock_interactive_write_metadata(description)
-        if operation_uuid:
-            metadata["operation_id"] = operation_uuid
-        try:
-            with self._write_metadata_context(metadata):
-                result = self.db.run_write_operation(operation, source=description)
-        except Exception as exc:
-            self._mark_operblock_write_outcome(operation_uuid, description, exc)
-            self._handle_database_access_failure(exc, source=description, write_description=description)
-            raise
-        self._mark_operblock_write_remote_committed(operation_uuid, description)
-        self.write_finished.emit(description)
-        self.request_immediate_refresh(force_emit=True, source=description)
-        self._mirror_operblock_write_after_commit(
-            description,
-            operation_uuid=operation_uuid,
-            context=_operblock_description_context(description, metadata),
-        )
-        return result
+        with self._emergency_write_submission_scope():
+            if self._reject_write_if_emergency_paused(description):
+                raise EmergencyWorkPausedError(
+                    "Аварийные фоновые записи временно приостановлены до завершения подтверждения."
+                )
+            if self._reject_write_if_outage(description):
+                raise RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
+            operation_uuid = self._record_operblock_write_intent(description)
+            metadata = self._opblock_interactive_write_metadata(description)
+            if operation_uuid:
+                metadata["operation_id"] = operation_uuid
+            try:
+                with self._write_metadata_context(metadata):
+                    result = self.db.run_write_operation(operation, source=description)
+            except Exception as exc:
+                self._mark_operblock_write_outcome(operation_uuid, description, exc)
+                self._handle_database_access_failure(exc, source=description, write_description=description)
+                raise
+            self._mark_operblock_write_remote_committed(operation_uuid, description)
+            self.write_finished.emit(description)
+            self.request_immediate_refresh(force_emit=True, source=description)
+            self._mirror_operblock_write_after_commit(
+                description,
+                operation_uuid=operation_uuid,
+                context=_operblock_description_context(description, metadata),
+            )
+            return result
 
     def is_write_queue_idle(self) -> bool:
         return bool(self._queue.is_idle())
+
+    def _is_emergency_runtime(self) -> bool:
+        runtime_context = getattr(self.db, "runtime_context", None)
+        return str(getattr(runtime_context, "mode", "") or "") == "emergency"
+
+    @contextmanager
+    def _emergency_write_submission_scope(self):
+        # Cover the interval between passing the pause gate and actually
+        # submitting to the queue (and the whole synchronous write).
+        with self._emergency_pause_lock:
+            self._emergency_write_submissions = getattr(self, "_emergency_write_submissions", 0) + 1
+        try:
+            yield
+        finally:
+            with self._emergency_pause_lock:
+                self._emergency_write_submissions -= 1
+
+    def _reject_write_if_emergency_paused(self, description: str) -> bool:
+        with self._emergency_pause_lock:
+            paused = self._emergency_pause_state is not None
+        if not paused:
+            return False
+        exc = EmergencyWorkPausedError(
+            "Аварийные фоновые записи временно приостановлены до завершения подтверждения."
+        )
+        logger.info("Write rejected during reversible emergency pause for %s", description)
+        self.write_failed.emit(f"{description}: {exc}")
+        return True
+
+    def pause_emergency_work(self, timeout_sec: float = 5.0) -> dict[str, Any]:
+        """Pause emergency background work and drain accepted clinical writes."""
+        if not self._is_emergency_runtime():
+            return {"ok": False, "reason": "runtime_not_emergency"}
+        if self._shutting_down:
+            return {"ok": False, "reason": "shutting_down"}
+
+        timeout = max(0.0, float(timeout_sec or 0.0))
+        started = time.monotonic()
+        with self._emergency_pause_lock:
+            if self._emergency_pause_state is not None:
+                existing = dict(self._emergency_pause_state)
+                return {
+                    "ok": bool(existing.get("ready")),
+                    "reason": "already_paused" if existing.get("ready") else "pause_in_progress",
+                    "token": existing["token"],
+                    "queue_idle": self.is_write_queue_idle(),
+                }
+            monitor_was_enabled = bool(
+                self._monitor is not None
+                and getattr(self._monitor, "is_enabled", lambda: False)()
+            )
+            token = uuid.uuid4().hex
+            self._emergency_pause_state = {
+                "token": token,
+                "monitor_was_enabled": monitor_was_enabled,
+                "ready": False,
+            }
+
+        monitor_paused = True
+        if self._monitor is not None and monitor_was_enabled:
+            remaining = max(0.0, timeout - (time.monotonic() - started))
+            pause_and_wait = getattr(self._monitor, "pause_and_wait", None)
+            if callable(pause_and_wait):
+                monitor_paused = bool(pause_and_wait(remaining))
+            else:
+                self._monitor.set_enabled(False)
+
+        deadline = started + timeout
+        while monitor_paused and time.monotonic() < deadline:
+            with self._emergency_pause_lock:
+                maintenance_idle = (self._poll_maintenance_active <= 0
+                                    and getattr(self, "_emergency_write_submissions", 0) == 0)
+            if self.is_write_queue_idle() and maintenance_idle:
+                break
+            time.sleep(0.01)
+        queue_idle = self.is_write_queue_idle()
+        with self._emergency_pause_lock:
+            maintenance_idle = (self._poll_maintenance_active <= 0
+                                and getattr(self, "_emergency_write_submissions", 0) == 0)
+        if monitor_paused and queue_idle and maintenance_idle:
+            with self._emergency_pause_lock:
+                self._emergency_pause_state["ready"] = True
+            return {
+                "ok": True,
+                "reason": "paused",
+                "token": token,
+                "monitor_paused": True,
+                "maintenance_paused": True,
+                "queue_idle": True,
+                "pending_count": 0,
+                "active_count": 0,
+            }
+
+        self.resume_emergency_work(token)
+        return {
+            "ok": False,
+            "reason": (
+                "monitor_pause_timeout"
+                if not monitor_paused
+                else "write_queue_not_drained"
+                if not queue_idle
+                else "maintenance_not_quiescent"
+            ),
+            "monitor_paused": bool(monitor_paused),
+            "maintenance_paused": bool(maintenance_idle),
+            "queue_idle": bool(queue_idle),
+            "pending_count": int(getattr(self._queue, "pending_count", lambda: 0)()),
+            "active_count": int(getattr(self._queue, "active_count", lambda: 0)()),
+        }
+
+    def resume_emergency_work(self, token: str | dict[str, Any]) -> dict[str, Any]:
+        """Resume the exact reversible emergency pause identified by *token*.
+
+        The workflow controller keeps the complete pause result so it can show
+        drain diagnostics.  Accept that result as well as its raw token value.
+        """
+        provided_token = token.get("token") if isinstance(token, dict) else token
+        with self._emergency_pause_lock:
+            state = self._emergency_pause_state
+            if state is None:
+                return {"ok": False, "reason": "not_paused"}
+            if str(provided_token or "") != str(state.get("token") or ""):
+                return {"ok": False, "reason": "token_mismatch"}
+            monitor_was_enabled = bool(state.get("monitor_was_enabled"))
+            self._emergency_pause_state = None
+
+        monitor_resumed = False
+        if (
+            monitor_was_enabled
+            and self._monitor is not None
+            and self._monitor_enabled
+            and not self._shutting_down
+        ):
+            self._monitor.set_enabled(True)
+            monitor_resumed = True
+        return {
+            "ok": True,
+            "reason": "resumed",
+            "monitor_resumed": monitor_resumed,
+            "maintenance_resumed": True,
+        }
 
     def block_new_writes_for_runtime_outage(self, info: dict[str, Any] | None = None) -> None:
         if self._network_outage_detected:
@@ -870,85 +1068,93 @@ class DataService(QObject):
         on_error: Optional[Callable[[Exception], None]] = None,
         write_metadata: Optional[dict[str, Any]] = None,
     ):
-        if self._network_outage_detected:
-            exc = RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
-            logger.warning("Queued write rejected after runtime network outage for %s", description)
-            self.write_failed.emit(f"{description}: {exc}")
-            if on_error:
-                self._error_callback_requested.emit(on_error, exc)
-            return False
-
-        try:
-            operation_uuid = self._record_operblock_write_intent(description)
-        except Exception as exc:
-            self.write_failed.emit(f"{description}: {exc}")
-            if on_error:
-                self._error_callback_requested.emit(on_error, exc)
-            return False
-
-        if self._shutting_down:
-            exc = RuntimeError("Application is shutting down; queued write rejected")
-            self._mark_operblock_write_failed(operation_uuid, description, exc)
-            logger.info("Queued write rejected during shutdown for %s", description)
-            self.write_failed.emit(f"{description}: {exc}")
-            if on_error:
-                try:
-                    on_error(exc)
-                except Exception as callback_exc:
-                    logger.error("DataService shutdown rejection callback failed: %s", callback_exc, exc_info=True)
-            return False
-
-        metadata = self._opblock_interactive_write_metadata(description, write_metadata)
-        if operation_uuid:
-            metadata["operation_id"] = operation_uuid
-
-        def run_operation_with_metadata():
-            with self._write_metadata_context(metadata):
-                return operation()
-
-        def handle_success(result):
-            self._mark_operblock_write_remote_committed(operation_uuid, description)
-            if self._shutting_down:
-                logger.info("Queued write success callbacks skipped during shutdown for %s", description)
-                self._mirror_operblock_write_after_commit(
-                    description,
-                    operation_uuid=operation_uuid,
-                    context=_operblock_description_context(description, metadata),
+        with self._emergency_write_submission_scope():
+            if self._reject_write_if_emergency_paused(description):
+                exc = EmergencyWorkPausedError(
+                    "Аварийные фоновые записи временно приостановлены до завершения подтверждения."
                 )
-                return
+                if on_error:
+                    self._error_callback_requested.emit(on_error, exc)
+                return False
             if self._network_outage_detected:
-                logger.info("Queued write success callbacks skipped after runtime outage for %s", description)
+                exc = RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
+                logger.warning("Queued write rejected after runtime network outage for %s", description)
+                self.write_failed.emit(f"{description}: {exc}")
+                if on_error:
+                    self._error_callback_requested.emit(on_error, exc)
+                return False
+
+            try:
+                operation_uuid = self._record_operblock_write_intent(description)
+            except Exception as exc:
+                self.write_failed.emit(f"{description}: {exc}")
+                if on_error:
+                    self._error_callback_requested.emit(on_error, exc)
+                return False
+
+            if self._shutting_down:
+                exc = RuntimeError("Application is shutting down; queued write rejected")
+                self._mark_operblock_write_failed(operation_uuid, description, exc)
+                logger.info("Queued write rejected during shutdown for %s", description)
+                self.write_failed.emit(f"{description}: {exc}")
+                if on_error:
+                    try:
+                        on_error(exc)
+                    except Exception as callback_exc:
+                        logger.error("DataService shutdown rejection callback failed: %s", callback_exc, exc_info=True)
+                return False
+
+            metadata = self._opblock_interactive_write_metadata(description, write_metadata)
+            if operation_uuid:
+                metadata["operation_id"] = operation_uuid
+
+            def run_operation_with_metadata():
+                with self._write_metadata_context(metadata):
+                    return operation()
+
+            def handle_success(result):
+                self._mark_operblock_write_remote_committed(operation_uuid, description)
+                if self._shutting_down:
+                    logger.info("Queued write success callbacks skipped during shutdown for %s", description)
+                    self._mirror_operblock_write_after_commit(
+                        description,
+                        operation_uuid=operation_uuid,
+                        context=_operblock_description_context(description, metadata),
+                    )
+                    return
+                if self._network_outage_detected:
+                    logger.info("Queued write success callbacks skipped after runtime outage for %s", description)
+                    self._mirror_operblock_write_after_commit(
+                        description,
+                        operation_uuid=operation_uuid,
+                        context=_operblock_description_context(description, metadata),
+                    )
+                    return
+                self.write_finished.emit(description)
+                self.request_immediate_refresh(force_emit=True, source=description)
+                self._success_callback_requested.emit(on_success, result)
                 self._mirror_operblock_write_after_commit(
                     description,
                     operation_uuid=operation_uuid,
                     context=_operblock_description_context(description, metadata),
                 )
-                return
-            self.write_finished.emit(description)
-            self.request_immediate_refresh(force_emit=True, source=description)
-            self._success_callback_requested.emit(on_success, result)
-            self._mirror_operblock_write_after_commit(
-                description,
-                operation_uuid=operation_uuid,
-                context=_operblock_description_context(description, metadata),
+
+            def handle_error(exc: Exception):
+                logger.error("Queued write failed for %s: %s", description, exc)
+                self._mark_operblock_write_outcome(operation_uuid, description, exc)
+                self._handle_database_access_failure(exc, source=description, write_description=description)
+                self.write_failed.emit(f"{description}: {exc}")
+                self._error_callback_requested.emit(on_error, exc)
+
+            self._queue.submit(
+                func=run_operation_with_metadata,
+                description=description,
+                on_success=handle_success,
+                on_error=handle_error,
+                retryable=bool(metadata.get("queue_retryable", True)),
+                retries_left=max(0, int(metadata.get("queue_retries_left", 10))),
             )
-
-        def handle_error(exc: Exception):
-            logger.error("Queued write failed for %s: %s", description, exc)
-            self._mark_operblock_write_outcome(operation_uuid, description, exc)
-            self._handle_database_access_failure(exc, source=description, write_description=description)
-            self.write_failed.emit(f"{description}: {exc}")
-            self._error_callback_requested.emit(on_error, exc)
-
-        self._queue.submit(
-            func=run_operation_with_metadata,
-            description=description,
-            on_success=handle_success,
-            on_error=handle_error,
-            retryable=bool(metadata.get("queue_retryable", True)),
-            retries_left=max(0, int(metadata.get("queue_retries_left", 10))),
-        )
-        return True
+            return True
 
     @Slot(object, object)
     def _dispatch_success_callback(self, callback: Optional[Callable[[Any], None]], result: Any):
@@ -980,6 +1186,12 @@ class DataService(QObject):
 
     def set_shutting_down(self):
         self._shutting_down = True
+        unsubscribe = self._direct_central_failure_unsubscribe
+        self._direct_central_failure_unsubscribe = None
+        if callable(unsubscribe):
+            unsubscribe()
+        if self._uses_direct_central_runtime():
+            set_database_unavailable_warnings_suppressed(True)
 
     def prepare_runtime_outage_shutdown(self, timeout: float = 5.0) -> bool:
         logger.info("Runtime outage shutdown: stopping schedulers, monitor and write queue")

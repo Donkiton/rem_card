@@ -449,17 +449,16 @@ def _check_no_sqlite_safety_changes(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _check_no_emergency_startup_enabled_yet(temp_root: str) -> tuple[bool, str]:
+def _check_pre_qt_bootstrap_does_not_create_emergency_session(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
     bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
-    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
     forbidden = (
-        "build_emergency_runtime_context",
-        "build_settings_snapshot_context",
-        "emergency_session_dir",
+        "create_active_session_from_standby(",
+        "start_or_resume_emergency_session(",
     )
     for token in forbidden:
-        if token in bootstrap_text or token in main_text:
-            return False, f"emergency startup token unexpectedly present: {token}"
+        if token in bootstrap_text:
+            return False, f"pre-Qt bootstrap creates an emergency session: {token}"
     return True, "ok"
 
 
@@ -472,6 +471,30 @@ def _create_valid_emergency_medical_db(path: str) -> None:
     try:
         configure_connection(conn, profile="network")
         ensure_unified_schema(conn)
+        patient = conn.execute(
+            """
+            INSERT INTO patients(full_name, admission_uid, last_name, first_name)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "Regression Standby Patient",
+                f"REG-STANDBY-{uuid.uuid4().hex[:12]}",
+                "Regression",
+                "Standby",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime, is_active)
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (
+                int(patient.lastrowid),
+                1,
+                f"REG-STANDBY-{uuid.uuid4().hex[:8]}",
+                "2026-06-01T08:00:00",
+            ),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -917,17 +940,25 @@ def _check_emergency_no_sqlite_safety_changes(temp_root: str) -> tuple[bool, str
     return _check_no_sqlite_safety_changes(temp_root)
 
 
-def _check_emergency_no_startup_activation_yet(temp_root: str) -> tuple[bool, str]:
+def _check_emergency_startup_has_no_implicit_session_creation(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
     bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
     main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    forbidden = (
-        "EmergencyLocalStore(",
-        "build_active_runtime_context",
-        "emergency_session.json",
-    )
-    for token in forbidden:
-        if token in bootstrap_text or token in main_text:
-            return False, f"emergency startup activation token unexpectedly present: {token}"
+    if "create_active_session_from_standby(" in bootstrap_text or "create_active_session_from_standby(" in main_text:
+        return False, "startup coordinator creates an emergency session directly"
+    if "start_or_resume_emergency_session(" in bootstrap_text:
+        return False, "pre-Qt bootstrap activates an emergency session implicitly"
+
+    flow_start = main_text.find("def _try_emergency_startup_after_network_failure(")
+    flow_end = main_text.find("\ndef ", flow_start + 1)
+    flow = main_text[flow_start: flow_end if flow_end > flow_start else len(main_text)]
+    offer_index = flow.find("_call_emergency_startup_offer(")
+    password_index = flow.find("_show_emergency_startup_password(")
+    activation_index = flow.find("session = start_or_resume_emergency_session(")
+    if min(flow_start, offer_index, password_index, activation_index) < 0:
+        return False, "explicit emergency startup confirmation flow is incomplete"
+    if not (offer_index < password_index < activation_index):
+        return False, "fresh emergency session can be activated before offer and password confirmation"
     return True, "ok"
 
 
@@ -1302,13 +1333,14 @@ def _check_emergency_startup_uses_previous_valid_standby_after_failed_refresh(te
     return True, "ok"
 
 
-def _check_emergency_standby_no_startup_activation_yet(temp_root: str) -> tuple[bool, str]:
+def _check_emergency_standby_has_no_direct_startup_refresh_io(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
     bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
     main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
-    forbidden = ("EmergencyStandbyManager", "create_or_refresh_standby", "refresh_medical_standby")
+    forbidden = ("create_or_refresh_standby(", "refresh_medical_standby(")
     for token in forbidden:
         if token in bootstrap_text or token in main_text:
-            return False, f"standby startup activation token unexpectedly present: {token}"
+            return False, f"startup performs direct standby refresh I/O: {token}"
     return True, "ok"
 
 

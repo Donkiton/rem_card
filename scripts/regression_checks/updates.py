@@ -1014,6 +1014,38 @@ def _check_role_exe_names_preserved(temp_root: str) -> tuple[bool, str]:
             "PyInstaller entry points must be analyzed from ALIAS_ROOT; otherwise the "
             f"source rem_card shim hides compiled modules: {missing_alias_tokens}"
         )
+    # Execute only the TOC selector, without running PyInstaller or exporting data.
+    import ast
+    from types import SimpleNamespace
+
+    tree = ast.parse(text)
+    path_setup = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_prefer_windows_system_dlls")
+    fake_env = {"SystemRoot": os.path.join(temp_root, "Windows"), "PATH": os.path.join(temp_root, "external_tools")}
+    path_namespace = {"os": SimpleNamespace(path=os.path, pathsep=os.pathsep, environ=fake_env),
+                      "sys": SimpleNamespace(platform="win32")}
+    exec(compile(ast.Module(body=[path_setup], type_ignores=[]), "RemCard.spec", "exec"), path_namespace)
+    path_namespace["_prefer_windows_system_dlls"]()
+    if fake_env["PATH"].split(os.pathsep)[0] != os.path.join(fake_env["SystemRoot"], "System32"):
+        return False, "system DLLs must take precedence over external tools on build PATH"
+    selector = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_script_toc")
+    entrypoints = (
+        "run_doctor.py", "run_nurse.py", "run_operblock_emergency.py",
+        "run_operblock_planned.py", "run_path_setup.py", "run_updater.py",
+    )
+    hooks = [(name, os.path.join(temp_root, name + ".py"), "PYSOURCE")
+             for name in ("custom_runtime", "pyi_rth_pyside6", "pyi_rth_multiprocessing")]
+    entries = [(name[:-3], os.path.join(temp_root, name), "PYSOURCE") for name in entrypoints]
+    namespace = {"os": os, "ENTRYPOINT_FILES": entrypoints, "a": SimpleNamespace(scripts=hooks + entries)}
+    exec(compile(ast.Module(body=[selector], type_ignores=[]), "RemCard.spec", "exec"), namespace)
+    for name, entry in zip(entrypoints, entries):
+        if namespace["_script_toc"](name) != hooks + [entry]:
+            return False, f"{name}: runtime hooks must precede only the selected entrypoint"
+    try:
+        namespace["_script_toc"]("missing.py")
+    except RuntimeError:
+        pass
+    else:
+        return False, "missing entrypoint must fail packaging"
     return True, "ok"
 
 

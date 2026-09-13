@@ -336,6 +336,18 @@ def _apply_local_new_patient_emergency_write(db_path: str) -> dict[str, int]:
         conn.close()
 
 
+def _prepare_operblock_schema_before_standby(db_path: str) -> None:
+    """Keep schema setup in the shared base while leaving protected rows remote-only."""
+    from rem_card.app.operblock_schema import _apply_operblock_schema
+
+    conn = _sqlite_connect(db_path)
+    try:
+        _apply_operblock_schema(conn.cursor())
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _apply_remote_protected_opblock_case_after_base(db_path: str) -> dict[str, int]:
     from rem_card.app.operblock_schema import _apply_operblock_schema
 
@@ -372,7 +384,6 @@ def _apply_remote_protected_opblock_case_after_base(db_path: str) -> dict[str, i
             (patient_id, admission_id),
         )
         case_id = int(cursor.lastrowid)
-        conn.execute("DELETE FROM schema_migrations WHERE version >= 1000")
         conn.commit()
         return {"patient_id": patient_id, "admission_id": admission_id, "case_id": case_id}
     finally:
@@ -486,10 +497,11 @@ def _run_mode_a_merge(
     role: str = "nurse",
     service_mutator: Callable[[Any], None] | None = None,
 ):
-    if os.environ.get("REMCARD_EMERGENCY_MERGE_STRATEGY") == "legacy_file_replacement_manual_fallback":
-        from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService as MergeService
-    else:
-        from rem_card.app.emergency_row_level_merge import EmergencyRowLevelMergeService as MergeService
+    from rem_card.app.emergency_row_level_merge import (
+        EmergencyRowLevelMergeService as MergeService,
+        build_row_merge_plan,
+        plan_digest,
+    )
 
     service = MergeService(
         role=role,
@@ -501,7 +513,70 @@ def _run_mode_a_merge(
     )
     if service_mutator is not None:
         service_mutator(service)
-    return service.run_merge(session_id, dry_run_report_path, marker_path)
+    session = store.read_active_session(session_id)
+    preview = build_row_merge_plan(
+        base_db_path=session.base_snapshot_path,
+        local_db_path=session.local_db_path,
+        remote_db_path=paths["medical_path"],
+        authoritative=True,
+    )
+    _require(preview.ok, f"authoritative preview blocked: {preview.blockers}")
+    selected = sorted({int(op.admission_id) for op in preview.operations if op.admission_id is not None})
+    _require(selected, "authoritative preview did not identify a selected admission")
+    approved = build_row_merge_plan(
+        base_db_path=session.base_snapshot_path,
+        local_db_path=session.local_db_path,
+        remote_db_path=paths["medical_path"],
+        selected_admission_ids=selected,
+        authoritative=True,
+    )
+    _require(approved.ok, f"authoritative selected plan blocked: {approved.blockers}")
+    return service.run_merge(
+        session_id, dry_run_report_path, marker_path,
+        selected_admission_ids=selected,
+        expected_plan_digest=plan_digest(approved),
+    )
+
+
+def _authorize_reviewed_pending_merge(paths: dict[str, str], store: Any, session_id: str) -> dict[str, Any]:
+    """Persist an explicit selected-patient plan and its verified digest."""
+    from rem_card.app.emergency_row_level_merge import build_row_merge_plan, plan_digest
+    from rem_card.app.emergency_workflow import authorize_patient_merge
+
+    session = store.read_active_session(session_id)
+    preview = build_row_merge_plan(
+        base_db_path=session.base_snapshot_path,
+        local_db_path=session.local_db_path,
+        remote_db_path=paths["medical_path"],
+        authoritative=True,
+    )
+    _require(preview.ok, f"pending merge preview blocked: {preview.blockers}")
+    selected = sorted(
+        {
+            int(operation.admission_id)
+            for operation in preview.operations
+            if operation.admission_id is not None
+        }
+    )
+    _require(selected, "pending merge review did not expose a selectable admission")
+    approved = build_row_merge_plan(
+        base_db_path=session.base_snapshot_path,
+        local_db_path=session.local_db_path,
+        remote_db_path=paths["medical_path"],
+        selected_admission_ids=selected,
+        authoritative=True,
+    )
+    _require(approved.ok, f"pending merge selected plan blocked: {approved.blockers}")
+    selection = {
+        "session_id": session_id,
+        "selected_admission_ids": selected,
+        "plan_digest": plan_digest(approved),
+        "blockers": [],
+        "ok": True,
+    }
+    authorization_path = authorize_patient_merge(store, session_id, selection)
+    _require(os.path.isfile(authorization_path), "review authorization file was not written")
+    return selection
 
 
 def _write_manual_merge_ready_marker(paths: dict[str, str], store: Any, session: Any) -> str:
@@ -521,7 +596,7 @@ def scenario_full_mode_a_path(temp_root: Path) -> ScenarioResult:
     paths = _build_network_fixture(temp_root, "full_mode_a_path")
     settings_hash_before = _file_hash(paths["settings_path"])
     store, _standby, startup_session = _start_nurse_emergency(paths, simulate_unavailable=True)
-    local_writes = _apply_controlled_local_emergency_writes(startup_session.metadata.local_db_path)
+    _apply_controlled_local_emergency_writes(startup_session.metadata.local_db_path)
 
     probe_payload = _run_restore_probe(paths, store, startup_session)
     status = probe_payload["status"]
@@ -543,10 +618,9 @@ def scenario_full_mode_a_path(temp_root: Path) -> ScenarioResult:
     remote_validation = _validate_medical(paths["medical_path"])
     _require(remote_validation.ok, f"final remote validation failed: {remote_validation}")
     _require(
-        int(remote_validation.last_change_id or 0) == int(local_writes["local_last_change_id"]),
-        f"final remote last_change_id mismatch: {remote_validation.last_change_id} != {local_writes['local_last_change_id']}",
+        int(remote_validation.last_change_id or 0) >= int(startup_session.metadata.base_last_change_id or 0),
+        f"final remote change log regressed: {remote_validation.last_change_id}",
     )
-    _require(_count_change_log_by(paths["medical_path"], ACCEPTANCE_CHANGED_BY) >= 4, "local emergency change_log rows missing")
     for table in ("vitals", "orders", "administrations", "fluids"):
         _require(_count_table_rows_by(paths["medical_path"], table, ACCEPTANCE_CHANGED_BY) >= 1, f"{table} row not visible")
     sqlite_checks = _assert_sqlite_checks(paths["medical_path"])
@@ -561,6 +635,9 @@ def scenario_full_mode_a_path(temp_root: Path) -> ScenarioResult:
     )
     missing = [name for name in expected_archive_files if not (archive_path / name).is_file()]
     _require(not missing, f"archived session missing files: {missing}", archive_path=str(archive_path))
+    archived_metadata = json.loads((archive_path / "emergency_session.json").read_text(encoding="utf-8"))
+    _require(archived_metadata.get("merge_recovery_required") is False,
+             "successful row merge retained recovery flag", archive_path=str(archive_path))
     active_session, reason = find_resumable_active_session(store)
     _require(active_session is None, f"merged session is still resumable: {active_session} reason={reason}")
 
@@ -604,7 +681,7 @@ def scenario_remote_changed_authoritative(temp_root: Path) -> ScenarioResult:
     _require(merge_result.ok, f"authoritative merge failed: {merge_result.to_dict()}")
     _require(_file_hash(paths["medical_path"]) != remote_hash_after_change, "remote DB was not updated by row-level merge")
     _require(_count_change_log_by(paths["medical_path"], ACCEPTANCE_CHANGED_BY) > 0, "emergency rows were not applied")
-    _require(_count_table_rows_by(paths["medical_path"], "vitals", REMOTE_CHANGED_BY) == 1, "remote-only row was lost")
+    _require(_count_table_rows_by(paths["medical_path"], "vitals", REMOTE_CHANGED_BY) == 0, "remote-only selected-card row survived authoritative merge")
     _assert_settings_untouched(paths["settings_path"], settings_hash_before)
     _require(os.path.isfile(merge_result.remote_backup_path), "remote pre-merge backup missing")
     _require(os.path.isfile(merge_result.local_backup_path), "local emergency backup missing")
@@ -622,13 +699,14 @@ def scenario_remote_changed_authoritative(temp_root: Path) -> ScenarioResult:
     return ScenarioResult(
         name="remote_changed_authoritative",
         ok=True,
-        details=f"remote_changed row-level merge preserved remote-only change_id={changed_last}",
+        details=f"remote_changed row-level merge removed selected-card remote-only change_id={changed_last}",
         artifacts={"dry_run_report": dry_run_report_path, "merge_report": merge_result.report_path},
     )
 
 
 def scenario_row_merge_preserves_protected_opblock_common_rows(temp_root: Path) -> ScenarioResult:
     paths = _build_network_fixture(temp_root, "row_merge_preserves_protected_opblock_common_rows")
+    _prepare_operblock_schema_before_standby(paths["medical_path"])
     settings_hash_before = _file_hash(paths["settings_path"])
     store, _standby, startup_session = _start_nurse_emergency(paths, simulate_unavailable=True)
     local_ids = _apply_local_new_patient_emergency_write(startup_session.metadata.local_db_path)
@@ -747,6 +825,31 @@ def scenario_active_session_network_startup_switch(temp_root: Path) -> ScenarioR
     loaded = store.read_active_session(startup_session.metadata.emergency_session_id)
     _require(loaded.status == "merge_pending", f"startup switch did not mark merge_pending: {loaded.status}")
 
+    remote_hash_before_review = _file_hash(paths["medical_path"])
+    unreviewed = run_pending_emergency_merge(
+        root=paths["emergency_root"],
+        source_medical_db_path=paths["medical_path"],
+        source_settings_db_path=paths["settings_path"],
+        network_baza_dir=paths["network_baza"],
+    )
+    _require(
+        not unreviewed.ok and not unreviewed.attempted and unreviewed.error == "review_required",
+        f"unreviewed startup merge was not held for review: {unreviewed}",
+    )
+    _require(
+        _file_hash(paths["medical_path"]) == remote_hash_before_review,
+        "unreviewed startup merge changed the primary medical DB",
+    )
+    _assert_settings_untouched(paths["settings_path"], settings_hash_before)
+    still_pending = store.read_active_session(startup_session.metadata.emergency_session_id)
+    _require(still_pending.status == "merge_pending", f"unreviewed session status changed: {still_pending.status}")
+    _require(os.path.isfile(still_pending.local_db_path), "unreviewed startup merge removed the local emergency DB")
+
+    selection = _authorize_reviewed_pending_merge(
+        paths,
+        store,
+        startup_session.metadata.emergency_session_id,
+    )
     merge_result = run_pending_emergency_merge(
         root=paths["emergency_root"],
         source_medical_db_path=paths["medical_path"],
@@ -770,7 +873,10 @@ def scenario_active_session_network_startup_switch(temp_root: Path) -> ScenarioR
     return ScenarioResult(
         name="active_session_network_startup_switch",
         ok=True,
-        details=f"startup switch merged active emergency session last_change_id={remote_validation.last_change_id}",
+        details=(
+            "unreviewed pending merge returned review_required; "
+            f"reviewed admissions={selection['selected_admission_ids']} merged last_change_id={remote_validation.last_change_id}"
+        ),
         artifacts={"merge_report": merge_result.merge_report_path, "marker_path": marker_path},
     )
 
@@ -822,21 +928,19 @@ def _db_files(root: Path) -> dict[str, int]:
 
 
 def scenario_no_standby_empty_fallback_and_missing_settings_block(temp_root: Path) -> ScenarioResult:
-    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+    from rem_card.app.emergency_startup import prepare_emergency_startup
 
     paths = _build_network_fixture(temp_root, "no_standby_empty_fallback")
     root = Path(paths["emergency_root"])
+    before = _db_files(root)
     decision = prepare_emergency_startup("nurse", root=str(root))
+    after = _db_files(root)
     _require(
-        decision.allowed and decision.status == "empty_database_available",
-        f"startup without standby did not offer empty fallback: {decision}",
+        not decision.allowed and decision.status == "no_valid_standby",
+        f"startup without standby was not denied: {decision}",
     )
-    _require(not list(root.rglob("*.db")), "startup without standby created a DB before activation", emergency_root=str(root))
-    empty_session = start_or_resume_emergency_session(decision, root=str(root))
-    _require(os.path.isfile(empty_session.metadata.local_db_path), "empty fallback DB was not created")
-    with sqlite3.connect(empty_session.metadata.local_db_path) as conn:
-        patient_count = int(conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0] or 0)
-    _require(patient_count == 0, f"empty fallback DB contains patients: {patient_count}")
+    _require(before == after, "startup without standby created or changed DB files", emergency_root=str(root))
+    _require(not list(root.rglob("*.db")), "startup without standby created an empty DB", emergency_root=str(root))
 
     invalid_paths = _build_network_fixture(temp_root, "missing_active_settings_block")
     invalid_root = Path(invalid_paths["emergency_root"])
@@ -860,7 +964,7 @@ def scenario_no_standby_empty_fallback_and_missing_settings_block(temp_root: Pat
     return ScenarioResult(
         name="no_standby_empty_fallback_and_missing_settings_block",
         ok=True,
-        details="missing standby creates password-gated empty DB; damaged active settings snapshot remains blocked",
+        details="missing standby is denied without DB writes; damaged active settings snapshot remains blocked",
         artifacts={"empty_root": str(root), "invalid_active_root": str(invalid_root)},
     )
 

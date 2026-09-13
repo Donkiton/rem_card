@@ -1042,7 +1042,7 @@ class DatabaseManager:
             self._record_startup_metric("sqlite_connect_ms", (time.perf_counter() - connect_started) * 1000.0)
         except Exception as exc:
             if is_database_unavailable_error(exc):
-                raise notify_database_unavailable(exc, context="remcard_init", logger=logger) from exc
+                raise notify_database_unavailable(exc, context="remcard_init", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             raise
         finally:
             profile_lock.release()
@@ -2697,6 +2697,13 @@ class DatabaseManager:
             if watchdog_thread is not None and watchdog_thread.is_alive():
                 watchdog_thread.join(timeout=0.2)
 
+    def _confirmed_central_read_result(self, result):
+        if getattr(getattr(self, "runtime_context", None), "mode", "") == "network":
+            from rem_card.app.db_availability import notify_direct_central_success
+
+            notify_direct_central_success()
+        return result
+
     def _fetch_all_central(self, query, params=(), *, use_write_connection: bool = False, cancel_check=None):
         # Чтения внутри текущей транзакции должны видеть незакоммиченные строки.
         # Обычные фоновые чтения открывают короткоживущее read-only connection
@@ -2709,13 +2716,13 @@ class DatabaseManager:
                 with self._central_io_lock_scope("remcard_read_all_write_conn", source="fetch_all"):
                     conn = self._get_central_write_connection_for_read("remcard_read_all")
                     with self.write_controller.connection_guard(conn):
-                        return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
+                        return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check))
             scoped_conn = self._scoped_central_read_connection()
             if scoped_conn is not None:
-                return self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check)
+                return self._confirmed_central_read_result(self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check))
             conn = self._open_readonly_central_connection()
             try:
-                return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
+                return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check))
             finally:
                 try:
                     conn.close()
@@ -2723,7 +2730,7 @@ class DatabaseManager:
                     logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
             if is_database_unavailable_error(exc):
-                raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger) from exc
+                raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             raise
 
     def _fetch_one_central(self, query, params=(), *, use_write_connection: bool = False):
@@ -2734,17 +2741,17 @@ class DatabaseManager:
                     with self.write_controller.connection_guard(conn):
                         cursor = conn.cursor()
                         cursor.execute(query, params)
-                        return cursor.fetchone()
+                        return self._confirmed_central_read_result(cursor.fetchone())
             scoped_conn = self._scoped_central_read_connection()
             if scoped_conn is not None:
                 cursor = scoped_conn.cursor()
                 cursor.execute(query, params)
-                return cursor.fetchone()
+                return self._confirmed_central_read_result(cursor.fetchone())
             conn = self._open_readonly_central_connection()
             try:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
-                return cursor.fetchone()
+                return self._confirmed_central_read_result(cursor.fetchone())
             finally:
                 try:
                     conn.close()
@@ -2752,7 +2759,7 @@ class DatabaseManager:
                     logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
             if is_database_unavailable_error(exc):
-                raise notify_database_unavailable(exc, context="remcard_read_one", logger=logger) from exc
+                raise notify_database_unavailable(exc, context="remcard_read_one", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             raise
 
     @staticmethod
@@ -3187,7 +3194,7 @@ class DatabaseManager:
                         self._after_write_committed()
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
             if is_database_unavailable_error(exc):
-                raise notify_database_unavailable(exc, context=f"remcard_transaction:{source}", logger=logger) from exc
+                raise notify_database_unavailable(exc, context=f"remcard_transaction:{source}", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             op_id = None
             if is_corruption_write_error(exc):
                 logger.critical("Central SQLite DB corruption detected during transaction (source=%s): %s", source, exc)
@@ -3268,7 +3275,7 @@ class DatabaseManager:
             return cursor
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
             if is_database_unavailable_error(exc):
-                raise notify_database_unavailable(exc, context=f"remcard_write:{source}", logger=logger) from exc
+                raise notify_database_unavailable(exc, context=f"remcard_write:{source}", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             if is_corruption_write_error(exc):
                 logger.critical("Central SQLite DB corruption detected during write (source=%s): %s", source, exc)
             if is_retryable_write_error(exc):

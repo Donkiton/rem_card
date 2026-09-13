@@ -122,9 +122,15 @@ class NurseSector8Panel(QWidget):
         self.btn_exit.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_exit.clicked.connect(self.exit_clicked.emit)
 
+        from rem_card.ui.shared.emergency_mode_button import create_emergency_mode_button
+
+        self.btn_emergency_mode = create_emergency_mode_button(self)
+        self.btn_emergency_mode.setStyleSheet(STYLE_SECTOR8_BUTTON)
+
         self._button_widgets = {
             "archive": self.btn_archive,
             "refresh": self.btn_refresh,
+            "emergency_mode": self.btn_emergency_mode,
             "user_report": self.btn_user_report,
             "user_reports": self.btn_user_reports,
             "add_patient": self.btn_add_patient,
@@ -156,12 +162,12 @@ class NurseSector8Panel(QWidget):
             left_order = [
                 button_id
                 for button_id in order
-                if button_id in {"user_report", "user_reports"} and bool(visible.get(button_id, True))
+                if button_id in {"emergency_mode", "user_report", "user_reports"} and bool(visible.get(button_id, True))
             ]
             right_order = [
                 button_id
                 for button_id in order
-                if button_id not in {"user_report", "user_reports"} and bool(visible.get(button_id, True))
+                if button_id not in {"emergency_mode", "user_report", "user_reports"} and bool(visible.get(button_id, True))
             ]
 
         self._clear_layout()
@@ -180,6 +186,9 @@ class NurseSector8Panel(QWidget):
                 continue
             button.setVisible(True)
             self.layout.addWidget(button)
+        from rem_card.ui.shared.emergency_mode_button import sync_emergency_mode_button
+
+        sync_emergency_mode_button(self)
         self.updateGeometry()
 
     def set_add_patient_enabled(self, enabled: bool):

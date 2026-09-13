@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from rem_card.ui.styles.shared_styles import apply_custom_dialog_style
+from rem_card.ui.styles.emergency_styles import apply_emergency_dialog_style
 
 
 ActionSpec = tuple[str, int]
@@ -23,6 +23,7 @@ PasswordVerifier = Callable[[str], bool]
 class NonClosableEmergencyDialog(QDialog):
     def __init__(self, title: str, message: str, parent=None):
         super().__init__(parent)
+        self.setWindowTitle(str(title))
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(True)
@@ -30,7 +31,7 @@ class NonClosableEmergencyDialog(QDialog):
         self._is_dragging = False
         self._drag_pos = QPoint()
 
-        apply_custom_dialog_style(self)
+        apply_emergency_dialog_style(self)
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -139,10 +140,12 @@ class EmergencyPasswordDialog(NonClosableEmergencyDialog):
         confirm_text: str = "Подтвердить",
         cancel_text: str = "Закрыть RemCard",
         error_text: str = "Пароль неверный",
+        verification_error_text: str = "Не удалось проверить аварийный пароль. Повторите попытку.",
     ):
         super().__init__(title, message, parent=parent)
         self._verifier = verifier
         self._error_text = str(error_text)
+        self._verification_error_text = str(verification_error_text)
 
         self.password_edit = QLineEdit()
         self.password_edit.setEchoMode(QLineEdit.Password)
@@ -174,7 +177,11 @@ class EmergencyPasswordDialog(NonClosableEmergencyDialog):
         try:
             ok = bool(self._verifier(password))
         except Exception:
-            ok = False
+            self.password_edit.clear()
+            self.error_label.setText(self._verification_error_text)
+            self.error_label.show()
+            self.password_edit.setFocus(Qt.OtherFocusReason)
+            return
         if ok:
             self.finish_with_code(QDialog.Accepted)
             return
@@ -194,6 +201,7 @@ class EmergencyPasswordDialog(NonClosableEmergencyDialog):
         confirm_text: str = "Подтвердить",
         cancel_text: str = "Закрыть RemCard",
         error_text: str = "Пароль неверный",
+        verification_error_text: str = "Не удалось проверить аварийный пароль. Повторите попытку.",
     ) -> bool:
         dialog = cls(
             title,
@@ -203,5 +211,6 @@ class EmergencyPasswordDialog(NonClosableEmergencyDialog):
             confirm_text=confirm_text,
             cancel_text=cancel_text,
             error_text=error_text,
+            verification_error_text=verification_error_text,
         )
         return int(dialog.exec()) == QDialog.Accepted
