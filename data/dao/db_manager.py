@@ -1,3 +1,4 @@
+from rem_card.app.db_wait_diagnostics import observe, observed_scope
 import json
 import os
 import random
@@ -731,36 +732,38 @@ class DatabaseManager:
 
     @contextmanager
     def _central_io_lock_scope(self, operation: str, *, source: str = "db"):
-        started = time.perf_counter()
-        lock = self._central_io_lock
-        lock.acquire()
-        wait_ms = (time.perf_counter() - started) * 1000.0
-        if wait_ms >= CENTRAL_IO_LOCK_WAIT_WARN_MS:
-            snapshot = active_maintenance_snapshot(limit=4)
-            active_tasks = ",".join(
-                str(item.get("task_type") or "")
-                for item in (snapshot.get("active") or [])
-                if isinstance(item, dict)
-            )
-            logger.warning(
-                "[DBReadWait] central_io_lock_wait_ms=%.1f operation=%s source=%s active_maintenance=%s",
-                wait_ms,
-                operation,
-                source,
-                active_tasks,
-            )
-            record_metric(
-                "central_io_lock_wait_ms",
-                round(wait_ms, 3),
-                operation=str(operation or ""),
-                source=str(source or ""),
-                active_maintenance_count=int(snapshot.get("active_count") or 0),
-                active_maintenance=active_tasks,
-            )
-        try:
-            yield
-        finally:
-            lock.release()
+        with observe(operation, resource=getattr(self, "db_path", ""), stage="central_io_wait") as diagnostic:
+            started = time.perf_counter()
+            lock = self._central_io_lock
+            lock.acquire()
+            diagnostic.stage("central_io_held")
+            wait_ms = (time.perf_counter() - started) * 1000.0
+            if wait_ms >= CENTRAL_IO_LOCK_WAIT_WARN_MS:
+                snapshot = active_maintenance_snapshot(limit=4)
+                active_tasks = ",".join(
+                    str(item.get("task_type") or "")
+                    for item in (snapshot.get("active") or [])
+                    if isinstance(item, dict)
+                )
+                logger.warning(
+                    "[DBReadWait] central_io_lock_wait_ms=%.1f operation=%s source=%s active_maintenance=%s",
+                    wait_ms,
+                    operation,
+                    source,
+                    active_tasks,
+                )
+                record_metric(
+                    "central_io_lock_wait_ms",
+                    round(wait_ms, 3),
+                    operation=str(operation or ""),
+                    source=str(source or ""),
+                    active_maintenance_count=int(snapshot.get("active_count") or 0),
+                    active_maintenance=active_tasks,
+                )
+            try:
+                yield
+            finally:
+                lock.release()
 
     def _rotation_blocking_role_lock_paths(self) -> dict[str, str]:
         session_locks_dir = os.path.join(str(getattr(self, "baza_dir", BAZA_DIR)), "session_locks")
@@ -2402,6 +2405,7 @@ class DatabaseManager:
                 logger.debug("Failed to close finished thread central read connection: %s", exc)
 
     @contextmanager
+    @observed_scope("read_scope")
     def central_read_scope(self, source: str = "snapshot"):
         """Reuse one short-lived read-only central connection inside a snapshot build."""
         state = self._thread_state
@@ -3175,13 +3179,15 @@ class DatabaseManager:
             os.remove(meta_path)
 
     @contextmanager
+    @observed_scope("central_io_wait_or_transaction")
     def remcard_transaction(self, source: str = "remcard_tx", write_options: Optional[dict[str, Any]] = None):
         statement_sink: list[tuple[str, tuple]] = []
         outer_transaction = not self._in_current_thread_remcard_transaction()
         effective_write_options = dict(write_options or self._current_thread_write_metadata())
         try:
             with self._mark_write_activity():
-                with self._central_io_lock:
+                with observe(source, resource=getattr(self, "db_path", ""), stage="central_io_wait") as diagnostic, self._central_io_lock:
+                    diagnostic.stage("central_io_held")
                     if self._closed or self._remcard_conn is None:
                         raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
                     conn = self._remcard_conn

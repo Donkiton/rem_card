@@ -78,7 +78,9 @@
     "tests/test_updater_install_safety.py",
     "tests/test_user_reports_service.py",
     "tests/test_vital_validation.py",
-    "tests/test_vitals_query_indexes.py"
+    "tests/test_vitals_query_indexes.py",
+    "tests/test_storage_maintenance.py",
+    "tests/test_db_wait_diagnostics.py"
   ],
   "ui": [
     "tests/test_emergency_button_layout.py",
@@ -151,6 +153,7 @@
     "tests/test_transfusion_protocol_report_setting.py",
     "tests/test_user_reports_dialog.py",
     "tests/test_vital_settings_dialog_cvp_button.py",
-    "tests/test_w1_layout_handoff.py"
+    "tests/test_w1_layout_handoff.py",
+    "tests/test_storage_maintenance_dialog.py"
   ]
 }
