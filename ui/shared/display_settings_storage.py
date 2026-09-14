@@ -12,7 +12,7 @@ from rem_card.ui.styles.theme_storage import get_style_settings_path
 
 
 DISPLAY_SETTINGS_ENV = "REMCARD_DISPLAY_SETTINGS_PATH"
-DISPLAY_SETTINGS_VERSION = 3
+DISPLAY_SETTINGS_VERSION = 4
 DISPLAY_SETTINGS_RELATIVE_PATH = os.path.join("settings", "display_settings", "display_settings.json")
 W1A_UPCOMING_ORDERS_DEFAULT_ENABLED = True
 W1B_LOWER_SECTOR_DEFAULT_ENABLED = True
@@ -51,6 +51,7 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         {"id": "calculations", "label": "Расчёт", "default_visible": True, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
+        {"id": "roles", "label": "Роли", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
     ),
     "nurse": (
@@ -81,6 +82,7 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         {"id": "calculations", "label": "Расчёт", "default_visible": True, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
+        {"id": "roles", "label": "Роли", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
     ),
     "operblock": (
@@ -102,6 +104,7 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         },
         {"id": "settings", "label": "Настройки", "default_visible": False, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
+        {"id": "roles", "label": "Роли", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
     ),
 }

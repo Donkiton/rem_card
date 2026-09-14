@@ -1680,14 +1680,36 @@ class DatabaseManager:
             self._local_replica = None
             logger.warning("Failed to enable local-first sync replica: %s", exc)
 
-    def _stop_local_replica_sync(self):
-        if self._local_replica:
-            try:
-                self._local_replica.set_failure_callback(None)
-                self._local_replica.stop()
-            except Exception as exc:
-                logger.warning("Failed to stop local replica sync: %s", exc)
+    def _stop_local_replica_sync(self, timeout_sec: float = 2.0) -> bool:
+        replica = self._local_replica
+        if replica is None:
+            return True
+        try:
+            replica.set_failure_callback(None)
+            # LocalReplicaSync.stop() closes its worker client immediately.  Do
+            # not call it while sync_once may still own that client: request a
+            # cooperative stop and retain the replica until its thread exits.
+            stop_evt = getattr(replica, "_stop_evt", None)
+            fast_sync_evt = getattr(replica, "_fast_sync_evt", None)
+            if stop_evt is not None:
+                stop_evt.set()
+            if fast_sync_evt is not None:
+                fast_sync_evt.set()
+            thread = getattr(replica, "_thread", None)
+            if thread is not None and thread.is_alive():
+                if thread is threading.current_thread():
+                    logger.warning("Local replica sync cannot join its own worker thread")
+                    return False
+                thread.join(timeout=max(0.0, float(timeout_sec)))
+                if thread.is_alive():
+                    logger.warning("Local replica sync did not stop before shutdown timeout")
+                    return False
+            replica.stop()
+        except Exception as exc:
+            logger.warning("Failed to stop local replica sync: %s", exc)
+            return False
         self._local_replica = None
+        return True
 
     def set_local_replica_failure_callback(
         self,
@@ -1838,13 +1860,21 @@ class DatabaseManager:
         self._outbox_thread.start()
         logger.info("Durable outbox replay enabled (interval=%ss, path=%s)", self._outbox_replay_interval_sec, LOCAL_REMCARD_OUTBOX_PATH)
 
-    def _stop_outbox_replay(self):
+    def _stop_outbox_replay(self, timeout_sec: float = 2.0) -> bool:
         self._outbox_stop_evt.set()
         self._outbox_wakeup_evt.set()
-        if self._outbox_thread and self._outbox_thread.is_alive():
-            self._outbox_thread.join(timeout=2.0)
+        thread = self._outbox_thread
+        if thread and thread.is_alive():
+            if thread is threading.current_thread():
+                logger.warning("Outbox replay cannot join its own worker thread")
+                return False
+            thread.join(timeout=max(0.0, float(timeout_sec)))
+            if thread.is_alive():
+                logger.warning("Outbox replay did not stop before shutdown timeout")
+                return False
         self._outbox_thread = None
         self._outbox = None
+        return True
 
     def _outbox_replay_worker(self):
         while not self._outbox_stop_evt.is_set():
@@ -2375,17 +2405,24 @@ class DatabaseManager:
             self._central_read_conns[current_thread] = conn
         return conn
 
-    def _close_central_read_connection(self):
-        conns = list(self._central_read_conns.values())
-        self._central_read_conns.clear()
-        for conn in conns:
+    def _close_central_read_connection(self) -> bool:
+        all_closed = True
+        for owner_thread, conn in list(self._central_read_conns.items()):
             if conn is None:
+                self._central_read_conns.pop(owner_thread, None)
                 continue
             try:
                 with self.write_controller.connection_guard(conn):
                     conn.close()
+                if self._central_read_conns.get(owner_thread) is conn:
+                    self._central_read_conns.pop(owner_thread, None)
             except Exception as exc:
-                logger.debug("Failed to close central read connection: %s", exc)
+                all_closed = False
+                # A check_same_thread connection cannot be closed from the new
+                # lifecycle worker.  Retain it so shutdown stays incomplete and
+                # the owning UI/worker cleanup can close it before a retry.
+                logger.warning("Failed to close central read connection; shutdown remains incomplete: %s", exc)
+        return all_closed and not self._central_read_conns
 
     def _close_finished_thread_read_connections_locked(self):
         current_thread = threading.current_thread()
@@ -3560,14 +3597,90 @@ class DatabaseManager:
     def checkpoint_wal(self):
         logger.info("WAL checkpoint skipped because WAL mode is disabled")
 
+    def _stop_shutdown_thread(
+        self,
+        thread_attr: str,
+        stop_event_attr: str,
+        label: str,
+        *,
+        timeout_sec: float,
+    ) -> bool:
+        stop_event = getattr(self, stop_event_attr, None)
+        if stop_event is not None:
+            stop_event.set()
+        thread = getattr(self, thread_attr, None)
+        if thread is None:
+            return True
+        try:
+            if thread.is_alive():
+                if thread is threading.current_thread():
+                    logger.warning("%s cannot join its own worker thread", label)
+                    return False
+                thread.join(timeout=max(0.0, float(timeout_sec)))
+            if thread.is_alive():
+                logger.warning("%s did not stop before database shutdown timeout", label)
+                return False
+        except Exception as exc:
+            logger.warning("Failed while waiting for %s: %s", label, exc)
+            return False
+        setattr(self, thread_attr, None)
+        return True
+
+    def _stop_network_write_worker(self, timeout_sec: float = 0.5) -> bool:
+        worker = self._network_write_worker
+        if worker is None:
+            return True
+        mutex = getattr(worker, "_mutex", None)
+        acquired = False
+        if mutex is not None:
+            try:
+                acquired = mutex.acquire(timeout=max(0.0, float(timeout_sec)))
+            except Exception as exc:
+                logger.warning("Failed to inspect network write worker ownership: %s", exc)
+                return False
+            if not acquired:
+                # NetworkWriteWorkerClient.close() force-terminates when its
+                # request mutex is busy.  An accepted write may be in COMMIT or
+                # confirmation, so retain the worker and retry instead.
+                logger.warning("Network write worker is still handling an accepted operation")
+                return False
+            mutex.release()
+        try:
+            result = worker.close(timeout_sec=max(0.0, float(timeout_sec)))
+            process = getattr(worker, "_process", None)
+            if result is False or (process is not None and process.is_alive()):
+                logger.warning("Network write worker did not stop before shutdown timeout")
+                return False
+        except Exception as exc:
+            logger.warning("Failed to stop network write worker: %s", exc)
+            return False
+        self._network_write_worker = None
+        return True
+
+    def _shutdown_resources_stopped(self) -> bool:
+        for thread_attr in ("_startup_quickcheck_thread", "_integrity_thread", "_outbox_thread"):
+            thread = getattr(self, thread_attr, None)
+            # A finished-but-retained reference still needs one cleanup pass
+            # so the successful result reflects normalized ownership.
+            if thread is not None:
+                return False
+        return bool(
+            getattr(self, "_local_replica", None) is None
+            and getattr(self, "_outbox", None) is None
+            and getattr(self, "_network_write_worker", None) is None
+            and not getattr(self, "_central_read_conns", {})
+            and getattr(self, "_remcard_conn", None) is None
+            and getattr(self, "_journal_conn", None) is None
+        )
+
     def close(self, timeout_sec: Optional[float] = None) -> bool:
         started = time.perf_counter()
         with self._close_state_lock:
             if self._closing:
                 logger.warning("Database close skipped because close is already in progress")
                 return False
-            if self._closed and self._remcard_conn is None:
-                logger.info("Database close skipped because connection is already closed")
+            if self._closed and self._shutdown_resources_stopped():
+                logger.info("Database close skipped because every resource is already closed")
                 return True
             self._closing = True
             self._closed = True
@@ -3575,28 +3688,31 @@ class DatabaseManager:
         io_lock_acquired = False
         ok = False
         io_timeout_sec = SHUTDOWN_CENTRAL_IO_LOCK_TIMEOUT_SEC if timeout_sec is None else max(0.1, float(timeout_sec))
+        worker_timeout_sec = min(2.0, io_timeout_sec)
         logger.info("Database shutdown started")
         try:
             self._cancel_periodic_backup()
-            self._startup_quickcheck_stop_evt.set()
-            if self._startup_quickcheck_thread and self._startup_quickcheck_thread.is_alive():
-                self._startup_quickcheck_thread.join(timeout=1.5)
-                if self._startup_quickcheck_thread.is_alive():
-                    logger.warning("Startup quick_check thread did not stop before database shutdown timeout")
-            self._startup_quickcheck_thread = None
-
-            self._integrity_stop_evt.set()
-            if self._integrity_thread and self._integrity_thread.is_alive():
-                self._integrity_thread.join(timeout=1.5)
-                if self._integrity_thread.is_alive():
-                    logger.warning("Integrity monitor thread did not stop before database shutdown timeout")
-            self._integrity_thread = None
-
-            self._stop_outbox_replay()
-            self._stop_local_replica_sync()
-            if self._network_write_worker is not None:
-                self._network_write_worker.close()
-                self._network_write_worker = None
+            background_ok = self._stop_shutdown_thread(
+                "_startup_quickcheck_thread",
+                "_startup_quickcheck_stop_evt",
+                "Startup quick_check thread",
+                timeout_sec=worker_timeout_sec,
+            )
+            background_ok = bool(
+                self._stop_shutdown_thread(
+                    "_integrity_thread",
+                    "_integrity_stop_evt",
+                    "Integrity monitor thread",
+                    timeout_sec=worker_timeout_sec,
+                )
+                and background_ok
+            )
+            background_ok = bool(self._stop_outbox_replay(worker_timeout_sec) and background_ok)
+            background_ok = bool(self._stop_local_replica_sync(worker_timeout_sec) and background_ok)
+            background_ok = bool(self._stop_network_write_worker(worker_timeout_sec) and background_ok)
+            if not background_ok:
+                logger.warning("Database shutdown retained unfinished background resources for retry")
+                return False
 
             logger.info("Database shutdown acquiring central IO lock timeout_sec=%.1f", io_timeout_sec)
             io_lock_acquired = self._central_io_lock.acquire(timeout=io_timeout_sec)
@@ -3608,7 +3724,9 @@ class DatabaseManager:
                 return False
 
             logger.info("Database shutdown central IO lock acquired")
-            self._close_central_read_connection()
+            if not self._close_central_read_connection():
+                logger.warning("Database shutdown retained central read connections for retry")
+                return False
             if self._remcard_conn:
                 conn = self._remcard_conn
                 if conn is not None:

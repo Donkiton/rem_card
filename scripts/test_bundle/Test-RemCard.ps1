@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Menu", "Connect", "Disconnect", "Status", "Cleanup", "Doctor", "Nurse")]
+    [ValidateSet("Menu", "Connect", "Disconnect", "Status", "Cleanup", "RemCard", "Doctor", "Nurse")]
     [string]$Action = "Menu",
     [switch]$Elevated
 )
@@ -297,11 +297,8 @@ function Invoke-ElevatedShareAction {
     }
 }
 
-function Start-TestRole {
-    param([ValidateSet("Doctor", "Nurse")][string]$Role)
-
-    $fileName = if ($Role -eq "Doctor") { "RemCardDoctor.exe" } else { "RemCardNurse.exe" }
-    $roleText = if ($Role -eq "Doctor") { "врача" } else { "медсестры" }
+function Start-TestRemCard {
+    $fileName = "RemCard.exe"
     $exePath = Join-Path $script:Context.ProgRoot $fileName
     if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
         throw "Не найден тестовый EXE: $exePath"
@@ -312,7 +309,7 @@ function Start-TestRole {
         -WorkingDirectory $script:Context.ProgRoot `
         -WindowStyle Hidden `
         -PassThru
-    Write-Host "Запущена тестовая программа $roleText (PID $($process.Id))." -ForegroundColor Green
+    Write-Host "Запущена единая тестовая RemCard (PID $($process.Id)). Выберите роль в программе." -ForegroundColor Green
 }
 
 function Write-StatusValue {
@@ -450,23 +447,21 @@ function Show-Menu {
         Clear-Host
         Write-Host "RemCard — изолированная проверка аварийного режима" -ForegroundColor Cyan
         Write-Host "Только синтетические данные из этой папки."
-        Write-Host "Сначала выберите 1, затем запускайте роли. Сеть сама не восстанавливается."
+        Write-Host "Сначала выберите 1, затем запускайте RemCard. Сеть сама не восстанавливается."
         Show-TestStatus
         Write-Host "1  Подключить / восстановить тестовую сеть"
-        Write-Host "2  Запустить тестовую программу врача"
-        Write-Host "3  Запустить тестовую программу медсестры"
-        Write-Host "4  Отключить тестовую сеть (имитация сбоя)"
-        Write-Host "5  Обновить состояние"
+        Write-Host "2  Запустить единую тестовую RemCard"
+        Write-Host "3  Отключить тестовую сеть (имитация сбоя)"
+        Write-Host "4  Обновить состояние"
         Write-Host "0  Завершить и убрать только тестовый сетевой ресурс"
         Write-Host ""
         $choice = Read-Host "Выберите действие"
         try {
             switch ($choice) {
                 "1" { Invoke-ElevatedShareAction "Connect" }
-                "2" { Start-TestRole "Doctor" }
-                "3" { Start-TestRole "Nurse" }
-                "4" { Invoke-ElevatedShareAction "Disconnect" }
-                "5" { }
+                "2" { Start-TestRemCard }
+                "3" { Invoke-ElevatedShareAction "Disconnect" }
+                "4" { }
                 "0" {
                     Invoke-ElevatedShareAction "Cleanup"
                     Write-Host "Работа меню завершена. Тестовые данные сохранены." -ForegroundColor Green
@@ -491,8 +486,10 @@ try {
         "Disconnect" { Invoke-ElevatedShareAction "Disconnect" }
         "Cleanup" { Invoke-ElevatedShareAction "Cleanup" }
         "Status" { Show-TestStatus }
-        "Doctor" { Start-TestRole "Doctor" }
-        "Nurse" { Start-TestRole "Nurse" }
+        "RemCard" { Start-TestRemCard }
+        # Старые команды автоматизации остаются безопасными алиасами единого входа.
+        "Doctor" { Start-TestRemCard }
+        "Nurse" { Start-TestRemCard }
     }
 }
 catch {

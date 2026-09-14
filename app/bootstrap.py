@@ -299,9 +299,13 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
         participant = EmergencyParticipant(runtime_context.baza_dir, role)
     try:
         container = _bootstrap_impl(role=role, runtime_context=runtime_context)
-    except Exception:
+    except Exception as exc:
         if participant is not None:
-            participant.release()
+            owner = getattr(exc, "runtime_container", None)
+            if bool(getattr(exc, "cleanup_failed", False)) and owner is not None:
+                owner.emergency_participant = participant
+            else:
+                participant.release()
         raise
     container.emergency_participant = participant
     return container
@@ -350,6 +354,63 @@ def _bootstrap_impl(role: str | None = None, runtime_context=None) -> Container:
         runtime_context=runtime_context,
         role=role,
     )
+    # Allocate the owner before constructing further services.  If any later
+    # step raises, this object retains every resource that was successfully
+    # attached and can be retried by SessionShutdown.
+    runtime_owner = Container.__new__(Container)
+    runtime_owner.db_manager = db_manager
+    runtime_owner.data_service = None
+    runtime_owner.runtime_context = getattr(db_manager, "runtime_context", runtime_context)
+    runtime_owner.emergency_participant = None
+    try:
+        return _finish_bootstrap(
+            runtime_owner,
+            db_manager,
+            role=role,
+            runtime_context=runtime_context,
+            runtime_mode=runtime_mode,
+            medical_db_path=medical_db_path,
+        )
+    except Exception as exc:
+        cleanup = _cleanup_failed_bootstrap(runtime_owner)
+        exc.cleanup_failed = not cleanup["ok"]
+        exc.cleanup_result = cleanup
+        exc.runtime_container = runtime_owner if not cleanup["ok"] else None
+        raise
+
+
+def _cleanup_failed_bootstrap(runtime_owner) -> dict[str, bool]:
+    data_service = getattr(runtime_owner, "data_service", None)
+    data_ok = True
+    if data_service is not None:
+        try:
+            data_ok = bool(data_service.shutdown())
+        except Exception as exc:
+            data_ok = False
+            logger.warning("Failed bootstrap DataService cleanup: %s", exc)
+    db_ok = False
+    db_manager = getattr(runtime_owner, "db_manager", None)
+    if db_manager is None:
+        db_ok = True
+    elif data_ok:
+        try:
+            db_ok = bool(db_manager.close())
+        except Exception as exc:
+            logger.warning("Failed bootstrap DatabaseManager cleanup: %s", exc)
+    else:
+        logger.warning("Failed bootstrap DB cleanup deferred until DataService stops")
+    return {"ok": bool(data_ok and db_ok), "data_service": data_ok, "db_manager": db_ok}
+
+
+def _finish_bootstrap(
+    runtime_owner,
+    db_manager: "DatabaseManager",
+    *,
+    role: str | None,
+    runtime_context,
+    runtime_mode: str,
+    medical_db_path: str,
+) -> Container:
     from rem_card.services.settings.settings_service import configure_settings_service, get_settings_service
 
     if runtime_context is not None:
@@ -395,10 +456,12 @@ def _bootstrap_impl(role: str | None = None, runtime_context=None) -> Container:
             result.integrity_check or "",
         )
 
-    return Container(
+    Container.__init__(
+        runtime_owner,
         db_manager,
         role=role,
         settings_info=settings_info,
         settings_service=settings_service,
         operblock_schema_prepared=operblock_schema_prepared,
     )
+    return runtime_owner

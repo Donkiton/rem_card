@@ -15,6 +15,8 @@ if str(PACKAGE_PARENT) not in sys.path:
 from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget  # noqa: E402
 
+from rem_card.ui.doctor_view.components.sector8_panel import Sector8Panel  # noqa: E402
+from rem_card.ui.nurse_view.components.nurse_sector8_panel import NurseSector8Panel  # noqa: E402
 from rem_card.ui.operblock_view import operblock_main_widget  # noqa: E402
 from rem_card.ui.operblock_view.operblock_main_widget import (  # noqa: E402
     OperBlockMainWidget,
@@ -27,8 +29,8 @@ def application() -> QApplication:
     return QApplication.instance() or QApplication([])
 
 
-def _display_settings(*, back_visible: bool = True) -> dict:
-    order = ["archive", "settings", "back", "exit"]
+def _display_settings(*, back_visible: bool = True, roles_visible: bool = True) -> dict:
+    order = ["archive", "settings", "back", "roles", "exit"]
     return {
         "sector8_buttons": {
             "order": order,
@@ -39,6 +41,7 @@ def _display_settings(*, back_visible: bool = True) -> dict:
                 "user_reports": False,
                 "settings": True,
                 "back": back_visible,
+                "roles": roles_visible,
                 "exit": True,
             },
             "side": {button_id: "right" for button_id in order},
@@ -46,11 +49,11 @@ def _display_settings(*, back_visible: bool = True) -> dict:
     }
 
 
-def _make_panel(monkeypatch, *, back_visible: bool = True) -> OperBlockSector8Panel:
+def _make_panel(monkeypatch, *, back_visible: bool = True, roles_visible: bool = True) -> OperBlockSector8Panel:
     monkeypatch.setattr(
         operblock_main_widget,
         "role_display_settings_from_payload",
-        lambda _payload, _role: _display_settings(back_visible=back_visible),
+        lambda _payload, _role: _display_settings(back_visible=back_visible, roles_visible=roles_visible),
     )
     monkeypatch.setattr(
         operblock_main_widget.DisplaySettingsStorage,
@@ -111,6 +114,15 @@ def test_operblock_back_button_respects_disabled_display_setting(monkeypatch):
 def test_operblock_back_button_is_noop_on_standalone_board():
     board_page = QWidget()
 
+    class Controller:
+        def __init__(self):
+            self.calls = 0
+
+        def request_role_exit(self):
+            self.calls += 1
+
+    controller = Controller()
+
     class StackStub:
         def currentWidget(self):
             return board_page
@@ -122,6 +134,10 @@ def test_operblock_back_button_is_noop_on_standalone_board():
         archive_page = None
         settings_page = None
         _role_launcher_mode = False
+
+        @staticmethod
+        def window():
+            return type("Window", (), {"unified_controller": controller})()
 
         @staticmethod
         def is_view_only_mode():
@@ -138,6 +154,49 @@ def test_operblock_back_button_is_noop_on_standalone_board():
     stub = OperblockStub()
     stub.board_page = board_page
     OperBlockMainWidget.on_back_clicked(stub)
+    assert controller.calls == 0
+
+
+def test_operblock_roles_button_is_hidden_without_unified_window_and_returns_to_roles(monkeypatch):
+    app = application()
+    monkeypatch.setattr(Sector8Panel, "refresh_user_reports_count", lambda _self: None)
+    monkeypatch.setattr(NurseSector8Panel, "refresh_user_reports_count", lambda _self: None)
+    doctor = Sector8Panel()
+    nurse = NurseSector8Panel()
+    doctor._reports_count_timer.stop()
+    nurse._reports_count_timer.stop()
+    for panel in (doctor, nurse):
+        assert panel.btn_roles.isHidden()
+        panel.set_roles_available(True)
+        assert not panel.btn_roles.isHidden()
+        panel.set_roles_available(False)
+        assert panel.btn_roles.isHidden()
+
+    panel = _make_panel(monkeypatch)
+    assert panel.btn_roles.isHidden()
+
+    calls = []
+    panel.set_roles_available(True)
+    assert not panel.btn_roles.isHidden()
+    panel.btn_roles.clicked.connect(lambda: calls.append("roles"))
+    panel.btn_roles.click()
+    assert calls == ["roles"]
+
+    panel.set_roles_available(False)
+    assert panel.btn_roles.isHidden()
+    panel.close()
+    panel.deleteLater()
+
+    disabled_by_settings = _make_panel(monkeypatch, roles_visible=False)
+    disabled_by_settings.set_roles_available(True)
+    assert disabled_by_settings.btn_roles.isHidden()
+    disabled_by_settings.close()
+    disabled_by_settings.deleteLater()
+    doctor.close()
+    doctor.deleteLater()
+    nurse.close()
+    nurse.deleteLater()
+    app.processEvents()
 
 
 def test_operblock_sector8_frame_has_equal_three_pixel_edge_gaps():

@@ -24,6 +24,7 @@ class Sector8Panel(QWidget):
     add_patient_clicked = Signal()
     user_report_clicked = Signal()
     user_reports_clicked = Signal()
+    roles_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -32,6 +33,7 @@ class Sector8Panel(QWidget):
         self._reports_count_worker = None
         self._last_reports_count = 0
         self._is_closing = False
+        self._roles_available = False
         self.init_ui()
 
     def init_ui(self):
@@ -105,6 +107,15 @@ class Sector8Panel(QWidget):
         self.btn_back.setMinimumHeight(32)
         set_widget_style(self.btn_back, STYLE_SECTOR8_BUTTON)
 
+        # Возврат к выбору роли доступен только из единого окна приложения.
+        self.btn_roles = QPushButton(" Роли", self)
+        roles_icon = os.path.join(self.icon_dir, "operbloc.png")
+        self.btn_roles.setIcon(QIcon(roles_icon))
+        self.btn_roles.setIconSize(QSize(18, 18))
+        self.btn_roles.setMinimumHeight(32)
+        set_widget_style(self.btn_roles, STYLE_SECTOR8_BUTTON)
+        self.btn_roles.clicked.connect(self.roles_clicked.emit)
+
         # 3. Кнопка Настройки
         self.btn_settings = QPushButton(" Настройки", self)
         settings_icon = os.path.join(self.icon_dir, "settings.png")
@@ -138,6 +149,7 @@ class Sector8Panel(QWidget):
             "calculations": self.btn_calculations,
             "settings": self.btn_settings,
             "back": self.btn_back,
+            "roles": self.btn_roles,
             "exit": self.btn_exit,
         }
         self._reports_count_timer = QTimer(self)
@@ -176,14 +188,14 @@ class Sector8Panel(QWidget):
             button.setVisible(False)
         for button_id in left_order:
             button = self._button_widgets.get(button_id)
-            if button is None:
+            if button is None or (button_id == "roles" and not self._roles_available):
                 continue
             button.setVisible(True)
             self.layout.addWidget(button)
         self.layout.addStretch()
         for button_id in right_order:
             button = self._button_widgets.get(button_id)
-            if button is None:
+            if button is None or (button_id == "roles" and not self._roles_available):
                 continue
             button.setVisible(True)
             self.layout.addWidget(button)
@@ -191,6 +203,13 @@ class Sector8Panel(QWidget):
 
         sync_emergency_mode_button(self)
         self.updateGeometry()
+
+    def set_roles_available(self, available: bool):
+        available = bool(available)
+        if self._roles_available == available:
+            return
+        self._roles_available = available
+        self.apply_display_settings()
 
     def set_add_patient_enabled(self, enabled: bool):
         button = getattr(self, "btn_add_patient", None)

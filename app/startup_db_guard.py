@@ -1131,7 +1131,10 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
     except Exception as exc:
         return StartupGuardResult(
             ok=False,
-            user_message="Путь к папке базы недоступен. Запустите RemCardPathSetup.exe.",
+            user_message=(
+                "Путь к папке базы недоступен. Откройте Центр управления в RemCard.exe "
+                "и проверьте путь к базе."
+            ),
             technical_reason=str(exc),
         )
 

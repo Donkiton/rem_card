@@ -1516,6 +1516,7 @@ class NurseMainWidget(QWidget):
         # Панель управления медсестры (Сектор 8)
         self.sector8_panel = NurseSector8Panel()
         self.sector8_panel.btn_back.clicked.connect(self.on_back_clicked)
+        self.sector8_panel.roles_clicked.connect(self._request_role_exit)
         self.sector8_panel.btn_exit.clicked.connect(self.on_exit_clicked)
         self.sector8_panel.archive_clicked.connect(self.on_global_archive_clicked)
         self.sector8_panel.refresh_clicked.connect(self.force_refresh_everywhere)
@@ -1532,6 +1533,7 @@ class NurseMainWidget(QWidget):
 
         # Подключаем выбор пациента из списка коек
         self.layout_manager.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
+        QTimer.singleShot(0, self._sync_roles_action_availability)
 
     def has_full_layout(self) -> bool:
         return bool(self._full_layout_created)
@@ -2736,7 +2738,12 @@ class NurseMainWidget(QWidget):
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         reply = CustomMessageBox.question(self, "Подтверждение", "Выйти из программы?", CustomMessageBox.Yes | CustomMessageBox.No, CustomMessageBox.No)
-        if reply == CustomMessageBox.Yes: self.window().close()
+        if reply == CustomMessageBox.Yes:
+            controller = getattr(self.window(), "unified_controller", None)
+            if controller is not None:
+                controller.request_application_exit(confirmed=True)
+            else:
+                self.window().close()
 
     def on_settings_clicked(self):
         self._remember_settings_return_mode()
@@ -2842,6 +2849,20 @@ class NurseMainWidget(QWidget):
         else: 
             self._release_add_patient_lock()
             self.back_to_roles()
+
+    def _unified_controller(self):
+        controller = getattr(self.window(), "unified_controller", None)
+        return controller if callable(getattr(controller, "request_role_exit", None)) else None
+
+    def _sync_roles_action_availability(self):
+        panel = getattr(self, "sector8_panel", None)
+        if panel is not None:
+            panel.set_roles_available(self._unified_controller() is not None)
+
+    def _request_role_exit(self):
+        controller = self._unified_controller()
+        if controller is not None:
+            controller.request_role_exit()
 
     def _return_from_settings(self) -> bool:
         mode = str(self._settings_return_mode or "").strip()

@@ -259,6 +259,18 @@ class AdminMainWidget(QWidget):
             (self.btn_backup_settings, "Резервная копия настроек", "Создать отдельный снимок пользовательских настроек.", "бекап backup настройки"),
             (self.btn_backup_main_db, "Резервная копия основной БД", "Создать безопасную копию основной базы RemCard.", "бекап backup база"),
         ]
+        if QApplication.instance() and QApplication.instance().property("unified_entry"):
+            institution_button = QPushButton("Учреждение", self)
+            path_button = QPushButton("Путь к базе данных", self)
+            maintenance_button = QPushButton("Технические работы", self)
+            institution_button.clicked.connect(lambda: self._unified_action("edit_institution"))
+            path_button.clicked.connect(lambda: self._unified_action("change_database"))
+            maintenance_button.clicked.connect(lambda: self._unified_action("open_maintenance"))
+            interface_actions.append((institution_button, "Учреждение", "Полное и краткое название больницы.", "больница название учреждение"))
+            maintenance_actions.extend([
+                (path_button, "Путь к базе данных", "Подключение другой базы после перезапуска.", "путь база подключение"),
+                (maintenance_button, "Технические работы", "Предупредить рабочие места и закрыть входы в роли.", "техработы обслуживание доступ"),
+            ])
 
         # Temporary doctor entry point; move authorization to administrator
         # when the unified launcher is introduced. The service has no role logic.
@@ -960,6 +972,11 @@ class AdminMainWidget(QWidget):
             self._connect_back(self.database_info_dialog)
             self.stack.addWidget(self.database_info_dialog)
         return self.database_info_dialog
+
+    def _unified_action(self, action):
+        controller = getattr(self.window(), "unified_controller", None)
+        if controller is not None:
+            getattr(controller, action)()
 
     def _ensure_db_rotation_page(self):
         if self.db_rotation_dialog is None:

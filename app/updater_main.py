@@ -115,7 +115,11 @@ LOCK_STALE_SEC = 30 * 60
 ROLE_LOCK_STALE_SEC = 90
 WAIT_ACTIVE_SESSIONS_TIMEOUT_SEC = 30 * 60
 WAIT_TARGET_PROCESSES_TIMEOUT_SEC = 30 * 60
-REQUIRED_EXES = (
+UNIFIED_REQUIRED_EXES = (
+    "RemCard.exe",
+    "RemCardUpdater.exe",
+)
+LEGACY_REQUIRED_EXES = (
     "RemCardDoctor.exe",
     "RemCardNurse.exe",
     "RemCardOperBlockEmergency.exe",
@@ -123,6 +127,9 @@ REQUIRED_EXES = (
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )
+# Kept as the primary package contract for callers/tests that imported the old
+# name. Legacy packages are accepted explicitly by _detect_package_layout().
+REQUIRED_EXES = UNIFIED_REQUIRED_EXES
 MANAGED_ROOT_FILES = (
     "RemCard.exe",
     "RemCardDoctor.exe",
@@ -659,12 +666,36 @@ def _validate_source(source_dir: str) -> dict[str, Any]:
             f"Неподдерживаемый тип пакета обновления: {package_type or '<empty>'}. "
             "Требуется полная сборка."
         )
-    for exe_name in REQUIRED_EXES:
-        if not os.path.isfile(os.path.join(source, exe_name)):
-            raise RuntimeError(f"В пакете обновления отсутствует {exe_name}.")
+    _detect_package_layout(source)
     if not os.path.isdir(os.path.join(source, "_internal")):
         raise RuntimeError("В пакете обновления отсутствует папка _internal.")
     return manifest
+
+
+def _detect_package_layout(directory: str) -> str:
+    """Accept the final unified package and the previously shipped layout."""
+    root = os.path.abspath(directory)
+    if all(os.path.isfile(os.path.join(root, name)) for name in UNIFIED_REQUIRED_EXES):
+        return "unified"
+    if all(os.path.isfile(os.path.join(root, name)) for name in LEGACY_REQUIRED_EXES):
+        return "legacy"
+
+    unified_missing = [
+        name for name in UNIFIED_REQUIRED_EXES
+        if not os.path.isfile(os.path.join(root, name))
+    ]
+    legacy_missing = [
+        name for name in LEGACY_REQUIRED_EXES
+        if not os.path.isfile(os.path.join(root, name))
+    ]
+    raise RuntimeError(
+        "Пакет обновления не соответствует ни единой, ни прежней структуре EXE. "
+        "Для единой структуры отсутствуют: "
+        + ", ".join(unified_missing)
+        + "; для прежней структуры отсутствуют: "
+        + ", ".join(legacy_missing)
+        + "."
+    )
 
 
 def _make_path_writable_and_retry(func: Callable[[str], None], path: str, _exc_info):
@@ -994,9 +1025,7 @@ def _replace_program_dir(
             finally:
                 _log_phase_duration(log, "inventory_verify", phase_started)
 
-        for exe_name in REQUIRED_EXES:
-            if not os.path.isfile(os.path.join(staging, exe_name)):
-                raise RuntimeError(f"Подготовленная сборка неполная: нет {exe_name}.")
+        _detect_package_layout(staging)
     except Exception:
         try:
             if os.path.isdir(staging):
@@ -1207,8 +1236,8 @@ class UpdateWorker(QObject):
 
             restart_exe = str(self.args.restart_exe or "").strip()
             if restart_exe:
-                restart_path = os.path.join(target, restart_exe)
-                if os.path.isfile(restart_path):
+                restart_path = _resolve_restart_path(target, restart_exe)
+                if restart_path:
                     self._status("Запуск новой версии...", 100)
                     try:
                         popen_hidden([restart_path], cwd=target)
@@ -1229,7 +1258,7 @@ class UpdateWorker(QObject):
                     )
                     _write_log(
                         baza_dir,
-                        f"update restart target missing path={restart_path}",
+                        f"update restart target missing requested={restart_exe}",
                     )
                     self.restart_warning.emit(warning)
             self.succeeded.emit(str(payload["target_version"] or ""))
@@ -1552,6 +1581,20 @@ def _current_executable_dir() -> str:
     return os.path.dirname(os.path.abspath(sys.argv[0] or __file__))
 
 
+def _resolve_restart_path(target_dir: str, requested_exe: str) -> str:
+    """Resolve a restart inside the updated install, with legacy-to-unified fallback."""
+    requested_name = os.path.basename(os.path.normpath(str(requested_exe or "").strip()))
+    if requested_name.casefold() in MANAGED_EXE_NAMES:
+        requested_path = os.path.join(os.path.abspath(target_dir), requested_name)
+        if os.path.isfile(requested_path):
+            return requested_path
+
+    unified_path = os.path.join(os.path.abspath(target_dir), UNIFIED_REQUIRED_EXES[0])
+    if os.path.isfile(unified_path):
+        return unified_path
+    return ""
+
+
 def _iter_parent_dirs(path: str, max_depth: int = 10):
     current = os.path.abspath(path)
     for _ in range(max_depth):
@@ -1591,7 +1634,9 @@ def _load_direct_release(executable_dir: str) -> Optional[tuple[str, str, dict[s
             continue
         if not os.path.isfile(os.path.join(source_dir, READY_FILE_NAME)):
             continue
-        if not all(os.path.isfile(os.path.join(source_dir, exe_name)) for exe_name in REQUIRED_EXES):
+        try:
+            _detect_package_layout(source_dir)
+        except RuntimeError:
             continue
         return os.path.abspath(release_dir), source_dir, manifest
     return None

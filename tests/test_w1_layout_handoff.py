@@ -5,6 +5,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget  # noqa: E402
 from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget  # noqa: E402
+from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget  # noqa: E402
 from rem_card.ui.shared.lightweight_w1_shell import LightweightW1Shell  # noqa: E402
 from rem_card.ui.shared.remcard_layout import RemCardLayoutManager  # noqa: E402
 
@@ -70,6 +72,68 @@ class _CountingNurseWidget(NurseMainWidget):
 
     def on_back_clicked(self):
         self.back_calls += 1
+
+
+class _UnifiedControllerProbe:
+    def __init__(self):
+        self.calls = 0
+
+    def request_role_exit(self):
+        self.calls += 1
+
+
+def test_roles_action_is_the_only_unified_exit_path_for_each_role():
+    for widget_type, panel_name in (
+        (DoctorRemCardWidget, "sector8_panel"),
+        (NurseMainWidget, "sector8_panel"),
+        (OperBlockMainWidget, "sector_8_panel"),
+    ):
+        controller = _UnifiedControllerProbe()
+        panel = MagicMock()
+        owner = SimpleNamespace(**{panel_name: panel})
+        owner.window = lambda controller=controller: SimpleNamespace(unified_controller=controller)
+        owner._unified_controller = lambda widget_type=widget_type, owner=owner: widget_type._unified_controller(owner)
+
+        widget_type._sync_roles_action_availability(owner)
+        panel.set_roles_available.assert_called_once_with(True)
+        widget_type._request_role_exit(owner)
+        assert controller.calls == 1
+
+
+def test_back_keeps_doctor_and_nurse_card_navigation_in_unified_window():
+    controller = _UnifiedControllerProbe()
+    selection_stack = SimpleNamespace(currentIndex=lambda: 0)
+
+    doctor_modes = []
+    doctor = SimpleNamespace(
+        layout_manager=SimpleNamespace(
+            selection_stack=selection_stack,
+            bottom_row=SimpleNamespace(show=lambda: None),
+            set_patient_selection_mode=doctor_modes.append,
+        ),
+        _archive_read_only_mode=False,
+        _card_return_mode=None,
+        _balance_update_timer=SimpleNamespace(stop=lambda: None),
+        admission_id=1,
+        window=lambda: SimpleNamespace(unified_controller=controller),
+        _release_add_patient_lock=lambda: None,
+        _exit_archive_read_only_mode=lambda: None,
+    )
+    DoctorRemCardWidget.on_back_clicked(doctor)
+    assert doctor_modes == ["beds"]
+
+    nurse_modes = []
+    nurse = SimpleNamespace(
+        layout_manager=SimpleNamespace(
+            selection_stack=selection_stack,
+            set_patient_selection_mode=nurse_modes.append,
+        ),
+        window=lambda: SimpleNamespace(unified_controller=controller),
+        _release_add_patient_lock=lambda: None,
+    )
+    NurseMainWidget.on_back_clicked(nurse)
+    assert nurse_modes == ["beds"]
+    assert controller.calls == 0
 
 
 class W1LayoutHandoffTest(unittest.TestCase):

@@ -23,6 +23,7 @@ UPDATE_LOCK_STALE_SEC = 30 * 60
 UPDATE_STARTING_LOCK_STALE_SEC = 5 * 60
 LEGACY_STARTING_LOCK_STALE_SEC = 15
 UPDATER_EXE_NAME = "RemCardUpdater.exe"
+UNIFIED_APP_EXE_NAME = "RemCard.exe"
 LOCAL_UPDATE_STARTING_LOCK_NAME = ".remcard_update_starting.lock"
 
 
@@ -298,7 +299,6 @@ def launch_update(
 ) -> bool:
     if not is_compiled():
         return False
-
     try:
         baza_dir = resolve_baza_dir()
         target_dir = get_executable_dir()
@@ -360,6 +360,19 @@ def launch_update(
         _remove_lock_quietly(starting_lock_path)
         _remove_lock_quietly(local_starting_lock_path)
         return False
+
+
+def launch_unified_update(
+    candidate: UpdateCandidate,
+    *,
+    wait_for_parent: bool = True,
+) -> bool:
+    """Launch an update and return to the single RemCard entry afterwards."""
+    return launch_update(
+        candidate,
+        restart_exe=UNIFIED_APP_EXE_NAME,
+        wait_for_parent=wait_for_parent,
+    )
 
 
 def current_exe_name() -> str:

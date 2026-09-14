@@ -84,6 +84,8 @@ def _get_icon_path(name):
 
 
 def _apply_role_icon(role):
+    if QApplication.instance() and QApplication.instance().property("unified_entry"):
+        return
     if role not in ("doctor", "nurse"):
         return
 
@@ -352,11 +354,15 @@ class MainWindow(QMainWindow):
         return token
 
     def _hide_loading_if_generation(self, token: str, generation: int):
+        if getattr(self, "_is_closing", False):
+            return
         if int(self._loading_generations.get(token, 0) or 0) != int(generation):
             return
         self.hide_loading_indicator(token)
 
     def hide_loading_indicator(self, key: str | None = None, *, delay_ms: int = 0):
+        if getattr(self, "_is_closing", False):
+            return
         if delay_ms and int(delay_ms) > 0:
             if key is None:
                 generations = dict(self._loading_generations)
@@ -1395,6 +1401,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._load_role_ui)
 
     def _load_role_ui(self):
+        if getattr(self, "_is_closing", False):
+            return
         """Ленивая догрузка интерфейса роли при старте."""
         from PySide6.QtCore import QTimer
 

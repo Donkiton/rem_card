@@ -644,9 +644,10 @@ def _check_full_update_network_publish_is_atomic_and_idempotent(temp_root: str) 
     resumable_staging = releases_dir / f".staging-{version}"
     resumable_staging.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source / "manifest.json", resumable_staging / "manifest.json")
-    shutil.copy2(source / "RemCardDoctor.exe", resumable_staging / "RemCardDoctor.exe")
+    resumable_exe_name = "RemCard.exe"
+    shutil.copy2(source / resumable_exe_name, resumable_staging / resumable_exe_name)
     resumed_mtime = 946684800
-    os.utime(resumable_staging / "RemCardDoctor.exe", (resumed_mtime, resumed_mtime))
+    os.utime(resumable_staging / resumable_exe_name, (resumed_mtime, resumed_mtime))
     stale_staging = releases_dir / ".staging-obsolete"
     stale_staging.mkdir()
     stale_mtime = time.time() - publish_full_update.STALE_STAGING_MAX_AGE_SECONDS - 60
@@ -671,7 +672,7 @@ def _check_full_update_network_publish_is_atomic_and_idempotent(temp_root: str) 
             return False, f"ready marker order was not proved: {state}"
         if not (final_dir / "ready.ok").is_file():
             return False, "published full release has no ready.ok"
-        if int((final_dir / "RemCardDoctor.exe").stat().st_mtime) != resumed_mtime:
+        if int((final_dir / resumable_exe_name).stat().st_mtime) != resumed_mtime:
             return False, "valid file from resumable staging was copied again"
         if stale_staging.exists():
             return False, "obsolete network staging directory was not cleaned"
@@ -680,7 +681,7 @@ def _check_full_update_network_publish_is_atomic_and_idempotent(temp_root: str) 
         if second_dir != final_dir or state["ready_calls"] != 1:
             return False, "identical repeated full publication was not idempotent"
 
-        (final_dir / "RemCardDoctor.exe").write_bytes(b"changed existing release")
+        (final_dir / resumable_exe_name).write_bytes(b"changed existing release")
         try:
             publish_full_update.publish_release(source, production_baza, allow_local=True)
         except publish_full_update.PublishError:
@@ -991,16 +992,26 @@ def _check_role_exe_names_preserved(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     text = Path(PROJECT_ROOT, "RemCard.spec").read_text(encoding="utf-8")
     expected = (
+        "RemCard",
+        "RemCardUpdater",
+    )
+    missing = [name for name in expected if f"name='{name}'" not in text and f'name="{name}"' not in text]
+    if missing:
+        return False, f"unified EXE names missing from RemCard.spec: {missing}"
+    legacy_names = (
         "RemCardDoctor",
         "RemCardNurse",
         "RemCardOperBlockEmergency",
         "RemCardOperBlockPlanned",
         "RemCardPathSetup",
-        "RemCardUpdater",
     )
-    missing = [name for name in expected if f"name='{name}'" not in text and f'name="{name}"' not in text]
-    if missing:
-        return False, f"role EXE names missing from RemCard.spec: {missing}"
+    retained = [
+        name
+        for name in legacy_names
+        if f"name='{name}'" in text or f'name="{name}"' in text
+    ]
+    if retained:
+        return False, f"legacy role EXEs remain in RemCard.spec: {retained}"
     if "--role" in text:
         return False, "RemCard.spec unexpectedly switched to --role model"
     alias_tokens = (
@@ -1029,8 +1040,7 @@ def _check_role_exe_names_preserved(temp_root: str) -> tuple[bool, str]:
         return False, "system DLLs must take precedence over external tools on build PATH"
     selector = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_script_toc")
     entrypoints = (
-        "run_doctor.py", "run_nurse.py", "run_operblock_emergency.py",
-        "run_operblock_planned.py", "run_path_setup.py", "run_updater.py",
+        "run_remcard.py", "run_updater.py",
     )
     hooks = [(name, os.path.join(temp_root, name + ".py"), "PYSOURCE")
              for name in ("custom_runtime", "pyi_rth_pyside6", "pyi_rth_multiprocessing")]

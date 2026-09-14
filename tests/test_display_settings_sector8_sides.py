@@ -106,6 +106,19 @@ class DisplaySettingsSector8SidesTest(unittest.TestCase):
 
         self.assertFalse(settings["sector8_buttons"]["visible"]["calculations"])
 
+    def test_roles_action_is_registered_and_uses_per_role_visibility(self):
+        for role in ("doctor", "nurse", "operblock"):
+            with self.subTest(role=role):
+                section = default_role_display_settings(role)["sector8_buttons"]
+                self.assertIn("roles", section["order"])
+                self.assertTrue(section["visible"]["roles"])
+
+                hidden = normalize_role_display_settings(
+                    role,
+                    {"sector8_buttons": {"visible": {"roles": False}}},
+                )["sector8_buttons"]
+                self.assertFalse(hidden["visible"]["roles"])
+
 
 if __name__ == "__main__":
     unittest.main()

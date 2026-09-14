@@ -23,6 +23,7 @@ from rem_card.services.operblock_service import (  # noqa: E402
     OperBlockService,
     OperBlockSourceMovementChangedError,
 )
+from rem_card.services.concurrency import DataConflictError  # noqa: E402
 from rem_card.ui.operblock_view.operblock_main_widget import (  # noqa: E402
     OperBlockAdmissionTimeInput,
     OperBlockMainWidget,
@@ -352,6 +353,42 @@ class OperBlockStartedAtTest(unittest.TestCase):
             ["operblock_get_operation_case_form_data"],
         )
         self.assertEqual(self.db.write_operation_sources, [])
+
+    def test_operation_case_form_rejects_stale_snapshot_before_any_change(self):
+        started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
+        result = self.service.create_operation_case(self._base_payload(started_at))
+        saved_snapshot = self.service.get_operation_case_form_data(result["operation_case_id"])
+        stale_snapshot = self.service.get_operation_case_form_data(result["operation_case_id"])
+
+        saved_snapshot["full_name"] = "Петров Пётр Петрович"
+        saved_snapshot["diagnosis_text"] = "Обновлённый диагноз"
+        self.service.update_operation_case_form_data(
+            result["operation_case_id"],
+            saved_snapshot,
+            expected_operation_case_revision=saved_snapshot["operation_case_revision"],
+            expected_admission_revision=saved_snapshot["admission_revision"],
+        )
+
+        stale_snapshot["full_name"] = "Сидоров Сидор Сидорович"
+        stale_snapshot["diagnosis_text"] = "Устаревший диагноз"
+        with self.assertRaises(DataConflictError):
+            self.service.update_operation_case_form_data(
+                result["operation_case_id"],
+                stale_snapshot,
+                expected_operation_case_revision=stale_snapshot["operation_case_revision"],
+                expected_admission_revision=stale_snapshot["admission_revision"],
+            )
+
+        patient = self.db.fetch_one_remcard(
+            "SELECT full_name FROM patients WHERE id = ?",
+            (result["patient_id"],),
+        )
+        admission = self.db.fetch_one_remcard(
+            "SELECT diagnosis_text FROM admissions WHERE id = ?",
+            (result["admission_id"],),
+        )
+        self.assertEqual(patient["full_name"], "Петров Пётр Петрович")
+        self.assertEqual(admission["diagnosis_text"], "Обновлённый диагноз")
 
     def test_start_anesthesia_context_reuses_one_read_scope(self):
         started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)

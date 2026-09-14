@@ -38,11 +38,7 @@ PROGRESS_JSON_PREFIX = "REMCARD_PROGRESS_JSON:"
 PROGRESS_JSON_SCHEMA_VERSION = 1
 RELEASES_DIR_NAME = "releases"
 REQUIRED_RELEASE_EXES = (
-    "RemCardDoctor.exe",
-    "RemCardNurse.exe",
-    "RemCardOperBlockEmergency.exe",
-    "RemCardOperBlockPlanned.exe",
-    "RemCardPathSetup.exe",
+    "RemCard.exe",
     "RemCardUpdater.exe",
 )
 SETTINGS_RELEASE_DIR = Path("_internal") / "rem_card" / "settings_release"
@@ -284,7 +280,7 @@ def run_release_checks(root: Path) -> None:
 
 
 def run_compiled_smoke(package_dir: Path) -> None:
-    """Prove that every shipped role starts its frozen entrypoint successfully."""
+    """Prove that every shipped executable starts its frozen entrypoint successfully."""
     for exe_name in REQUIRED_RELEASE_EXES:
         executable = package_dir / exe_name
         print(f"Smoke-тест собранного EXE: {exe_name}...")
@@ -318,7 +314,7 @@ def run_compiled_smoke(package_dir: Path) -> None:
                 f"Smoke-тест {exe_name} завершился с кодом {result.returncode}. "
                 f"Сборка остановлена.{suffix}"
             )
-    print("Smoke-тест всех шести EXE пройден.")
+    print("Smoke-тест обоих EXE пройден.")
 
 
 def _read_json_object(path: Path) -> dict:
@@ -539,6 +535,20 @@ def validate_full_package(
     missing = [name for name in REQUIRED_RELEASE_EXES if not (package_dir / name).is_file()]
     if missing:
         raise RuntimeError("В full-пакете нет обязательных EXE: " + ", ".join(missing))
+    required_exe_keys = {name.casefold() for name in REQUIRED_RELEASE_EXES}
+    unexpected_exes = sorted(
+        path.name
+        for path in package_dir.iterdir()
+        if path.is_file()
+        and path.suffix.casefold() == ".exe"
+        and path.name.casefold() not in required_exe_keys
+    )
+    if unexpected_exes:
+        raise RuntimeError(
+            "Новый full-пакет должен содержать только RemCard.exe и "
+            "RemCardUpdater.exe; найдены лишние EXE: "
+            + ", ".join(unexpected_exes)
+        )
     if not (package_dir / "_internal").is_dir():
         raise RuntimeError("В full-пакете нет каталога _internal.")
     if not allow_ready and (package_dir / READY_FILE_NAME).exists():

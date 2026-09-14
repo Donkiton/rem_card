@@ -16,13 +16,9 @@ DICTIONARIES_TARGET = os.path.join("rem_card", "data", "dictionaries")
 SETTINGS_TARGET = os.path.join("rem_card", "settings")
 SETTINGS_RELEASE_TARGET = os.path.join("rem_card", "settings_release")
 PACKAGE_DIRS = ("app", "data", "services", "ui")
-ALIAS_RESOURCE_DIRS = ("icon",)
+ALIAS_RESOURCE_DIRS = ("icon", "translations")
 ENTRYPOINT_FILES = (
-    "run_doctor.py",
-    "run_nurse.py",
-    "run_operblock_emergency.py",
-    "run_operblock_planned.py",
-    "run_path_setup.py",
+    "run_remcard.py",
     "run_updater.py",
 )
 ALIAS_ROOT = os.path.join(APP_ROOT, "build", "pyinstaller_package_alias")
@@ -309,6 +305,7 @@ a = Analysis(
 
 		# иконки
 		_data_dir('icon'),
+		_data_dir('translations'),
 
 		# dictionaries (json): seed для первого импорта в settings DB внутри _internal;
 		# наружу рядом с exe эти файлы больше не копируются.
@@ -357,68 +354,12 @@ def _script_toc(script_name):
     return [*runtime_hooks, entry_script]
 
 
-doctor_exe = EXE(
+remcard_exe = EXE(
     pyz,
-    _script_toc('run_doctor.py'),
+    _script_toc('run_remcard.py'),
     [],
     exclude_binaries=True,
-    name='RemCardDoctor',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    icon=[os.path.join(APP_ROOT, 'icon', 'doctor.ico')],
-)
-
-nurse_exe = EXE(
-    pyz,
-    _script_toc('run_nurse.py'),
-    [],
-    exclude_binaries=True,
-    name='RemCardNurse',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    icon=[os.path.join(APP_ROOT, 'icon', 'nurse.ico')],
-)
-
-operblock_emergency_exe = EXE(
-    pyz,
-    _script_toc('run_operblock_emergency.py'),
-    [],
-    exclude_binaries=True,
-    name='RemCardOperBlockEmergency',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    icon=[os.path.join(APP_ROOT, 'icon', 'operbloc.ico')],
-)
-
-operblock_planned_exe = EXE(
-    pyz,
-    _script_toc('run_operblock_planned.py'),
-    [],
-    exclude_binaries=True,
-    name='RemCardOperBlockPlanned',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    icon=[os.path.join(APP_ROOT, 'icon', 'operbloc.ico')],
-)
-
-path_setup_exe = EXE(
-    pyz,
-    _script_toc('run_path_setup.py'),
-    [],
-    exclude_binaries=True,
-    name='RemCardPathSetup',
+    name='RemCard',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -442,11 +383,7 @@ updater_exe = EXE(
 )
 
 coll = COLLECT(
-    doctor_exe,
-    nurse_exe,
-    operblock_emergency_exe,
-    operblock_planned_exe,
-    path_setup_exe,
+    remcard_exe,
     updater_exe,
     a.binaries,
     a.datas,

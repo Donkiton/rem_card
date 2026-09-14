@@ -4033,6 +4033,7 @@ class OperBlockService:
                     oc.admission_id,
                     oc.table_code,
                     oc.status AS case_status,
+                    COALESCE(oc.revision, 0) AS operation_case_revision,
                     oc.started_at,
                     oc.ended_at,
                     {handoff_expr},
@@ -4041,6 +4042,7 @@ class OperBlockService:
                     p.full_name,
                     p.birth_date,
                     a.history_number,
+                    COALESCE(a.revision, 0) AS admission_revision,
                     a.patient_gender,
                     a.diagnosis_code,
                     a.diagnosis_text,
@@ -4138,6 +4140,8 @@ class OperBlockService:
                     )
             return {
                 "operation_case_id": int(data.get("operation_case_id") or 0),
+                "operation_case_revision": int(data.get("operation_case_revision") or 0),
+                "admission_revision": int(data.get("admission_revision") or 0),
                 "table_code": data.get("table_code") or "",
                 "table_name": data.get("table_display_name") or "",
                 "started_at": data.get("started_at"),
@@ -4186,6 +4190,9 @@ class OperBlockService:
         self,
         operation_case_id: int,
         data: OperBlockPatientInput | dict[str, Any],
+        *,
+        expected_operation_case_revision: Optional[int] = None,
+        expected_admission_revision: Optional[int] = None,
     ) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
         data = _case_input_from_payload(data)
@@ -4209,6 +4216,8 @@ class OperBlockService:
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
+            assert_revision_matches(case["revision"], expected_operation_case_revision)
+            assert_revision_matches(case["admission_revision"], expected_admission_revision)
             patient_id = int(case["patient_id"])
             admission_id = int(case["admission_id"])
             old_started_at = _parse_dt(case.get("started_at"))
@@ -4252,8 +4261,25 @@ class OperBlockService:
                 """,
                 (full_name, birth_date.isoformat(), last_name, first_name, middle_name, patient_id),
             )
+            admission_revision_clause = ""
+            admission_params: list[Any] = [
+                history_number,
+                started_text,
+                age["patient_age"],
+                age["patient_months"],
+                age["patient_age_unit"],
+                data.gender,
+                diagnosis_code or None,
+                diagnosis_text,
+                department_profile or None,
+                now,
+                admission_id,
+            ]
+            if expected_admission_revision is not None:
+                admission_revision_clause = " AND COALESCE(revision, 0) = ?"
+                admission_params.append(int(expected_admission_revision))
             cursor.execute(
-                """
+                f"""
                 UPDATE admissions
                 SET history_number = ?,
                     admission_datetime = ?,
@@ -4266,24 +4292,38 @@ class OperBlockService:
                     department_profile = ?,
                     updated_at = ?,
                     revision = COALESCE(revision, 0) + 1
-                WHERE id = ?
+                WHERE id = ?{admission_revision_clause}
                 """,
-                (
-                    history_number,
-                    started_text,
-                    age["patient_age"],
-                    age["patient_months"],
-                    age["patient_age_unit"],
-                    data.gender,
-                    diagnosis_code or None,
-                    diagnosis_text,
-                    department_profile or None,
-                    now,
-                    admission_id,
-                ),
+                tuple(admission_params),
             )
+            if cursor.rowcount != 1:
+                raise DataConflictError(DATA_CONFLICT_MESSAGE)
+            case_revision_clause = ""
+            case_params: list[Any] = [
+                started_text,
+                data.operation_name or None,
+                data.anesthesia_assistance_type or None,
+                _surgeons_json(data.surgeons),
+                data.operating_nurse or None,
+                data.anesthesiologist or None,
+                data.anesthetist or None,
+                data.height_cm,
+                data.weight_kg,
+                data.allergies or None,
+                data.blood_group or None,
+                data.blood_rh or None,
+                data.preop_sys,
+                data.preop_dia,
+                data.preop_pulse,
+                data.preop_spo2,
+                1,
+                int(operation_case_id),
+            ]
+            if expected_operation_case_revision is not None:
+                case_revision_clause = " AND COALESCE(revision, 0) = ?"
+                case_params.append(int(expected_operation_case_revision))
             cursor.execute(
-                """
+                f"""
                 UPDATE operation_cases
                 SET started_at = ?,
                     planned_operation_name = ?,
@@ -4306,30 +4346,14 @@ class OperBlockService:
                     revision = COALESCE(revision, 0) + 1
                 WHERE id = ?
                   AND status = 'active'
+                  {case_revision_clause}
                 """,
-                (
-                    started_text,
-                    data.operation_name or None,
-                    data.anesthesia_assistance_type or None,
-                    _surgeons_json(data.surgeons),
-                    data.operating_nurse or None,
-                    data.anesthesiologist or None,
-                    data.anesthetist or None,
-                    data.height_cm,
-                    data.weight_kg,
-                    data.allergies or None,
-                    data.blood_group or None,
-                    data.blood_rh or None,
-                    data.preop_sys,
-                    data.preop_dia,
-                    data.preop_pulse,
-                    data.preop_spo2,
-                    1,
-                    int(operation_case_id),
-                ),
+                tuple(case_params),
             )
             if cursor.rowcount != 1:
-                raise OperBlockConflictError("Случай уже изменён другим рабочим местом. Обновите список оперблока.")
+                if expected_operation_case_revision is None:
+                    raise OperBlockConflictError("Случай уже изменён другим рабочим местом. Обновите список оперблока.")
+                raise DataConflictError(DATA_CONFLICT_MESSAGE)
             if started_at_changed:
                 cursor.execute(
                     """
@@ -7718,6 +7742,7 @@ class OperBlockService:
                 {source_rao_expr},
                 {resolved_rao_expr},
                 a.department_profile,
+                COALESCE(a.revision, 0) AS admission_revision,
                 COALESCE(oc.revision, 0) AS revision
             FROM operation_cases oc
             JOIN admissions a ON a.id = oc.admission_id

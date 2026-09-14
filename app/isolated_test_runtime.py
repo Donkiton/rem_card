@@ -170,7 +170,7 @@ def configure_test_runtime() -> None:
         globals()["_recovery_smoke_application"] = application
         install_emergency_recovery_smoke(application, mode=recovery_mode, root=root)
     if not smoke and (
-        Path(sys.executable).stem.lower() not in {"remcarddoctor", "remcardnurse"}
+        Path(sys.executable).stem.lower() not in {"remcard", "remcarddoctor", "remcardnurse"}
         or "--path-setup" in sys.argv
     ):
         from PySide6.QtWidgets import QApplication, QMessageBox

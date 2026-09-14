@@ -97,6 +97,16 @@ APP_SETTING_CATALOG_KEYS: dict[str, str] = {
 
 
 TECHNICAL_APP_SETTINGS = {"settings_import_report"}
+NON_DISTRIBUTABLE_APP_SETTINGS = frozenset({("institution", "identity")})
+
+
+def _is_non_distributable_app_setting(row: sqlite3.Row | dict[str, Any]) -> bool:
+    try:
+        scope = str(row["scope"] or "").strip().casefold()
+        key = str(row["key"] or "").strip().casefold()
+    except (KeyError, IndexError):
+        return False
+    return (scope, key) in NON_DISTRIBUTABLE_APP_SETTINGS
 
 
 def _stable_json(value: Any) -> str:
@@ -398,7 +408,10 @@ def export_settings_release_snapshot(
             if table.name == "app_settings":
                 rows = [
                     row for row in rows
-                    if str(row.get("key") or "") not in TECHNICAL_APP_SETTINGS
+                    if (
+                        str(row.get("key") or "") not in TECHNICAL_APP_SETTINGS
+                        and not _is_non_distributable_app_setting(row)
+                    )
                 ]
             tables_payload[table.name] = rows
             row_counts[table.name] = len(rows)
@@ -765,6 +778,8 @@ def _upsert_release_row(
     if any(value is None or str(value) == "" for value in values):
         return "skipped"
     existing = _fetch_existing_row(cursor, table, apply_row)
+    if table.name == "app_settings" and _is_non_distributable_app_setting(apply_row):
+        return "preserved" if existing is not None else "skipped"
     if _rows_equal(existing, apply_row, table_name=table.name):
         return "unchanged"
     if table.name == "ui_backgrounds" and preserve_existing_background_rows and existing is not None:
@@ -807,12 +822,19 @@ def apply_settings_release_snapshot(
     bump_catalog_version: Callable[..., tuple[int, str]],
 ) -> dict[str, Any]:
     snapshot_dir = os.path.dirname(os.path.abspath(snapshot_path))
+    snapshot: dict[str, Any] | None = None
     try:
         manifest = load_settings_release_manifest(snapshot_path)
     except Exception:
         manifest = None
     if manifest:
-        manifest_hash = str(manifest.get("content_hash") or "")
+        snapshot = load_settings_release_snapshot(snapshot_path)
+        manifest_hash = str(manifest.get("content_hash") or "").strip().lower()
+        if str(snapshot["content_hash"]).strip().lower() != manifest_hash:
+            raise ValueError(
+                "Пакет обновления настроек поврежден: manifest content_hash "
+                "не соответствует текущему snapshot"
+            )
         with db.read_connection() as conn:
             row = conn.execute(
                 "SELECT value FROM settings_meta WHERE key = ?",
@@ -828,7 +850,8 @@ def apply_settings_release_snapshot(
                     "fast_path": "manifest",
                 }
 
-    snapshot = load_settings_release_snapshot(snapshot_path)
+    if snapshot is None:
+        snapshot = load_settings_release_snapshot(snapshot_path)
     snapshot_hash = str(snapshot["content_hash"])
     release_version = str(snapshot.get("release_version") or "")
     tables_raw = snapshot.get("tables") or {}

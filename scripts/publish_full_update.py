@@ -38,7 +38,11 @@ TEST_WORKTREE_MARKER_NAME = "TEST_WORKTREE_ONLY.txt"
 RELEASES_DIR_NAME = "releases"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-REQUIRED_RELEASE_EXES = (
+UNIFIED_REQUIRED_RELEASE_EXES = (
+    "RemCard.exe",
+    "RemCardUpdater.exe",
+)
+LEGACY_REQUIRED_RELEASE_EXES = (
     "RemCardDoctor.exe",
     "RemCardNurse.exe",
     "RemCardOperBlockEmergency.exe",
@@ -46,6 +50,7 @@ REQUIRED_RELEASE_EXES = (
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )
+REQUIRED_RELEASE_EXES = UNIFIED_REQUIRED_RELEASE_EXES
 SETTINGS_RELEASE_DIR = Path("_internal") / "rem_card" / "settings_release"
 SETTINGS_RELEASE_SNAPSHOT_FILE = "settings_release_snapshot.json"
 SETTINGS_RELEASE_MANIFEST_FILE = "settings_release_manifest.json"
@@ -58,6 +63,26 @@ STALE_LOCK_MAX_AGE_SECONDS = 12 * 60 * 60
 
 class PublishError(RuntimeError):
     pass
+
+
+def _detect_executable_layout(source: Path) -> str:
+    if all((source / name).is_file() for name in UNIFIED_REQUIRED_RELEASE_EXES):
+        legacy_role_exes = [
+            name
+            for name in LEGACY_REQUIRED_RELEASE_EXES
+            if name != "RemCardUpdater.exe" and (source / name).is_file()
+        ]
+        if legacy_role_exes:
+            raise PublishError(
+                "Единый full-релиз содержит EXE прежних отдельных ролей: "
+                + ", ".join(legacy_role_exes)
+            )
+        return "unified"
+    if all((source / name).is_file() for name in LEGACY_REQUIRED_RELEASE_EXES):
+        return "legacy"
+    raise PublishError(
+        "Full-релиз не содержит полный единый или прежний набор EXE."
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -269,9 +294,7 @@ def _validate_release(source: Path) -> tuple[dict[str, Any], str]:
         raise PublishError(
             f"Имя папки релиза ({source.name}) не совпадает с версией manifest ({version})."
         )
-    for exe_name in REQUIRED_RELEASE_EXES:
-        if not (source / exe_name).is_file():
-            raise PublishError(f"Full-релиз неполный: отсутствует {exe_name}.")
+    _detect_executable_layout(source)
     bundled_version = source / "_internal" / "rem_card" / "VERSION"
     try:
         bundled_version_text = bundled_version.read_text(encoding="utf-8").splitlines()[0].strip()

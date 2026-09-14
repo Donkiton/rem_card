@@ -364,39 +364,44 @@ class LocalReplicaSyncTest(unittest.TestCase):
             snapshot_lease_id="doctor",
             timeout_sec=3.0,
         )
-        first_result = {}
-
-        def run_first():
-            try:
-                first_result["value"] = first.sync(
-                    local_state={},
-                    temp_db_path=str(self.root / "nurse.sync_tmp.db"),
-                    debug_delay_sec=0.6,
-                )
-            except Exception as exc:
-                first_result["error"] = exc
-
-        thread = threading.Thread(target=run_first, daemon=True)
-        thread.start()
         gate_path = Path(first.snapshot_gate_path)
-        deadline = time.monotonic() + 2.0
-        while not gate_path.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
+        gate_holder = FileWriteLock(
+            str(gate_path),
+            stale_timeout_sec=60.0,
+            allow_expired_lease_cleanup=False,
+            allow_legacy_replica_cleanup=False,
+            allow_malformed_cleanup=False,
+        )
+        first_temp_path = self.root / "nurse.sync_tmp.db"
+        second_temp_path = self.root / "doctor.sync_tmp.db"
         try:
+            self.assertTrue(
+                gate_holder.acquire(
+                    owner_id="test-nurse-client",
+                    source="local_replica_snapshot_gate",
+                )
+            )
             self.assertTrue(gate_path.exists())
             with self.assertRaises(LocalReplicaSnapshotBusy):
                 second.sync(
                     local_state={},
-                    temp_db_path=str(self.root / "doctor.sync_tmp.db"),
+                    temp_db_path=str(second_temp_path),
                 )
-            thread.join(timeout=5.0)
+            self.assertTrue(gate_path.exists())
+            self.assertFalse(second_temp_path.exists())
+
+            self.assertTrue(gate_holder.release())
+            first_result = first.sync(
+                local_state={},
+                temp_db_path=str(first_temp_path),
+            )
         finally:
+            gate_holder.release()
             first.close()
             second.close()
 
-        self.assertFalse(thread.is_alive())
-        self.assertNotIn("error", first_result)
-        self.assertEqual(first_result["value"]["status"], "snapshot_ready")
+        self.assertEqual(first_result["status"], "snapshot_ready")
+        self.assertTrue(first_temp_path.exists())
         self.assertFalse(gate_path.exists())
         self.assertFalse(list(lease_dir.glob("*.lock")))
 

@@ -688,7 +688,8 @@ def resolve_baza_dir() -> str:
         configured = read_configured_baza_dir()
         if not configured:
             raise DataPathConfigurationError(
-                "Путь к папке базы не задан. Запустите RemCardPathSetup.exe."
+                "Путь к папке базы не задан. Откройте RemCard.exe и настройте путь "
+                "в Центре управления."
             )
         return configured
 

@@ -47,18 +47,28 @@ class PatientService:
     def _release_due_outcome_beds_impl(self) -> int:
         released = 0
         try:
-            released = self.dao.release_due_outcome_beds(delay_minutes=self.outcome_release_delay_minutes)
-            if released > 0:
-                logger.info(
-                    "Auto-release completed: %s patient(s) removed from beds after outcome timeout (%s min).",
-                    released,
-                    self.outcome_release_delay_minutes,
-                )
+            released = self._release_due_outcome_beds_operation()
         except Exception as exc:
             logger.warning("Auto-release check failed: %s", exc)
         return released
 
+    def _release_due_outcome_beds_operation(self) -> int:
+        """Run the mutation without hiding its outcome from a write owner."""
+        released = self.dao.release_due_outcome_beds(
+            delay_minutes=self.outcome_release_delay_minutes
+        )
+        if released > 0:
+            logger.info(
+                "Auto-release completed: %s patient(s) removed from beds after outcome timeout (%s min).",
+                released,
+                self.outcome_release_delay_minutes,
+            )
+        return released
+
     def maybe_release_due_outcome_beds(self, force: bool = False) -> int:
+        if self.data_service is not None:
+            self.maybe_release_due_outcome_beds_async(force=force)
+            return 0
         now_mono = time.monotonic()
         if not force and (now_mono - self._last_outcome_release_check_mono) < self._outcome_release_check_interval_sec:
             return 0
@@ -75,15 +85,39 @@ class PatientService:
             self._last_outcome_release_check_mono = now_mono
             self._outcome_release_worker_active = True
 
-        def _worker():
+        if self.data_service is None:
+            with self._outcome_release_guard:
+                self._outcome_release_worker_active = False
+            logger.warning("Auto-release check skipped: lifecycle DataService is unavailable")
+            return False
+
+        def _operation():
             try:
-                self._release_due_outcome_beds_impl()
+                return self._release_due_outcome_beds_operation()
             finally:
                 with self._outcome_release_guard:
                     self._outcome_release_worker_active = False
 
-        threading.Thread(target=_worker, name="OutcomeBedAutoRelease", daemon=True).start()
-        return True
+        def _on_error(exc: Exception):
+            logger.warning("Auto-release check failed: %s", exc)
+
+        try:
+            accepted = bool(
+                self.data_service.enqueue_write(
+                    description="auto_release_outcome_beds",
+                    operation=_operation,
+                    on_error=_on_error,
+                )
+            )
+        except Exception as exc:
+            with self._outcome_release_guard:
+                self._outcome_release_worker_active = False
+            logger.warning("Auto-release check could not be submitted: %s", exc)
+            return False
+        if not accepted:
+            with self._outcome_release_guard:
+                self._outcome_release_worker_active = False
+        return accepted
 
     def get_active_patients(self) -> List[PatientDTO]:
         self.maybe_release_due_outcome_beds()

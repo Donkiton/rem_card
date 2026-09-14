@@ -2646,7 +2646,12 @@ class LocalWriteQueue:
                             result = task.func()
                             diagnostic.stage("success_callback")
                             if task.on_success:
-                                task.on_success(result)
+                                try:
+                                    task.on_success(result)
+                                except Exception:
+                                    # The transaction has already succeeded. A UI/notification
+                                    # failure must never retry the committed mutation.
+                                    self.logger.exception("Committed write notification failed for %s", task.description)
                             break
                         except sqlite3.OperationalError as exc:
                             if task.retryable and task.retries_left > 0 and self._is_retryable_operational_error(exc):
@@ -2657,14 +2662,20 @@ class LocalWriteQueue:
                                 continue
                             diagnostic.stage("task_failed")
                             if task.on_error:
-                                task.on_error(exc)
+                                try:
+                                    task.on_error(exc)
+                                except Exception:
+                                    self.logger.exception("Write failure notification failed for %s", task.description)
                             else:
                                 self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
                             break
                         except Exception as exc:
                             diagnostic.stage("task_failed")
                             if task.on_error:
-                                task.on_error(exc)
+                                try:
+                                    task.on_error(exc)
+                                except Exception:
+                                    self.logger.exception("Write failure notification failed for %s", task.description)
                             else:
                                 self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
                             break

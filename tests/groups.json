@@ -1,5 +1,14 @@
 {
   "core": [
+    "tests/test_unified_main.py",
+    "tests/test_unified_database_setup.py",
+    "tests/test_unified_access.py",
+    "tests/test_unified_shutdown_resources.py",
+    "tests/test_unified_runtime.py",
+    "tests/test_unified_preflight.py",
+    "tests/test_unified_shortcuts.py",
+    "tests/test_unified_write_outcomes.py",
+    "tests/test_unified_update_package.py",
     "tests/test_emergency_restore_stale_locks.py",
     "tests/test_emergency_participants.py",
     "tests/test_isolated_test_runtime.py",
@@ -83,6 +92,9 @@
     "tests/test_db_wait_diagnostics.py"
   ],
   "ui": [
+    "tests/test_unified_first_run_flow.py",
+    "tests/test_unified_window_lifecycle.py",
+    "tests/test_unified_entry_pages.py",
     "tests/test_admin_dictionary_chrome.py",
     "tests/test_admin_settings_import_async.py",
     "tests/test_admin_settings_navigation.py",

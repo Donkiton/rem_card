@@ -57,7 +57,7 @@ class CustomTitleBar(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("MainTitleBar")
-        self.setFixedHeight(32)
+        self.setFixedHeight(30)
         
         self.window_ptr = parent
         self._is_dragging = False

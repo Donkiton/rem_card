@@ -53,7 +53,7 @@ class LightweightW1Shell(QWidget):
         from rem_card.ui.rem_card_sectors.sector_w1a import SectorW1a
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 2, 0, 0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
         self.sector_8 = Sector8()

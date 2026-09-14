@@ -1957,6 +1957,7 @@ class OperBlockSector8Panel(QWidget):
         self.icon_dir = get_icon_dir()
         self._protocol_mode = False
         self._launcher_back = False
+        self._roles_available = False
         self._display_visible: dict[str, bool] = {}
         self._display_order: list[str] = []
         self._init_ui()
@@ -1972,6 +1973,7 @@ class OperBlockSector8Panel(QWidget):
         self.btn_user_reports = self._button(" Репорты", "reports.png")
         self.btn_settings = self._button(" Настройки", "settings.png")
         self.btn_back = self._button(" Назад", "back.png")
+        self.btn_roles = self._button(" Роли", "operbloc.png")
         self.btn_exit = self._button(" Выход", "exit.png")
         self._button_widgets = {
             "archive": self.btn_archive,
@@ -1980,6 +1982,7 @@ class OperBlockSector8Panel(QWidget):
             "user_reports": self.btn_user_reports,
             "settings": self.btn_settings,
             "back": self.btn_back,
+            "roles": self.btn_roles,
             "exit": self.btn_exit,
         }
         self._reports_count_timer = QTimer(self)
@@ -2040,7 +2043,7 @@ class OperBlockSector8Panel(QWidget):
             button.setVisible(False)
         for button_id in left_order:
             button = self._button_widgets.get(button_id)
-            if button is None:
+            if button is None or (button_id == "roles" and not self._roles_available):
                 continue
             if self._display_visible.get(button_id, True):
                 self.layout.addWidget(button)
@@ -2048,13 +2051,20 @@ class OperBlockSector8Panel(QWidget):
         self.layout.addStretch(1)
         for button_id in right_order:
             button = self._button_widgets.get(button_id)
-            if button is None:
+            if button is None or (button_id == "roles" and not self._roles_available):
                 continue
             if self._display_visible.get(button_id, True):
                 self.layout.addWidget(button)
                 button.setVisible(True)
         self._apply_back_visibility()
         self.updateGeometry()
+
+    def set_roles_available(self, available: bool):
+        available = bool(available)
+        if self._roles_available == available:
+            return
+        self._roles_available = available
+        self.apply_display_settings()
 
     def _apply_back_visibility(self):
         visible_by_settings = bool(self._display_visible.get("back", True))
@@ -9563,6 +9573,7 @@ class OperBlockMainWidget(QWidget):
         self.sector_8_panel.btn_user_reports.clicked.connect(self._open_user_reports_dialog)
         self.sector_8_panel.btn_settings.clicked.connect(self._open_unified_settings)
         self.sector_8_panel.btn_back.clicked.connect(self.on_back_clicked)
+        self.sector_8_panel.btn_roles.clicked.connect(self._request_role_exit)
         self.sector_8_panel.btn_exit.clicked.connect(lambda: self.window().close())
         self._apply_view_only_chrome_state()
         self.sector_8.set_content(self.sector_8_panel)
@@ -9573,6 +9584,7 @@ class OperBlockMainWidget(QWidget):
         self.stack.addWidget(self.board_page)
         root.addWidget(self.stack, 1)
         self._set_protocol_chrome(False)
+        QTimer.singleShot(0, self._sync_roles_action_availability)
 
     def _open_user_report_dialog(self):
         from rem_card.ui.shared.user_reports_dialog import UserReportDialog
@@ -13488,6 +13500,8 @@ class OperBlockMainWidget(QWidget):
             return
         table_code = str((initial_data or {}).get("table_code") or "")
         table_name = str((initial_data or {}).get("table_name") or "") or _operblock_table_display_name(table_code)
+        expected_operation_case_revision = (initial_data or {}).get("operation_case_revision")
+        expected_admission_revision = (initial_data or {}).get("admission_revision")
         dialog = OccupyTableDialog(
             table_code,
             table_name,
@@ -13511,7 +13525,12 @@ class OperBlockMainWidget(QWidget):
             self._write_pending = True
 
             def operation():
-                return self.operblock_service.update_operation_case_form_data(int(operation_case_id), payload)
+                return self.operblock_service.update_operation_case_form_data(
+                    int(operation_case_id),
+                    payload,
+                    expected_operation_case_revision=expected_operation_case_revision,
+                    expected_admission_revision=expected_admission_revision,
+                )
 
             self._enqueue_write(
                 f"operblock_update_operation_case:{int(operation_case_id)}",
@@ -20753,6 +20772,20 @@ class OperBlockMainWidget(QWidget):
             parent = self.parent()
             if parent is not None and hasattr(parent, "setCurrentIndex"):
                 parent.setCurrentIndex(0)
+
+    def _unified_controller(self):
+        controller = getattr(self.window(), "unified_controller", None)
+        return controller if callable(getattr(controller, "request_role_exit", None)) else None
+
+    def _sync_roles_action_availability(self):
+        panel = getattr(self, "sector_8_panel", None)
+        if panel is not None:
+            panel.set_roles_available(self._unified_controller() is not None)
+
+    def _request_role_exit(self):
+        controller = self._unified_controller()
+        if controller is not None:
+            controller.request_role_exit()
 
     def shutdown(self):
         self._is_closing = True

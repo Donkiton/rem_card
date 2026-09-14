@@ -5,6 +5,7 @@ from __future__ import annotations
 from .common import PROJECT_ROOT
 from pathlib import Path
 import os
+import threading
 import time
 
 
@@ -725,16 +726,58 @@ def _check_runtime_outage_marker_contains_unconfirmed_write_after_shutdown(temp_
 
 
 def _check_runtime_outage_timeout_sets_unknown_active_write(temp_root: str) -> tuple[bool, str]:
+    # Keep the historical registry key, but verify the newer distinction:
+    # a drain timeout is pending; only a database receipt can make it unknown.
     _ = temp_root
     service = _make_runtime_outage_data_service()
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_write():
+        started.set()
+        release.wait(1.0)
+        return "committed"
+
     try:
-        service.enqueue_write("slow_runtime_outage_write", lambda: time.sleep(1.0))
-        service.prepare_runtime_outage_shutdown(timeout=0.05)
+        service.enqueue_write("slow_runtime_outage_write", slow_write)
+        if not started.wait(1.0):
+            return False, "slow write did not start"
+        if service.prepare_runtime_outage_shutdown(timeout=0.05):
+            return False, "shutdown reported success with an active accepted write"
         state = service.get_write_queue_state()
-        if state.get("queue_shutdown_result") != "timeout" or not state.get("unknown_active_write"):
-            return False, f"timeout did not mark unknown active write: {state}"
+        if (
+            state.get("queue_shutdown_result") != "timeout"
+            or state.get("queue_settled") is not False
+            or int(state.get("unsettled_write_count") or 0) != 1
+            or state.get("unknown_active_write")
+        ):
+            return False, f"timeout did not preserve a pending accepted write: {state}"
+        outcomes = service.unsettled_writes()
+        if len(outcomes) != 1 or outcomes[0].get("state") != "pending":
+            return False, f"pending outcome mismatch after timeout: {outcomes}"
+
+        release.set()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            outcomes = service.write_outcomes()
+            if outcomes and outcomes[0].get("state") == "committed":
+                break
+            time.sleep(0.01)
+        else:
+            return False, f"late committed outcome was not recorded: {service.write_outcomes()}"
+
+        if not service.prepare_runtime_outage_shutdown(timeout=1.0):
+            return False, f"shutdown retry did not settle late outcome: {service.get_write_queue_state()}"
+        final_state = service.get_write_queue_state()
+        if (
+            final_state.get("queue_settled") is not True
+            or int(final_state.get("unsettled_write_count") or 0) != 0
+            or final_state.get("unknown_active_write")
+        ):
+            return False, f"late outcome left shutdown blocked: {final_state}"
     finally:
-        service.shutdown()
+        release.set()
+        service.shutdown(timeout=1.0)
     return True, "ok"
 
 

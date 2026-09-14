@@ -1445,6 +1445,12 @@ def _bootstrap_container_with_emergency_fallback(
     try:
         return bootstrap_func(role=role), emergency_runtime_context, role_lock
     except Exception as exc:
+        # Starting another runtime after an incomplete bootstrap cleanup can
+        # leave live DB owners behind.  Preserve the partial owner on the
+        # original exception so the unified shell can drain or retain its
+        # central lease instead of opening an emergency runtime beside it.
+        if bool(getattr(exc, "cleanup_failed", False)):
+            raise
         opblock_outcome = _try_operblock_offline_startup_after_network_failure(
             role,
             exc,
@@ -2318,6 +2324,8 @@ def _prepare_runtime_context_for_startup(
     args: argparse.Namespace,
     active_local_operblock_case: bool,
     splash_controller: _StartupSplashController,
+    *,
+    acquire_role_lock: bool = True,
 ) -> tuple[Any, str, Any]:
     preselected_runtime_context, preselected_runtime_reason = _start_preselected_operblock_offline_context(
         args.role,
@@ -2359,11 +2367,13 @@ def _prepare_runtime_context_for_startup(
     if BASE_DIR not in sys.path:
         sys.path.insert(0, BASE_DIR)
 
-    role_lock = _acquire_role_lock_for_startup(
-        args.role,
-        emergency_runtime_context,
-        splash_controller.close,
-    )
+    role_lock = None
+    if acquire_role_lock:
+        role_lock = _acquire_role_lock_for_startup(
+            args.role,
+            emergency_runtime_context,
+            splash_controller.close,
+        )
     return emergency_runtime_context, preselected_runtime_reason, role_lock
 
 

@@ -2397,7 +2397,7 @@ class DoctorRemCardWidget(QWidget):
         from ..shared.lightweight_w1_shell import LightweightW1Shell
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setContentsMargins(5, 0, 5, 5)
         self.content_stack = QStackedWidget(self)
 
         self._w1_shell = LightweightW1Shell(
@@ -2421,6 +2421,7 @@ class DoctorRemCardWidget(QWidget):
         
         self.btn_exit.clicked.connect(self.on_exit_clicked)
         self.btn_back.clicked.connect(self.on_back_clicked)
+        self.sector8_panel.roles_clicked.connect(self._request_role_exit)
         self.btn_settings.clicked.connect(self.on_settings_clicked)
         self.sector8_panel.archive_clicked.connect(self.on_global_archive_clicked)
         self.sector8_panel.refresh_clicked.connect(self.on_refresh_beds_clicked)
@@ -2438,6 +2439,7 @@ class DoctorRemCardWidget(QWidget):
             self.layout_manager.selection_mode_changed.connect(self._on_selection_mode_changed)
             self._on_selection_mode_changed(getattr(self.layout_manager, "current_mode", "beds"))
         self._apply_burn_calculator_button_state()
+        QTimer.singleShot(0, self._sync_roles_action_availability)
 
         # Динамические W1-экраны shell подключаются без создания полной карты.
         self._wire_dynamic_views()
@@ -3656,7 +3658,12 @@ class DoctorRemCardWidget(QWidget):
 
     def on_exit_clicked(self):
         reply = CustomMessageBox.question(self, "Подтверждение", "Выйти из программы?", CustomMessageBox.Yes | CustomMessageBox.No, CustomMessageBox.No)
-        if reply == CustomMessageBox.Yes: self.window().close()
+        if reply == CustomMessageBox.Yes:
+            controller = getattr(self.window(), "unified_controller", None)
+            if controller is not None:
+                controller.request_application_exit(confirmed=True)
+            else:
+                self.window().close()
 
     def on_back_clicked(self):
         viewer = getattr(self, "_operblock_archive_viewer", None)
@@ -3744,6 +3751,20 @@ class DoctorRemCardWidget(QWidget):
             self._card_return_mode = None
             self._card_opened_from_global_archive = False
             self.back_to_roles_requested.emit()
+
+    def _unified_controller(self):
+        controller = getattr(self.window(), "unified_controller", None)
+        return controller if callable(getattr(controller, "request_role_exit", None)) else None
+
+    def _sync_roles_action_availability(self):
+        panel = getattr(self, "sector8_panel", None)
+        if panel is not None:
+            panel.set_roles_available(self._unified_controller() is not None)
+
+    def _request_role_exit(self):
+        controller = self._unified_controller()
+        if controller is not None:
+            controller.request_role_exit()
 
     def on_settings_clicked(self):
         self._remember_settings_return_mode()
