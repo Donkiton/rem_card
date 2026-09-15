@@ -45,6 +45,12 @@ class _EntryDialog(QDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.chrome)
 
+    def done(self, result):
+        # The application filter must stop before a closed modal's Python
+        # reference cycle can be collected by a background settings worker.
+        QApplication.instance().removeEventFilter(self.chrome)
+        super().done(result)
+
     def _buttons(self, save_text):
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Save).setText(save_text)

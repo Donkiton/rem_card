@@ -89,7 +89,9 @@ class NurseRemCardLayoutManager(QWidget):
 
     def init_ui(self):
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 2, 0, 0)
+        # Match LightweightW1Shell so idle prewarm does not move sector 8
+        # away from the window title bar when the full layout takes over.
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
         # 1. Создание секторов
@@ -130,16 +132,9 @@ class NurseRemCardLayoutManager(QWidget):
 
         self._align_nurse_7b_chrome()
 
-        # Для медсестры держим верхний сектор с правым отступом 3px от границы окна.
-        set_widget_style(self.sector_8, """
-            QFrame#sector_8_frame {
-                background-color: #e9ecef;
-                border: 1px solid #bdc3c7;
-                border-radius: 5px;
-                margin-left: 3px;
-                margin-right: 3px;
-            }
-        """)
+        # Keep Sector8's own frame style, identical to the lightweight W1
+        # shell. A second QSS changed the right margin during idle prewarm
+        # and was later overwritten again on a theme refresh.
 
         # 2. Сборка структурных компонентов
         self.sector_3_4_container = SplitterManager.create_splitter(Qt.Vertical)

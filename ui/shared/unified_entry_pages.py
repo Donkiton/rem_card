@@ -202,6 +202,10 @@ class _RoleCard(QPushButton):
         painter.drawEllipse(arrow_rect)
         cx, cy = arrow_rect.center().x(), arrow_rect.center().y()
         painter.setPen(QPen(QColor('#ffffff'), 3.5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        if self.property('preparing'):
+            painter.setBrush(Qt.NoBrush)
+            painter.drawArc(arrow_rect.adjusted(10, 10, -10, -10), int(self.property('phase') or 0) * 16, 250 * 16)
+            return
         painter.drawLine(QPointF(cx-8, cy), QPointF(cx+7, cy))
         arrow = QPainterPath(QPointF(cx+1, cy-6))
         arrow.lineTo(cx+7, cy)
@@ -325,6 +329,8 @@ class WelcomePage(_EntryPageBase):
         super().__init__(parent)
         self._access_blocked = False
         self._access_message = ""
+        self._preparing_role = ''
+        self._preparing_message = ''
         self._compact_grid = None
         self._build_ui()
         self._clock_timer = QTimer(self)
@@ -333,6 +339,29 @@ class WelcomePage(_EntryPageBase):
         self._clock_timer.start()
         self._refresh_clock()
         self._update_role_grid()
+        self._preparing_timer = QTimer(self)
+        self._preparing_timer.setInterval(60)
+        self._preparing_timer.timeout.connect(self._advance_preparing)
+
+    def _advance_preparing(self):
+        card = self.role_buttons.get(self._preparing_role)
+        if card:
+            card.setProperty('phase', (int(card.property('phase') or 0) + 24) % 360)
+            card.update()
+
+    def set_preparing(self, role='', message=''):
+        self._preparing_role = role
+        self._preparing_message = message or 'Подготовка рабочего места…'
+        for key, card in self.role_buttons.items():
+            card.setProperty('preparing', key == role)
+            card.update()
+        if role:
+            self._preparing_timer.start()
+        else:
+            self._preparing_timer.stop()
+        for button in (self.settings_button, self.about_button, self.update_button):
+            button.setEnabled(not bool(role))
+        self.set_access_state(self._access_message, self._access_blocked)
 
     def _build_ui(self) -> None:
         header = QHBoxLayout()
@@ -479,13 +508,15 @@ class WelcomePage(_EntryPageBase):
         self._access_blocked = bool(blocked)
         self._access_message = str(message or "").strip()
         for card in self._role_cards:
-            card.setEnabled(not self._access_blocked)
-        self.access_label.setText(self._access_message)
-        if self._access_blocked:
+            card.setEnabled(not (self._access_blocked or self._preparing_role))
+        self.access_label.setText(self._preparing_message if self._preparing_role else self._access_message)
+        if self._preparing_role:
+            self.access_label.setStyleSheet("color: #cfefff; font: 600 14px 'Segoe UI';")
+        elif self._access_blocked:
             self.access_label.setStyleSheet("color: #ffc2c8; font: 600 12px 'Segoe UI';")
         else:
             self.access_label.setStyleSheet("color: #91dabc; font: 600 12px 'Segoe UI';")
-        self.access_label.setVisible(bool(self._access_message))
+        self.access_label.setVisible(bool(self._access_message or self._preparing_role))
 
     def set_update_available(self, version: str = "") -> None:
         version = str(version or "").strip()

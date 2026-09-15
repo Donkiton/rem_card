@@ -31,6 +31,38 @@ def state(mode, generation, operation=None):
     return dict(state=mode, generation=generation, operation_id=operation, owner_token='token')
 
 
+def test_initial_loading_precedes_role_chooser(shell, monkeypatch, tmp_path):
+    from rem_card.app import runtime_paths
+    monkeypatch.setattr(runtime_paths, 'is_compiled', lambda: False)
+    monkeypatch.setattr(runtime_paths, 'resolve_baza_dir', lambda: str(tmp_path))
+    monkeypatch.setattr(shell, '_configure_store', lambda: None)
+    monkeypatch.setattr(shell, '_async', lambda *a: None)
+    monkeypatch.setattr(shell, 'refresh_access', lambda: None)
+    monkeypatch.setattr(shell, '_check_updates', lambda: None)
+    shell.stack.setCurrentWidget(shell.welcome)
+    shell.initialize()
+    assert shell.stack.currentWidget() is shell.loading
+    shell._ready()
+    assert shell.stack.currentWidget() is shell.welcome
+
+
+def test_role_preparation_stays_on_chooser_and_error_restores_controls(shell, monkeypatch, tmp_path):
+    shell.root = str(tmp_path)
+    calls = []
+    monkeypatch.setattr(shell, '_async', lambda *a: calls.append(a))
+    shell.stack.setCurrentWidget(shell.welcome)
+    shell.enter_role('doctor')
+    assert shell.stack.currentWidget() is shell.welcome
+    assert shell.welcome.role_buttons['doctor'].property('preparing')
+    assert not shell.welcome.settings_button.isEnabled()
+    assert not any(button.isEnabled() for button in shell.welcome.role_buttons.values())
+    shell.enter_role('nurse')
+    assert shell.role == 'doctor' and len(calls) == 1
+    shell._error(RuntimeError('Нет доступа'))
+    assert not shell.welcome.role_buttons['doctor'].property('preparing')
+    assert shell.welcome.settings_button.isEnabled()
+
+
 def test_confirmed_application_exit_does_not_ask_to_return_to_roles(shell, monkeypatch):
     from rem_card.ui.shared.custom_message_box import CustomMessageBox
     monkeypatch.setattr(CustomMessageBox, 'question', lambda *a, **k: pytest.fail('second confirmation'))
@@ -40,6 +72,54 @@ def test_confirmed_application_exit_does_not_ask_to_return_to_roles(shell, monke
     shell.request_application_exit(confirmed=True)
     assert shell._pending_exit
     assert calls == [True]
+
+
+def test_application_exit_hides_window_but_keeps_runtime_until_drain(shell, monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    data = SimpleNamespace(set_shutting_down=lambda: None)
+    container = SimpleNamespace(data_service=data)
+    role = QWidget()
+    role.doctor_main = role.nurse_main = role.operblock_main = None
+    role.iter_runtime_containers = lambda: [container]
+    shell.stack.addWidget(role)
+    shell.stack.setCurrentWidget(role)
+    shell.container, shell.role_window, shell.role = container, role, 'doctor'
+    shell.show()
+    pages = []
+    shell.stack.currentChanged.connect(lambda _: pages.append(shell.stack.currentWidget()))
+    waits = []
+    monkeypatch.setattr(shell, '_wait_before_drain', lambda: waits.append(True))
+    shell.request_application_exit(confirmed=True)
+    assert shell.isHidden()
+    assert shell.stack.currentWidget() is role
+    assert shell.loading not in pages
+    assert shell.container is container and shell._shutdown is not None
+    assert shell._leaving and waits == [True]
+
+
+@pytest.mark.parametrize('index,result', [(0, QMessageBox.Yes), (1, QMessageBox.No)])
+def test_role_confirmation_buttons_visibly_press_and_return_result(shell, index, result):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
+    from rem_card.ui.shared.custom_message_box import CustomMessageBox
+    dialog = CustomMessageBox('Выход из роли', 'Вернуться к выбору ролей?', 'warning', parent=shell,
+                              action_buttons=[('Вернуться к ролям', QMessageBox.Yes), ('Остаться', QMessageBox.No)])
+    dialog.show()
+    QApplication.processEvents()
+    button = dialog.findChildren(QPushButton, 'DialogOkBtn')[index]
+    QTest.mouseMove(button, button.rect().center())
+    QApplication.processEvents()
+    before = button.grab().toImage()
+    geometry = button.geometry()
+    QTest.mousePress(button, Qt.LeftButton)
+    QApplication.processEvents()
+    assert button.isDown()
+    assert button.grab().toImage() != before
+    assert button.geometry() == geometry
+    QTest.mouseRelease(button, Qt.LeftButton)
+    assert dialog.result() == result and not dialog.isVisible()
+    dialog.deleteLater()
 
 
 def test_application_close_uses_exit_confirmation_not_role_confirmation(shell, monkeypatch):
@@ -112,7 +192,86 @@ def test_transition_passes_intermediate_rectangles_and_returns_to_saved_size(she
     QTimer.singleShot(3000, loop.quit)
     loop.exec()
     assert shell.geometry() == original
-    assert shell._transition.cover is None
+    assert not shell._transition.running
+
+
+def test_drain_waits_for_live_animation_without_releasing_runtime(shell, monkeypatch):
+    from PySide6.QtCore import QRect, QTimer
+    container = object()
+    shell.container = container
+    shell._transition.start(QRect(shell.geometry()), lambda: None, lambda: None)
+    queued = []
+    monkeypatch.setattr(QTimer, 'singleShot', lambda delay, callback: queued.append(callback))
+    monkeypatch.setattr(shell, '_async', lambda *args: pytest.fail('Drain during animation'))
+    shell._wait_before_drain()
+    assert shell.container is container and queued == [shell._wait_before_drain]
+    shell._transition.cancel()
+
+
+def test_return_animation_resizes_chooser_instead_of_clinical_page(shell):
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QWidget
+    role_page = QWidget()
+    shell.stack.addWidget(role_page)
+    shell.stack.setCurrentWidget(role_page)
+    shell.entry_chrome.set_role_mode(True)
+    shell.showNormal()
+    QApplication.processEvents()
+    prepared = []
+    def prepare():
+        prepared.append(True)
+        shell.stack.setCurrentWidget(shell.welcome)
+        shell.entry_chrome.set_role_mode(False)
+    shell._transition.start(QRect(shell.geometry()), prepare, lambda: None,
+                            prepare_before_resize=True)
+    assert shell._transition.running and prepared == [True]
+    assert role_page.isHidden() and shell.welcome.isVisible()
+    shell._transition.cancel()
+
+
+def test_role_page_keeps_ownership_but_does_not_resize_until_reveal(shell):
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QWidget
+    role_page = QWidget()
+    shell.role_window = role_page
+    shell.stack.addWidget(role_page)
+    shell.stack.setCurrentWidget(shell.welcome)
+    shell.settings.setValue('test_role/normal_rect', QRect(0, 0, 1400, 850))
+    shell.settings.setValue('test_role/maximized', False)
+    shell._animate_page(role_page, 'test_role', True, lambda: None)
+    assert shell.stack.indexOf(role_page) == -1
+    assert role_page.parentWidget() is shell.stack
+    assert shell.role_window is role_page
+    shell._transition.animation.setCurrentTime(shell._transition.animation.duration())
+    assert shell.stack.currentWidget() is role_page
+    assert shell.stack.indexOf(role_page) >= 0
+
+
+def test_transition_keeps_live_text_at_native_resolution(shell, monkeypatch):
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QWidget, QLabel
+    page = QWidget()
+    label = QLabel('RemCard · Чёткий текст', page)
+    label.setGeometry(10, 10, 250, 40)
+    label.setStyleSheet('font: 16px "Segoe UI"; color: black; background: white;')
+    shell.stack.addWidget(page)
+    shell.stack.setCurrentWidget(page)
+    shell.showNormal()
+    QApplication.processEvents()
+    original = label.grab().toImage()
+    # A transition must never replace live widgets with a stretched screenshot.
+    monkeypatch.setattr(shell.entry_chrome, 'grab', lambda: pytest.fail('Screenshot animation'))
+    target = QRect(shell.geometry())
+    target.setWidth(target.width() + 200)
+    target.setHeight(target.height() + 100)
+    shell._transition.start(target, lambda: None, lambda: None)
+    shell._transition.animation.pause()
+    shell._transition.animation.setCurrentTime(80)
+    QApplication.processEvents()
+    assert label.isVisible() and shell.entry_chrome.content.isVisible()
+    assert label.grab().toImage() == original
+    shell._transition.cancel()
+    assert label.isVisible()
 
 
 def test_maximized_transition_keeps_work_area_and_normal_restore_rectangle(shell, monkeypatch):

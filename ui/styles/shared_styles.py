@@ -18,6 +18,8 @@ def _set_style(widget, qss: str) -> None:
 
 
 def apply_custom_dialog_style(dialog) -> None:
+    from PySide6.QtGui import QColor
+    pressed_background = QColor(_t("button.accent.hover")).darker(125).name()
     _set_style(
         dialog,
         f"""
@@ -74,6 +76,13 @@ def apply_custom_dialog_style(dialog) -> None:
         }}
         QPushButton#DialogOkBtn:hover {{
             background-color: {_t("button.accent.hover")};
+        }}
+        QPushButton#DialogOkBtn:focus {{
+            border-color: {_t("border.focus")};
+        }}
+        QPushButton#DialogOkBtn:pressed {{
+            background-color: {pressed_background};
+            border-color: {_t("border.focus")};
         }}
         """,
     )

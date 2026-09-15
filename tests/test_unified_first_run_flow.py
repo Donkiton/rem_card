@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import sys
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,11 +43,15 @@ def _isolated_environment(tmp_path: Path) -> tuple[dict[str, str], Path]:
     return environment, config_path
 
 
-def test_first_run_empty_folder_is_saved_reopened_and_bootstraps_doctor(tmp_path):
+@pytest.mark.parametrize("qt_platform", ["offscreen", pytest.param(
+    "windows", marks=pytest.mark.skipif(sys.platform != "win32", reason="Windows Qt integration")
+)])
+def test_first_run_empty_folder_connects_immediately_and_reopens(tmp_path, qt_platform):
     environment, config_path = _isolated_environment(tmp_path)
     selected = tmp_path / "new-central-root"
     selected.mkdir()
     environment["REMCARD_FIRST_RUN_TEST_ROOT"] = str(selected)
+    environment["QT_QPA_PLATFORM"] = qt_platform
 
     result = subprocess.run(
         [sys.executable, str(PROJECT_DIR / "tests" / "unified_first_run_smoke.py")],
@@ -59,6 +65,7 @@ def test_first_run_empty_folder_is_saved_reopened_and_bootstraps_doctor(tmp_path
 
     assert result.returncode == 0, result.stdout + "\n" + result.stderr
     assert "UNIFIED_FIRST_RUN_DOCTOR_OK" in result.stdout
+    assert "UNIFIED_INSTITUTION_SAVE_OK" in result.stdout
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     assert Path(payload["baza_dir"]) == selected.absolute()
     assert (selected / "archiv" / "rao_journal.db").is_file()
@@ -78,12 +85,20 @@ def test_first_run_invalid_nonempty_folder_is_not_saved(tmp_path, monkeypatch):
     from rem_card.ui.shared import unified_settings_dialogs
     from rem_card.ui.unified_window import UnifiedWindow
 
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtCore import QObject
+    app = QApplication.instance() or QApplication([])  # Keep the Qt application alive.
+
     class Dialog:
         def __init__(self, *_args, **_kwargs):
             self.path_edit = SimpleNamespace(text=lambda: str(selected))
+            self.chrome = QObject()
 
         def exec(self):
             return 1
+
+        def deleteLater(self):
+            self.chrome.deleteLater()
 
     errors = []
     shell = SimpleNamespace(
@@ -105,6 +120,7 @@ def test_first_run_invalid_nonempty_folder_is_not_saved(tmp_path, monkeypatch):
 
     UnifiedWindow.change_database(shell, first_run=True)
 
+    assert app is QApplication.instance()
     assert errors and "не найдена база данных" in str(errors[0])
     assert not config_path.exists()
     assert (selected / "notes.txt").read_text(encoding="utf-8") == "user data"

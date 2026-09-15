@@ -158,6 +158,11 @@ class W1LayoutHandoffTest(unittest.TestCase):
             lower_name = "sector_w1b_nurse"
 
         shell = widget.layout_manager
+        shell.resize(1280, 800)
+        shell.layout().activate()
+        from PySide6.QtCore import QPoint
+        sector8_top = shell.sector_8.mapTo(shell, QPoint()).y()
+        sector8_style = shell.sector_8.styleSheet()
         archive_widget = shell._ensure_archive_widget()
         widget._wire_dynamic_views()
         refs = {
@@ -177,6 +182,10 @@ class W1LayoutHandoffTest(unittest.TestCase):
 
         self.assertTrue(widget._ensure_full_layout(reason="test_handoff"))
         layout = widget.layout_manager
+        layout.resize(1280, 800)
+        layout.layout().activate()
+        self.assertEqual(layout.sector_8.mapTo(layout, QPoint()).y(), sector8_top)
+        self.assertEqual(layout.sector_8.styleSheet(), sector8_style)
 
         self.assertEqual(beds_probe.wait_calls, 0)
         self.assertEqual(w1a_probe.wait_calls, 0)

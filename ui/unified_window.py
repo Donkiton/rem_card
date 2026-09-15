@@ -111,6 +111,7 @@ class UnifiedWindow(QMainWindow):
             return self.role_window.hide_loading_indicator(*args, **kwargs)
 
     def _error(self, exc):
+        self.welcome.set_preparing()
         if isinstance(exc, CentralUnavailable):
             self._central_unavailable = True
             self._compatibility_error = ""
@@ -126,6 +127,8 @@ class UnifiedWindow(QMainWindow):
                         error_class=type(exc).__name__)
 
     def initialize(self):
+        self.stack.setCurrentWidget(self.loading)
+        self.loading.reset()
         from rem_card.app.runtime_paths import resolve_baza_dir, is_compiled, read_configured_baza_dir
         icon_dir = Path(__file__).resolve().parents[1] / "icon"
         icon = icon_dir / "remcardicon.ico"
@@ -229,10 +232,8 @@ class UnifiedWindow(QMainWindow):
         self._return_to_control = False
         self.role = role
         self.session_id = uuid.uuid4().hex
-        self.stack.setCurrentWidget(self.loading)
-        self.loading.reset()
-        self.loading.complete_stage(0)
-        self.loading.set_stage(1, "Проверка доступа к рабочему месту…")
+        self.stack.setCurrentWidget(self.welcome)
+        self.welcome.set_preparing(role, "Проверка доступа к рабочему месту…")
         def admission():
             from rem_card.app.unified_access import SessionLease, MaintenanceStateError
             lease = SessionLease(self.root, role)
@@ -302,7 +303,7 @@ class UnifiedWindow(QMainWindow):
             from rem_card.app.bootstrap import bootstrap
             from rem_card.app.main import _apply_app_theme
             _apply_app_theme(QApplication.instance(), self.role if self.role != "settings" else "doctor")
-            self.loading.set_stage(3, "Подготовка рабочего места…")
+            self.welcome.set_preparing(self.role, "Подготовка рабочего места…")
             QApplication.processEvents()
             from rem_card.app.unified_preflight import get_startup_request, prepare_admitted_runtime_context, bootstrap_admitted_container
             request = get_startup_request(self)
@@ -446,6 +447,7 @@ class UnifiedWindow(QMainWindow):
                            maximize_default=self.role != "settings")
 
     def _role_transition_ready(self):
+        self.welcome.set_preparing()
         self._busy = False
         self._compatibility_error = ""
         lifecycle_event("role_enter_ready", session_id=self.session_id, role=self.role)
@@ -484,6 +486,7 @@ class UnifiedWindow(QMainWindow):
                 return
         self._leaving = True
         self._busy = True
+        self.welcome.set_preparing()
         if not interrupted_transition:
             self._save_geometry(self.role)
         lifecycle_event("role_leave_requested", session_id=self.session_id, role=self.role, forced=bool(force))
@@ -509,8 +512,9 @@ class UnifiedWindow(QMainWindow):
             if isinstance(widget, QDialog) and widget is not self:
                 widget.reject()
         if self._pending_exit:
-            self.loading.set_stage(4, "Завершение сохранений и закрытие программы…")
-            self.stack.setCurrentWidget(self.loading)
+            # Hiding is not closing: keep the event loop and runtime alive
+            # until accepted writes have drained and the lease is released.
+            self.hide()
         else:
             self.welcome.set_access_state("Завершение сохранений и освобождение базы…", True)
             self._animate_page(self.welcome, "shell", False, lambda: None)
@@ -532,6 +536,11 @@ class UnifiedWindow(QMainWindow):
         return any(isValid(thread) and thread.isRunning() for thread in self._role_threads)
 
     def _wait_before_drain(self):
+        # Keep shutdown/backup work out of the short live resize. The runtime
+        # and its lease remain owned until both animation and writes finish.
+        if self._transition.running:
+            QTimer.singleShot(40, self._wait_before_drain)
+            return
         # Settings saves and detached UI reads must finish before closing their DB.
         if self._workers or any(w.isRunning() for w in AsyncCallThread._keepalive_threads):
             QTimer.singleShot(100, self._wait_before_drain)
@@ -778,12 +787,19 @@ class UnifiedWindow(QMainWindow):
         from rem_card.ui.shared.unified_settings_dialogs import DatabasePathDialog
         from rem_card.app.runtime_paths import write_configured_baza_dir, is_compiled, save_dev_baza_dir
         dialog = DatabasePathDialog(self.root, self)
-        if dialog.exec() != QDialog.Accepted:
+        try:
+            accepted = dialog.exec() == QDialog.Accepted
+            raw_path = dialog.path_edit.text().strip() if accepted else ""
+        finally:
+            # Dispose Qt widgets on the GUI thread before background schema
+            # creation can trigger Python cyclic garbage collection.
+            QApplication.instance().removeEventFilter(dialog.chrome)
+            dialog.deleteLater()
+        if not accepted:
             if first_run:
                 self.welcome.set_access_state("Для начала работы выберите папку базы в настройках.", True)
                 self.stack.setCurrentWidget(self.welcome)
             return
-        raw_path = dialog.path_edit.text().strip()
         if not raw_path:
             QMessageBox.warning(self, "Путь к базе", "Укажите папку базы данных.")
             return
@@ -802,6 +818,7 @@ class UnifiedWindow(QMainWindow):
         def saved(path):
             if first_run:
                 self.root = path
+                self.stack.setCurrentWidget(self.loading)
                 self.loading.complete_stage(0)
                 os.environ["REMCARD_BAZA_DIR"] = path
                 from rem_card.app.runtime_paths import DEV_RUNTIME_BAZA_PIN_ENV
@@ -818,16 +835,28 @@ class UnifiedWindow(QMainWindow):
             return
         from rem_card.ui.shared.unified_settings_dialogs import InstitutionDialog
         dialog = InstitutionDialog(**self._institution, parent=self)
-        if dialog.exec() == QDialog.Accepted:
+        try:
+            if dialog.exec() != QDialog.Accepted:
+                return
             value = {"full_name": dialog.full_name.text().strip(), "short_name": dialog.short_name.text().strip()}
-            service = self.container.settings_service
-            self._async(lambda: service.set_app_setting("institution", "identity", value), lambda _: self._set_institution(value))
+        finally:
+            QApplication.instance().removeEventFilter(dialog.chrome)
+            dialog.deleteLater()
+        service = self.container.settings_service
+        # Pass only plain data to the worker, after disposing the modal UI.
+        def saved(_):
+            self._set_institution(value)
+            lifecycle_event("unified_institution_saved", session_id=self.session_id, role=self.role)
+        self._async(lambda: service.set_app_setting("institution", "identity", value), saved)
 
     def about(self):
         from rem_card.ui.shared.unified_settings_dialogs import EntryInformationDialog
         dialog = EntryInformationDialog("О программе", f"RemCard {APP_VERSION}\nРеанимационная карта\n\nЕдиное приложение для специалистов отделения.", self)
-        dialog.exec()
-        dialog.deleteLater()
+        try:
+            dialog.exec()
+        finally:
+            QApplication.instance().removeEventFilter(dialog.chrome)
+            dialog.deleteLater()
 
     def update_application(self):
         if self._local_only or self._requires_fresh_runtime:
@@ -881,12 +910,22 @@ class UnifiedWindow(QMainWindow):
         normal.moveTop(max(available.top(), min(normal.top(), available.bottom() - normal.height() + 1)))
         maximized = self.settings.value(key + "/maximized", maximize_default, type=bool)
 
+        # QStackedLayout resizes hidden pages too. Keep the clinical page
+        # outside the stack during the live chooser resize, while retaining
+        # its QObject parent and runtime ownership until admission/drain ends.
+        if self.role_window is not None:
+            self.stack.removeWidget(self.role_window)
+            self.role_window.hide()
+
         def prepare():
             self.entry_chrome.set_role_mode(role_mode)
+            if self.stack.indexOf(page) < 0:
+                self.stack.addWidget(page)
             self.stack.setCurrentWidget(page)
 
         self._transition.start(available if maximized else normal, prepare, finished,
-                               maximized=maximized, normal_rect=normal)
+                               maximized=maximized, normal_rect=normal,
+                               prepare_before_resize=not role_mode)
 
     def _restore_geometry(self, key, maximize_default=False):
         self._is_custom_maximized = False
@@ -956,6 +995,8 @@ class UnifiedWindow(QMainWindow):
             event.ignore()
             self._closing = self._restart = self._update_requested = self._pending_exit = False
             self._status_timer.start()
+            self.show_roles()
+            self.show()
             QMessageBox.warning(self, "RemCard", "Не удалось запустить перезапуск или обновление. Программа остаётся открытой.")
             return
         event.accept()

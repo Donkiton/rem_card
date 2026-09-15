@@ -162,6 +162,9 @@ class CustomMessageBox(QDialog):
         
         main_layout.addWidget(main_frame)
         
+        for button in self.findChildren(QPushButton, "DialogOkBtn"):
+            button.setCursor(Qt.PointingHandCursor)
+
         title_bar.installEventFilter(self)
 
     def eventFilter(self, obj, event):
