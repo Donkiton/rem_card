@@ -52,7 +52,6 @@ def test_welcome_page_exposes_all_roles_actions_and_access_state(tmp_path):
     roles = []
     page.role_selected.connect(roles.append)
     actions = []
-    page.settings_requested.connect(lambda: actions.append("settings"))
     page.about_requested.connect(lambda: actions.append("about"))
     page.update_requested.connect(lambda: actions.append("update"))
 
@@ -64,12 +63,11 @@ def test_welcome_page_exposes_all_roles_actions_and_access_state(tmp_path):
     }
     assert set(page.role_buttons) == expected_roles
     page.role_buttons[ROLE_DOCTOR].click()
-    page.settings_button.click()
     page.about_button.click()
     page.set_update_available("3.1.0")
     page.update_button.click()
     assert roles == [ROLE_DOCTOR]
-    assert actions == ["settings", "about", "update"]
+    assert actions == ["about", "update"]
     assert page.context_label.text() == "ОАРИТ"
     assert page.hospital_label.text() == "ККБ"
     assert not page.hospital_separator.isHidden()
@@ -105,6 +103,73 @@ def test_welcome_page_keeps_four_roles_in_one_row_without_tooltips():
     assert all(card.width() >= 178 and card.height() >= 168 for card in page.role_buttons.values())
     page.deleteLater()
     app.processEvents()
+
+
+def test_welcome_reference_layout_fits_compact_window_and_long_institution():
+    app = application()
+    page = WelcomePage()
+    page.resize(1194, 744)  # Content inside the 1200 x 780 shell.
+    page.set_institution('Полное название', 'Очень длинное название медицинского учреждения ' * 4)
+    page.show()
+    app.processEvents()
+    assert page.width() == 1194
+    for card in page.role_buttons.values():
+        assert page.roles_area.rect().contains(card.geometry())
+        assert not card._photo.isNull()
+    assert page.content.rect().contains(page.theme_switch.geometry())
+    assert page.content.rect().contains(page.about_button.geometry())
+    assert page.hospital_label.text().startswith('Очень длинное')
+    assert page.quote_author.text() == 'М.И. Шевчук'
+    page.set_institution('', '')
+    assert page.hospital_label.isHidden() and page.hospital_separator.isHidden()
+    page.set_access_state('Технические работы', blocked=True)
+    selected = []
+    page.role_selected.connect(selected.append)
+    for card in page.role_buttons.values():
+        card.click()
+    assert selected == []
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_welcome_theme_loads_saved_mode_and_shares_settings_switch(tmp_path, monkeypatch):
+    from rem_card.ui.shared import theme_switch as switches
+    from rem_card.ui.styles.theme_manager import ThemeManager
+    from rem_card.ui.styles.theme_storage import ThemeStorage
+    from rem_card.ui.styles.theme_tokens import default_settings_payload
+    app = application()
+    storage = ThemeStorage(str(tmp_path / 'theme.json'))
+    payload = default_settings_payload()
+    payload['mode'] = 'dark'
+    storage.save(payload)
+    manager = ThemeManager(storage)
+    monkeypatch.setattr(switches, 'get_theme_manager', lambda: manager)
+    # Test persistence/synchronization without replacing the shared pytest
+    # process's native QStyle; real style changes are covered by the GUI probe.
+    monkeypatch.setattr(manager, 'apply_to_app', lambda app: manager.theme_changed.emit(manager.mode))
+    page = WelcomePage()
+    settings_switch = switches.ThemeSwitch(manager=manager)
+    try:
+        assert page.theme_switch.mode == settings_switch.mode == 'dark'
+        assert page._theme_mode == 'dark'
+        dark_background = page._background.cacheKey()
+        page.theme_switch.click()
+        assert page.theme_switch.mode == settings_switch.mode == 'light'
+        assert page._theme_mode == 'light'
+        assert page._background.cacheKey() != dark_background
+        assert all(card._theme_mode == 'light' and not card._photo.isNull() for card in page.role_buttons.values())
+        assert ThemeManager(storage).load()['mode'] == 'light'
+        settings_switch.click()
+        assert page.theme_switch.mode == 'dark'
+        assert page._theme_mode == 'dark'
+        page.set_preparing(ROLE_DOCTOR)
+        page.theme_switch.click()
+        assert page.theme_switch.mode == 'dark'
+        assert not page.theme_switch.isEnabled()
+    finally:
+        page.deleteLater()
+        settings_switch.deleteLater()
+        app.processEvents()
 
 
 def test_startup_page_reports_only_explicit_stage_completion_and_errors(tmp_path):

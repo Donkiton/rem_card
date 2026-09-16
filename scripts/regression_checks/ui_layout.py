@@ -495,7 +495,7 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         if marker not in display_storage_source:
             return False, f"display settings storage missing W1a marker: {marker}"
     for marker in (
-        'super().__init__("Отображение", parent)',
+        'super().__init__("Расположение кнопок", parent)',
         '"W1a - ближайшие назначения"',
         '"Показывать ближайшие назначения"',
         '"W1b - нижний сектор"',
@@ -525,8 +525,8 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
     ok, details = _check_w1c_source_markers(root, layout_cases)
     if not ok:
         return False, details
-    if 'QPushButton("Отображение")' not in admin_main_source:
-        return False, "admin program settings button must be renamed to Отображение"
+    if 'QPushButton("Расположение кнопок")' not in admin_main_source:
+        return False, "admin program settings button must be named Расположение кнопок"
 
     service_source = (root / "services" / "order_domain_service.py").read_text(encoding="utf-8")
     if "def get_upcoming_orders_across_active_admissions" not in service_source:

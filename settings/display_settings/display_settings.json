@@ -1,40 +1,46 @@
 {
-  "version": 3,
+  "version": 4,
   "active": {
     "doctor": {
       "sector8_buttons": {
         "order": [
-          "add_patient",
-          "refresh",
           "user_report",
           "user_reports",
+          "roles",
+          "emergency_mode",
+          "add_patient",
+          "refresh",
           "archive",
           "calculations",
           "settings",
           "back",
           "exit"
         ],
-        "visible": {
-          "archive": true,
-          "refresh": true,
-          "user_report": true,
-          "user_reports": false,
-          "add_patient": true,
-          "calculations": true,
-          "settings": true,
-          "back": true,
-          "exit": true
-        },
         "side": {
-          "archive": "right",
-          "refresh": "right",
-          "user_report": "left",
-          "user_reports": "left",
           "add_patient": "right",
-          "calculations": "right",
-          "settings": "right",
+          "archive": "right",
           "back": "right",
-          "exit": "right"
+          "calculations": "right",
+          "emergency_mode": "left",
+          "exit": "right",
+          "refresh": "right",
+          "roles": "left",
+          "settings": "right",
+          "user_report": "left",
+          "user_reports": "left"
+        },
+        "visible": {
+          "add_patient": true,
+          "archive": true,
+          "back": true,
+          "calculations": true,
+          "emergency_mode": true,
+          "exit": true,
+          "refresh": true,
+          "roles": true,
+          "settings": true,
+          "user_report": true,
+          "user_reports": false
         }
       },
       "remcard_tabs": {
@@ -69,9 +75,11 @@
     "nurse": {
       "sector8_buttons": {
         "order": [
-          "add_patient",
           "user_report",
           "user_reports",
+          "roles",
+          "emergency_mode",
+          "add_patient",
           "archive",
           "refresh",
           "calculations",
@@ -79,27 +87,31 @@
           "back",
           "exit"
         ],
-        "visible": {
-          "archive": false,
-          "refresh": true,
-          "user_report": true,
-          "user_reports": false,
-          "add_patient": true,
-          "calculations": false,
-          "settings": false,
-          "back": true,
-          "exit": true
-        },
         "side": {
-          "archive": "right",
-          "refresh": "right",
-          "user_report": "left",
-          "user_reports": "left",
           "add_patient": "right",
-          "calculations": "right",
-          "settings": "right",
+          "archive": "right",
           "back": "right",
-          "exit": "right"
+          "calculations": "right",
+          "emergency_mode": "left",
+          "exit": "right",
+          "refresh": "right",
+          "roles": "left",
+          "settings": "right",
+          "user_report": "left",
+          "user_reports": "left"
+        },
+        "visible": {
+          "add_patient": true,
+          "archive": false,
+          "back": true,
+          "calculations": false,
+          "emergency_mode": true,
+          "exit": true,
+          "refresh": true,
+          "roles": true,
+          "settings": false,
+          "user_report": true,
+          "user_reports": false
         }
       },
       "remcard_tabs": {
@@ -127,6 +139,40 @@
       },
       "w1b_lower_sector": {
         "enabled": false
+      }
+    },
+    "operblock": {
+      "sector8_buttons": {
+        "order": [
+          "user_reports",
+          "user_report",
+          "roles",
+          "archive",
+          "refresh",
+          "settings",
+          "back",
+          "exit"
+        ],
+        "side": {
+          "archive": "right",
+          "back": "right",
+          "exit": "right",
+          "refresh": "right",
+          "roles": "left",
+          "settings": "right",
+          "user_report": "left",
+          "user_reports": "left"
+        },
+        "visible": {
+          "archive": true,
+          "back": true,
+          "exit": true,
+          "refresh": true,
+          "roles": true,
+          "settings": false,
+          "user_report": true,
+          "user_reports": false
+        }
       }
     }
   }

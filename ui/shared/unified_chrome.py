@@ -6,13 +6,13 @@ from PySide6.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout, Q
 from rem_card.app.version import APP_VERSION
 
 
-def entry_action_icon(kind):
+def entry_action_icon(kind, color='#e5f4ff'):
     import math
     pixmap = QPixmap(28, 28)
     pixmap.fill(Qt.transparent)
     p = QPainter(pixmap)
     p.setRenderHint(QPainter.Antialiasing)
-    p.setPen(QPen(QColor('#e5f4ff'), 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setPen(QPen(QColor(color), 1.7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
     if kind == 'settings':
         shape = QPainterPath()
         for i in range(32):
@@ -39,19 +39,22 @@ class HeartMark(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.scale(self.width() / 100, self.height() / 100)
+        light = self.property('entry_theme') == 'light'
+        side = min(self.width(), self.height())
+        p.translate((self.width() - side) / 2, (self.height() - side) / 2)
+        p.scale(side / 100, side / 100)
         shape = QPainterPath(QPointF(50, 91))
         shape.cubicTo(40, 77, 4, 51, 4, 29)
         shape.cubicTo(4, 3, 37, 0, 50, 23)
         shape.cubicTo(63, 0, 96, 3, 96, 29)
         shape.cubicTo(96, 51, 60, 77, 50, 91)
         gradient = QLinearGradient(0, 5, 95, 92)
-        gradient.setColorAt(0, QColor('#b7eeff'))
-        gradient.setColorAt(1, QColor('#4db4f2'))
+        gradient.setColorAt(0, QColor('#db4358' if light else '#b7eeff'))
+        gradient.setColorAt(1, QColor('#c91e36' if light else '#4db4f2'))
         p.setPen(Qt.NoPen)
         p.setBrush(gradient)
         p.drawPath(shape)
-        p.setPen(QPen(QColor('#063352'), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setPen(QPen(QColor('#ffffff' if light else '#063352'), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         pulse = QPainterPath(QPointF(23, 51))
         for x, y in ((36, 51), (42, 40), (48, 65), (55, 31), (61, 53), (76, 53)):
             pulse.lineTo(x, y)
@@ -84,9 +87,10 @@ class _WindowButton(QAbstractButton):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        light = self.parentWidget().property('entry_theme') == 'light'
         if self.underMouse() or self.hasFocus():
-            p.fillRect(self.rect(), QColor('#b44157' if self.kind == 'close' else '#245b83'))
-        p.setPen(QPen(QColor('#e1f1ff'), 1.6))
+            p.fillRect(self.rect(), QColor('#b44157' if self.kind == 'close' else ('#d5e7f3' if light else '#245b83')))
+        p.setPen(QPen(QColor('#162b42' if light else '#e1f1ff'), 1.6))
         x, y = self.width()/2, self.height()/2
         if self.kind == 'close':
             p.drawLine(QPointF(x-6, y-6), QPointF(x+6, y+6))
@@ -115,13 +119,25 @@ class EntryTitleBar(QWidget):
             layout.addWidget(_WindowButton('max', owner, self))
         layout.addWidget(_WindowButton('close', owner, self))
 
+    def set_theme(self, mode):
+        self.setProperty('entry_theme', mode)
+        for label in self.findChildren(QLabel):
+            label.setStyleSheet(f"color:{'#101c46' if mode == 'light' else '#eff8ff'}; background:transparent; font:600 16px 'Segoe UI';")
+        for mark in self.findChildren(HeartMark):
+            mark.setProperty('entry_theme', mode)
+            mark.update()
+        for button in self.findChildren(_WindowButton):
+            button.update()
+        self.update()
+
     def paintEvent(self, event):
         p = QPainter(self)
+        light = self.property('entry_theme') == 'light'
         gradient = QLinearGradient(0, 0, self.width(), self.height())
-        gradient.setColorAt(0, QColor('#153d60'))
-        gradient.setColorAt(1, QColor('#092945'))
+        gradient.setColorAt(0, QColor('#f6f4f1' if light else '#153d60'))
+        gradient.setColorAt(1, QColor('#eeeae6' if light else '#092945'))
         p.fillRect(self.rect(), gradient)
-        p.setPen(QColor('#507a9a'))
+        p.setPen(QColor('#c9d3de' if light else '#507a9a'))
         p.drawLine(0, self.height()-1, self.width(), self.height()-1)
 
     def mousePressEvent(self, event):
@@ -142,6 +158,8 @@ class EntryChrome(QWidget):
         super().__init__(owner)
         self.owner = owner
         self.role_mode = False
+        self._mask_keys = {}
+        self._transition_active = False
         owner.setProperty('entry_dialog', dialog)
         owner.setWindowFlag(Qt.FramelessWindowHint, True)
         owner.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -169,13 +187,43 @@ class EntryChrome(QWidget):
         self._update_masks()
         self.update()
 
+    def set_theme(self, mode):
+        self.setProperty('entry_theme', mode)
+        self.title_bar.set_theme(mode)
+        self.update()
+
+    def set_transition_active(self, active):
+        self._transition_active = bool(active)
+        if active:
+            # The translucent backing already clips the rounded frame. Rebuilding
+            # the native window region during every resize forces extra paints.
+            self.owner.clearMask()
+            self._mask_keys.pop(self.owner, None)
+        else:
+            self._update_masks()
+
     def _update_masks(self):
         maximized = self.owner.isMaximized() or getattr(self.owner, '_is_custom_maximized', False)
         radius = 0 if maximized else (5 if self.role_mode else 13)
         for widget, rounding in ((self.owner, radius), (self.content, max(0, radius - (1 if self.role_mode else 3)))):
+            if widget is self.owner and self._transition_active:
+                continue
+            key = (widget.width(), widget.height(), rounding)
+            if self._mask_keys.get(widget) == key:
+                continue
             path = QPainterPath()
             path.addRoundedRect(QRectF(widget.rect()), rounding, rounding)
-            widget.setMask(QRegion(path.toFillPolygon().toPolygon()))
+            region = QRegion(path.toFillPolygon().toPolygon())
+            if widget is self.owner and rounding:
+                # A native region has binary edges. Leave the translucent
+                # painter's antialiased border intact instead of cutting its
+                # partially covered corner pixels off at integer coordinates.
+                base_region = region
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        region = region.united(base_region.translated(dx, dy))
+            widget.setMask(region)
+            self._mask_keys[widget] = key
 
     def eventFilter(self, obj, event):
         if obj in (self.owner, getattr(self, 'content', None)) and event.type() in (QEvent.Resize, QEvent.WindowStateChange, QEvent.Show):
@@ -188,8 +236,9 @@ class EntryChrome(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(self.palette().window() if self.role_mode else QColor('#0c2944'))
-        p.setPen(QPen(self.palette().mid().color() if self.role_mode else QColor('#81b4d6'), 1.2))
+        light = self.property('entry_theme') == 'light'
+        p.setBrush(self.palette().window() if self.role_mode else QColor('#f4f1ed' if light else '#0c2944'))
+        p.setPen(QPen(self.palette().mid().color() if self.role_mode else QColor('#a5b9cb' if light else '#81b4d6'), 1.2))
         radius = 4 if self.role_mode else 12
         p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), radius, radius)
 

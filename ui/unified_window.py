@@ -22,7 +22,7 @@ class UnifiedWindow(QMainWindow):
         QApplication.instance().setProperty("unified_entry", True)
         self.unified_controller = self
         self.setWindowTitle(APP_DISPLAY_TITLE)
-        self.setMinimumSize(1200, 780)
+        self.setMinimumSize(1200, 880)
         self.settings = QSettings("MyHospital", "RemCardUnified")
         self.stack = QStackedWidget()
         from rem_card.ui.shared.unified_chrome import EntryChrome
@@ -32,6 +32,10 @@ class UnifiedWindow(QMainWindow):
         self._transition = WindowTransition(self)
         self.loading = StartupPage()
         self.welcome = WelcomePage()
+        self.welcome.theme_changed.connect(self.entry_chrome.set_theme)
+        self.welcome.theme_changed.connect(self.loading.set_theme)
+        self.entry_chrome.set_theme(self.welcome.theme_switch.mode)
+        self.loading.set_theme(self.welcome.theme_switch.mode)
         self.stack.addWidget(self.loading)
         self.stack.addWidget(self.welcome)
         self.welcome.role_selected.connect(self.enter_role)
@@ -58,6 +62,9 @@ class UnifiedWindow(QMainWindow):
         self._exit_update_checked = False
         self._suppress_exit_update = False
         self._maintenance_mutating = False
+        from rem_card.app.local_administrator import is_local_administrator
+        self._local_administrator = is_local_administrator()
+        self._maintenance_warning = None
         self._owned_containers = []
         self._retired_widgets = []
         self._role_threads = []
@@ -577,6 +584,8 @@ class UnifiedWindow(QMainWindow):
             failures.extend(item for item in outcomes if item.get("state") == "failed")
         if failures:
             self._leave_notice = f"Не выполнено сохранений: {len(failures)}. Результаты записаны в журнал диагностики. Проверьте данные после входа."
+        if self._control_page is not None and self.role_window and self.role_window.isAncestorOf(self._control_page):
+            self._control_page = None
         if self.role_window:
             self.stack.removeWidget(self.role_window)
             self.role_window.deleteLater()
@@ -625,7 +634,7 @@ class UnifiedWindow(QMainWindow):
     def open_settings(self):
         if not self.root:
             self.change_database(first_run=True)
-        elif self._maintenance_state.get("state", "open") != "open" or self._compatibility_error:
+        elif (self._maintenance_state.get("state", "open") != "open" and not self._local_administrator) or self._compatibility_error:
             self.open_maintenance()
         else:
             self.enter_role("settings")
@@ -653,16 +662,19 @@ class UnifiedWindow(QMainWindow):
             self._last_generation = generation
         self._maintenance_state = state
         blocked = state.get("state") != "open"
+        admission_blocked = blocked and not (self._local_administrator and state.get("state") in {"draining", "maintenance"})
         if state.get("state") != "unknown" and self.store.control_dir.is_dir() and str(self.store.control_dir) not in self._watcher.directories():
             self._watcher.addPath(str(self.store.control_dir))
         if not self._leaving:
             message = self._compatibility_error or ("Идут технические работы. Попробуйте позже." if blocked else self._leave_notice)
-            entry_blocked = blocked or bool(self._compatibility_error)
+            if blocked and not admission_blocked:
+                message = "Идут технические работы. Для этого ПК разрешён доступ администратора."
+            entry_blocked = admission_blocked or bool(self._compatibility_error)
             if self._central_unavailable and state.get("state") not in {"draining", "maintenance"} and not self._compatibility_error:
                 message = "Общая база недоступна. Выберите роль для локального аварийного режима."
                 entry_blocked = False
             self.welcome.set_access_state(message, entry_blocked)
-        if blocked and self.container and not self._leaving:
+        if admission_blocked and self.container and not self._leaving:
             if state.get("state") == "unknown":
                 if not self._local_only:
                     self.request_role_exit(force=True)
@@ -672,15 +684,21 @@ class UnifiedWindow(QMainWindow):
                 self._maintenance_operation = operation
                 self._maintenance_deadline = time.monotonic() + 60
                 self._countdown.start()
+                self._show_maintenance_warning()
                 lifecycle_event("maintenance_received", session_id=self.session_id, role=self.role,
                                 operation_id=operation)
-        elif not blocked:
+        elif not admission_blocked:
             self._maintenance_deadline = None
+            self._maintenance_operation = ""
+            if self._maintenance_warning is not None:
+                self._maintenance_warning.reject()
             self._countdown.stop()
             if not self._local_only:
                 self.statusBar().hide()
         if self._control_page is not None:
-            text = "Доступ открыт" if not blocked else "Вход закрыт. Ожидание освобождения базы…"
+            text = ("Доступ открыт" if not blocked else
+                    "Техработы включены. Обычные рабочие места завершают работу в течение минуты. "
+                    "Вход разрешён только администраторам. Для исключительных операций закройте все роли, включая администраторские.")
             if self.exclusive and state.get("state") == "maintenance":
                 text = ("Сеансы единого входа завершены, доступ к базе удерживается для обслуживания. "
                         "Старые версии RemCard должны быть закрыты на всех ПК: они не поддерживают этот режим.")
@@ -688,11 +706,15 @@ class UnifiedWindow(QMainWindow):
                 text = "Состояние базы неизвестно. Обслуживание не подтверждено."
             self._maintenance_label.setText(text)
             self._maintenance_button.setText("Включить технические работы" if not blocked else "Завершить технические работы")
-            if blocked and state.get("state") != "unknown" and self.container is None and not self.exclusive and not self._exclusive_pending:
-                self._exclusive_pending = True
-                self._async(lambda: self.store.try_exclusive(expected_generation=state["generation"],
-                            operation_id=state["operation_id"], owner_token=state["owner_token"]), self._exclusive_ready,
-                            self._exclusive_failed)
+            self._maintenance_button.setEnabled(
+                self._local_administrator and state.get("state") != "unknown" and not self._maintenance_mutating)
+            self._control_page.admin_label.setText(
+                "Доступ администратора включён. Это рабочее место не будет отключено."
+                if self._local_administrator else "Доступ администратора не включён. Сначала предоставьте его этому ПК.")
+            self._control_page.admin_button.setEnabled(not blocked or not self._local_administrator)
+            self._control_page.admin_button.setText(
+                "Отключить доступ администратора на этом ПК" if self._local_administrator
+                else "Предоставить этому ПК доступ администратора")
 
     def _exclusive_failed(self, exc):
         self._exclusive_pending = False
@@ -717,30 +739,59 @@ class UnifiedWindow(QMainWindow):
             self._countdown.stop()
             self.request_role_exit(force=True)
 
-    def open_maintenance(self):
+    def _show_maintenance_warning(self):
+        if self._maintenance_warning is not None:
+            return
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        dialog = CustomMessageBox(
+            "Скоро начнутся технические работы",
+            "Через одну минуту программа вернётся к выбору ролей.\n\n"
+            "Сохраните изменения и завершите ввод. Несохранённый ввод будет потерян.\n"
+            "Кнопка «ОК» закрывает только это предупреждение; отсчёт продолжится.",
+            msg_type="warning", parent=self, action_buttons=[("ОК", QMessageBox.Ok)])
+        dialog.setMinimumWidth(520)
+        self._maintenance_warning = dialog
+        def dismissed(_result):
+            if self._maintenance_warning is dialog:
+                self._maintenance_warning = None
+            dialog.deleteLater()
+        dialog.finished.connect(dismissed)
+        dialog.open()
+        dialog.raise_()
+
+    def open_maintenance(self, center=None):
         if self._local_only or self._requires_fresh_runtime:
             QMessageBox.information(self, "Локальный режим", "Для обслуживания общей базы завершите локальную роль и повторно подключитесь через выбор ролей.")
             return
+        from rem_card.ui.admin_view.unified_maintenance_page import UnifiedMaintenancePage
         if self._control_page is None:
-            page = QWidget()
-            layout = QVBoxLayout(page)
-            self._maintenance_label = QLabel("Проверка состояния…")
-            self._maintenance_label.setWordWrap(True)
-            layout.addWidget(self._maintenance_label)
-            self._maintenance_button = QPushButton("Включить технические работы")
-            self._maintenance_button.clicked.connect(self._toggle_maintenance)
-            layout.addWidget(self._maintenance_button)
-            path_button = QPushButton("Путь к базе данных…")
-            path_button.clicked.connect(lambda: self.change_database())
-            layout.addWidget(path_button)
-            back = QPushButton("Назад")
-            back.clicked.connect(self._back_from_control)
-            layout.addWidget(back)
-            layout.addStretch()
-            self.stack.addWidget(page)
+            page = UnifiedMaintenancePage(self, center or self)
             self._control_page = page
-        self.stack.setCurrentWidget(self._control_page)
+            self._maintenance_label = page.status_label
+            self._maintenance_button = page.maintenance_button
+            if center is None:
+                page.btn_back.clicked.connect(self._back_from_control)
+                self.stack.addWidget(page)
+        if center is not None:
+            self.stack.removeWidget(self._control_page)
+            center._show_maintenance_page(self._control_page)
+        else:
+            self.stack.setCurrentWidget(self._control_page)
+        self._access_received(self._maintenance_state or {"state": "unknown"})
         self.refresh_access()
+
+    def _toggle_local_administrator(self):
+        if self._maintenance_mutating or (self._local_administrator and self._maintenance_state.get("state") != "open"):
+            return
+        from rem_card.app.local_administrator import set_local_administrator
+        try:
+            set_local_administrator(not self._local_administrator)
+        except OSError as exc:
+            self._maintenance_label.setText("Не удалось сохранить локальный доступ: " + str(exc))
+            return
+        self._local_administrator = not self._local_administrator
+        lifecycle_event("local_administrator_changed", enabled=self._local_administrator)
+        self._access_received(self._maintenance_state)
 
     def _back_from_control(self):
         if self.role_window and not self._leaving:
@@ -749,7 +800,7 @@ class UnifiedWindow(QMainWindow):
             self.show_roles()
 
     def _toggle_maintenance(self):
-        if self._local_only or self._requires_fresh_runtime:
+        if self._local_only or self._requires_fresh_runtime or not self._local_administrator:
             return
         if self._exclusive_pending or self._maintenance_mutating:
             return
@@ -758,8 +809,17 @@ class UnifiedWindow(QMainWindow):
         if state.get("state") == "open":
             self._async(lambda: self.store.begin(expected_generation=state.get("generation")), self._maintenance_started, self._maintenance_change_failed)
         else:
-            self._async(lambda: self.store.finish(expected_generation=state.get("generation"),
-                        operation_id=state.get("operation_id"), owner_token=state.get("owner_token")), self._maintenance_finished, self._maintenance_change_failed)
+            def finish():
+                current = state
+                if current.get("state") == "maintenance":
+                    lease = self.store.try_exclusive(expected_generation=current.get("generation"),
+                        operation_id=current.get("operation_id"), owner_token=current.get("owner_token"))
+                    if lease is None:
+                        raise RuntimeError("База удерживается другим сеансом обслуживания. Дождитесь его завершения.")
+                    current = self.store.read()
+                return self.store.finish(expected_generation=current.get("generation"),
+                    operation_id=current.get("operation_id"), owner_token=current.get("owner_token"))
+            self._async(finish, self._maintenance_finished, self._maintenance_change_failed)
 
     def _maintenance_change_failed(self, exc):
         self._maintenance_mutating = False
@@ -773,12 +833,7 @@ class UnifiedWindow(QMainWindow):
 
     def _maintenance_started(self, state):
         self._maintenance_mutating = False
-        self._return_to_control = True
         self._access_received(state)
-        if self.container and self.role == "settings":
-            self.request_role_exit(force=True)
-        elif self.role_window:
-            self.stack.setCurrentWidget(self.role_window)
 
     def change_database(self, first_run=False):
         if self._local_only or self._requires_fresh_runtime:
@@ -851,7 +906,13 @@ class UnifiedWindow(QMainWindow):
 
     def about(self):
         from rem_card.ui.shared.unified_settings_dialogs import EntryInformationDialog
-        dialog = EntryInformationDialog("О программе", f"RemCard {APP_VERSION}\nРеанимационная карта\n\nЕдиное приложение для специалистов отделения.", self)
+        dialog = EntryInformationDialog(
+            "О программе",
+            f"РЕМКАРТА\nРеанимационная карта\nВерсия {APP_VERSION}\n\n"
+            "Единое приложение для врачей, медсестёр и специалистов оперблока.\n\n"
+            "Ведение пациентов, назначения, мониторинг и операционные карты.",
+            self, theme=self.welcome.theme_switch.mode,
+        )
         try:
             dialog.exec()
         finally:

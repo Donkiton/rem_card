@@ -9,7 +9,9 @@ from rem_card.ui.unified_window import UnifiedWindow
 
 
 @pytest.fixture
-def shell(tmp_path):
+def shell(tmp_path, monkeypatch):
+    from rem_card.app import local_administrator
+    monkeypatch.setattr(local_administrator, "is_local_administrator", lambda: False)
     app = QApplication.instance() or QApplication([])
     old_unified = app.property('unified_entry')
     window = UnifiedWindow()
@@ -54,13 +56,51 @@ def test_role_preparation_stays_on_chooser_and_error_restores_controls(shell, mo
     shell.enter_role('doctor')
     assert shell.stack.currentWidget() is shell.welcome
     assert shell.welcome.role_buttons['doctor'].property('preparing')
-    assert not shell.welcome.settings_button.isEnabled()
+    assert not shell.welcome.theme_switch.isEnabled()
     assert not any(button.isEnabled() for button in shell.welcome.role_buttons.values())
     shell.enter_role('nurse')
     assert shell.role == 'doctor' and len(calls) == 1
     shell._error(RuntimeError('Нет доступа'))
     assert not shell.welcome.role_buttons['doctor'].property('preparing')
-    assert shell.welcome.settings_button.isEnabled()
+    assert shell.welcome.theme_switch.isEnabled() == shell.welcome.theme_switch.runtime_enabled
+
+
+def test_entry_theme_updates_chrome_loading_and_survives_resize(shell):
+    for mode in ('light', 'dark', 'light'):
+        shell.welcome.set_theme(mode)
+        assert shell.entry_chrome.property('entry_theme') == mode
+        assert shell.entry_chrome.title_bar.property('entry_theme') == mode
+        assert shell.loading._theme_mode == mode
+        shell.loading.set_stage(1)
+        assert all(row._theme_mode == mode for row in shell.loading.stage_rows)
+        shell.welcome.resize(1194, 744)
+        QApplication.processEvents()
+        assert shell.welcome._theme_mode == mode
+
+
+@pytest.mark.parametrize('mode', ['light', 'dark'])
+def test_about_button_opens_dialog_in_current_theme_and_accepts_click(shell, mode):
+    from PySide6.QtCore import QTimer, Qt
+    from PySide6.QtWidgets import QDialogButtonBox
+    from PySide6.QtTest import QTest
+    from rem_card.ui.shared.unified_settings_dialogs import EntryInformationDialog
+    shell.welcome.theme_switch._on_theme_changed(mode)
+    observed = []
+
+    def accept_dialog():
+        dialog = QApplication.activeModalWidget()
+        if isinstance(dialog, EntryInformationDialog):
+            observed.append((dialog.chrome.property('entry_theme'), dialog.styleSheet()))
+            box = dialog.findChild(QDialogButtonBox)
+            QTest.mouseClick(box.button(QDialogButtonBox.Ok), Qt.LeftButton)
+        elif dialog is not None:
+            dialog.reject()
+
+    QTimer.singleShot(0, accept_dialog)
+    shell.welcome.about_button.click()
+    assert len(observed) == 1
+    assert observed[0][0] == mode
+    assert ('#fffdf9' in observed[0][1]) == (mode == 'light')
 
 
 def test_confirmed_application_exit_does_not_ask_to_return_to_roles(shell, monkeypatch):
@@ -172,7 +212,7 @@ def test_transition_passes_intermediate_rectangles_and_returns_to_saved_size(she
     original = QRect(shell.geometry())
     shell._save_geometry('animation_origin')
     screen = shell.screen().availableGeometry()
-    target = QRect(screen.left(), screen.top(), min(1250, screen.width()), min(800, screen.height()))
+    target = QRect(screen.left(), screen.top(), min(1250, screen.width()), min(max(800, shell.minimumHeight()), screen.height()))
     shell.settings.setValue('animation_destination/normal_rect', target)
     shell.settings.setValue('animation_destination/maximized', False)
     observed = []
@@ -247,6 +287,66 @@ def test_role_page_keeps_ownership_but_does_not_resize_until_reveal(shell):
     assert shell.stack.indexOf(role_page) >= 0
 
 
+def test_transition_does_not_reapply_unchanged_native_masks(shell, monkeypatch):
+    shell.showNormal()
+    QApplication.processEvents()
+    shell.entry_chrome._update_masks()
+    calls = []
+    monkeypatch.setattr(shell, 'setMask', lambda mask: calls.append(mask))
+    shell.entry_chrome._update_masks()
+    shell.entry_chrome._update_masks()
+    assert not calls
+
+
+def test_transition_holds_entry_typography_and_restores_native_mask_on_cancel(shell):
+    from PySide6.QtCore import QRect
+    shell.showNormal()
+    shell.resize(1200, 780)
+    QApplication.processEvents()
+    original_font = shell.welcome.heading.font()
+    target = QRect(shell.geometry())
+    target.setWidth(1800)
+    shell._transition.start(target, lambda: None, lambda: None)
+    shell._transition.animation.pause()
+    shell._transition.animation.setCurrentTime(shell._transition.animation.duration() // 2)
+    QApplication.processEvents()
+    assert shell.width() > 1300
+    assert shell.welcome.heading.font() == original_font
+    assert shell.mask().isEmpty()
+    assert not shell.entry_chrome.content.mask().isEmpty()
+    shell._transition.cancel()
+    assert not shell.mask().isEmpty()
+    assert not shell.welcome._window_transition_active
+    assert not shell.entry_chrome._transition_active
+
+
+def test_failed_transition_preparation_restores_masks(shell):
+    from PySide6.QtCore import QRect
+    def fail():
+        raise RuntimeError('preparation failed')
+    with pytest.raises(RuntimeError, match='preparation failed'):
+        shell._transition.start(QRect(shell.geometry()), fail, lambda: None,
+                                prepare_before_resize=True)
+    assert shell.updatesEnabled()
+    assert not shell.entry_chrome._transition_active
+    assert not shell._transition.running
+
+
+def test_entry_status_does_not_move_quote(shell):
+    shell.stack.setCurrentWidget(shell.welcome)
+    shell.showNormal()
+    QApplication.processEvents()
+    page = shell.welcome
+    original = page.quote_label.geometry()
+    for message in ('Подготовка рабочего места…',
+                    'Завершение сохранения и освобождение базы…', ''):
+        page.set_access_state(message)
+        QApplication.processEvents()
+        assert page.quote_label.geometry() == original
+        assert page.access_label.y() > page.quote_author.geometry().bottom()
+
+
+
 def test_transition_keeps_live_text_at_native_resolution(shell, monkeypatch):
     from PySide6.QtCore import QRect
     from PySide6.QtWidgets import QWidget, QLabel
@@ -266,7 +366,7 @@ def test_transition_keeps_live_text_at_native_resolution(shell, monkeypatch):
     target.setHeight(target.height() + 100)
     shell._transition.start(target, lambda: None, lambda: None)
     shell._transition.animation.pause()
-    shell._transition.animation.setCurrentTime(80)
+    shell._transition.animation.setCurrentTime(shell._transition.animation.duration() // 2)
     QApplication.processEvents()
     assert label.isVisible() and shell.entry_chrome.content.isVisible()
     assert label.grab().toImage() == original
@@ -388,6 +488,7 @@ def test_countdown_forces_exit_without_restore(shell, monkeypatch):
 
 
 def test_double_click_submits_only_one_maintenance_mutation(shell, monkeypatch):
+    shell._local_administrator = True
     calls = []
     monkeypatch.setattr(shell, '_async', lambda *args: calls.append(args))
     shell._maintenance_state = state('open', 0)
@@ -484,3 +585,80 @@ def test_runtime_outage_suppresses_exit_update_check(shell, tmp_path, monkeypatc
     assert async_calls == []
     assert event.accepted
     assert not event.ignored
+
+
+@pytest.mark.parametrize('role', ['doctor', 'nurse', 'operblock_emergency', 'operblock_planned'])
+def test_maintenance_acknowledgment_keeps_countdown_and_about_button(shell, monkeypatch, role):
+    from PySide6.QtWidgets import QPushButton
+    shell.role = role
+    shell.container = object()
+    calls = []
+    monkeypatch.setattr(shell, 'request_role_exit', lambda force=False: calls.append(force))
+    shell._access_received(state('draining', 1, 'work'))
+    deadline = shell._maintenance_deadline
+    dialog = shell._maintenance_warning
+    assert dialog is not None
+    button = next(b for b in dialog.findChildren(QPushButton) if b.text() == 'ОК')
+    button.click()
+    assert shell._maintenance_warning is None
+    assert shell._maintenance_deadline == deadline and not calls
+    assert shell.welcome.about_button.text() == ''
+    assert shell.welcome.about_button.accessibleName() == 'О программе'
+    shell._access_received(state('draining', 1, 'work'))
+    assert shell._maintenance_warning is None
+    shell._maintenance_deadline = time.monotonic() - 1
+    shell._tick_maintenance()
+    assert calls == [True]
+
+
+def test_local_administrator_is_not_evicted_but_unknown_access_still_closes(shell, monkeypatch):
+    shell._local_administrator = True
+    shell.container = object()
+    shell._access_received(state('draining', 1, 'work'))
+    assert shell._maintenance_warning is None
+    assert shell._maintenance_deadline is None
+    assert all(b.isEnabled() for b in shell.welcome.role_buttons.values())
+    calls = []
+    monkeypatch.setattr(shell, 'request_role_exit', lambda force=False: calls.append(force))
+    shell._access_received(state('unknown', 2))
+    assert calls == [True]
+
+
+def test_maintenance_is_embedded_in_control_center(shell, monkeypatch):
+    from PySide6.QtWidgets import QWidget, QStackedWidget, QVBoxLayout
+    from rem_card.ui.admin_view.admin_main_widget import AdminMainWidget
+    class Center(QWidget):
+        _show_maintenance_page = AdminMainWidget._show_maintenance_page
+        go_back = AdminMainWidget.go_back
+        def __init__(self):
+            super().__init__()
+            self.stack = QStackedWidget(self)
+            QVBoxLayout(self).addWidget(self.stack)
+            self.menu_widget = QWidget()
+            self.stack.addWidget(self.menu_widget)
+            self.settings_content_stack = QStackedWidget(self.menu_widget)
+            QVBoxLayout(self.menu_widget).addWidget(self.settings_content_stack)
+            category = QWidget()
+            self.settings_content_stack.addWidget(category)
+            self.settings_categories = [dict(key='maintenance', page=category)]
+        def _prepare_settings_surface(self, page):
+            pass
+        def _select_settings_category(self, index):
+            self.settings_content_stack.setCurrentWidget(self.settings_categories[index]['page'])
+    center = Center()
+    shell.stack.addWidget(center)
+    shell.stack.setCurrentWidget(center)
+    monkeypatch.setattr(shell, 'refresh_access', lambda: None)
+    shell._maintenance_state = state('open', 0)
+    shell.open_maintenance(center)
+    assert shell.stack.currentWidget() is center
+    assert center.stack.currentWidget() is center.menu_widget
+    assert center.settings_content_stack.currentWidget() is shell._control_page
+    assert not shell._control_page.isWindow()
+    assert shell._control_page.property('settingsEmbedded')
+    assert not shell._maintenance_button.isEnabled()
+    assert center.go_back()
+    assert center.settings_content_stack.currentWidget() is center.settings_categories[0]['page']
+    shell.open_maintenance(center)
+    shell._control_page.btn_back.click()
+    assert center.settings_content_stack.currentWidget() is center.settings_categories[0]['page']

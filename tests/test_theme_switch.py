@@ -119,6 +119,37 @@ def test_switch_is_keyboard_focusable_and_space_toggles(monkeypatch):
     assert switch.isChecked()
 
 
+def test_visible_switch_reverses_animation_without_jump(monkeypatch):
+    _app()
+    monkeypatch.setenv("REMCARD_FULL_RUNTIME_THEME", "1")
+    manager = FakeThemeManager()
+    switch = ThemeSwitch(manager=manager)
+    switch.show()
+    _app().processEvents()
+    monkeypatch.setattr(switch.style(), "styleHint", lambda *args: 1)
+    switch.click()
+    switch._animation.setCurrentTime(160)
+    midway = switch._position
+    assert 0 < midway < 1
+    switch.click()
+    assert switch._position == midway
+    switch._animation.setCurrentTime(switch._animation.duration())
+    assert switch._position == 0
+    assert switch.mode == "light"
+    assert manager.calls == [("dark", True), ("light", True)]
+
+
+def test_hidden_switch_tracks_external_mode_without_animation(monkeypatch):
+    _app()
+    monkeypatch.setenv("REMCARD_FULL_RUNTIME_THEME", "1")
+    manager = FakeThemeManager("dark")
+    switch = ThemeSwitch(manager=manager)
+    assert switch._position == 1
+    switch.hide()
+    manager.set_mode("light", save=False)
+    assert switch._position == 0
+
+
 @pytest.mark.parametrize(
     ("panel_module", "panel_class", "role"),
     [

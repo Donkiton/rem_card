@@ -12,11 +12,13 @@ import re
 import weakref
 
 from PySide6.QtGui import QColor
+from PySide6.QtCore import QObject, QEvent
 from shiboken6 import isValid
 
 
 _styles = weakref.WeakKeyDictionary()
 _callbacks = weakref.WeakKeyDictionary()
+_pending_styles = weakref.WeakSet()
 _mode = "light"
 _installed_app = None
 _refreshing = False
@@ -145,6 +147,7 @@ def render_style(source: str, mode: str) -> str:
 def set_widget_style(widget, source: str):
     """Единственное назначение локального QSS, с точным обратным переходом."""
     source = str(source)
+    _pending_styles.discard(widget)
     if _COLOR.search(source):
         _styles[widget] = source
     else:
@@ -167,12 +170,29 @@ def register_theme_callback(widget, method):
         methods.append(ref)
 
 
+class _PendingThemeFilter(QObject):
+    def eventFilter(self, widget, event):
+        if event.type() == QEvent.Show and widget in _pending_styles:
+            # Apply before the first paint of a previously hidden page. Always
+            # use the latest mode/source, including repeated toggles while hidden.
+            _pending_styles.discard(widget)
+            source = _styles.get(widget)
+            if source is not None:
+                result = render_style(source, _mode)
+                if widget.styleSheet() != result:
+                    widget.setStyleSheet(result)
+        return False
+
+
 def install_theme_runtime(app):
     global _installed_app
     _installed_app = weakref.ref(app)
+    if not hasattr(app, '_remcard_pending_theme_filter'):
+        app._remcard_pending_theme_filter = _PendingThemeFilter(app)
+        app.installEventFilter(app._remcard_pending_theme_filter)
 
 
-def refresh_registered_styles(mode=None, *, force=False, tokens=None):
+def refresh_registered_styles(mode=None, *, force=False, tokens=None, defer_hidden=False):
     global _mode, _refreshing, _active_tokens
     from rem_card.ui.styles.theme_manager import get_theme_manager
     mode = get_theme_manager().mode if mode is None else mode
@@ -186,6 +206,10 @@ def refresh_registered_styles(mode=None, *, force=False, tokens=None):
     try:
         for widget, source in list(_styles.items()):
             if isValid(widget):
+                if defer_hidden and not widget.isVisible():
+                    _pending_styles.add(widget)
+                    continue
+                _pending_styles.discard(widget)
                 result = render_style(source, mode)
                 if widget.styleSheet() != result:
                     widget.setStyleSheet(result)

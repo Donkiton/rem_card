@@ -20,6 +20,21 @@ from rem_card.ui.shared.display_settings_storage import (  # noqa: E402
 
 
 class DisplaySettingsSector8SidesTest(unittest.TestCase):
+    def test_factory_layout_is_available_without_database_or_files(self):
+        from unittest.mock import patch
+        expected = {
+            "doctor": (["user_report", "roles", "emergency_mode"],
+                       ["add_patient", "refresh", "archive", "calculations", "settings", "back", "exit"]),
+            "nurse": (["user_report", "roles", "emergency_mode"],
+                      ["add_patient", "refresh", "back", "exit"]),
+            "operblock": (["user_report", "roles"], ["archive", "refresh", "back", "exit"]),
+        }
+        with patch("builtins.open", side_effect=AssertionError("Factory defaults must not read files")):
+            for role, (left, right) in expected.items():
+                section = default_role_display_settings(role)["sector8_buttons"]
+                self.assertEqual(ordered_visible_ids_by_side(section, "left"), left)
+                self.assertEqual(ordered_visible_ids_by_side(section, "right"), right)
+
     def test_default_report_buttons_are_on_left_side(self):
         settings = default_role_display_settings("doctor")
         section = settings["sector8_buttons"]
@@ -49,7 +64,7 @@ class DisplaySettingsSector8SidesTest(unittest.TestCase):
         self.assertEqual(section["side"]["user_reports"], SECTOR8_BUTTON_SIDE_LEFT)
         left_ids = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_LEFT)
         self.assertIn("emergency_mode", left_ids)
-        self.assertEqual([item for item in left_ids if item != "emergency_mode"], ["user_report"])
+        self.assertEqual([item for item in left_ids if item not in {"emergency_mode", "roles"}], ["user_report"])
         right_ids = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_RIGHT)
         self.assertIn("add_patient", right_ids)
         self.assertIn("calculations", right_ids)

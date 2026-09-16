@@ -379,7 +379,7 @@ def test_apply_uses_palette_and_emits_once_per_actual_mode(monkeypatch, tmp_path
     assert emitted == ["dark"]
     install.assert_called_once_with(app)
     apply_style.assert_called_once_with(app, "dark")
-    refresh.assert_called_once_with(mode="dark", force=True, tokens=ANY)
+    refresh.assert_called_once_with(mode="dark", force=True, tokens=ANY, defer_hidden=True)
 
     manager.set_mode("light", save=False)
     assert emitted == ["dark", "light"]
@@ -434,4 +434,57 @@ def test_same_mode_role_profile_change_reapplies_effective_tokens(monkeypatch, t
 
     assert emitted == ["dark", "dark", "dark"]
     assert refresh.call_count == 3
-    refresh.assert_called_with(mode="dark", force=True, tokens=ANY)
+    refresh.assert_called_with(mode="dark", force=True, tokens=ANY, defer_hidden=True)
+
+
+@pytest.mark.parametrize("modes", [("dark",), ("dark", "light"), ("dark", "light", "dark")])
+def test_hidden_page_receives_latest_theme_before_first_paint(modes):
+    from PySide6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
+    from shiboken6 import delete
+    app = QApplication.instance() or QApplication([])
+    theme_runtime.install_theme_runtime(app)
+    theme_runtime.refresh_registered_styles("light", force=True)
+    page = QWidget()
+    layout = QVBoxLayout(page)
+    painted = []
+    class Probe(QLabel):
+        def paintEvent(self, event):
+            painted.append(self.styleSheet())
+            super().paintEvent(event)
+    label = Probe("Текст", page)
+    layout.addWidget(label)
+    source = "color: #111111; background: #ffffff;"
+    theme_runtime.set_widget_style(label, source)
+    try:
+        for mode in modes:
+            theme_runtime.refresh_registered_styles(mode, force=True, defer_hidden=True)
+        assert label.styleSheet() == source
+        expected = theme_runtime.render_style(source, modes[-1])
+        page.show()
+        app.processEvents()
+        assert painted and all(style == expected for style in painted)
+    finally:
+        delete(page)
+        theme_runtime.refresh_registered_styles("light", force=True)
+
+
+def test_pending_theme_uses_changed_source_and_handles_deleted_widget():
+    from PySide6.QtWidgets import QApplication, QLabel
+    from shiboken6 import delete
+    app = QApplication.instance() or QApplication([])
+    theme_runtime.install_theme_runtime(app)
+    theme_runtime.refresh_registered_styles("light", force=True)
+    label, removed = QLabel("Текст"), QLabel()
+    for widget in (label, removed):
+        theme_runtime.set_widget_style(widget, "color: #111111;")
+    try:
+        theme_runtime.refresh_registered_styles("dark", force=True, defer_hidden=True)
+        delete(removed)
+        source = "color: #333333; background: #eeeeee;"
+        theme_runtime.set_widget_style(label, source)
+        label.show()
+        app.processEvents()
+        assert label.styleSheet() == theme_runtime.render_style(source, "dark")
+    finally:
+        delete(label)
+        theme_runtime.refresh_registered_styles("light", force=True)

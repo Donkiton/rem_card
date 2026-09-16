@@ -28,12 +28,26 @@ _STYLE = """
     QListView QLineEdit, QTreeView QLineEdit { padding:0px 3px; border-radius:3px; margin:0; }
 """
 
+_LIGHT_STYLE = _STYLE
+for _dark, _light in {
+    '#dfedfa': '#142647', '#123753': '#fffdf9', '#081d34': '#edf4fa',
+    '#0a233b': '#ffffff', '#eef8ff': '#142647', '#426780': '#a5bacb',
+    '#226d9c': '#c5e2f8', '#75d0ff': '#2387ce',
+    'rgba(38,102,145,150)': '#e5f0fa', '#e5f4ff': '#142647',
+    '#5c98bc': '#8baac3', '#226e9e': '#d2e7f8', '#7edaff': '#2387ce',
+    '#9ce5ff': '#087cce', '#236c9f': '#c5e2f8', '#e8f6ff': '#142647',
+    '#204963': '#e5f0fa', '#12334d': '#e7eef5', '#eaf4ff': '#142647',
+    '#102e49': '#f7fafc', '#7892a8': '#718096', 'color:white': 'color:#142647',
+}.items():
+    _LIGHT_STYLE = _LIGHT_STYLE.replace(_dark, _light)
+
 
 class _EntryDialog(QDialog):
-    def __init__(self, title, parent=None):
+    def __init__(self, title, parent=None, *, theme='dark'):
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setStyleSheet(_STYLE)
+        self._theme = theme
+        self.setStyleSheet(_LIGHT_STYLE if theme == 'light' else _STYLE)
         self.setMinimumWidth(670)
         self.body = QWidget()
         self.body.setObjectName('EntryDialogBody')
@@ -41,6 +55,7 @@ class _EntryDialog(QDialog):
         self.content_layout.setContentsMargins(34, 28, 34, 30)
         self.content_layout.setSpacing(20)
         self.chrome = EntryChrome(self, self.body, title=title, dialog=True)
+        self.chrome.set_theme(theme)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.chrome)
@@ -64,19 +79,22 @@ class _EntryDialog(QDialog):
 
 class DatabasePathDialog(_EntryDialog):
     def __init__(self, current='', parent=None):
-        super().__init__('РЕМКАРТА  ·  Подключение базы', parent)
+        switch = getattr(getattr(parent, 'welcome', None), 'theme_switch', None)
+        theme = getattr(switch, 'mode', 'light')
+        super().__init__('РЕМКАРТА  ·  Подключение базы', parent, theme=theme)
         self.resize(730, 410)
         brand = QHBoxLayout()
         mark = HeartMark()
+        mark.setProperty('entry_theme', theme)
         mark.setFixedSize(66, 66)
         brand.addWidget(mark)
         heading = QLabel('Где будут храниться данные?')
-        heading.setStyleSheet("font:600 25px 'Segoe UI'; color:#f3f9ff;")
+        heading.setStyleSheet(f"font:600 25px 'Segoe UI'; color:{'#142647' if theme == 'light' else '#f3f9ff'};")
         brand.addWidget(heading, 1)
         self.content_layout.addLayout(brand)
         label = QLabel('Выберите общую папку RemCard или пустую папку для новой базы.\nВ пустой папке программа создаст базу автоматически.')
         label.setWordWrap(True)
-        label.setStyleSheet('color:#b6d4ea;')
+        label.setStyleSheet(f"color:{'#345372' if theme == 'light' else '#b6d4ea'};")
         self.content_layout.addWidget(label)
         self.path_edit = QLineEdit(current)
         self.path_edit.setPlaceholderText('Путь к папке базы данных')
@@ -89,7 +107,7 @@ class DatabasePathDialog(_EntryDialog):
         self.content_layout.addLayout(row)
         self.error = QLabel('Путь можно изменить позже в Центре управления.')
         self.error.setWordWrap(True)
-        self.error.setStyleSheet("color:#91b4cf; font:14px 'Segoe UI';")
+        self.error.setStyleSheet(f"color:{'#526a80' if theme == 'light' else '#91b4cf'}; font:14px 'Segoe UI';")
         self.content_layout.addWidget(self.error)
         self.buttons = self._buttons('Подключить')
 
@@ -108,7 +126,7 @@ class DatabasePathDialog(_EntryDialog):
         dialog.setOption(QFileDialog.DontUseNativeDialog, True)
         dialog.setFileMode(QFileDialog.Directory)
         dialog.setOption(QFileDialog.ShowDirsOnly, True)
-        dialog.setStyleSheet(_STYLE)
+        dialog.setStyleSheet(self.styleSheet())
         dialog.setLabelText(QFileDialog.Accept, 'Выбрать папку')
         dialog.setLabelText(QFileDialog.Reject, 'Отмена')
         dialog.setLabelText(QFileDialog.LookIn, 'Папка:')
@@ -117,7 +135,7 @@ class DatabasePathDialog(_EntryDialog):
         if sys.platform == 'win32':
             try:
                 import ctypes
-                enabled = ctypes.c_int(1)
+                enabled = ctypes.c_int(self._theme == 'dark')
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(int(dialog.winId()), 20, ctypes.byref(enabled), ctypes.sizeof(enabled))
             except (AttributeError, OSError):
                 pass
@@ -127,13 +145,34 @@ class DatabasePathDialog(_EntryDialog):
 
 
 class EntryInformationDialog(_EntryDialog):
-    def __init__(self, title, message, parent=None):
-        super().__init__(title, parent)
+    def __init__(self, title, message, parent=None, *, theme='light'):
+        super().__init__(title, parent, theme=theme)
+        self.chrome.set_theme(theme)
+        if theme == 'light':
+            self.setStyleSheet("""
+                QWidget { color:#142647; font:16px 'Segoe UI'; }
+                QWidget#EntryDialogBody { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #fffdf9,stop:1 #edf4fa); }
+                QLabel { background:transparent; }
+                QPushButton { background:#f3f4f6; color:#142647; border:1px solid #b8c4cf;
+                              border-radius:8px; padding:10px 19px; }
+                QPushButton:default { background:#f3f4f6; color:#142647; }
+                QPushButton:hover { background:#e7edf2; border-color:#748ca4; }
+                QPushButton:focus { border:1px solid #748ca4; }
+                QPushButton:pressed { background:#d6e0e8; border-color:#748ca4; }
+            """)
         label = QLabel(message)
         label.setWordWrap(True)
         self.content_layout.addWidget(label)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok)
         buttons.button(QDialogButtonBox.Ok).setText('Понятно')
+        if theme == 'light':
+            buttons.button(QDialogButtonBox.Ok).setStyleSheet("""
+                QPushButton, QPushButton:default { background:#f3f4f6; color:#142647;
+                    border:1px solid #b8c4cf; border-radius:8px; padding:10px 19px; }
+                QPushButton:hover { background:#e7edf2; border-color:#748ca4; }
+                QPushButton:focus { border-color:#748ca4; }
+                QPushButton:pressed { background:#d6e0e8; }
+            """)
         buttons.accepted.connect(self.accept)
         self.content_layout.addWidget(buttons)
 

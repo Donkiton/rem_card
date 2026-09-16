@@ -110,7 +110,7 @@ class AdminMainWidget(QWidget):
         self.btn_doctor_list = QPushButton("Список врачей")
         self.btn_print = QPushButton("Печать / Отчеты")
         self.btn_style = QPushButton("Цветовая схема")
-        self.btn_display_settings = QPushButton("Отображение")
+        self.btn_display_settings = QPushButton("Расположение кнопок")
         self.btn_background_settings = QPushButton("Изменение фона")
         self.btn_remcard_icon_settings = QPushButton("Настройка иконок рем карты")
         self.btn_operblock_icon_settings = QPushButton("Настройка иконок оперблока")
@@ -244,7 +244,7 @@ class AdminMainWidget(QWidget):
             )
 
         interface_actions = [
-            (self.btn_display_settings, "Отображение", "Вид рабочих экранов для врача, медсестры и оперблока.", "вид интерфейс роль"),
+            (self.btn_display_settings, "Расположение кнопок", "Вид рабочих экранов для врача, медсестры и оперблока.", "вид интерфейс роль"),
             (self.btn_background_settings, "Фон приложения", "Фон, прозрачность и оформление рабочей области.", "обои изображение прозрачность"),
             (self.btn_remcard_icon_settings, "Иконки RemCard", "Набор иконок основной карты пациента.", "значки рем карта"),
         ]
@@ -800,7 +800,7 @@ class AdminMainWidget(QWidget):
             )
             prepare_embedded_settings_page(
                 self.display_settings_dialog,
-                title="Отображение интерфейса",
+                title="Расположение кнопок",
                 description="Управляйте видимостью и порядком рабочих разделов отдельно для каждой роли.",
                 hide_window_actions=("Отмена",),
             )
@@ -976,7 +976,24 @@ class AdminMainWidget(QWidget):
     def _unified_action(self, action):
         controller = getattr(self.window(), "unified_controller", None)
         if controller is not None:
-            getattr(controller, action)()
+            if action == "open_maintenance":
+                controller.open_maintenance(self)
+            else:
+                getattr(controller, action)()
+
+    def _show_maintenance_page(self, page):
+        index = next(i for i, category in enumerate(self.settings_categories)
+                     if category['key'] == 'maintenance')
+        if self.settings_content_stack.indexOf(page) < 0:
+            self.settings_content_stack.addWidget(page)
+            page.btn_back.setText('← Обслуживание')
+            page.btn_back.setFixedWidth(160)
+            page.btn_back.clicked.connect(lambda: self._select_settings_category(index))
+        self._maintenance_subpage = page
+        self._prepare_settings_surface(page)
+        self._select_settings_category(index)
+        self.settings_content_stack.setCurrentWidget(page)
+        self.stack.setCurrentWidget(self.menu_widget)
 
     def _ensure_db_rotation_page(self):
         if self.db_rotation_dialog is None:
@@ -1606,6 +1623,11 @@ class AdminMainWidget(QWidget):
 
     def go_back(self) -> bool:
         """Возвращает на предыдущий экран настроек, если он есть."""
+        if self.settings_content_stack.currentWidget() is getattr(self, '_maintenance_subpage', None):
+            index = next(i for i, category in enumerate(self.settings_categories)
+                         if category['key'] == 'maintenance')
+            self._select_settings_category(index)
+            return True
         if self.stack.currentWidget() is self.menu_widget:
             return False
         self.show_menu()

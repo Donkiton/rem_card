@@ -182,3 +182,43 @@ def test_missing_or_stale_session_metadata_is_never_safety_evidence(tmp_path: Pa
     lease.release()
     assert store.try_exclusive() is not None
     store.finish()
+
+
+@pytest.mark.parametrize('role', ['doctor', 'nurse', 'operblock_emergency', 'operblock_planned', 'settings'])
+def test_local_admin_admission_keeps_exclusive_safety_barrier(tmp_path, monkeypatch, role):
+    from rem_card.app import local_administrator
+    store = MaintenanceStore(tmp_path)
+    store.begin('test')
+    ordinary = SessionLease(tmp_path, role)
+    monkeypatch.setattr(local_administrator, 'is_local_administrator', lambda: False)
+    assert not ordinary.acquire()
+    monkeypatch.setattr(local_administrator, 'is_local_administrator', lambda: True)
+    admin = SessionLease(tmp_path, role)
+    assert admin.acquire()
+    assert store.try_exclusive() is None
+    admin.release()
+    exclusive = store.try_exclusive()
+    assert exclusive is not None
+    assert not SessionLease(tmp_path, role).acquire()
+    store.finish()
+
+
+def test_admin_can_recover_released_maintenance_without_reopening_public_entry(tmp_path, monkeypatch):
+    from rem_card.app import local_administrator
+    store = MaintenanceStore(tmp_path)
+    store.begin('test')
+    exclusive = store.try_exclusive()
+    exclusive.release()
+    monkeypatch.setattr(local_administrator, 'is_local_administrator', lambda: True)
+    admin = SessionLease(tmp_path, 'settings')
+    assert admin.acquire()
+    try:
+        current = store.read()
+        assert current['state'] == 'draining'
+        monkeypatch.setattr(local_administrator, 'is_local_administrator', lambda: False)
+        assert not SessionLease(tmp_path, 'nurse').acquire()
+        store.finish(expected_generation=current['generation'], operation_id=current['operation_id'],
+                     owner_token=current['owner_token'])
+        assert store.read()['state'] == 'open'
+    finally:
+        admin.release()

@@ -3,30 +3,23 @@
 from __future__ import annotations
 
 import os
+import math
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
-from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QMessageBox
+from PySide6.QtCore import QEasingCurve, QPointF, QRectF, QSize, Qt, Signal, QVariantAnimation
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
+from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QMessageBox, QStyle
 
 
 FULL_RUNTIME_THEME_ENV = "REMCARD_FULL_RUNTIME_THEME"
 
 # Палитра намеренно находится рядом с отрисовкой переключателя: он не зависит
 # от разбора QSS и остаётся читаемым до применения глобальной темы приложения.
-LIGHT_COLORS = {
-    "track": "#e9ecef",
-    "surface": "#ffffff",
-    "border": "#bdc3c7",
-    "accent": "#2f6fa3",
-    "text": "#243447",
-}
-DARK_COLORS = {
-    "track": "#19232f",
-    "surface": "#222e3c",
-    "border": "#485a70",
-    "accent": "#8ab8ff",
-    "text": "#d8e4f3",
-}
+def _blend(light: str, dark: str, progress: float) -> QColor:
+    first, last = QColor(light), QColor(dark)
+    return QColor.fromRgbF(*(
+        a + (b - a) * progress
+        for a, b in zip(first.getRgbF(), last.getRgbF())
+    ))
 
 
 def runtime_theme_enabled() -> bool:
@@ -69,19 +62,22 @@ class ThemeSwitch(QAbstractButton):
 
     mode_changed = Signal(str)
 
-    def __init__(self, parent=None, *, manager=None):
+    def __init__(self, parent=None, *, manager=None, load_saved_mode=False):
         super().__init__(parent)
         self.setObjectName("theme_mode_switch")
         self.setCheckable(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.setFixedHeight(32)
-        self.setMinimumWidth(128)
+        self.setFixedSize(self.sizeHint())
         self.setCursor(Qt.PointingHandCursor)
         self.setAccessibleName("Переключатель темы: Светлая / Тёмная")
         self.setAccessibleDescription("Пробел переключает светлую и тёмную тему")
         self.setToolTip("Светлая / Тёмная тема")
 
+        self._position = 0.0
+        self._animation = QVariantAnimation(self)
+        self._animation.setEasingCurve(QEasingCurve.InOutCubic)
+        self._animation.valueChanged.connect(self._set_position)
         self._manager = None
         self._mode = "light"
         self._runtime_enabled = runtime_theme_enabled()
@@ -93,6 +89,9 @@ class ThemeSwitch(QAbstractButton):
                 self._manager = manager if manager is not None else get_theme_manager()
                 self._runtime_enabled = _manager_enabled(self._manager)
                 if self._runtime_enabled:
+                    if load_saved_mode:
+                        # The chooser appears before any clinical role applies a theme.
+                        self._manager.settings_for_role()
                     signal = getattr(self._manager, "theme_changed", None)
                     if signal is not None and hasattr(signal, "connect"):
                         signal.connect(self._on_theme_changed)
@@ -124,6 +123,20 @@ class ThemeSwitch(QAbstractButton):
         changed = normalized != self._mode
         self._mode = normalized
         self.setChecked(normalized == "dark")
+        target = float(normalized == "dark")
+        # Повторный сигнал менеджера не перезапускает текущий переход.
+        if changed or not self.isVisible():
+            self._animation.stop()
+            if self.isVisible() and self.style().styleHint(QStyle.SH_Widget_Animate, None, self):
+                start = self._position
+                self._animation.blockSignals(True)
+                self._animation.setDuration(max(100, round(320 * abs(target - start))))
+                self._animation.setStartValue(start)
+                self._animation.setEndValue(target)
+                self._animation.blockSignals(False)
+                self._animation.start()
+            else:
+                self._set_position(target)
         # Названия обеих позиций остаются доступными скринридеру; выбранное
         # состояние сообщает стандартный checkable-интерфейс Qt.
         self.setAccessibleName("Переключатель темы: Светлая / Тёмная")
@@ -147,61 +160,110 @@ class ThemeSwitch(QAbstractButton):
                 return
         self._on_theme_changed(requested)
 
+    def _set_position(self, value) -> None:
+        self._position = float(value)
+        self.update()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._animation.stop()
+        self._set_position(float(self._mode == "dark"))
+        super().hideEvent(event)
+
     def sizeHint(self) -> QSize:
-        return QSize(132, 32)
+        return QSize(96, 38)
 
     def minimumSizeHint(self) -> QSize:
-        return QSize(128, 32)
+        return self.sizeHint()
+
+    @staticmethod
+    def _sun(painter: QPainter, center: QPointF, radius: float) -> None:
+        painter.setPen(QPen(QColor("#ffcc55"), 1.5, Qt.SolidLine, Qt.RoundCap))
+        for index in range(12):
+            angle = index * math.pi / 6
+            painter.drawLine(
+                center + QPointF(math.cos(angle), math.sin(angle)) * radius * .73,
+                center + QPointF(math.cos(angle), math.sin(angle)) * radius,
+            )
+        glow = QRadialGradient(center - QPointF(radius * .22, radius * .25), radius)
+        glow.setColorAt(0, QColor("#fff8b4"))
+        glow.setColorAt(.5, QColor("#ffdc55"))
+        glow.setColorAt(1, QColor("#eea125"))
+        painter.setBrush(glow)
+        painter.setPen(QPen(QColor("#ffe99c"), .8))
+        painter.drawEllipse(center, radius * .55, radius * .55)
+
+    @staticmethod
+    def _moon(painter: QPainter, center: QPointF, radius: float) -> None:
+        disc = QPainterPath()
+        disc.addEllipse(center, radius, radius)
+        cutout = QPainterPath()
+        cutout.addEllipse(center + QPointF(-radius * .50, -radius * .28), radius * .91, radius * .91)
+        gradient = QLinearGradient(center.x() - radius, center.y() - radius,
+                                   center.x() + radius, center.y() + radius)
+        gradient.setColorAt(0, QColor("#fff5c9"))
+        gradient.setColorAt(.55, QColor("#fff6e4"))
+        gradient.setColorAt(1, QColor("#a5afff"))
+        painter.setPen(QPen(QColor("#fff3d8"), .6))
+        painter.setBrush(gradient)
+        painter.drawPath(disc.subtracted(cutout))
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         del event
-        colors = DARK_COLORS if self._mode == "dark" else LIGHT_COLORS
+        t = self._position
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-
-        bounds = self.rect().adjusted(1, 1, -1, -1)
-        radius = bounds.height() / 2
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(colors["track"]))
-        painter.drawRoundedRect(bounds, radius, radius)
-        inner_bounds = bounds.adjusted(1, 1, -1, -1)
-        painter.setBrush(QColor(colors["surface"]))
-        painter.drawRoundedRect(inner_bounds, max(0, radius - 1), max(0, radius - 1))
-        painter.setPen(QPen(QColor(colors["border"]), 1))
+        # Единая система координат сохраняет пропорции и ход анимации.
+        painter.scale(self.width() / 160, self.height() / 63)
+        track = QRectF(5, 5, 150, 52)
+        edge = QLinearGradient(track.topLeft(), track.topRight())
+        edge.setColorAt(0, QColor("#efbd60"))
+        edge.setColorAt(.45, QColor("#e4dcc6"))
+        edge.setColorAt(1, QColor("#719fff"))
+        # Несколько тонких контуров вместо дорогого blur-эффекта.
         painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(bounds, radius, radius)
-
-        half = bounds.width() / 2
-        thumb = bounds.adjusted(2, 2, -2, -2)
-        if self._mode == "dark":
-            thumb.setLeft(int(bounds.left() + half + 1))
-        else:
-            thumb.setRight(int(bounds.left() + half - 1))
+        for width, alpha in ((8, 12), (5, 22), (3, 40)):
+            painter.setPen(QPen(_blend("#efbf64", "#548cff", t), width))
+            painter.setOpacity(alpha / 255)
+            painter.drawRoundedRect(track, 26, 26)
+        painter.setOpacity(1)
+        sky = QLinearGradient(track.topLeft(), track.topRight())
+        sky.setColorAt(0, _blend("#f6cf7d", "#705b3c", t))
+        sky.setColorAt(.48, _blend("#526080", "#182b50", t))
+        sky.setColorAt(1, QColor("#0a1940"))
+        painter.setBrush(sky)
+        painter.setPen(QPen(edge, 1.4))
+        painter.drawRoundedRect(track, 26, 26)
+        painter.setPen(QPen(QColor(255, 255, 255, 65), .7))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(track.adjusted(2, 2, -2, -2), 24, 24)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(colors["accent"]))
-        painter.drawRoundedRect(thumb, thumb.height() / 2, thumb.height() / 2)
-
-        painter.setFont(self.font())
-        metrics = QFontMetrics(self.font())
-        labels = (("Светлая", bounds.left(), int(bounds.left() + half)), ("Тёмная", int(bounds.left() + half), bounds.right()))
-        for label, left, right in labels:
-            selected = (label == "Тёмная") == (self._mode == "dark")
-            color = colors["track"] if selected else colors["text"]
-            painter.setPen(QColor(color))
-            text_rect = bounds.adjusted(0, 0, 0, 0)
-            text_rect.setLeft(left)
-            text_rect.setRight(right)
-            painter.drawText(text_rect, Qt.AlignCenter, metrics.elidedText(label, Qt.ElideRight, max(1, right - left - 6)))
-
-        if self.hasFocus():
-            focus_color = colors["accent"]
-            painter.setPen(QPen(QColor(focus_color), 2))
-            painter.setBrush(Qt.NoBrush)
-            focus_bounds = self.rect().adjusted(0, 0, -1, -1)
-            painter.drawRoundedRect(focus_bounds, radius + 1, radius + 1)
-
-        if not self.isEnabled():
-            painter.fillRect(self.rect(), QColor(255, 255, 255, 95))
+        painter.setBrush(QColor("#ffe8b0"))
+        for x, y, r in ((65, 17, 1), (83, 39, 1.3), (97, 15, .8), (73, 45, .7), (133, 18, .8)):
+            painter.drawEllipse(QPointF(x, y), r, r)
+        painter.setOpacity(.58 + .30 * t)
+        self._sun(painter, QPointF(31, 31), 14)
+        painter.setOpacity(.88 - .30 * t)
+        self._moon(painter, QPointF(129, 31), 14)
+        painter.setOpacity(1)
+        center = QPointF(31 + 98 * t, 31)
+        thumb = QRadialGradient(center - QPointF(9, 13), 51)
+        thumb.setColorAt(0, _blend("#fffefa", "#487ed9", t))
+        thumb.setColorAt(.55, _blend("#fff1cb", "#102b69", t))
+        thumb.setColorAt(1, _blend("#f4ca7e", "#071638", t))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 8, 30, 65))
+        painter.drawEllipse(center + QPointF(0, 2), 24, 24)
+        painter.setBrush(thumb)
+        painter.setPen(QPen(_blend("#fffdf0", "#b4dcff", t), 1.5))
+        painter.drawEllipse(center, 23.5, 23.5)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(_blend("#ffda8c", "#468fff", t), .8))
+        painter.drawEllipse(center, 21.8, 21.8)
+        painter.setOpacity(1 - t)
+        self._sun(painter, center, 17)
+        painter.setOpacity(t)
+        self._moon(painter, center + QPointF(2, 0), 15)
+        painter.setOpacity(1)
         painter.end()
 
 

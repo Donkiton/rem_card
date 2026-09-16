@@ -603,11 +603,15 @@ class SessionLease:
     def acquire(self) -> bool:
         if self.held:
             return True
+        from rem_card.app.local_administrator import is_local_administrator
+        administrator = is_local_administrator()
         pristine = not self.store.control_dir.exists()
         with self.store._state_guard():
             state = self.store._read_state_unlocked(allow_initial=pristine)
             self.rejection_state = None
-            if state.get("state") != "open":
+            if state.get("state") != "open" and not (
+                administrator and state.get("state") in ("draining", "maintenance")
+            ):
                 self.rejection_state = state
                 return False
             if not self.store.state_path.exists():
@@ -618,6 +622,16 @@ class SessionLease:
             if not gate.acquire(blocking=False):
                 self.rejection_state = MaintenanceStore._unknown("exclusive_maintenance_lock_held")
                 return False
+            if state.get("state") == "maintenance":
+                # Never bypass an exclusive OS lease. Re-enter draining only
+                # after acquiring the shared gate under the state guard.
+                state = {**state, 'state': 'draining',
+                         'generation': state['generation'] + 1, 'published_at': _utc_now()}
+                try:
+                    self.store._write_state_unlocked(state)
+                except Exception:
+                    gate.release()
+                    raise
             self._gate = gate
             self.acquired_at = _utc_now()
             self.generation = state["generation"]

@@ -3,6 +3,7 @@
     "tests/test_unified_main.py",
     "tests/test_unified_database_setup.py",
     "tests/test_unified_access.py",
+    "tests/test_local_administrator.py",
     "tests/test_unified_shutdown_resources.py",
     "tests/test_unified_runtime.py",
     "tests/test_unified_preflight.py",

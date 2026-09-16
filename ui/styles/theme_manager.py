@@ -251,7 +251,8 @@ class ThemeManager(QObject):
         theme_runtime.install_theme_runtime(target_app)
         apply_application_theme_style(target_app, self.mode)
         target_app.setPalette(self._build_palette(tokens))
-        theme_runtime.refresh_registered_styles(mode=self.mode, force=True, tokens=tokens)
+        theme_runtime.refresh_registered_styles(mode=self.mode, force=True, tokens=tokens,
+                                                defer_hidden=True)
         apply_tooltip_palette(target_app)
         self._applied_profile = profile
         self.theme_changed.emit(self.mode)
