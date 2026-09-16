@@ -336,6 +336,9 @@ class BedsSelectionWidget(QWidget):
     def _apply_beds_snapshot(self, snapshot):
         if self._is_closing:
             return
+        from rem_card.ui.shared.window_transition import defer_transition_update
+        if defer_transition_update(self, 'beds', lambda: self._apply_beds_snapshot(snapshot)):
+            return
         self._refresh_apply_count += 1
         active_patients = list(snapshot.get("patients") or [])
         now = snapshot.get("now") or datetime.datetime.now()

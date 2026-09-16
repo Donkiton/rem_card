@@ -3,6 +3,31 @@ from PySide6.QtCore import QObject, QRect, Qt, QPropertyAnimation, QEasingCurve,
 from functools import wraps
 
 
+def defer_transition_update(widget, key, callback):
+    """Coalesce presentation work while reads continue during window resize."""
+    transition = getattr(widget.window(), '_transition', None)
+    if transition is None or not transition.running:
+        return False
+    pending = getattr(widget, '_transition_updates', None)
+    if pending is None:
+        pending = widget._transition_updates = {}
+    scheduled = key in pending
+    pending[key] = callback
+    if not scheduled:
+        def apply():
+            if getattr(widget, '_is_closing', False) or getattr(widget, '_is_shutting_down', False):
+                pending.pop(key, None)
+                return
+            if transition.running:
+                QTimer.singleShot(20, widget, apply)
+                return
+            update = pending.pop(key, None)
+            if update:
+                update()
+        QTimer.singleShot(20, widget, apply)
+    return True
+
+
 def after_window_transition(method):
     """Delay optional UI prewarming while its top-level window is resizing."""
     @wraps(method)

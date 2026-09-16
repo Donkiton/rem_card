@@ -437,6 +437,33 @@ def test_same_mode_role_profile_change_reapplies_effective_tokens(monkeypatch, t
     refresh.assert_called_with(mode="dark", force=True, tokens=ANY, defer_hidden=True)
 
 
+def test_equivalent_role_switch_keeps_tokens_and_skips_global_restyle(monkeypatch, tmp_path):
+    storage = ThemeStorage(str(tmp_path / "theme.json"))
+    storage.save(default_settings_payload())
+    manager = ThemeManager(storage)
+    app = _PaletteApplication()
+    refresh = Mock()
+    monkeypatch.setattr(theme_runtime, "install_theme_runtime", Mock())
+    monkeypatch.setattr(theme_runtime, "refresh_registered_styles", refresh)
+    monkeypatch.setattr("rem_card.ui.styles.focus_rect_style.apply_application_theme_style", Mock())
+    monkeypatch.setattr(theme_manager_module, "apply_tooltip_palette", lambda app: None)
+    manager.load("doctor")
+    manager.apply_to_app(app)
+    cached = manager._tokens_cache[("doctor", "light")]
+    manager.load("nurse")
+    manager.apply_to_app(app)
+    assert manager.active_role == "nurse"
+    assert manager._tokens_cache[("doctor", "light")] is cached
+    assert refresh.call_count == 1
+    payload = storage.load()
+    payload["active"]["nurse"]["overrides"] = {"surface.window": "#abcdef"}
+    storage.save(payload)
+    manager.load("nurse")
+    manager.apply_to_app(app)
+    assert refresh.call_count == 2
+    assert app.palette().color(QPalette.Active, QPalette.Window).name() == "#abcdef"
+
+
 @pytest.mark.parametrize("modes", [("dark",), ("dark", "light"), ("dark", "light", "dark")])
 def test_hidden_page_receives_latest_theme_before_first_paint(modes):
     from PySide6.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
@@ -515,6 +542,7 @@ def test_workspace_transparency_applies_to_dark_panel_fill():
 def test_clinical_legend_keeps_original_colors_in_both_themes():
     from PySide6.QtWidgets import QApplication, QLabel
     app = QApplication.instance() or QApplication([])
+    assert app is not None
     label = QLabel()
     label.setProperty('preserveClinicalColors', True)
     source = 'QLabel { background: #e6f7ff; color: #2c3e50; border-left: 6px solid #00bfff; }'
@@ -528,6 +556,7 @@ def test_dark_legend_and_chart_share_dimmed_clinical_colors():
     from rem_card.ui.styles.theme_presets import BASE_MEDICAL_TOKENS, build_tokens
     from rem_card.ui.styles.chart_styles import vital_colors
     app = QApplication.instance() or QApplication([])
+    assert app is not None
     label = QLabel()
     label.setProperty('preserveClinicalColors', True)
     tokens = build_tokens(mode='dark')
@@ -552,6 +581,7 @@ def test_workspace_keeps_orders_and_output_editor_opaque():
 def test_opaque_order_cards_are_scoped_to_patient_sector():
     from PySide6.QtWidgets import QApplication, QWidget, QFrame
     app = QApplication.instance() or QApplication([])
+    assert app is not None
     workspace = QWidget()
     workspace.setProperty('workspaceBackdrop', True)
     sector = QWidget(workspace)
@@ -583,6 +613,7 @@ QWidget#sector_w1a_main_container { background: #ffffff; border: 1px solid #aaaa
 def test_primary_tab_body_is_opaque_without_changing_secondary_balance(mode):
     from PySide6.QtWidgets import QApplication, QWidget
     app = QApplication.instance() or QApplication([])
+    assert app is not None
     workspace = QWidget()
     workspace.setProperty('workspaceBackdrop', True)
     primary = QWidget(workspace)

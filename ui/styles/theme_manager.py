@@ -86,10 +86,12 @@ class ThemeManager(QObject):
             self._loaded = True
             self._tokens_cache.clear()
             return deepcopy(self._payload)
-        self._payload = self.storage.load()
+        payload = self.storage.load()
+        if payload != self._payload:
+            self._tokens_cache.clear()
+        self._payload = payload
         self._mode = normalize_mode(self._payload.get("mode"))
         self._loaded = True
-        self._tokens_cache.clear()
         return deepcopy(self._payload)
 
     def settings_for_role(self, role: str | None = None) -> dict[str, Any]:
@@ -241,7 +243,9 @@ class ThemeManager(QObject):
         self._ensure_loaded()
         tokens = self.current_tokens()
         token_fingerprint = tuple(sorted((str(key), repr(value)) for key, value in tokens.items()))
-        profile = (id(target_app), self._runtime_role, self.mode, token_fingerprint)
+        # Role identity alone does not change the palette or rendered styles.
+        # Role-specific overrides are already included in the fingerprint.
+        profile = (id(target_app), self.mode, token_fingerprint)
         if self._applied_profile == profile:
             return
 

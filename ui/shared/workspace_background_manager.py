@@ -2,7 +2,7 @@
 import threading
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication
-from rem_card.app.workspace_backgrounds import BackgroundRepository, BUILTIN
+from rem_card.app.workspace_backgrounds import BackgroundRepository
 from rem_card.app.runtime_paths import resolve_baza_dir
 
 

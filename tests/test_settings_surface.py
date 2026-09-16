@@ -117,7 +117,7 @@ def test_settings_center_uses_the_same_outer_frame_as_archive():
 
     margins = widget.layout().contentsMargins()
     assert widget.surface_frame.objectName() == "SettingsCenterFrame"
-    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (0, 5, 5, 4)
+    assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (0, 5, 1, 4)
     assert widget.surface_frame.layout().contentsMargins().left() == 2
     assert "QFrame#SettingsCenterFrame" in widget.styleSheet()
     assert "border-radius: 5px" in widget.styleSheet()
@@ -127,7 +127,7 @@ def test_settings_center_uses_the_same_outer_frame_as_archive():
     app.processEvents()
 
 
-def test_settings_center_accepts_operblock_symmetric_outer_margins():
+def test_settings_center_accepts_operblock_left_margin_and_shared_right_edge():
     app = application()
     widget = AdminMainWidget(role="doctor", left_outer_margin=5)
     widget.resize(1280, 720)
@@ -137,9 +137,9 @@ def test_settings_center_accepts_operblock_symmetric_outer_margins():
     margins = widget.layout().contentsMargins()
     frame_geometry = widget.surface_frame.geometry()
 
-    assert (margins.left(), margins.right()) == (5, 5)
+    assert (margins.left(), margins.right()) == (5, 1)
     assert frame_geometry.left() == 5
-    assert widget.width() - 1 - frame_geometry.right() == 5
+    assert widget.width() - 1 - frame_geometry.right() == 1
 
     widget.close()
     widget.deleteLater()

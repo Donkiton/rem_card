@@ -60,10 +60,10 @@ def _current_role() -> str:
 
 
 class PatientBedManagementWidget(QWidget):
-    def __init__(self, db_manager, data_service=None, parent=None):
+    def __init__(self, db_manager, data_service=None, parent=None, *, preparing=False):
         super().__init__(parent)
         self.db_manager = db_manager
-        self.patient_bed_service = PatientBedManagementService(db_manager, data_service=data_service)
+        self.patient_bed_service = None
         self._move_pending = False
         self._is_closing = False
         self._opening_patient_form = False
@@ -76,7 +76,25 @@ class PatientBedManagementWidget(QWidget):
 
         self.bed_widgets = []
         self._init_ui()
-        QTimer.singleShot(0, self.refresh_bed_statuses)
+        if not preparing:
+            self.bind_session(db_manager, data_service)
+
+    def bind_session(self, db_manager, data_service=None):
+        """Attach a fresh clinical service only when the screen is requested."""
+        self.db_manager = db_manager
+        self.patient_bed_service = PatientBedManagementService(db_manager, data_service=data_service)
+        QTimer.singleShot(0, self, self.refresh_bed_statuses)
+
+    @classmethod
+    def create(cls, db_manager, data_service=None, parent=None):
+        from rem_card.ui.shared.role_entry_preload import take_prepared_patient_management
+        widget = take_prepared_patient_management()
+        if widget is None:
+            return cls(db_manager, data_service=data_service, parent=parent)
+        widget.setParent(parent)
+        widget.bind_session(db_manager, data_service)
+        widget.show()
+        return widget
 
     def _init_ui(self):
         root_layout = QVBoxLayout(self)
@@ -472,7 +490,7 @@ class PatientBedManagementWidget(QWidget):
             bed_widget.setEnabled(True)
 
     def refresh_bed_statuses(self):
-        if self._is_closing:
+        if self._is_closing or self.patient_bed_service is None:
             return
         worker = self._refresh_worker
         if worker is not None and worker.isRunning():

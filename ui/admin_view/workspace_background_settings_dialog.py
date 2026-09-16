@@ -3,10 +3,10 @@ from functools import partial
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QApplication, QLabel, QPushButton, QHBoxLayout, QVBoxLayout,
-    QListWidget, QLineEdit, QCheckBox, QDateEdit, QFileDialog, QFrame)
+    QListWidget, QLineEdit, QCheckBox, QDateEdit, QFileDialog)
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.workspace_background_manager import background_manager
-from rem_card.app.workspace_backgrounds import STANDARD, BUILTIN, builtin_paths
+from rem_card.app.workspace_backgrounds import STANDARD, BUILTIN
 from rem_card.ui.styles.theme_runtime import set_widget_style
 from rem_card.ui.styles.settings_surface import prepare_settings_file_dialog
 

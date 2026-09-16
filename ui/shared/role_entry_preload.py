@@ -11,6 +11,25 @@ class RoleEntryPreload(QObject):
         super().__init__(owner)
         self.owner = owner
         self.items = {}
+        self.workspaces = {}
+        self.patient_management = None
+
+    def prepare_shared(self):
+        """One empty management screen, shared by the first role to open it."""
+        if self.patient_management is not None:
+            return
+        from rem_card.ui.patient_bed_management.management_widget import PatientBedManagementWidget
+        started = time.perf_counter()
+        widget = PatientBedManagementWidget(None, parent=self.owner, preparing=True)
+        widget.hide()
+        widget.ensurePolished()
+        self.patient_management = widget
+        record_metric('shared_ui_preload_ms', round((time.perf_counter()-started)*1000, 2))
+
+    def take_patient_management(self):
+        widget = self.patient_management
+        self.patient_management = None
+        return widget if widget is not None and isValid(widget) else None
 
     def prepare(self, role):
         if role not in ('doctor', 'nurse') or role in self.items:
@@ -24,6 +43,10 @@ class RoleEntryPreload(QObject):
             from rem_card.ui.nurse_view import nurse_main_widget  # noqa: F401
             from rem_card.ui.nurse_view.components.nurse_sector8_panel import NurseSector8Panel as Panel
         from rem_card.ui.shared.lightweight_w1_shell import LightweightW1Shell
+        from rem_card.ui.shared.workspace_background import WorkspaceStack
+        workspace = WorkspaceStack(self.owner)
+        workspace.hide()
+        self.workspaces[role] = workspace
         shell = LightweightW1Shell(role=role, patient_service=None, parent=self.owner, preparing=True)
         shell.hide()
         try:
@@ -69,8 +92,17 @@ class RoleEntryPreload(QObject):
         record_metric('role_entry_preload_reused', 1, role=role)
         return pair
 
+    def take_workspace(self, role):
+        return self.workspaces.pop(role, None)
+
 
 def take_prepared_entry(role, **kwargs):
     app = QApplication.instance()
     pool = getattr(app, '_role_entry_preload', None)
     return pool.take(role, **kwargs) if pool is not None and isValid(pool) else None
+
+
+def take_prepared_patient_management():
+    app = QApplication.instance()
+    pool = getattr(app, '_role_entry_preload', None)
+    return pool.take_patient_management() if pool is not None and isValid(pool) else None

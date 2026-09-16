@@ -320,6 +320,9 @@ class SectorW1a(BaseSectorWidget):
         sender = self.sender()
         if sender is not None and sender is not self._refresh_worker:
             return
+        from rem_card.ui.shared.window_transition import defer_transition_update
+        if defer_transition_update(self, 'orders', lambda: self._apply_snapshot(snapshot)):
+            return
         self._refresh_apply_count += 1
         snapshot = dict(snapshot or {})
         content_hash = str(snapshot.get("content_hash") or "")

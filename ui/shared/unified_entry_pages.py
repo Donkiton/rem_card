@@ -496,6 +496,7 @@ class WelcomePage(_EntryPageBase):
             self._preparing_timer.start()
         else:
             self._preparing_timer.stop()
+            self.end_window_transition()
         for button in (self.theme_switch, self.about_button, self.update_button):
             button.setEnabled(not bool(role))
         self.theme_switch.setEnabled(not bool(role) and self.theme_switch.runtime_enabled)
@@ -760,10 +761,20 @@ class WelcomePage(_EntryPageBase):
 
     def begin_window_transition(self, target_width=None):
         if target_width is not None:
+            self._window_transition_active = False
             self._apply_responsive_layout(target_width)
         self._window_transition_active = True
 
     def end_window_transition(self):
+        # The resize can finish before the first clinical data arrives. Keep
+        # the visible chooser's margins/type sizes stable throughout that wait.
+        if self._preparing_role and self.isVisible():
+            return
+        self._window_transition_active = False
+        self._apply_responsive_layout()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
         self._window_transition_active = False
         self._apply_responsive_layout()
 

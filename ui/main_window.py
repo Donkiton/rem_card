@@ -1,5 +1,5 @@
 from rem_card.ui.styles.theme_runtime import set_widget_style
-from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel
+from PySide6.QtWidgets import QMainWindow, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel
 from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer, Slot, Signal, QEventLoop
 
 from .shared.navigation_widgets import WelcomeWidget
@@ -262,8 +262,13 @@ class MainWindow(QMainWindow):
             self._restore_probe_status_label = None
         
         from rem_card.ui.shared.workspace_background import WorkspaceStack
-        self.stack = WorkspaceStack()
+        pool = getattr(QApplication.instance(), '_role_entry_preload', None)
+        from shiboken6 import isValid
+        self.stack = pool.take_workspace(self._initial_role) if pool is not None and isValid(pool) else None
+        if self.stack is None:
+            self.stack = WorkspaceStack()
         self.main_layout.addWidget(self.stack)
+        self.stack.show()
         
         self.setCentralWidget(self.main_container)
 

@@ -8,6 +8,70 @@ from PySide6.QtWidgets import QApplication, QWidget
 from rem_card.ui.shared.window_transition import _FrameAnimation, after_window_transition
 
 
+@pytest.mark.parametrize('role', ['doctor', 'nurse'])
+def test_welcome_header_stays_fixed_until_prepared_role_is_shown(role):
+    from PySide6.QtCore import QPoint
+    from rem_card.ui.shared.unified_entry_pages import WelcomePage
+    app = QApplication.instance() or QApplication([])
+    page = WelcomePage()
+    try:
+        page.resize(1200, 880)
+        page.show()
+        app.processEvents()
+        page.set_preparing(role)
+        page.begin_window_transition()
+        page.resize(1920, 1040)
+        app.processEvents()
+        before = (page.logo_label.mapTo(page, QPoint()).x(), page.logo_label.width())
+        page.end_window_transition()
+        app.processEvents()
+        after = (page.logo_label.mapTo(page, QPoint()).x(), page.logo_label.width())
+        assert after == before, (before, after)
+        page.hide()
+        app.processEvents()
+        assert not page._window_transition_active
+        page.set_preparing()
+        page.show()
+        app.processEvents()
+        assert page.logo_label.width() == 74
+        page.set_preparing(role)
+        page.begin_window_transition()
+        page.set_preparing()  # failed/cancelled admission also releases layout
+        assert not page._window_transition_active
+    finally:
+        page.close()
+        page.deleteLater()
+
+
+def test_transition_defers_latest_result_and_drops_closing_widget():
+    from types import SimpleNamespace
+    from rem_card.ui.shared.window_transition import defer_transition_update
+    app = QApplication.instance() or QApplication([])
+    assert app is not None
+    window = QWidget()
+    window._transition = SimpleNamespace(running=True)
+    child = QWidget(window)
+    values = []
+    try:
+        assert defer_transition_update(child, 'result', lambda: values.append(1))
+        assert defer_transition_update(child, 'result', lambda: values.append(2))
+        assert not values
+        window._transition.running = False
+        loop = QEventLoop()
+        QTimer.singleShot(80, loop.quit)
+        loop.exec()
+        assert values == [2]
+        window._transition.running = True
+        defer_transition_update(child, 'result', lambda: values.append(3))
+        child._is_closing = True
+        window._transition.running = False
+        QTimer.singleShot(80, loop.quit)
+        loop.exec()
+        assert values == [2]
+    finally:
+        window.deleteLater()
+
+
 @pytest.mark.parametrize('reverse', [False, True])
 def test_transition_keeps_time_budget_after_ui_stall(reverse):
     app = QApplication.instance() or QApplication([])
@@ -72,6 +136,7 @@ def test_cancelled_transition_does_not_apply_queued_tick():
 def test_optional_prewarm_waits_for_transition_and_skips_closed_role():
     from types import SimpleNamespace
     app = QApplication.instance() or QApplication([])
+    assert app is not None
     calls = []
 
     class Role(QWidget):

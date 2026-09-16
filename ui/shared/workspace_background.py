@@ -9,6 +9,26 @@ from pathlib import Path
 
 FIXED_WORKSPACE_BACKGROUND = True
 
+# Two shared decoded images, reused by both role shells; paths in the media
+# cache are immutable. Include the stat signature for developer asset updates.
+_decoded_pair_key = None
+_decoded_pair = None
+
+
+def _load_decoded_pair(light_path, dark_path):
+    global _decoded_pair_key, _decoded_pair
+    try:
+        key = tuple((str(p), Path(p).stat().st_mtime_ns, Path(p).stat().st_size)
+                    for p in (light_path, dark_path))
+    except OSError:
+        return None
+    if key != _decoded_pair_key:
+        light, dark = QPixmap(str(light_path)), QPixmap(str(dark_path))
+        if light.isNull() or dark.isNull():
+            return None
+        _decoded_pair_key, _decoded_pair = key, (light, dark)
+    return _decoded_pair
+
 
 def workspace_surface_style(style):
     return style.replace('background-color: #f8f9fa;', 'background-color: transparent;') if FIXED_WORKSPACE_BACKGROUND else style
@@ -19,8 +39,7 @@ class WorkspaceStack(QStackedWidget):
         super().__init__(parent)
         self.setProperty('workspaceBackdrop', True)
         self.setContentsMargins(0, 5, 0, 0)
-        self._background = QPixmap(str(Path(get_icon_dir()) / 'workspace_background_light.png'))
-        self._dark_background = QPixmap(str(Path(get_icon_dir()) / 'workspace_background_dark.png'))
+        self._background, self._dark_background = QPixmap(), QPixmap()
         self._pair_key = None
         self._scaled = QPixmap()
         self._cache_key = None
@@ -30,15 +49,20 @@ class WorkspaceStack(QStackedWidget):
         self._manager = background_manager()
         self._manager.changed.connect(self._load_pair)
         self._load_pair()
+        if self._background.isNull():
+            self._background, self._dark_background = _load_decoded_pair(
+                Path(get_icon_dir()) / 'workspace_background_light.png',
+                Path(get_icon_dir()) / 'workspace_background_dark.png') or (QPixmap(), QPixmap())
 
     def _load_pair(self):
         _entry, paths = self._manager.repository.active(self._manager.catalog)
         key = (paths['light'], paths['dark'])
         if key == self._pair_key:
             return
-        light, dark = QPixmap(paths['light']), QPixmap(paths['dark'])
-        if light.isNull() or dark.isNull():
+        pair = _load_decoded_pair(paths['light'], paths['dark'])
+        if pair is None:
             return
+        light, dark = pair
         self._background, self._dark_background = light, dark
         self._pair_key = key
         self._cache_key = None

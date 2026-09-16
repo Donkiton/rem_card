@@ -22,6 +22,7 @@ class CentralUnavailable(CompatibilityError):
 def read_institution(root: str) -> dict:
     """Short read-only startup read, protected by the same maintenance barrier."""
     from rem_card.app.unified_access import SessionLease
+    from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
     lease = SessionLease(root, "startup_settings")
     if not lease.acquire():
@@ -30,7 +31,7 @@ def read_institution(root: str) -> dict:
         path = Path(root) / "settings" / "remcard_settings.db"
         if not path.is_file():
             return {}
-        connection = sqlite3.connect(path.absolute().as_uri() + "?mode=ro", uri=True, timeout=2)
+        connection = sqlite3.connect(build_sqlite_file_uri(path, mode="ro"), uri=True, timeout=2)
         try:
             row = connection.execute("SELECT value_json FROM app_settings WHERE scope=? AND key=?", ("institution", "identity")).fetchone()
             value = json.loads(row[0]) if row else {}

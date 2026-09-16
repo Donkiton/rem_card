@@ -8,7 +8,7 @@ import uuid
 
 from PySide6.QtCore import QSettings, Qt, QTimer, QFileSystemWatcher, QThread, QObject
 from PySide6.QtGui import QIcon
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox, QDialog
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget, QPushButton, QMessageBox, QDialog
 
 from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
 from rem_card.app.unified_runtime import CentralUnavailable, CompatibilityError, check_client_compatibility, lifecycle_event, SessionShutdown
@@ -194,7 +194,7 @@ class UnifiedWindow(QMainWindow):
         from rem_card.ui.shared.role_entry_preload import RoleEntryPreload
         pool = RoleEntryPreload(self)
         QApplication.instance()._role_entry_preload = pool
-        roles = iter(("doctor", "nurse"))
+        roles = iter(("doctor", "nurse", "shared"))
 
         def next_role():
             if self._closing:
@@ -203,14 +203,17 @@ class UnifiedWindow(QMainWindow):
             if role is None:
                 self._ready()
                 return
-            label = "врача" if role == "doctor" else "медсестры"
+            label = {"doctor": "врача", "nurse": "медсестры", "shared": "управления пациентами"}[role]
             self.loading.set_stage(3, f"Подготовка интерфейса {label}…")
 
             def prepare():
                 if self._closing:
                     return
                 try:
-                    pool.prepare(role)
+                    if role == "shared":
+                        pool.prepare_shared()
+                    else:
+                        pool.prepare(role)
                 except Exception as exc:
                     # The normal admitted constructor remains the fallback.
                     lifecycle_event("role_entry_preload_failed", role=role,
@@ -473,15 +476,40 @@ class UnifiedWindow(QMainWindow):
             if not self.role_window._initial_role_ui_ready:
                 raise RuntimeError("Не удалось подготовить выбранную роль.")
             self.role_window.start_initial_role_refresh()
-            self.role_window.wake_initial_role_monitor()
-            from rem_card.app.main import _wait_for_initial_w1, _startup_w1_wait_ms
-            from rem_card.app.logger import logger
-            _wait_for_initial_w1(QApplication.instance(), self.role_window, logger,
-                                 time.perf_counter(), _startup_w1_wait_ms())
+            if self.role not in {"doctor", "nurse"}:
+                self.role_window.wake_initial_role_monitor()
         for index in range(5):
             self.loading.complete_stage(index)
-        self._animate_page(self.role_window, self.role, True, self._role_transition_ready,
-                           maximize_default=self.role != "settings")
+        if self.role in {"doctor", "nurse"}:
+            page, session = self.role_window, self.session_id
+            deadline = time.monotonic() + 30
+            # The read workers now run during the resize. Keep clinical controls
+            # hidden until both the animation and the first data refresh finish.
+            self._animate_page(page, self.role, True,
+                               lambda: self._finish_role_entry(page, session, deadline),
+                               maximize_default=True, defer_page=True)
+        else:
+            self._animate_page(self.role_window, self.role, True, self._role_transition_ready,
+                               maximize_default=self.role != "settings")
+
+    def _finish_role_entry(self, page, session, deadline):
+        if self._closing or self._leaving or self.role_window is not page or self.session_id != session:
+            return
+        from rem_card.app.main import _initial_w1_state
+        if _initial_w1_state(page).get("ready"):
+            page.wake_initial_role_monitor()
+            self.entry_chrome.set_role_mode(True)
+            if self.stack.indexOf(page) < 0:
+                self.stack.addWidget(page)
+            self.stack.setCurrentWidget(page)
+            self._role_transition_ready()
+        elif time.monotonic() >= deadline:
+            self._admitted_failed(RuntimeError(
+                "Не удалось получить начальные данные рабочего места за 30 секунд. "
+                "Проверьте соединение с базой и повторите вход."))
+        else:
+            self.welcome.set_preparing(self.role, "Загрузка актуального списка пациентов…")
+            QTimer.singleShot(40, self, lambda: self._finish_role_entry(page, session, deadline))
 
     def _role_transition_ready(self):
         self.welcome.set_preparing()
@@ -981,7 +1009,7 @@ class UnifiedWindow(QMainWindow):
                   if getattr(self, '_is_custom_maximized', False) else self.normalGeometry())
         self.settings.setValue(key + "/normal_rect", normal)
 
-    def _animate_page(self, page, key, role_mode, finished, maximize_default=False):
+    def _animate_page(self, page, key, role_mode, finished, maximize_default=False, defer_page=False):
         from PySide6.QtCore import QRect
         normal = self.settings.value(key + "/normal_rect")
         if not isinstance(normal, QRect) or not normal.isValid():
@@ -1009,6 +1037,8 @@ class UnifiedWindow(QMainWindow):
             self.role_window.hide()
 
         def prepare():
+            if defer_page:
+                return
             self.entry_chrome.set_role_mode(role_mode)
             if self.stack.indexOf(page) < 0:
                 self.stack.addWidget(page)

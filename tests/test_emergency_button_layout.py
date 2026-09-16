@@ -87,6 +87,8 @@ def test_emergency_button_follows_configured_side_and_order(
     section = settings["sector8_buttons"]
     section["order"].remove("emergency_mode")
     anchor = "user_report" if side == "left" else "settings"
+    # Defaults may hide settings for a role; this test exercises explicit order.
+    section["visible"][anchor] = True
     section["order"].insert(section["order"].index(anchor) + 1, "emergency_mode")
     section["side"]["emergency_mode"] = side
     host, panel = _panel(monkeypatch, panel_module, panel_class, role, settings, "emergency")
