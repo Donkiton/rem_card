@@ -57,6 +57,7 @@ class UnifiedWindow(QMainWindow):
         self._closing = False
         self._return_to_control = False
         self._restart = False
+        self._restart_resume_role = None
         self._candidate = None
         self._update_requested = False
         self._exit_update_checked = False
@@ -76,6 +77,8 @@ class UnifiedWindow(QMainWindow):
         self._central_unavailable = False
         self._local_only = False
         self._requires_fresh_runtime = False
+        self._local_runtime_roles = frozenset()
+        self._role_exit_dialog = None
         self._leave_notice = ""
         self._maintenance_deadline = None
         self._maintenance_operation = ""
@@ -157,6 +160,8 @@ class UnifiedWindow(QMainWindow):
 
     def _initial_incompatible(self, exc):
         self._error(exc)
+        if isinstance(exc, CentralUnavailable):
+            self._dispatch_startup_role()
         self._check_updates()
 
     def _configure_store(self):
@@ -233,6 +238,9 @@ class UnifiedWindow(QMainWindow):
         from rem_card.app.unified_shortcuts import migrate_known_legacy_shortcuts_once
         self._async(migrate_known_legacy_shortcuts_once, lambda _: None,
                     lambda exc: lifecycle_event("unified_shortcut_migration_failed", error_class=type(exc).__name__))
+        self._dispatch_startup_role()
+
+    def _dispatch_startup_role(self):
         from rem_card.app.unified_preflight import take_emergency_role_after_chooser_ready
         emergency_role = take_emergency_role_after_chooser_ready(self)
         if emergency_role:
@@ -263,7 +271,9 @@ class UnifiedWindow(QMainWindow):
             return
         if self._closing or self._busy or self._leaving or self.container is not None:
             return
-        if self._requires_fresh_runtime:
+        reuse_local = self._requires_fresh_runtime and role in self._local_runtime_roles
+        if self._requires_fresh_runtime and not reuse_local:
+            self._restart_resume_role = role if role in {"doctor", "nurse"} else None
             self._restart_for_storage_boundary()
             return
         self._save_geometry("shell")
@@ -274,6 +284,9 @@ class UnifiedWindow(QMainWindow):
         self.session_id = uuid.uuid4().hex
         self.stack.setCurrentWidget(self.welcome)
         self.welcome.set_preparing(role, "Проверка доступа к рабочему месту…")
+        if reuse_local:
+            self._admission_failed(CentralUnavailable("Продолжение локальной аварийной сессии"))
+            return
         def admission():
             from rem_card.app.unified_access import SessionLease, MaintenanceStateError
             lease = SessionLease(self.root, role)
@@ -322,15 +335,18 @@ class UnifiedWindow(QMainWindow):
         try:
             from rem_card.app.unified_preflight import prepare_local_only_runtime_context, bootstrap_local_only, CENTRAL_FAILURE_UNREACHABLE
             admission = prepare_local_only_runtime_context(
-                role=self.role, central_root=self.root, central_failure=CENTRAL_FAILURE_UNREACHABLE)
+                role=self.role, central_root=self.root, central_failure=CENTRAL_FAILURE_UNREACHABLE,
+                restart_after_activation=True)
             self.lease = admission.local_lease
             self._configure_role_environment()
             self.container = bootstrap_local_only(admission=admission, shell=self)
+            self._local_runtime_roles = (frozenset({"doctor", "nurse"}) if self.role in {"doctor", "nurse"}
+                                         else frozenset({"operblock_planned", "operblock_emergency"}))
             from rem_card.app.main import _apply_app_theme
             _apply_app_theme(QApplication.instance(), self.role)
             self._finish_admission()
-            self.statusBar().show()
-            self.statusBar().showMessage("Локальный аварийный режим. Общая база отключена. Для подключения вернитесь к выбору ролей.")
+            self.statusBar().clearMessage()
+            self.statusBar().hide()
         except (Exception, SystemExit) as failure:
             self._admitted_failed(failure)
 
@@ -372,6 +388,8 @@ class UnifiedWindow(QMainWindow):
         if isinstance(exc, SystemExit):
             exc = RuntimeError("Открытие рабочего места отменено.")
         self._error(exc)
+        if getattr(exc, "status", "") in {"role_not_allowed", "no_valid_standby", "active_session_invalid", "local_snapshot_central_mismatch"}:
+            QMessageBox.warning(self, "Аварийный режим недоступен", str(exc))
         partial = getattr(exc, "runtime_container", None)
         if self.container is None and partial is not None:
             self.container = partial
@@ -391,6 +409,7 @@ class UnifiedWindow(QMainWindow):
             self.setProperty("remcard_local_only_runtime", None)
             self._restore_role_environment()
             if restart_required:
+                self._restart_resume_role = self.role if self.role in {"doctor", "nurse"} else None
                 self._restart_for_storage_boundary()
 
     def _restart_for_storage_boundary(self):
@@ -426,7 +445,7 @@ class UnifiedWindow(QMainWindow):
 
             def _request_shared_emergency_finish(self, *args, **kwargs):
                 if shell._local_only:
-                    QMessageBox.information(shell, "Локальный режим", "Для подключения к общей базе вернитесь к выбору ролей и войдите снова после восстановления сети.")
+                    shell._request_emergency_reconnect()
                     return False
                 return super()._request_shared_emergency_finish(*args, **kwargs)
 
@@ -456,12 +475,20 @@ class UnifiedWindow(QMainWindow):
             def show_roles(self):
                 shell.request_role_exit()
 
+            def _launch_runtime_emergency_restart(self, marker_path):
+                # Launch only after SessionShutdown confirms all writes/readers drained.
+                shell._restart = True
+                shell._restart_resume_role = "nurse"
+                return True
+
+            def _restart_after_emergency_workflow(self):
+                shell._restart_emergency_to_network()
+                return True
+
             def closeEvent(self, event):
                 event.ignore()
                 if getattr(self, "_runtime_outage_handling", False):
-                    shell._suppress_exit_update = True
-                    shell._pending_exit = True
-                    shell.request_role_exit(force=True)
+                    shell._finish_runtime_outage()
                 else:
                     shell.request_application_exit()
 
@@ -523,6 +550,13 @@ class UnifiedWindow(QMainWindow):
     def request_role_exit(self, force=False):
         if self._leaving:
             return
+        if self._role_exit_dialog is not None:
+            if not force:
+                self._role_exit_dialog.raise_()
+                return
+            dialog = self._role_exit_dialog
+            self._role_exit_dialog = None
+            dialog.reject()
         interrupted_transition = self._transition.running
         if interrupted_transition:
             if not force:
@@ -542,13 +576,25 @@ class UnifiedWindow(QMainWindow):
             if buttons:
                 buttons[-1].setDefault(True)
                 buttons[-1].setFocus()
-            reply = dialog.exec()
-            dialog.deleteLater()
-            if reply != QMessageBox.Yes:
-                self._pending_exit = False
-                self._restart = False
-                self._update_requested = False
-                return
+            self._role_exit_dialog = dialog
+            session, container = self.session_id, self.container
+            def answered(reply):
+                current = self._role_exit_dialog is dialog
+                if current:
+                    self._role_exit_dialog = None
+                dialog.deleteLater()
+                if not current or self._leaving or self.session_id != session or self.container is not container:
+                    return
+                if reply == QMessageBox.Yes:
+                    self.request_role_exit(force=True)
+                else:
+                    self._pending_exit = False
+                    self._restart = False
+                    self._update_requested = False
+            dialog.finished.connect(answered)
+            lifecycle_event("role_leave_confirmation_open", session_id=self.session_id, role=self.role)
+            dialog.open()
+            return
         self._leaving = True
         self._busy = True
         self.welcome.set_preparing()
@@ -657,9 +703,6 @@ class UnifiedWindow(QMainWindow):
         if self._local_only:
             self._suppress_exit_update = True
             self._requires_fresh_runtime = True
-            if not self._pending_exit:
-                self._restart = True
-                self._pending_exit = True
         self._local_only = False
         self._local_only_runtime_state = None
         self.setProperty("remcard_local_only_runtime", None)
@@ -677,6 +720,9 @@ class UnifiedWindow(QMainWindow):
             self.refresh_access()
         else:
             self.show_roles()
+            if self._requires_fresh_runtime:
+                self.welcome.set_access_state(
+                    self._leave_notice or "Аварийная сессия сохранена. Выберите роль для продолжения.", False)
 
     def _retry_drain(self):
         if self._shutdown:
@@ -709,6 +755,35 @@ class UnifiedWindow(QMainWindow):
                 self.request_role_exit(force=True)
         self._async(self.store.read, self._access_received, failure)
 
+    def _route_unreachable_access(self, state):
+        if state.get("state") == "unknown" and state.get("error") == "root_unavailable":
+            self._central_unavailable = True
+            self.welcome.set_access_state(
+                self._compatibility_error or "Общая база недоступна. Выберите роль для продолжения.",
+                bool(self._compatibility_error),
+            )
+            if self.container and not self._leaving and not self._local_only:
+                data = getattr(self.container, "data_service", None)
+                handler = getattr(data, "_handle_database_access_failure", None)
+                if callable(handler):
+                    handler(OSError("Сетевая папка базы недоступна"), source="unified_access")
+                else:
+                    self.request_role_exit(force=True)
+            return True
+        return False
+
+    def _show_access_state(self, state, blocked, admission_blocked):
+        message = self._compatibility_error or ("Идут технические работы. Попробуйте позже." if blocked else self._leave_notice)
+        if state.get("state") == "unknown" and not self._compatibility_error:
+            message = "Не удалось подтвердить состояние доступа к базе. Проверьте связь и служебные файлы."
+        if blocked and not admission_blocked:
+            message = "Идут технические работы. Для этого ПК разрешён доступ администратора."
+        entry_blocked = admission_blocked or bool(self._compatibility_error)
+        if self._central_unavailable and state.get("state") not in {"draining", "maintenance"} and not self._compatibility_error:
+            message = "Общая база недоступна. Выберите роль для локального аварийного режима."
+            entry_blocked = False
+        self.welcome.set_access_state(message, entry_blocked)
+
     def _access_received(self, state):
         self._last_state_request = False
         if self._closing:
@@ -719,19 +794,14 @@ class UnifiedWindow(QMainWindow):
                 return
             self._last_generation = generation
         self._maintenance_state = state
+        if self._route_unreachable_access(state):
+            return
         blocked = state.get("state") != "open"
         admission_blocked = blocked and not (self._local_administrator and state.get("state") in {"draining", "maintenance"})
         if state.get("state") != "unknown" and self.store.control_dir.is_dir() and str(self.store.control_dir) not in self._watcher.directories():
             self._watcher.addPath(str(self.store.control_dir))
         if not self._leaving:
-            message = self._compatibility_error or ("Идут технические работы. Попробуйте позже." if blocked else self._leave_notice)
-            if blocked and not admission_blocked:
-                message = "Идут технические работы. Для этого ПК разрешён доступ администратора."
-            entry_blocked = admission_blocked or bool(self._compatibility_error)
-            if self._central_unavailable and state.get("state") not in {"draining", "maintenance"} and not self._compatibility_error:
-                message = "Общая база недоступна. Выберите роль для локального аварийного режима."
-                entry_blocked = False
-            self.welcome.set_access_state(message, entry_blocked)
+            self._show_access_state(state, blocked, admission_blocked)
         if admission_blocked and self.container and not self._leaving:
             if state.get("state") == "unknown":
                 if not self._local_only:
@@ -816,6 +886,38 @@ class UnifiedWindow(QMainWindow):
         dialog.finished.connect(dismissed)
         dialog.open()
         dialog.raise_()
+
+    def _finish_runtime_outage(self):
+        self._suppress_exit_update = True
+        # Only the nurse's handler launches a replacement process.
+        self._pending_exit = self.role == "nurse"
+        self._central_unavailable = True
+        self.request_role_exit(force=True)
+
+    def _request_emergency_reconnect(self):
+        reply = QMessageBox.question(
+            self, "Проверка основной базы",
+            "Перезапустить RemCard для проверки основной базы?\n\n"
+            "Сохранённые аварийные данные останутся на этом ПК. Несохранённый ввод будет потерян. "
+            "После входа завершите аварийный режим "
+            "через проверку и перенос данных; автоматического переключения базы не будет.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._restart_emergency_to_network()
+
+    def _restart_emergency_to_network(self):
+        self._restart_resume_role = self.role if self.role in {"doctor", "nurse"} else None
+        self._restart = True
+        self._pending_exit = True
+        self._suppress_exit_update = True
+        self.request_role_exit(force=True)
+
+    def request_emergency_mode_action(self):
+        if self._local_only:
+            self._request_emergency_reconnect()
+        elif self._emergency_workflow is not None:
+            self._emergency_workflow.begin_wait()
 
     def open_maintenance(self, center=None):
         if self._local_only or self._requires_fresh_runtime:
@@ -1106,7 +1208,10 @@ class UnifiedWindow(QMainWindow):
             self.exclusive.release()
         if self._restart:
             from rem_card.app.main import _launch_requested_restart
-            launched = _launch_requested_restart()
+            if self._restart_resume_role:
+                launched = _launch_requested_restart(resume_role=self._restart_resume_role)
+            else:
+                launched = _launch_requested_restart()
         elif self._candidate and self._update_requested:
             from rem_card.app.update_launcher import launch_unified_update
             launched = launch_unified_update(self._candidate, wait_for_parent=True)

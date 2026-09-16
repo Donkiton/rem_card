@@ -1185,7 +1185,7 @@ def _check_emergency_standby_expiry_uses_updated_at(temp_root: str) -> tuple[boo
     return True, "ok"
 
 
-def _check_emergency_standby_expired_pair_is_deleted(temp_root: str) -> tuple[bool, str]:
+def _check_emergency_standby_expired_pair_is_preserved(temp_root: str) -> tuple[bool, str]:
     from dataclasses import replace
 
     manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
@@ -1199,8 +1199,8 @@ def _check_emergency_standby_expired_pair_is_deleted(temp_root: str) -> tuple[bo
     if status.ok or status.status != "expired":
         return False, f"expired standby was not rejected: {status}"
     for path in (metadata.medical_db_path, metadata.settings_db_path):
-        if path and os.path.exists(path):
-            return False, f"expired standby file was not deleted: {path}"
+        if path and not os.path.isfile(path):
+            return False, f"expired standby file was deleted by validation: {path}"
     return True, "ok"
 
 

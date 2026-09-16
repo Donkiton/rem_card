@@ -21,6 +21,10 @@ def create_emergency_mode_button(panel):
     button.hide()
 
     def activate():
+        action = getattr(panel.window(), "request_emergency_mode_action", None)
+        if callable(action):
+            action()
+            return
         controller = getattr(panel.window(), "_emergency_workflow", None)
         if controller is not None:
             controller.begin_wait()

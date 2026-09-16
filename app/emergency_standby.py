@@ -83,6 +83,19 @@ class EmergencyStandbyRefreshResult:
     settings_validation: SnapshotValidationResult | None = None
 
 
+@dataclass(frozen=True)
+class StandbyAgeInfo:
+    """Возраст standby-копии, пригодный и для решения, и для сообщения пользователю."""
+
+    status: str
+    updated_at: datetime | None
+    age_seconds: float | None
+
+    @property
+    def is_valid(self) -> bool:
+        return self.status == "valid"
+
+
 def _parse_metadata_time(value: str | None) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -93,18 +106,39 @@ def _parse_metadata_time(value: str | None) -> datetime | None:
         return None
 
 
-def standby_metadata_age_seconds(metadata: EmergencyStandbyMetadata, *, now: datetime | None = None) -> float:
-    stamp = _parse_metadata_time(metadata.updated_at) or _parse_metadata_time(metadata.created_at)
+def standby_metadata_age_info(
+    metadata: EmergencyStandbyMetadata,
+    *,
+    now: datetime | None = None,
+) -> StandbyAgeInfo:
+    """Safely classify the standby update time without treating bad clocks as fresh data."""
+
+    updated_text = str(metadata.updated_at or "").strip()
+    created_text = str(metadata.created_at or "").strip()
+    stamp = _parse_metadata_time(updated_text) if updated_text else _parse_metadata_time(created_text)
     if stamp is None:
+        return StandbyAgeInfo("invalid_date", None, None)
+    try:
+        current = now
+        if current is None:
+            current = datetime.now(stamp.tzinfo) if stamp.tzinfo is not None else datetime.now()
+        elif stamp.tzinfo is not None and current.tzinfo is None:
+            current = current.replace(tzinfo=stamp.tzinfo)
+        elif stamp.tzinfo is None and current.tzinfo is not None:
+            current = current.replace(tzinfo=None)
+        age_seconds = (current - stamp).total_seconds()
+    except (OverflowError, TypeError, ValueError):
+        return StandbyAgeInfo("invalid_date", None, None)
+    if age_seconds < 0:
+        return StandbyAgeInfo("future_date", stamp, None)
+    return StandbyAgeInfo("valid", stamp, age_seconds)
+
+
+def standby_metadata_age_seconds(metadata: EmergencyStandbyMetadata, *, now: datetime | None = None) -> float:
+    age_info = standby_metadata_age_info(metadata, now=now)
+    if not age_info.is_valid or age_info.age_seconds is None:
         return float("inf")
-    current = now
-    if current is None:
-        current = datetime.now(stamp.tzinfo) if stamp.tzinfo is not None else datetime.now()
-    elif stamp.tzinfo is not None and current.tzinfo is None:
-        current = current.replace(tzinfo=stamp.tzinfo)
-    elif stamp.tzinfo is None and current.tzinfo is not None:
-        current = current.replace(tzinfo=None)
-    return max(0.0, (current - stamp).total_seconds())
+    return age_info.age_seconds
 
 
 def standby_metadata_expired(
@@ -113,7 +147,89 @@ def standby_metadata_expired(
     max_age_days: int | float = DEFAULT_STANDBY_MAX_AGE_DAYS,
     now: datetime | None = None,
 ) -> bool:
-    return standby_metadata_age_seconds(metadata, now=now) > float(max_age_days) * 86400.0
+    age_info = standby_metadata_age_info(metadata, now=now)
+    return bool(
+        age_info.is_valid
+        and age_info.age_seconds is not None
+        and age_info.age_seconds > float(max_age_days) * 86400.0
+    )
+
+
+def standby_known_change_gap(
+    metadata: EmergencyStandbyMetadata | None,
+    *,
+    last_observed_remote_change_id: int | None = None,
+) -> int | None:
+    """Return a known positive change-id gap, while ignoring incomplete observations."""
+
+    if metadata is None or last_observed_remote_change_id is None:
+        return None
+    try:
+        standby_change_id = int(metadata.remote_last_change_id)
+        observed_change_id = int(last_observed_remote_change_id)
+    except (TypeError, ValueError):
+        return None
+    gap = observed_change_id - standby_change_id
+    return gap if gap > 0 else None
+
+
+def _format_standby_age(age_seconds: float) -> str:
+    total_minutes = max(0, int(age_seconds // 60))
+    days, remainder = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(remainder, 60)
+    if days:
+        return f"{days} сут. {hours} ч."
+    if hours:
+        return f"{hours} ч. {minutes} мин."
+    return f"{minutes} мин."
+
+
+def standby_status_user_message(
+    status: EmergencyStandbyRefreshResult,
+    *,
+    last_observed_remote_change_id: int | None = None,
+    max_age_days: int | float = DEFAULT_STANDBY_MAX_AGE_DAYS,
+    now: datetime | None = None,
+) -> str:
+    """Build a shared Russian standby summary for startup and preflight dialogs."""
+
+    metadata = status.metadata
+    lines: list[str] = []
+    age_info = None if metadata is None else standby_metadata_age_info(metadata, now=now)
+    if age_info is None:
+        lines.append("Аварийная копия: не найдена." if status.status == "missing"
+                     else "Сведения об аварийной копии недоступны или повреждены.")
+    elif age_info.status == "invalid_date":
+        lines.append("Дата последнего обновления аварийной копии некорректна.")
+    elif age_info.status == "future_date":
+        stamp = age_info.updated_at.strftime("%d.%m.%Y %H:%M") if age_info.updated_at else "некорректна"
+        lines.append(f"Дата последнего обновления аварийной копии: {stamp} (в будущем).")
+    else:
+        lines.append(
+            "Последнее обновление аварийной копии: "
+            f"{age_info.updated_at.strftime('%d.%m.%Y %H:%M')}."
+        )
+        lines.append(f"Возраст аварийной копии: {_format_standby_age(age_info.age_seconds or 0)}")
+    lines.append(f"Допустимый возраст аварийной копии: {max_age_days:g} сут.")
+
+    if status.status == "expired":
+        lines.append("Состояние: срок актуальности аварийной копии истёк.")
+    elif status.status == "missing":
+        lines.append("Состояние: аварийная копия отсутствует.")
+    elif status.ok:
+        lines.append("Состояние: аварийная копия проверена.")
+    else:
+        lines.append("Состояние: аварийная копия не прошла проверку.")
+
+    gap = standby_known_change_gap(
+        metadata,
+        last_observed_remote_change_id=last_observed_remote_change_id,
+    )
+    if gap is not None and metadata is not None:
+        lines.append(
+            "Известное расхождение: в копии отсутствует часть последних изменений основной базы."
+        )
+    return "\n".join(lines)
 
 
 class EmergencyStandbyManager:
@@ -294,13 +410,28 @@ class EmergencyStandbyManager:
         try:
             metadata = self.store.read_standby_metadata()
         except EmergencyMetadataError as exc:
-            return EmergencyStandbyRefreshResult(ok=False, status="metadata_error", reason=str(exc))
+            status = "missing" if "не найдена" in str(exc).lower() else "metadata_error"
+            return EmergencyStandbyRefreshResult(ok=False, status=status, reason=str(exc))
+        age_info = standby_metadata_age_info(metadata)
+        if age_info.status == "invalid_date":
+            return EmergencyStandbyRefreshResult(
+                ok=False,
+                status="invalid",
+                reason="standby updated_at is invalid",
+                metadata=metadata,
+            )
+        if age_info.status == "future_date":
+            return EmergencyStandbyRefreshResult(
+                ok=False,
+                status="invalid",
+                reason="standby updated_at is in the future",
+                metadata=metadata,
+            )
         if standby_metadata_expired(metadata):
-            removed = self.store.delete_standby_files(metadata)
             return EmergencyStandbyRefreshResult(
                 ok=False,
                 status="expired",
-                reason=f"standby is older than {DEFAULT_STANDBY_MAX_AGE_DAYS} days; removed_files={removed}",
+                reason=f"standby is older than {DEFAULT_STANDBY_MAX_AGE_DAYS} days",
                 metadata=metadata,
             )
 
@@ -402,6 +533,8 @@ class EmergencyStandbyManager:
             return False
         metadata = self.store.get_latest_valid_standby()
         if metadata is None:
+            return True
+        if not standby_metadata_age_info(metadata).is_valid:
             return True
         if standby_metadata_expired(metadata):
             return True

@@ -558,7 +558,6 @@ class MainWindow(QMainWindow):
 
         from rem_card.app.runtime_outage import (
             build_runtime_outage_dialog_message,
-            launch_emergency_restart,
             write_runtime_outage_startup_request,
         )
         from rem_card.services.settings.settings_service import reset_settings_service
@@ -611,7 +610,7 @@ class MainWindow(QMainWindow):
             if not emergency_session_ready:
                 self.close()
                 return
-            launched = launch_emergency_restart(marker_path, role="nurse")
+            launched = self._launch_runtime_emergency_restart(marker_path)
             if not launched:
                 CustomMessageBox.warning(
                     None,
@@ -822,16 +821,28 @@ class MainWindow(QMainWindow):
                 result.user_message or "Перенос не выполнен. Локальные данные сохранены. Повторите позже.",
             )
 
+    def _launch_runtime_emergency_restart(self, marker_path: str) -> bool:
+        from rem_card.app.runtime_outage import launch_emergency_restart
+        return launch_emergency_restart(marker_path, role="nurse")
+
     def _prepare_runtime_outage_emergency_session(self, marker_payload: dict) -> bool:
         try:
             from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
             from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-            decision = prepare_emergency_startup("nurse")
+            decision = prepare_emergency_startup(
+                "nurse", last_observed_remote_change_id=marker_payload.get("last_observed_remote_change_id"),
+            )
             if not decision.allowed:
                 CustomMessageBox.warning(None, "Аварийный режим недоступен", decision.user_message)
                 return False
             if decision.active_session_metadata is None:
+                from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog
+                if not EmergencyActionDialog.ask(
+                    None, "Проверка аварийной копии", decision.user_message,
+                    [("Ввести аварийный пароль", 1), ("Отмена", 0)],
+                ):
+                    return False
                 if not self._confirm_emergency_password_for_transition(str(decision.password_settings_db_path or "")):
                     return False
             start_or_resume_emergency_session(decision, startup_request=marker_payload)

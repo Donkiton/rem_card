@@ -67,6 +67,7 @@ def _parse_args(argv=None):
     parser = _GuiSafeArgumentParser()
     parser.add_argument("--restart-after-pid", type=int, default=0)
     parser.add_argument("--role", default=None)  # Accepted legacy restart hint; always show chooser.
+    parser.add_argument("--resume-role", choices=("doctor", "nurse"), default=None, help=argparse.SUPPRESS)
     parser.add_argument("--emergency-startup-request", default="", help=argparse.SUPPRESS)
     parser.add_argument("--compiled-smoke", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -124,6 +125,7 @@ def main(argv=None):
     startup_request = build_startup_request(
         role=args.role,
         emergency_startup_request=args.emergency_startup_request,
+        resume_role=getattr(args, "resume_role", None),
     )
     attach_startup_request(window, startup_request)
     _connect_single_instance_requests(server, window, Qt, QTimer, logger)

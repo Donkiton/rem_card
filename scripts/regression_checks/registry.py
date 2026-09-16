@@ -282,7 +282,7 @@ def get_checks() -> list[RegressionCheck]:
         RegressionCheck('emergency_standby_should_not_refresh_when_current', emergency_standby._check_emergency_standby_should_not_refresh_when_current),
         RegressionCheck('emergency_standby_should_refresh_when_expired', emergency_standby._check_emergency_standby_should_refresh_when_expired),
         RegressionCheck('emergency_standby_expiry_uses_updated_at', emergency_standby._check_emergency_standby_expiry_uses_updated_at),
-        RegressionCheck('emergency_standby_expired_pair_is_deleted', emergency_standby._check_emergency_standby_expired_pair_is_deleted),
+        RegressionCheck('emergency_standby_expired_pair_is_preserved', emergency_standby._check_emergency_standby_expired_pair_is_preserved),
         RegressionCheck('emergency_standby_unavailable_source_does_not_trigger_recovery', emergency_standby._check_emergency_standby_unavailable_source_does_not_trigger_recovery),
         RegressionCheck('emergency_standby_no_empty_db_creation', emergency_standby._check_emergency_standby_no_empty_db_creation),
         RegressionCheck('emergency_standby_pair_is_consistent', emergency_standby._check_emergency_standby_pair_is_consistent),

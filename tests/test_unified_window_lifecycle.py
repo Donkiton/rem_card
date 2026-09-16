@@ -23,6 +23,7 @@ def shell(tmp_path, monkeypatch):
     window._workers.clear()
     window._exit_update_checked = True
     window._candidate = None
+    window._restart = window._pending_exit = False
     window.close()
     window.deleteLater()
     app.processEvents()
@@ -439,7 +440,7 @@ def test_partial_central_owner_never_starts_local_fallback(shell, monkeypatch):
     assert not shell._local_only
 
 
-def test_leaving_local_storage_restarts_before_central_can_be_opened(shell, monkeypatch):
+def test_leaving_local_storage_keeps_chooser_but_blocks_central_bootstrap(shell, monkeypatch):
     calls = []
     shell._local_only = True
     shell._leaving = True
@@ -448,9 +449,10 @@ def test_leaving_local_storage_restarts_before_central_can_be_opened(shell, monk
     monkeypatch.setattr(shell, '_role_threads_running', lambda: False)
     monkeypatch.setattr(shell, 'close', lambda: calls.append('close'))
     shell._drained({'ok': True})
-    assert calls == ['release', 'close']
+    assert calls == ['release']
     assert shell._requires_fresh_runtime
-    assert shell._restart
+    assert not shell._restart
+    assert shell.stack.currentWidget() is shell.welcome
     assert shell._suppress_exit_update
 
 
@@ -501,9 +503,8 @@ def test_cancel_close_does_not_leave_pending_exit(shell, monkeypatch):
     shell.container = object()
     shell._pending_exit = True
     shell._restart = True
-    from rem_card.ui.shared.custom_message_box import CustomMessageBox
-    monkeypatch.setattr(CustomMessageBox, 'exec', lambda *a, **k: QMessageBox.No)
     shell.request_role_exit()
+    shell._role_exit_dialog.done(QMessageBox.No)
     assert not shell._pending_exit
     assert not shell._restart
     assert not shell._leaving
@@ -515,6 +516,82 @@ def test_unknown_access_forces_role_out(shell, monkeypatch):
     monkeypatch.setattr(shell, 'request_role_exit', lambda force=False: calls.append(force))
     shell._access_received(state('unknown', None))
     assert calls == [True]
+
+
+@pytest.mark.parametrize('role', ['doctor', 'nurse'])
+def test_network_access_loss_routes_to_outage_handler(shell, monkeypatch, role):
+    calls = []
+    shell.role = role
+    shell.container = SimpleNamespace(data_service=SimpleNamespace(
+        _handle_database_access_failure=lambda exc, **kwargs: calls.append((exc, kwargs))))
+    monkeypatch.setattr(shell, 'request_role_exit', lambda **kw: pytest.fail('bypassed outage dialog'))
+    shell._access_received(dict(state='unknown', generation=None, error='root_unavailable'))
+    assert shell._central_unavailable
+    assert len(calls) == 1 and calls[0][1]['source'] == 'unified_access'
+    assert shell.welcome.role_buttons['nurse'].isEnabled()
+
+
+@pytest.mark.parametrize('role,exit_expected', [('doctor', False), ('nurse', True)])
+def test_outage_doctor_returns_to_chooser_nurse_finishes_restart(shell, monkeypatch, role, exit_expected):
+    calls = []
+    shell.role = role
+    monkeypatch.setattr(shell, 'request_role_exit', lambda **kw: calls.append(kw))
+    shell._finish_runtime_outage()
+    assert shell._pending_exit is exit_expected
+    assert shell._central_unavailable and shell._suppress_exit_update
+    assert calls == [{'force': True}]
+
+
+def test_offline_initialization_dispatches_emergency_continuation(shell, monkeypatch):
+    from rem_card.app.unified_runtime import CentralUnavailable
+    from rem_card.app.unified_preflight import attach_startup_request, build_startup_request
+    calls = []
+    attach_startup_request(shell, build_startup_request(role='nurse', emergency_startup_request='request.json'))
+    monkeypatch.setattr(shell, 'enter_role', calls.append)
+    monkeypatch.setattr(shell, '_check_updates', lambda: None)
+    shell._initial_incompatible(CentralUnavailable('Нет сети'))
+    QApplication.processEvents()
+    assert calls == ['nurse']
+    shell._dispatch_startup_role()
+    QApplication.processEvents()
+    assert calls == ['nurse']
+
+
+def test_clean_process_restart_keeps_selected_role(shell, monkeypatch, tmp_path):
+    calls = []
+    shell.root = str(tmp_path)
+    shell._requires_fresh_runtime = True
+    monkeypatch.setattr(shell, '_restart_for_storage_boundary', lambda: calls.append(shell._restart_resume_role))
+    shell.enter_role('nurse')
+    assert calls == ['nurse']
+
+
+@pytest.mark.parametrize('status', ['role_not_allowed', 'no_valid_standby', 'local_snapshot_central_mismatch'])
+def test_rejected_offline_entry_explains_reason_and_keeps_chooser(shell, monkeypatch, status):
+    from rem_card.app.unified_preflight import LocalOnlyStartupError
+    messages = []
+    shell._central_unavailable = True
+    monkeypatch.setattr(QMessageBox, 'warning', lambda parent, title, message: messages.append(message))
+    shell._admitted_failed(LocalOnlyStartupError('Копия недоступна: причина', status=status))
+    assert messages == ['Копия недоступна: причина']
+    assert shell.stack.currentWidget() is shell.welcome
+    assert shell.welcome.role_buttons['nurse'].isEnabled()
+
+
+def test_reconnect_preserves_role_and_drains_before_restart(shell, monkeypatch):
+    calls = []
+    shell.role = 'doctor'
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.Yes)
+    monkeypatch.setattr(shell, 'request_role_exit', lambda **kw: calls.append(kw))
+    shell._request_emergency_reconnect()
+    assert calls == [{'force': True}]
+    assert shell._restart_resume_role == 'doctor'
+
+
+def test_network_access_loss_does_not_clear_known_incompatibility(shell):
+    shell._compatibility_error = 'Требуется обновление RemCard'
+    shell._access_received(dict(state='unknown', generation=None, error='root_unavailable'))
+    assert not shell.welcome.role_buttons['nurse'].isEnabled()
 
 
 class _Lease:
@@ -662,3 +739,68 @@ def test_maintenance_is_embedded_in_control_center(shell, monkeypatch):
     shell.open_maintenance(center)
     shell._control_page.btn_back.click()
     assert center.settings_content_stack.currentWidget() is center.settings_categories[0]['page']
+
+
+def test_local_role_reentry_never_acquires_central_lease(shell, monkeypatch, tmp_path):
+    shell.root = str(tmp_path)
+    shell._requires_fresh_runtime = True
+    shell._local_runtime_roles = frozenset({'doctor', 'nurse'})
+    calls = []
+    monkeypatch.setattr(shell, '_admission_failed', lambda exc: calls.append(shell.role))
+    monkeypatch.setattr(shell, '_async', lambda *a: pytest.fail('central access in pinned process'))
+    monkeypatch.setattr(shell, '_restart_for_storage_boundary', lambda: pytest.fail('unnecessary restart'))
+    shell.enter_role('nurse')
+    assert calls == ['nurse']
+
+
+def test_role_exit_confirmation_is_single_and_nonblocking(shell, monkeypatch):
+    shell.container = object()
+    shell.request_role_exit()
+    dialog = shell._role_exit_dialog
+    shell.request_role_exit()
+    assert shell._role_exit_dialog is dialog
+    calls = []
+    monkeypatch.setattr(shell, 'request_role_exit', lambda force=False: calls.append(force))
+    dialog.done(QMessageBox.Yes)
+    assert calls == [True]
+    assert shell._role_exit_dialog is None
+
+
+def test_stale_role_exit_confirmation_cannot_close_new_session(shell, monkeypatch):
+    shell.container = object()
+    shell.session_id = 'old'
+    shell.request_role_exit()
+    dialog = shell._role_exit_dialog
+    shell.session_id = 'new'
+    calls = []
+    monkeypatch.setattr(shell, 'request_role_exit', lambda force=False: calls.append(force))
+    dialog.done(QMessageBox.Yes)
+    assert calls == []
+
+
+def test_emergency_restart_is_requested_before_drain(shell, monkeypatch):
+    shell.role = 'nurse'
+    calls = []
+    monkeypatch.setattr(shell, 'request_role_exit', lambda force=False: calls.append((force, shell._restart, shell._pending_exit)))
+    shell._restart_emergency_to_network()
+    assert calls == [(True, True, True)]
+    assert shell._restart_resume_role == 'nurse'
+
+
+def test_local_emergency_button_requests_reconnect(shell, monkeypatch):
+    shell._local_only = True
+    calls = []
+    monkeypatch.setattr(shell, '_request_emergency_reconnect', lambda: calls.append('reconnect'))
+    shell.request_emergency_mode_action()
+    assert calls == ['reconnect']
+
+
+def test_failed_local_writes_remain_visible_on_chooser(shell, monkeypatch):
+    shell._local_only = True
+    shell._leaving = True
+    data = SimpleNamespace(write_outcomes=lambda: [{'state': 'failed'}])
+    shell._shutdown = SimpleNamespace(containers=[SimpleNamespace(data_service=data)])
+    monkeypatch.setattr(shell, '_role_threads_running', lambda: False)
+    shell._drained({'ok': True})
+    assert 'Не выполнено сохранений: 1' in shell.welcome._access_message
+    assert 'сессия сохранена' not in shell.welcome._access_message

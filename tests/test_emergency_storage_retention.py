@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -20,7 +21,12 @@ from rem_card.app.emergency_paths import (
     standby_generation_settings_db_path,
     standby_metadata_path,
 )
-from rem_card.app.emergency_standby import EmergencyStandbyManager
+from rem_card.app.emergency_standby import (
+    DEFAULT_STANDBY_MAX_AGE_DAYS,
+    EmergencyStandbyManager,
+    EmergencyStandbyRefreshResult,
+    standby_status_user_message,
+)
 from rem_card.app.emergency_store import EmergencyLocalStore
 
 
@@ -202,3 +208,78 @@ def test_temp_cleanup_waits_twenty_four_hours(tmp_path):
     assert removed == 1
     assert not old_staging.exists()
     assert fresh_staging.exists()
+
+
+def test_expired_standby_validation_keeps_metadata_and_generation(tmp_path):
+    manager = _manager(tmp_path)
+    metadata = _generation(tmp_path, "gen_expired")
+    expired = replace(
+        metadata,
+        updated_at=(datetime.now() - timedelta(days=DEFAULT_STANDBY_MAX_AGE_DAYS + 1)).isoformat(),
+    )
+    manager.store.write_standby_metadata(expired)
+
+    result = manager.validate_standby()
+
+    assert result.status == "expired"
+    assert not result.ok
+    assert result.metadata == expired
+    assert Path(standby_metadata_path(str(tmp_path))).is_file()
+    assert Path(expired.generation_dir).is_dir()
+    assert Path(expired.medical_db_path).is_file()
+    assert Path(expired.settings_db_path).is_file()
+
+
+def test_invalid_or_future_standby_date_is_rejected_without_deletion(tmp_path):
+    manager = _manager(tmp_path)
+    metadata = _generation(tmp_path, "gen_bad_date")
+    for updated_at, expected_reason in (
+        ("not-a-date", "invalid"),
+        ((datetime.now() + timedelta(hours=1)).isoformat(), "future"),
+    ):
+        candidate = replace(metadata, updated_at=updated_at)
+        manager.store.write_standby_metadata(candidate)
+
+        result = manager.validate_standby()
+
+        assert result.status == "invalid"
+        assert expected_reason in result.reason
+        assert Path(standby_metadata_path(str(tmp_path))).is_file()
+        assert Path(candidate.generation_dir).is_dir()
+
+
+def test_standby_status_message_reports_age_limit_state_and_known_gap(tmp_path):
+    metadata = _generation(tmp_path, "gen_message")
+    updated_at = datetime(2026, 9, 10, 8, 30)
+    metadata = replace(metadata, updated_at=updated_at.isoformat(), remote_last_change_id=17)
+    status = EmergencyStandbyRefreshResult(
+        ok=False,
+        status="expired",
+        reason="standby is older than 3 days",
+        metadata=metadata,
+    )
+
+    message = standby_status_user_message(
+        status,
+        last_observed_remote_change_id=20,
+        now=datetime(2026, 9, 16, 8, 30),
+    )
+
+    assert "10.09.2026 08:30" in message
+    assert "Возраст аварийной копии: 6 сут. 0 ч." in message
+    assert "Допустимый возраст аварийной копии: 3 сут." in message
+    assert "срок актуальности аварийной копии истёк" in message
+    assert "в копии отсутствует часть последних изменений" in message
+
+
+def test_standby_status_message_distinguishes_missing_and_invalid_date(tmp_path):
+    missing = standby_status_user_message(
+        EmergencyStandbyRefreshResult(False, "missing", "metadata is missing"),
+    )
+    metadata = replace(_generation(tmp_path, "gen_invalid_message"), updated_at="not-a-date")
+    invalid = standby_status_user_message(
+        EmergencyStandbyRefreshResult(False, "invalid", "bad date", metadata=metadata),
+    )
+
+    assert "аварийная копия отсутствует" in missing
+    assert "Дата последнего обновления аварийной копии некорректна" in invalid

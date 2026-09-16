@@ -660,7 +660,7 @@ def _wait_for_restart_parent(parent_pid: int, *, timeout_sec: float = 45.0) -> b
     return False
 
 
-def _launch_requested_restart() -> bool:
+def _launch_requested_restart(*, resume_role: str | None = None) -> bool:
     """Перезапускает тот же entrypoint после полного выхода текущего процесса."""
     try:
         from rem_card.app.process_launch import popen_hidden
@@ -678,13 +678,23 @@ def _launch_requested_restart() -> bool:
                 os.environ.pop("REMCARD_BAZA_DIR", None)
                 os.environ.pop(DEV_RUNTIME_BAZA_PIN_ENV, None)
                 os.environ.pop(DEV_EXISTING_BAZA_ONLY_ENV, None)
+            restart_args = []
+            inherited_args = iter(str(arg) for arg in sys.argv[1:])
+            one_shot_flags = {"--restart-after-pid", "--resume-role", "--emergency-startup-request"}
+            for arg in inherited_args:
+                if arg in one_shot_flags:
+                    next(inherited_args, None)
+                elif arg.split("=", 1)[0] not in one_shot_flags:
+                    restart_args.append(arg)
             command = [
                 sys.executable,
                 os.path.abspath(sys.argv[0]),
-                *[str(arg) for arg in sys.argv[1:]],
+                *restart_args,
                 "--restart-after-pid",
                 str(os.getpid()),
             ]
+        if resume_role in {"doctor", "nurse"}:
+            command.extend(["--resume-role", resume_role])
         popen_hidden(command, cwd=os.getcwd())
         return True
     except Exception as exc:

@@ -401,12 +401,19 @@ function Show-TestStatus {
                 $snapshotsExist) {
                 $updatedText = [string]$standby.updated_at
                 try {
-                    $updatedText = ([datetimeoffset]::Parse($updatedText)).ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss")
+                    $stamp = [datetimeoffset]::Parse($updatedText)
+                    $age = [datetimeoffset]::Now - $stamp
+                    $updatedText = $stamp.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss")
+                    if ($age.TotalDays -gt 3 -or $age.TotalSeconds -lt 0) {
+                        Write-StatusValue "Резерв для аварии" "Не готов: дата $updatedText; предел 3 суток, будущая дата запрещена" Red
+                    }
+                    else {
+                        Write-StatusValue "Резерв для аварии" "Файлы есть; обновлён $updatedText. Полная проверка выполняется при входе." Green
+                    }
                 }
                 catch {
-                    # Если формат времени новый, показываем исходное значение без потери статуса.
+                    Write-StatusValue "Резерв для аварии" "Не готов: некорректная дата обновления" Red
                 }
-                Write-StatusValue "Резерв для аварии" "Готов; обновлён $updatedText" Green
             }
             elseif (-not $snapshotsExist) {
                 Write-StatusValue "Резерв для аварии" "Не готов: нет обоих файлов резерва" Red
@@ -447,6 +454,7 @@ function Show-Menu {
         Clear-Host
         Write-Host "RemCard — изолированная проверка аварийного режима" -ForegroundColor Cyan
         Write-Host "Только синтетические данные из этой папки."
+        Write-Host "Роли: врач, медсестра, плановый и экстренный оперблок."
         Write-Host "Сначала выберите 1, затем запускайте RemCard. Сеть сама не восстанавливается."
         Show-TestStatus
         Write-Host "1  Подключить / восстановить тестовую сеть"

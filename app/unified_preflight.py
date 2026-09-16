@@ -7,8 +7,9 @@ That lease is the maintenance admission proof and replaces the legacy
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
+from pathlib import Path
 import sys
 import threading
 from types import SimpleNamespace
@@ -78,9 +79,12 @@ class UnifiedStartupRequest:
 
     role: str | None = None
     emergency_startup_request: str = ""
+    resume_role: str | None = None
 
     @property
     def emergency_role(self) -> str | None:
+        if self.resume_role in _EMERGENCY_ROLES:
+            return self.resume_role
         if self.emergency_startup_request and self.role in _EMERGENCY_ROLES:
             return self.role
         return None
@@ -90,12 +94,15 @@ def build_startup_request(
     *,
     role: str | None = None,
     emergency_startup_request: str | None = None,
+    resume_role: str | None = None,
 ) -> UnifiedStartupRequest:
     role_key = str(role or "").strip().casefold() or None
     marker_path = str(emergency_startup_request or "").strip()
     if marker_path and role_key not in _EMERGENCY_ROLES:
         raise ValueError("Emergency startup request requires the doctor or nurse role")
-    return UnifiedStartupRequest(role=role_key, emergency_startup_request=marker_path)
+    if resume_role is not None and resume_role not in _EMERGENCY_ROLES:
+        raise ValueError("Unsupported resume role")
+    return UnifiedStartupRequest(role=role_key, emergency_startup_request=marker_path, resume_role=resume_role)
 
 
 def attach_startup_request(shell: Any, request: UnifiedStartupRequest) -> None:
@@ -147,9 +154,7 @@ def _require_central_admission(central_lease: Any, role: str) -> None:
         raise RuntimeError("Central SessionLease does not identify its maintenance root")
     from rem_card.app.runtime_paths import resolve_baza_dir
 
-    configured_root = os.path.normcase(os.path.abspath(resolve_baza_dir()))
-    protected_root = os.path.normcase(os.path.abspath(str(lease_root)))
-    if protected_root != configured_root:
+    if not _same_path(lease_root, resolve_baza_dir()):
         raise RuntimeError("Central SessionLease does not protect the configured database root")
 
 
@@ -244,7 +249,8 @@ _LOCAL_CONTEXT_PATH_FIELDS = (
 
 
 def _normalized_path(path: str | os.PathLike[str]) -> str:
-    return os.path.abspath(os.path.normpath(str(path)))
+    # Path canonicalizes a UNC share root's trailing separator without I/O.
+    return str(Path(os.path.abspath(os.path.normpath(str(path)))))
 
 
 def _same_path(first: str | os.PathLike[str], second: str | os.PathLike[str]) -> bool:
@@ -445,7 +451,7 @@ def _prepare_local_only_emergency_decision(role: str, local_root: str):
             role=role,
             allowed=False,
             status="no_valid_standby",
-            user_message=startup.NO_VALID_STANDBY_MESSAGE,
+            user_message=startup._startup_message_with_standby_status(startup.NO_VALID_STANDBY_MESSAGE, standby_status),
             root=local_root,
             technical_reason=reason,
         )
@@ -462,7 +468,9 @@ def _prepare_local_only_emergency_decision(role: str, local_root: str):
             role=role,
             allowed=False,
             status="no_valid_standby",
-            user_message=startup.NO_VALID_STANDBY_MESSAGE,
+            user_message=startup._startup_message_with_standby_status(
+                startup.NO_VALID_STANDBY_MESSAGE,
+                replace(standby_status, ok=False, status="invalid", reason=metadata_reason)),
             root=local_root,
             technical_reason=metadata_reason,
         )
@@ -474,7 +482,9 @@ def _prepare_local_only_emergency_decision(role: str, local_root: str):
             role=role,
             allowed=False,
             status="no_valid_standby",
-            user_message=startup.NO_VALID_STANDBY_MESSAGE,
+            user_message=startup._startup_message_with_standby_status(
+                startup.NO_VALID_STANDBY_MESSAGE,
+                replace(standby_status, ok=False, status="invalid", reason=source_error)),
             root=local_root,
             technical_reason=source_error,
         )
@@ -482,7 +492,7 @@ def _prepare_local_only_emergency_decision(role: str, local_root: str):
         role=role,
         allowed=True,
         status="standby_available",
-        user_message=startup.NURSE_EMERGENCY_OFFER_MESSAGE,
+        user_message=startup._startup_message_with_standby_status(startup.NURSE_EMERGENCY_OFFER_MESSAGE, standby_status),
         root=local_root,
         password_settings_db_path=str(standby_status.metadata.settings_db_path or ""),
         standby_metadata=standby_status.metadata,
@@ -508,6 +518,7 @@ def prepare_local_only_runtime_context(
     central_failure: str,
     confirm_startup: Callable[[str, str], bool] | None = None,
     confirm_password: Callable[[str], bool] | None = None,
+    restart_after_activation: bool = False,
 ) -> LocalOnlyRuntimeAdmission:
     """Prepare an explicitly confirmed local runtime without probing central.
 
@@ -542,10 +553,7 @@ def prepare_local_only_runtime_context(
         from rem_card.app.emergency_paths import resolve_emergency_root
         from rem_card.app.emergency_startup import start_or_resume_emergency_session
 
-        local_root = require_fresh_local_only_import_state(
-            role=role_key,
-            local_root=resolve_emergency_root(),
-        )
+        local_root = _require_local_fixed_root(resolve_emergency_root())
         if _same_path(local_root, central_identity):
             raise LocalOnlyStartupError(
                 "Аварийный каталог совпадает с основной базой.",
@@ -575,6 +583,14 @@ def prepare_local_only_runtime_context(
             session = start_or_resume_emergency_session(decision, root=local_root)
             runtime_context = session.runtime_context
             _validate_local_runtime_context(role=role_key, runtime_context=runtime_context, local_root=local_root)
+            # Validate/authorize the local copy before requesting a clean process.
+            # The persisted session survives the restart and never needs a second password.
+            require_fresh_local_only_import_state(role=role_key, local_root=local_root)
+            if restart_after_activation and decision.active_session_metadata is None:
+                raise LocalOnlyRestartRequired(
+                    "Аварийная сессия подготовлена. RemCard будет перезапущена.",
+                    local_root=local_root, loaded_roots={},
+                )
         except BaseException:
             lease.release()
             raise

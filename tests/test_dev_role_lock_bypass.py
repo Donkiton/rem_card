@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+import pytest
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -202,6 +203,30 @@ def test_add_patient_mutex_exposes_owner_role(monkeypatch, tmp_path):
         assert nurse_lock.holder_owner_role() == "doctor"
     finally:
         doctor_lock.release()
+
+
+@pytest.mark.parametrize('compiled', [True, False])
+def test_emergency_patient_mutex_uses_same_local_runtime_for_both_roles(monkeypatch, tmp_path, compiled):
+    from types import SimpleNamespace
+    from rem_card.ui.doctor_view import doctor_remcard_widget as doctor
+    from rem_card.ui.nurse_view import nurse_main_widget as nurse
+
+    monkeypatch.setattr(runtime_paths, 'is_compiled', lambda: compiled)
+    monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'appdata'))
+    for module in (doctor, nurse):
+        monkeypatch.setattr(module, 'get_role_lock_path', lambda key: str(tmp_path / 'central' / (key + '.lock')))
+    runtime = SimpleNamespace(mode='emergency', session_locks_dir=str(tmp_path / 'active' / 'locks'))
+    widget = SimpleNamespace(patient_service=SimpleNamespace(data_service=SimpleNamespace(db=SimpleNamespace(runtime_context=runtime))))
+    first = doctor.DoctorRemCardWidget._build_add_patient_lock(widget)
+    second = nurse.NurseMainWidget._build_add_patient_lock(widget)
+    expected = os.path.join(runtime.session_locks_dir, doctor.ADD_PATIENT_LOCK_KEY + '.lock')
+    assert first.lock_path == second.lock_path == expected
+    try:
+        assert first.acquire()
+        assert not second.acquire()
+    finally:
+        first.release()
+    assert not (tmp_path / 'central').exists()
 
 
 def test_dev_emergency_probe_does_not_create_network_role_marker(monkeypatch):
