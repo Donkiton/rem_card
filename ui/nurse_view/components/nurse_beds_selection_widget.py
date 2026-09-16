@@ -146,7 +146,7 @@ class NurseBedsSelectionWidget(QWidget):
         set_widget_style(self.container, "QWidget#beds_container { background: transparent; }")
         
         self.list_layout = QVBoxLayout(self.container)
-        self.list_layout.setContentsMargins(0, 0, 3, 0)
+        self.list_layout.setContentsMargins(0, 0, 0, 0)
         self.list_layout.setSpacing(5) 
         self.list_layout.setAlignment(Qt.AlignTop) 
         
@@ -155,6 +155,9 @@ class NurseBedsSelectionWidget(QWidget):
 
     def paintEvent(self, event):
         super().paintEvent(event)
+        from rem_card.ui.shared.workspace_background import FIXED_WORKSPACE_BACKGROUND
+        if FIXED_WORKSPACE_BACKGROUND:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 

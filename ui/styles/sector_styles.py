@@ -58,6 +58,7 @@ def build_remcard_current_time_label_style(tokens: dict[str, str]) -> str:
 def build_remcard_tab_frame_style(tokens: dict[str, str]) -> str:
     t = lambda key, default="": token(tokens, key, default)
     return f"""
+        QFrame#remcard_tabs_frame {{
         background: {t("surface.window")};
         border-left: {t("border.width")} solid {t("sector.border")};
         border-right: {t("border.width")} solid {t("sector.border")};
@@ -65,6 +66,7 @@ def build_remcard_tab_frame_style(tokens: dict[str, str]) -> str:
         border-top: none;
         border-bottom-left-radius: {t("radius.dialog")};
         border-bottom-right-radius: {t("radius.dialog")};
+        }}
     """
 
 

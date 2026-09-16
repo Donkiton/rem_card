@@ -39,6 +39,7 @@ class ProceduresPanel(QWidget):
 
         frame = QFrame()
         frame.setObjectName("procedures_frame")
+        frame.setProperty("primaryClinicalSurface", True)
         set_widget_style(frame, """
             QFrame#procedures_frame {
                 border: none;

@@ -79,7 +79,7 @@ class AdminMainWidget(QWidget):
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
         # Совпадает с внешней геометрией архива и соседнего сектора W1a.
-        main_layout.setContentsMargins(self._left_outer_margin, 5, 5, 4)
+        main_layout.setContentsMargins(self._left_outer_margin, 5, 1, 4)
         main_layout.setSpacing(0)
 
         self.surface_frame = QFrame(self)
@@ -810,10 +810,10 @@ class AdminMainWidget(QWidget):
 
     def _ensure_background_settings_page(self):
         if self.background_settings_dialog is None:
-            from .background_settings_dialog import BackgroundSettingsDialog
+            from .workspace_background_settings_dialog import WorkspaceBackgroundSettingsDialog
             from .dictionary_page_chrome import prepare_embedded_settings_page
 
-            self.background_settings_dialog = BackgroundSettingsDialog(parent=self)
+            self.background_settings_dialog = WorkspaceBackgroundSettingsDialog(parent=self)
             prepare_embedded_settings_page(
                 self.background_settings_dialog,
                 title="Фон приложения",

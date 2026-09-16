@@ -435,9 +435,10 @@ class SettingsService:
         return self._current_startup_role() not in {"doctor", "nurse"}
 
     def _should_repair_backgrounds_on_startup(self) -> bool:
-        # В интерфейсе оперблока фон отсутствует. Его старт не должен ни читать
-        # ui_backgrounds, ни проверять файлы общего каталога backgrounds.
-        return self._current_startup_role() != "operblock"
+        # Workspace v2 uses paired files and a local cache in every role.
+        # Do not repair or warm up the unused legacy backgrounds on startup.
+        # Explicit legacy export/migration operations remain available.
+        return False
 
     @staticmethod
     def _is_settings_startup_write_busy(exc: Exception) -> bool:

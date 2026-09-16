@@ -2478,7 +2478,12 @@ def _check_background_release_preserves_user_settings(temp_root: str) -> tuple[b
         )
     restarted = SettingsService(SettingsDatabase(baza_dir=repair_baza))
     repair_info = restarted.ensure_ready()
-    repair_report = repair_info.get("background_settings_repair") or {}
+    if repair_info.get("background_settings_repair"):
+        return False, "workspace v2 startup must not repair unused legacy backgrounds"
+    # Explicit legacy recovery still preserves user data; workspace v2 no
+    # longer invokes it (or old media warmup) on every application startup.
+    repair_report = restarted._repair_background_settings_from_rows() or {}
+    restarted.invalidate_cache(BACKGROUND_SETTINGS_KEY)
     if int(repair_report.get("restored_rows") or 0) < 1:
         return False, f"background repair did not restore missing rows: {repair_info}"
     repaired_payload = restarted.get_app_setting("shared", "background_settings", default={})

@@ -396,6 +396,7 @@ class SectorIvl(BaseSectorWidget):
     def _build_ui(self):
         main_frame = QFrame()
         main_frame.setObjectName("ivl_screen")
+        main_frame.setProperty("primaryClinicalSurface", True)
         main_frame.setAttribute(Qt.WA_StyledBackground, True)
         main_frame.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         set_widget_style(main_frame, """
@@ -466,7 +467,7 @@ class SectorIvl(BaseSectorWidget):
             QLabel#ivl_stat_icon {
                 background-color: #eaf5ff;
                 color: #147ad6;
-                border-radius: 19px;
+                border-radius: 7px;
                 font-size: 17px;
                 font-weight: 800;
             }
@@ -1031,6 +1032,7 @@ class SectorIvl(BaseSectorWidget):
 
         scroll_area = QScrollArea()
         scroll_area.setObjectName("ivl_scroll_area")
+        scroll_area.setProperty("primaryClinicalSurface", True)
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1039,6 +1041,9 @@ class SectorIvl(BaseSectorWidget):
         scroll_area.setMinimumSize(0, 0)
         set_widget_style(scroll_area, source_style(main_frame))
         scroll_area.setWidget(main_frame)
+        # The scroll viewport must not paint an opaque layer under the title.
+        scroll_area.viewport().setAutoFillBackground(False)
+        main_frame.setAutoFillBackground(False)
 
         self.set_content(scroll_area)
         self._populate_event_types(self.PRESTART_EVENT_CODES)

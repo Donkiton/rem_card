@@ -309,6 +309,14 @@ DARK_MEDICAL_TOKENS = {
 }
 
 
+# Preserve the familiar clinical hues; reduce RGB intensity by 30% in dark mode.
+for _key, _value in BASE_MEDICAL_TOKENS.items():
+    if _key.startswith("medical.vital."):
+        DARK_MEDICAL_TOKENS[_key] = "#" + "".join(
+            f"{round(int(_value[i:i + 2], 16) * .7):02x}" for i in (1, 3, 5)
+        )
+
+
 def build_tokens(preset_id: str | None = None, mode: str | None = None, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     preset = get_preset(preset_id)
     normalized_mode = normalize_mode(mode or preset.default_mode or DEFAULT_MODE)

@@ -1,3 +1,4 @@
+from rem_card.ui.shared.workspace_background import workspace_surface_style
 from rem_card.ui.styles.theme_runtime import set_widget_style
 import time
 from datetime import datetime, timedelta
@@ -54,9 +55,11 @@ class SectorW1a(BaseSectorWidget):
         role: str | None = "doctor",
         *,
         auto_initial_refresh: bool = True,
+        preparing: bool = False,
     ):
         super().__init__("W1a", parent)
         self.service = service
+        self._preparing = preparing
         self.role = normalize_display_role(role)
         self._auto_initial_refresh = bool(auto_initial_refresh)
         self._display_enabled = self._read_display_enabled()
@@ -143,7 +146,7 @@ class SectorW1a(BaseSectorWidget):
         self.scroll_area.setWidget(self.scroll_content)
         self.main_layout_v.addWidget(self.scroll_area)
 
-        set_widget_style(self.main_container, """
+        set_widget_style(self.main_container, workspace_surface_style("""
             QWidget#sector_w1a_main_container {
                 background-color: #f8f9fa;
                 border: 1.5px solid #bdc3c7;
@@ -184,7 +187,7 @@ class SectorW1a(BaseSectorWidget):
                 border-bottom-left-radius: 4px;
                 border-bottom-right-radius: 4px;
             }
-            """)
+            """))
 
         self.set_content(self.main_container)
         self.main_container.setVisible(self._display_enabled)
@@ -209,6 +212,8 @@ class SectorW1a(BaseSectorWidget):
             self._sleep_display_disabled()
 
     def _read_display_enabled(self) -> bool:
+        if self._preparing:
+            return True
         try:
             payload = DisplaySettingsStorage().load()
             return w1a_upcoming_orders_enabled(payload, self.role)

@@ -261,7 +261,8 @@ class MainWindow(QMainWindow):
         else:
             self._restore_probe_status_label = None
         
-        self.stack = QStackedWidget()
+        from rem_card.ui.shared.workspace_background import WorkspaceStack
+        self.stack = WorkspaceStack()
         self.main_layout.addWidget(self.stack)
         
         self.setCentralWidget(self.main_container)

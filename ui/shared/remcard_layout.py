@@ -151,7 +151,7 @@ class RemCardLayoutManager(QWidget):
         self.sector_3_4_wrapper.setFixedWidth(240)
         wrapper_layout = QVBoxLayout(self.sector_3_4_wrapper)
         # Правый край рамок правой колонки совпадает с верхними секторами.
-        wrapper_layout.setContentsMargins(4, 3, 0, 4) 
+        wrapper_layout.setContentsMargins(1, 2, 0, 4)
         wrapper_layout.setSpacing(0)
         wrapper_layout.addWidget(self.sector_3_4_container)
         wrapper_layout.addWidget(self.sector_3_4_spacer)

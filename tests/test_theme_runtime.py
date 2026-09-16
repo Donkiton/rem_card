@@ -488,3 +488,132 @@ def test_pending_theme_uses_changed_source_and_handles_deleted_widget():
     finally:
         delete(label)
         theme_runtime.refresh_registered_styles("light", force=True)
+
+def test_workspace_transparency_preserves_controls_text_and_clinical_colors():
+    source = '''QFrame#sector { background: #ffffff; color: #123456; border: 1px solid #aaaaaa; }
+QPushButton { background: #ffffff; }
+QLineEdit { background: #ffffff; }
+QLabel#warning { background: #ff0000; }
+QFrame:hover { background: #eeeeee; }'''
+    result = theme_runtime._translucent_surfaces(source)
+    assert 'background: rgba(255, 255, 255, 153)' in result
+    assert 'color: #123456' in result
+    assert 'border: 1px solid #aaaaaa' in result
+    assert 'QPushButton { background: #ffffff; }' in result
+    assert 'QLineEdit { background: #ffffff; }' in result
+    assert 'background: #ff0000' in result
+    assert 'QFrame:hover { background: #eeeeee; }' in result
+    assert theme_runtime._translucent_surfaces(result) == result
+
+
+def test_workspace_transparency_applies_to_dark_panel_fill():
+    result = theme_runtime._translucent_surfaces('QFrame { background-color: #222e3c; color: #d8e4f3; }')
+    assert 'rgba(34, 46, 60, 153)' in result
+    assert 'color: #d8e4f3' in result
+
+
+def test_clinical_legend_keeps_original_colors_in_both_themes():
+    from PySide6.QtWidgets import QApplication, QLabel
+    app = QApplication.instance() or QApplication([])
+    label = QLabel()
+    label.setProperty('preserveClinicalColors', True)
+    source = 'QLabel { background: #e6f7ff; color: #2c3e50; border-left: 6px solid #00bfff; }'
+    for mode in ('light', 'dark'):
+        assert theme_runtime._render_widget_style(label, source, mode) == source
+    label.close()
+
+
+def test_dark_legend_and_chart_share_dimmed_clinical_colors():
+    from PySide6.QtWidgets import QApplication, QLabel
+    from rem_card.ui.styles.theme_presets import BASE_MEDICAL_TOKENS, build_tokens
+    from rem_card.ui.styles.chart_styles import vital_colors
+    app = QApplication.instance() or QApplication([])
+    label = QLabel()
+    label.setProperty('preserveClinicalColors', True)
+    tokens = build_tokens(mode='dark')
+    chart = vital_colors(tokens)
+    for metric, name in [('ad', 'bp'), ('pulse', 'pulse'), ('temp', 'temp'), ('spo2', 'spo2'), ('cvp', 'cvp'), ('rr', 'resp')]:
+        line = BASE_MEDICAL_TOKENS[f'medical.vital.{name}.line']
+        fill = BASE_MEDICAL_TOKENS[f'medical.vital.{name}.bg']
+        source = f'QLabel {{background: {fill}; border-left: 6px solid {line};}}'
+        rendered = theme_runtime._render_widget_style(label, source, 'dark')
+        assert chart[metric] in rendered
+        assert chart[metric + '_fill'] in rendered
+        assert len(set(chart[k] for k in ('ad', 'pulse', 'temp', 'spo2', 'cvp', 'rr'))) == 6
+    label.close()
+
+
+def test_workspace_keeps_orders_and_output_editor_opaque():
+    for selector in ('QFrame#orders_frame_container', 'QWidget#balance_output_editor'):
+        source = selector + ' { background-color: #ffffff; border: 1px solid #aaaaaa; }'
+        assert theme_runtime._translucent_surfaces(source) == source
+
+
+def test_opaque_order_cards_are_scoped_to_patient_sector():
+    from PySide6.QtWidgets import QApplication, QWidget, QFrame
+    app = QApplication.instance() or QApplication([])
+    workspace = QWidget()
+    workspace.setProperty('workspaceBackdrop', True)
+    sector = QWidget(workspace)
+    sector.setObjectName('sector_1a_main_container')
+    card = QFrame(sector)
+    card.setObjectName('order_card')
+    source = 'QFrame#order_card { background: #f8f9fa; }'
+    assert theme_runtime._render_widget_style(card, source, 'light') == source
+    card.setParent(workspace)
+    assert 'rgba(' in theme_runtime._render_widget_style(card, source, 'light')
+    workspace.close()
+
+
+def test_workspace_layout_gutters_are_clear_but_bordered_panels_keep_fill():
+    source = '''QWidget#sector_1b_main_container { background-color: #f8f9fa; }
+QWidget#sector_3a_main_container { background: #222e3c; }
+QWidget#sector_w1a_main_container { background: #ffffff; border: 1px solid #aaaaaa; }'''
+    result = theme_runtime._translucent_surfaces(source)
+    assert result.count('background: transparent') == 2
+    assert 'background: rgba(255, 255, 255, 153)' in result
+    assert 'border: 1px solid #aaaaaa' in result
+    for selector in ('QFrame#sector_2v_frame', 'OrdersWidget', 'NurseOrdersWidget'):
+        assert 'background: transparent' in theme_runtime._translucent_surfaces(
+            selector + ' { background-color: #f8f9fa; }'
+        )
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_primary_tab_body_is_opaque_without_changing_secondary_balance(mode):
+    from PySide6.QtWidgets import QApplication, QWidget
+    app = QApplication.instance() or QApplication([])
+    workspace = QWidget()
+    workspace.setProperty('workspaceBackdrop', True)
+    primary = QWidget(workspace)
+    primary.setProperty('primaryClinicalSurface', True)
+    secondary = QWidget(workspace)
+    source = "QLabel#balance_header { background: #e9ecef; } QWidget#balance_data_area { background: white; }"
+    primary_style = theme_runtime._render_widget_style(primary, source, mode)
+    secondary_style = theme_runtime._render_widget_style(secondary, source, mode)
+    assert primary_style.count('153)') == 1
+    assert secondary_style.count('153)') == 2
+    body = source[source.index('QWidget'):]
+    assert theme_runtime.render_style(body, mode) in primary_style
+    workspace.close()
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_primary_headers_have_no_opaque_underlay_and_graph_is_unchanged(mode):
+    source = """QFrame#ivl_screen { background: #f8f9fa; border: 1px solid #aaaaaa; }
+QScrollArea#ivl_scroll_area { background: #f8f9fa; }
+QScrollArea#ivl_scroll_area > QWidget > QWidget { background: #f8f9fa; }
+QFrame#ivl_title_bar { background: #e9ecef; }
+QWidget#ivl_body { background: #f8f9fa; }
+QWidget#OralNutritionRoot { background: #f8f9fa; }
+QLabel#OralNutritionOuterHeader { background: #e9ecef; }
+QWidget#OralNutritionOuterBody { background: #f8f9fa; }
+QWidget#chart_header { background: #e9ecef; }
+QWidget#chart_body { background: #ffffff; }"""
+    rendered = theme_runtime.render_style(source, mode)
+    result = theme_runtime._translucent_surfaces(rendered, primary=True)
+    assert result.count('background: transparent') == 4
+    assert result.count('153)') == 2
+    for name in ('ivl_body', 'OralNutritionOuterBody', 'chart_header', 'chart_body'):
+        rule = next(line for line in rendered.splitlines() if '#' + name + ' ' in line)
+        assert rule in result

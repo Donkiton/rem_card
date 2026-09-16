@@ -186,9 +186,39 @@ class UnifiedWindow(QMainWindow):
             def imports():
                 from rem_card.app import bootstrap  # noqa: F401
                 from rem_card.ui import main_window  # noqa: F401
-            self._async(imports, self._ready)
+            self._async(imports, self._preload_entry_ui)
         from rem_card.app.unified_runtime import read_institution
         self._async(lambda: read_institution(self.root), prepared)
+
+    def _preload_entry_ui(self, _=None):
+        from rem_card.ui.shared.role_entry_preload import RoleEntryPreload
+        pool = RoleEntryPreload(self)
+        QApplication.instance()._role_entry_preload = pool
+        roles = iter(("doctor", "nurse"))
+
+        def next_role():
+            if self._closing:
+                return
+            role = next(roles, None)
+            if role is None:
+                self._ready()
+                return
+            label = "врача" if role == "doctor" else "медсестры"
+            self.loading.set_stage(3, f"Подготовка интерфейса {label}…")
+
+            def prepare():
+                if self._closing:
+                    return
+                try:
+                    pool.prepare(role)
+                except Exception as exc:
+                    # The normal admitted constructor remains the fallback.
+                    lifecycle_event("role_entry_preload_failed", role=role,
+                                    error_class=type(exc).__name__)
+                QTimer.singleShot(0, self, next_role)
+            QTimer.singleShot(16, self, prepare)
+
+        next_role()
 
     def _ready(self, _=None):
         self.loading.complete_stage(3)

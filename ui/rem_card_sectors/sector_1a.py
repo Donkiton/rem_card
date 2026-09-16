@@ -55,6 +55,9 @@ class Sector1a(BaseSectorWidget):
         self.scroll_layout.setSpacing(0)
 
         self.cards_container = QWidget()
+        set_widget_style(self.cards_container, "background: transparent;")
+        self.scroll_area.viewport().setAutoFillBackground(False)
+        set_widget_style(self.scroll_area.viewport(), "background: transparent;")
         self.content_layout = QVBoxLayout(self.cards_container)
         self.content_layout.setContentsMargins(2, 5, 2, 0)
         self.content_layout.setSpacing(5)

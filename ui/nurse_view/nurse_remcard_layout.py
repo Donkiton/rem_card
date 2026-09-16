@@ -148,7 +148,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.sector_3_4_wrapper = QWidget()
         self.sector_3_4_wrapper.setFixedWidth(240)
         wrapper_layout = QVBoxLayout(self.sector_3_4_wrapper)
-        wrapper_layout.setContentsMargins(4, 3, 0, 4)
+        wrapper_layout.setContentsMargins(1, 2, 0, 4)
         wrapper_layout.setSpacing(0)
         wrapper_layout.addWidget(self.sector_3_4_container)
         wrapper_layout.addWidget(self.sector_3_4_spacer)
@@ -285,7 +285,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.right_area = QWidget()
         right_layout = QVBoxLayout(self.right_area)
         # Единый правый отступ и тот же верхний зазор, что у первой W1-строки.
-        right_layout.setContentsMargins(0, 5, 3, 0)
+        right_layout.setContentsMargins(0, 5, 0, 0)
         right_layout.setSpacing(0)
         
         # Используем обычный QVBoxLayout вместо сплиттера для устранения микро-зазоров

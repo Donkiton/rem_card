@@ -319,6 +319,7 @@ class SectorAnal(BaseSectorWidget):
     def _build_ui(self):
         main_frame = QFrame()
         main_frame.setObjectName("lab_main_frame")
+        main_frame.setProperty("primaryClinicalSurface", True)
         set_widget_style(main_frame, """
             QFrame#lab_main_frame {
                 border: none;

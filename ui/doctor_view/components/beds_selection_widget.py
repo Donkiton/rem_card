@@ -201,6 +201,9 @@ class BedsSelectionWidget(QWidget):
 
     def paintEvent(self, event):
         super().paintEvent(event)
+        from rem_card.ui.shared.workspace_background import FIXED_WORKSPACE_BACKGROUND
+        if FIXED_WORKSPACE_BACKGROUND:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 

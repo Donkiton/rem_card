@@ -1,3 +1,4 @@
+from rem_card.ui.shared.window_transition import after_window_transition
 import os
 import socket
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QStackedWidget
@@ -1497,11 +1498,17 @@ class NurseMainWidget(QWidget):
         from ..shared.lightweight_w1_shell import LightweightW1Shell
 
         main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(5, 0, 5, 0)
         
         self.main_stack = QStackedWidget()
         
-        self._w1_shell = LightweightW1Shell(
+        from rem_card.ui.shared.role_entry_preload import take_prepared_entry
+        prepared = take_prepared_entry(
+            "nurse", patient_service=self.patient_service,
+            remcard_service=self.remcard_service, operblock_service=self.operblock_service,
+            parent=self.main_stack,
+        )
+        self._w1_shell = prepared[0] if prepared else LightweightW1Shell(
             role="nurse",
             patient_service=self.patient_service,
             remcard_service=self.remcard_service,
@@ -1514,7 +1521,7 @@ class NurseMainWidget(QWidget):
         main_layout.addWidget(self.main_stack)
 
         # Панель управления медсестры (Сектор 8)
-        self.sector8_panel = NurseSector8Panel()
+        self.sector8_panel = prepared[1] if prepared else NurseSector8Panel()
         self.sector8_panel.btn_back.clicked.connect(self.on_back_clicked)
         self.sector8_panel.roles_clicked.connect(self._request_role_exit)
         self.sector8_panel.btn_exit.clicked.connect(self.on_exit_clicked)
@@ -1777,6 +1784,7 @@ class NurseMainWidget(QWidget):
             getattr(widget, "_plan", None),
         )
 
+    @after_window_transition
     def _schedule_card_ui_prewarm(self):
         if self._card_ui_prewarm_started or self._card_ui_prewarm_done:
             return
@@ -1785,6 +1793,7 @@ class NurseMainWidget(QWidget):
         self._card_ui_prewarm_started = True
         QTimer.singleShot(0, self._run_card_ui_prewarm)
 
+    @after_window_transition
     def _run_card_ui_prewarm(self):
         if self._card_ui_prewarm_done:
             return
@@ -1800,6 +1809,7 @@ class NurseMainWidget(QWidget):
             if hasattr(self, 'layout_manager'):
                 self.layout_manager.setUpdatesEnabled(True)
 
+    @after_window_transition
     def _run_card_ui_prewarm_stage_2(self):
         if self._card_ui_prewarm_done:
             return
@@ -1812,6 +1822,7 @@ class NurseMainWidget(QWidget):
             logger.warning("Nurse card UI prewarm stage2 failed: %s", exc)
             self._card_ui_prewarm_started = False
 
+    @after_window_transition
     def _run_card_ui_prewarm_stage_3(self):
         if self._card_ui_prewarm_done:
             return
@@ -1831,6 +1842,7 @@ class NurseMainWidget(QWidget):
         self._journal_prewarm_started = True
         QTimer.singleShot(0, self._run_journal_prewarm)
 
+    @after_window_transition
     def _run_journal_prewarm(self):
         if self._journal_prewarm_done:
             return
@@ -1891,6 +1903,7 @@ class NurseMainWidget(QWidget):
         self._chart_init_pending = True
         QTimer.singleShot(max(0, int(delay_ms or 0)), self._run_deferred_chart_init)
 
+    @after_window_transition
     def _run_deferred_chart_init(self):
         self._chart_init_pending = False
         if self._is_closing:

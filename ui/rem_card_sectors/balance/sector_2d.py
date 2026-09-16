@@ -28,6 +28,7 @@ class Sector2d(BaseSectorWidget):
         # Общий контейнер
         self.main_container = QWidget()
         self.main_container.setObjectName("sector_2d_main_container")
+        self.main_container.setProperty("primaryClinicalSurface", True)
         self.main_layout_v = QVBoxLayout(self.main_container)
         # Отступы: 3px сверху и снизу для унификации
         self.main_layout_v.setContentsMargins(4, 3, 0, 3)
@@ -37,12 +38,12 @@ class Sector2d(BaseSectorWidget):
         self.header_lbl = QLabel("Выведение")
         self.header_lbl.setObjectName("sector_header")
         self.header_lbl.setAlignment(Qt.AlignCenter)
-        self.header_lbl.setFixedHeight(28)
+        self.header_lbl.setFixedHeight(30)
         self.main_layout_v.addWidget(self.header_lbl)
 
         # 2. Область контента (Белый фон, боковые границы)
         self.content_area = QWidget()
-        self.content_area.setObjectName("sector_content_area")
+        self.content_area.setObjectName("balance_output_editor")
         self.content_layout = QVBoxLayout(self.content_area)
         self.content_layout.setContentsMargins(5, 5, 5, 5)
         self.content_layout.setSpacing(10)
@@ -119,8 +120,8 @@ class Sector2d(BaseSectorWidget):
                 border-top-left-radius: 5px !important;
                 border-top-right-radius: 5px !important;
             }
-            QWidget#sector_content_area {
-                background-color: #f8f9fa !important;
+            QWidget#balance_output_editor {
+                background-color: #ffffff !important;
                 border-left: 1.5px solid #bdc3c7 !important;
                 border-right: 1.5px solid #bdc3c7 !important;
                 border-bottom: 1.5px solid #bdc3c7 !important;

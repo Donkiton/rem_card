@@ -20,6 +20,7 @@ class Sector2b_v(QWidget):
     def init_ui(self):
         # Общий контейнер
         self.main_container = QWidget()
+        self.main_container.setProperty("primaryClinicalSurface", True)
         self.main_layout_v = QVBoxLayout(self.main_container)
         # Отступы: 3px сверху и снизу для унификации
         self.main_layout_v.setContentsMargins(2, 3, 0, 3) 

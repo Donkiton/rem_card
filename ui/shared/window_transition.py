@@ -1,39 +1,25 @@
 """Animate live Qt widgets at their current size, without scaling screenshots."""
-from PySide6.QtCore import QObject, QRect, Qt, QPropertyAnimation, QEasingCurve, QTimer, QElapsedTimer
+from PySide6.QtCore import QObject, QRect, Qt, QPropertyAnimation, QEasingCurve, QTimer
+from functools import wraps
+
+
+def after_window_transition(method):
+    """Delay optional UI prewarming while its top-level window is resizing."""
+    @wraps(method)
+    def run(widget):
+        if getattr(widget, '_is_closing', False):
+            return
+        transition = getattr(widget.window(), '_transition', None)
+        if transition is not None and transition.running:
+            # Context-bound callback is discarded if the role is destroyed.
+            QTimer.singleShot(80, widget, lambda: run(widget))
+            return
+        return method(widget)
+    return run
 
 
 class _FrameAnimation(QPropertyAnimation):
-    """Sample live geometry independently of Qt's shared 16 ms animation tick."""
-
-    def __init__(self, *args):
-        super().__init__(*args)
-        self._clock = QElapsedTimer()
-        self._offset = 0
-        self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)
-        self._timer.setInterval(8)
-        self._timer.timeout.connect(self._advance)
-        self.finished.connect(self._timer.stop)
-
-    def start(self):
-        super().start()
-        super().pause()
-        self.resume()
-
-    def pause(self):
-        self._timer.stop()
-
-    def resume(self):
-        self._offset = self.currentTime()
-        self._clock.start()
-        self._timer.start()
-
-    def stop(self):
-        self._timer.stop()
-        super().stop()
-
-    def _advance(self):
-        self.setCurrentTime(min(self.duration(), self._offset + self._clock.elapsed()))
+    """Qt's normal timed animation; painting remains coalesced by its event loop."""
 
 
 class WindowTransition(QObject):
@@ -68,6 +54,9 @@ class WindowTransition(QObject):
             window.setWindowState(window.windowState() & ~Qt.WindowMaximized & ~Qt.WindowMinimized)
             window._is_custom_maximized = False
             window.setGeometry(start)
+            # Animate the actual window continuously. A larger temporary native
+            # host followed by reparenting produced visible jumps before/after
+            # the child animation, even though the child frames were smooth.
             if prepare_before_resize:
                 # Returning to the chooser can resize its lightweight widgets;
                 # the clinical page stays hidden and does not relayout per frame.
@@ -85,15 +74,13 @@ class WindowTransition(QObject):
             window.setUpdatesEnabled(True)
         animation = _FrameAnimation(window, b'geometry', self)
         self.animation = animation
-        # About five extra live frames at the measured 24 ms paint cadence.
-        # The event loop stays active throughout the transition.
+        # Time bounded transition; do not force every intermediate size to repaint.
         animation.setDuration(300)
         animation.setEasingCurve(QEasingCurve.InOutSine)
         animation.setStartValue(start)
         animation.setEndValue(target)
 
         def complete():
-            window.setGeometry(target)
             window._is_custom_maximized = maximized
             if maximized and normal_rect is not None:
                 window._custom_normal_geometry = QRect(normal_rect)

@@ -1,3 +1,4 @@
+from rem_card.ui.shared.workspace_background import workspace_surface_style
 from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel)
 from PySide6.QtCore import Qt, QSize
@@ -10,8 +11,9 @@ from rem_card.ui.shared.display_settings_storage import (
 
 class SectorW1b(BaseSectorWidget):
     """Сектор W1b, отображаемый в режиме списка коек (вместо 1б)."""
-    def __init__(self, parent=None, role: str | None = "doctor"):
+    def __init__(self, parent=None, role: str | None = "doctor", *, preparing: bool = False):
         super().__init__("W1b", parent)
+        self._preparing = preparing
         self.role = normalize_display_role(role)
         self._display_enabled = self._read_display_enabled()
         self.label.hide()
@@ -40,13 +42,13 @@ class SectorW1b(BaseSectorWidget):
         self.main_layout_v.addWidget(self.empty_label)
 
         # QSS стиль
-        set_widget_style(self.main_container, """
+        set_widget_style(self.main_container, workspace_surface_style("""
             QWidget#sector_w1b_main_container {
                 background-color: #f8f9fa;
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
             }
-        """)
+        """))
 
         self.set_content(self.main_container)
         self._apply_display_enabled()
@@ -59,6 +61,8 @@ class SectorW1b(BaseSectorWidget):
         self._apply_display_enabled()
 
     def _read_display_enabled(self) -> bool:
+        if self._preparing:
+            return True
         try:
             payload = DisplaySettingsStorage().load()
             return w1b_lower_sector_enabled(payload, self.role)

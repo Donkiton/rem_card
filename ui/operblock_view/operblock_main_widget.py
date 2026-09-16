@@ -447,7 +447,7 @@ OPERBLOCK_MEDICATION_SETTINGS_ROW_STYLE = f"""
 
 PATIENT_CARD_STYLE = f"""
     QFrame#operblockTableCard {{
-        background-color: {BG_CARD};
+        background-color: transparent;
         border: 1.5px solid {BORDER_COLOR};
         border-radius: 8px;
     }}
@@ -1973,7 +1973,7 @@ class OperBlockSector8Panel(QWidget):
         self.btn_user_reports = self._button(" Репорты", "reports.png")
         self.btn_settings = self._button(" Настройки", "settings.png")
         self.btn_back = self._button(" Назад", "back.png")
-        self.btn_roles = self._button(" Роли", "operbloc.png")
+        self.btn_roles = self._button(" Роли", "role.png")
         self.btn_exit = self._button(" Выход", "exit.png")
         self._button_widgets = {
             "archive": self.btn_archive,
@@ -9558,14 +9558,16 @@ class OperBlockMainWidget(QWidget):
                 button.setVisible(False)
 
     def _init_ui(self):
-        set_widget_style(self, f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
+        from rem_card.ui.shared.workspace_background import FIXED_WORKSPACE_BACKGROUND
+        background = 'transparent' if FIXED_WORKSPACE_BACKGROUND else BG_MAIN
+        set_widget_style(self, f"QWidget {{ background-color: {background}; color: {TEXT_PRIMARY}; }}")
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 2, 0, 0)
+        root.setContentsMargins(5, 0, 5, 0)
         root.setSpacing(0)
 
         self.sector_8 = Sector8()
         self.sector_8.setFixedHeight(38)
-        self.sector_8.set_horizontal_frame_margins(3, 3)
+        self.sector_8.set_horizontal_frame_margins(3, 1)
         self.sector_8_panel = OperBlockSector8Panel()
         self.sector_8_panel.btn_archive.clicked.connect(self._show_operblock_archive)
         self.sector_8_panel.btn_refresh.clicked.connect(lambda: self.auto_refresh(force=True))
@@ -9694,7 +9696,7 @@ class OperBlockMainWidget(QWidget):
         metric_started = operblock_startup_metrics.timer_start()
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(3, 5, 3, 3)
+        layout.setContentsMargins(3, 5, 1, 3)
         layout.setSpacing(6)
 
         self.cards_layout = QHBoxLayout()
@@ -9859,7 +9861,7 @@ class OperBlockMainWidget(QWidget):
         metric_started = operblock_startup_metrics.timer_start()
         page = QWidget()
         layout = QHBoxLayout(page)
-        layout.setContentsMargins(3, 5, 3, 3)
+        layout.setContentsMargins(3, 5, 1, 3)
         layout.setSpacing(0)
 
         layout.addWidget(self._build_protocol_left_column(), 0)
@@ -12460,7 +12462,7 @@ class OperBlockMainWidget(QWidget):
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(18, 18, 18, 18)
         body_layout.setSpacing(16)
-        set_widget_style(body, "QWidget#OperBlockStartBody { background: #F7F9FC; }")
+        set_widget_style(body, "QWidget#OperBlockStartBody { background: transparent; }")
 
         content = QGridLayout()
         content.setContentsMargins(0, 0, 0, 0)

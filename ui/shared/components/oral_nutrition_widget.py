@@ -514,6 +514,7 @@ class OralNutritionWidget(QWidget):
 
     def _build_ui(self):
         self.setObjectName("OralNutritionRoot")
+        self.setProperty("primaryClinicalSurface", True)
         page_layout = QVBoxLayout(self)
         page_layout.setContentsMargins(0, 3, 0, 5)
         page_layout.setSpacing(0)

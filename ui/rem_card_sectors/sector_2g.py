@@ -19,6 +19,7 @@ class Sector2g(BaseSectorWidget):
         # Общий контейнер
         self.main_container = QWidget()
         self.main_container.setObjectName("sector_2g_main_container")
+        self.main_container.setProperty("primaryClinicalSurface", True)
         self.main_layout_v = QVBoxLayout(self.main_container)
         # Сдвигаем рамку (слой 2) сверху и снизу на 3 пикселя
         self.main_layout_v.setContentsMargins(0, 3, 0, 5) 
@@ -105,6 +106,7 @@ class Sector2g(BaseSectorWidget):
 
     def create_legend_label(self, text, bg_color, line_color):
         item = QLabel(text)
+        item.setProperty('preserveClinicalColors', True)
         item.setMinimumHeight(35)
         item.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         item.setContentsMargins(10, 0, 5, 0) # Уменьшен правый контентный отступ

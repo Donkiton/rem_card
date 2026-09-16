@@ -1663,9 +1663,6 @@ class NurseOrdersWidget(QWidget):
             + STYLE_ORDERS_VERTICAL_SCROLLBAR)
         self.table_clip_layout.addWidget(self.table_view)
 
-        self.bottom_footer = QWidget()
-        self.bottom_footer.setFixedHeight(15)
-        self.frame_layout.addWidget(self.bottom_footer)
 
         set_widget_style(self, f"NurseOrdersWidget {{ background-color: {BG_MAIN}; }} QWidget#table_clip {{ background-color: {BG_CARD}; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QWidget#orders_footer_frame {{ background-color: {BG_MAIN}; border-top: 1px solid {BORDER_COLOR}; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }} QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 6px; border: none; border-bottom: 0.5px solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 10pt; }} QHeaderView {{ background-color: {BG_LIGHT}; border-top-left-radius: 5px; border-top-right-radius: 5px; }}")
 

@@ -144,6 +144,64 @@ def render_style(source: str, mode: str) -> str:
     return _DECLARATION.sub(declaration, source)
 
 
+@lru_cache(maxsize=1024)
+def _translucent_surfaces(source, primary=False):
+    """Only panel fills: never fade text, controls, or clinical colour signals."""
+    def fill(match):
+        color = QColor(match[2])
+        if not color.isValid() or (color.hsvSaturationF() > .4 and color.name() not in ('#19232f', '#222e3c', '#293748')):
+            return match[0]
+        return f"{match[1]}: rgba({color.red()}, {color.green()}, {color.blue()}, 153)"
+    def rule(match):
+        selectors, body = match[1], match[2]
+        # The central tabs have opaque reading surfaces. Only their outer
+        # headings show the workspace; nested cards and controls retain fills.
+        if primary and re.search(r'#(?:ivl_screen|ivl_scroll_area|OralNutritionRoot)\b', selectors):
+            return selectors + '{' + re.sub(r'background(?:-color)?\s*:[^;]+', 'background: transparent', body) + '}'
+        if re.search(r'#(?:orders_frame_container|balance_output_editor|SettingsActionCard)\b', selectors):
+            return match[0]
+        if any(name in selectors for name in ('#AdminSettingsMenu', '#SettingsContent', '#SettingsCategoryPage', '#SettingsCardsContainer', '#SettingsSidebar')):
+            return selectors + '{' + re.sub(r'background(?:-color)?\s*:[^;]+', 'background: transparent', body) + '}'
+        # Layout-only sector wrappers include the gutters outside their bordered
+        # header/body children. Painting them fills those gutters with grey.
+        if re.fullmatch(r'\s*(?:QWidget#sector_\w+_main_container|QFrame#sector_2v_frame|OrdersWidget|NurseOrdersWidget)\s*', selectors) and not re.search(r'\bborder[\w-]*\s*:', body):
+            body = re.sub(r'background(?:-color)?\s*:[^;]+', 'background: transparent', body)
+            return selectors + '{' + body + '}'
+        if primary and not re.search(r'#(?:vitals_header|balance_header|sector_header|ivl_title_bar|procedures_title|lab_sector_header|OralNutritionOuterHeader)\b', selectors):
+            return match[0]
+        if not all(re.match(r'\s*(?:QWidget|QFrame|QLabel)\b', part) and ':' not in part
+                   and not re.search(r'Q(?:PushButton|LineEdit|Table|Combo|Spin|ScrollBar)', part)
+                   for part in selectors.split(',')):
+            return match[0]
+        return selectors + '{' + re.sub(r'(background(?:-color)?)\s*:\s*(#[0-9a-fA-F]{6}|white)\b', fill, body) + '}'
+    return re.sub(r'([^{}]+)\{([^{}]*)\}', rule, source)
+
+
+def _render_widget_style(widget, source, mode):
+    if widget.property('preserveClinicalColors'):
+        if mode == 'dark':
+            from rem_card.ui.styles.theme_presets import BASE_MEDICAL_TOKENS, build_tokens
+            tokens = _active_tokens if _active_tokens.get('meta.mode') == 'dark' else build_tokens(mode='dark')
+            colors = {value.lower(): tokens[key] for key, value in BASE_MEDICAL_TOKENS.items() if key.startswith('medical.vital.')}
+            return re.sub(r'#[0-9a-fA-F]{6}\b', lambda match: colors.get(match[0].lower(), match[0]), source)
+        return source
+    result = render_style(source, mode)
+    parent = widget
+    in_patient_orders = False
+    primary = False
+    while parent is not None:
+        in_patient_orders |= parent.objectName() == 'sector_1a_main_container'
+        primary |= bool(parent.property('primaryClinicalSurface'))
+        if parent.property('workspaceBackdrop'):
+            if in_patient_orders and widget.objectName() == 'order_card':
+                return result
+            return _translucent_surfaces(result, primary=primary)
+        if parent.isWindow():
+            break
+        parent = parent.parentWidget()
+    return result
+
+
 def set_widget_style(widget, source: str):
     """Единственное назначение локального QSS, с точным обратным переходом."""
     source = str(source)
@@ -152,7 +210,7 @@ def set_widget_style(widget, source: str):
         _styles[widget] = source
     else:
         _styles.pop(widget, None)
-    result = render_style(source, _mode)
+    result = _render_widget_style(widget, source, _mode)
     if widget.styleSheet() != result:
         widget.setStyleSheet(result)
 
@@ -172,13 +230,13 @@ def register_theme_callback(widget, method):
 
 class _PendingThemeFilter(QObject):
     def eventFilter(self, widget, event):
-        if event.type() == QEvent.Show and widget in _pending_styles:
+        if event.type() == QEvent.Show and widget in _styles:
             # Apply before the first paint of a previously hidden page. Always
             # use the latest mode/source, including repeated toggles while hidden.
             _pending_styles.discard(widget)
             source = _styles.get(widget)
             if source is not None:
-                result = render_style(source, _mode)
+                result = _render_widget_style(widget, source, _mode)
                 if widget.styleSheet() != result:
                     widget.setStyleSheet(result)
         return False
@@ -210,7 +268,7 @@ def refresh_registered_styles(mode=None, *, force=False, tokens=None, defer_hidd
                     _pending_styles.add(widget)
                     continue
                 _pending_styles.discard(widget)
-                result = render_style(source, mode)
+                result = _render_widget_style(widget, source, mode)
                 if widget.styleSheet() != result:
                     widget.setStyleSheet(result)
         for widget, methods in list(_callbacks.items()):

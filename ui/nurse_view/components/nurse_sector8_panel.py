@@ -27,7 +27,7 @@ class NurseSector8Panel(QWidget):
     user_reports_clicked = Signal()
     roles_clicked = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, preparing=False):
         super().__init__(parent)
         # Путь к иконкам (на уровень выше, чем у врача)
         self.icon_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "icon")
@@ -35,6 +35,7 @@ class NurseSector8Panel(QWidget):
         self._reports_count_worker = None
         self._last_reports_count = 0
         self._is_closing = False
+        self._preparing = preparing
         self._roles_available = False
         self.init_ui()
 
@@ -118,7 +119,7 @@ class NurseSector8Panel(QWidget):
 
         # Возврат к выбору роли доступен только из единого окна приложения.
         self.btn_roles = QPushButton(" Роли", self)
-        roles_icon = os.path.join(self.icon_dir, "operbloc.png")
+        roles_icon = os.path.join(self.icon_dir, "role.png")
         self.btn_roles.setIcon(QIcon(roles_icon))
         self.btn_roles.setIconSize(QSize(18, 18))
         self.btn_roles.setMinimumHeight(32)
@@ -154,9 +155,10 @@ class NurseSector8Panel(QWidget):
         }
         self._reports_count_timer = QTimer(self)
         self._reports_count_timer.timeout.connect(self.refresh_user_reports_count)
-        self._reports_count_timer.start(60000)
         self.apply_display_settings()
-        QTimer.singleShot(0, self.refresh_user_reports_count)
+        if not self._preparing:
+            self._reports_count_timer.start(60000)
+            QTimer.singleShot(0, self.refresh_user_reports_count)
 
     def _clear_layout(self):
         while self.layout.count():
@@ -164,7 +166,7 @@ class NurseSector8Panel(QWidget):
 
     def apply_display_settings(self):
         try:
-            payload = DisplaySettingsStorage().load()
+            payload = {} if self._preparing else DisplaySettingsStorage().load()
             settings = role_display_settings_from_payload(payload, "nurse")
             section = settings["sector8_buttons"]
             left_order = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_LEFT)

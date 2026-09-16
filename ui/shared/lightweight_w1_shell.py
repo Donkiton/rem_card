@@ -28,8 +28,10 @@ class LightweightW1Shell(QWidget):
         remcard_service=None,
         parent=None,
         operblock_service=None,
+        preparing=False,
     ):
         super().__init__(parent)
+        self._preparing = preparing
         self.role = str(role or "doctor").lower()
         self.patient_service = patient_service
         self.remcard_service = remcard_service
@@ -47,6 +49,9 @@ class LightweightW1Shell(QWidget):
         self.sector_w1c = None
 
         self._init_ui()
+        if preparing:
+            for timer in self.findChildren(QTimer):
+                timer.stop()
 
     def _init_ui(self):
         from rem_card.ui.rem_card_sectors.sector_8 import Sector8
@@ -67,7 +72,7 @@ class LightweightW1Shell(QWidget):
         self.l_layout.setSpacing(0)
 
         self.sector_1a_stack = CurrentPageStack()
-        self.sector_w1a = SectorW1a(self.remcard_service, role=self.role, auto_initial_refresh=False)
+        self.sector_w1a = SectorW1a(self.remcard_service, role=self.role, auto_initial_refresh=False, preparing=self._preparing)
         self.sector_1a_stack.addWidget(self.sector_w1a)
         self.l_layout.addWidget(self.sector_1a_stack, 1)
 
@@ -76,12 +81,12 @@ class LightweightW1Shell(QWidget):
             from rem_card.ui.rem_card_sectors.sector_w1b_nurse import SectorW1bNurse
 
             self.sector_w1b = None
-            self.sector_w1b_nurse = SectorW1bNurse(role="nurse")
+            self.sector_w1b_nurse = SectorW1bNurse(role="nurse", preparing=self._preparing)
             self.sector_1b_stack.addWidget(self.sector_w1b_nurse)
         else:
             from rem_card.ui.rem_card_sectors.sector_w1b import SectorW1b
 
-            self.sector_w1b = SectorW1b(role="doctor")
+            self.sector_w1b = SectorW1b(role="doctor", preparing=self._preparing)
             self.sector_w1b_nurse = None
             self.sector_1b_stack.addWidget(self.sector_w1b)
         self.l_layout.addWidget(self.sector_1b_stack, 0)
@@ -142,6 +147,8 @@ class LightweightW1Shell(QWidget):
         self._apply_w1_beds_sector_visibility(refresh_w1a=False)
 
     def _w1_display_flags(self) -> tuple[bool, bool]:
+        if self._preparing:
+            return True, True
         try:
             payload = DisplaySettingsStorage().load()
             return (

@@ -17,6 +17,7 @@ class Sector2b(BaseSectorWidget):
         self.setContentsMargins(0, 0, 0, 0)
         tokens = style_tokens()
         
+        self.setObjectName("remcard_tabs_frame")
         set_widget_style(self, build_remcard_tab_frame_style(tokens))
 
         self.label.hide()

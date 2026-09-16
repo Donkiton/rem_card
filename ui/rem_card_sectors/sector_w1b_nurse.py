@@ -10,8 +10,9 @@ from rem_card.ui.shared.display_settings_storage import (
 
 class SectorW1bNurse(BaseSectorWidget):
     """Сектор W1b-nurse для медсестры, отображаемый в режиме списка коек (вместо 1б)."""
-    def __init__(self, parent=None, role: str | None = "nurse"):
+    def __init__(self, parent=None, role: str | None = "nurse", *, preparing: bool = False):
         super().__init__("W1b-nurse", parent)
+        self._preparing = preparing
         self.role = normalize_display_role(role)
         self._display_enabled = self._read_display_enabled()
         self.label.hide()
@@ -59,6 +60,8 @@ class SectorW1bNurse(BaseSectorWidget):
         self._apply_display_enabled()
 
     def _read_display_enabled(self) -> bool:
+        if self._preparing:
+            return True
         try:
             payload = DisplaySettingsStorage().load()
             return w1b_lower_sector_enabled(payload, self.role)

@@ -496,7 +496,7 @@ def _check_emergency_banner_cannot_be_hidden_by_normal_refresh(temp_root: str) -
     _ = temp_root
     text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
     banner_idx = text.find("self.main_layout.addWidget(self._emergency_banner)")
-    stack_idx = text.find("self.stack = QStackedWidget()")
+    stack_idx = text.find("self.main_layout.addWidget(self.stack)")
     if banner_idx < 0 or stack_idx < 0 or banner_idx > stack_idx:
         return False, "emergency banner is not mounted above the refreshable stacked widget"
     if "self.stack.addWidget(self._emergency_banner)" in text:

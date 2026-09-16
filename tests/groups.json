@@ -93,6 +93,7 @@
     "tests/test_db_wait_diagnostics.py"
   ],
   "ui": [
+    "tests/test_workspace_backgrounds.py",
     "tests/test_unified_first_run_flow.py",
     "tests/test_unified_window_lifecycle.py",
     "tests/test_unified_entry_pages.py",
@@ -167,6 +168,7 @@
     "tests/test_theme_paint.py",
     "tests/test_theme_html.py",
     "tests/test_theme_runtime.py",
+    "tests/test_window_transition.py",
     "tests/test_theme_styles.py",
     "tests/test_theme_switch.py",
     "tests/test_transfusion_protocol_report_setting.py",
