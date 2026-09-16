@@ -515,7 +515,7 @@ class _OperBlockEmptyRoomIllustration(QWidget):
         clip = QPainterPath()
         clip.addEllipse(circle_rect)
         painter.setClipPath(clip)
-        painter.fillPath(clip, themed_qcolor("#EEF7FF", "text"))
+        painter.fillPath(clip, themed_qcolor("#EEF7FF", "background"))
 
         painter.setPen(Qt.NoPen)
         painter.setBrush(themed_qcolor("#FFFFFF", "background"))
@@ -12323,7 +12323,6 @@ class OperBlockMainWidget(QWidget):
         info_layout = QHBoxLayout(info)
         info_layout.setContentsMargins(18, 12, 18, 12)
         info_layout.setSpacing(11)
-        info_layout.addStretch(1)
 
         icon = _OperBlockCircleIcon(
             "info",
@@ -12340,36 +12339,31 @@ class OperBlockMainWidget(QWidget):
         text.setWordWrap(True)
         text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         set_widget_style(text, "color: #31516F; font-size: 14px; font-weight: 600;")
-        info_layout.addWidget(text, 0, Qt.AlignVCenter)
-        info_layout.addStretch(1)
+        info_layout.addWidget(text, 1, Qt.AlignVCenter)
         return info
 
     def _make_empty_table_card(self, table_code: str, display_name: str) -> QFrame:
         apply_metrics = self._current_board_apply_metrics
         metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
-        frame = self._base_card()
+        frame = QFrame()
+        frame.setObjectName("OperBlockEmptyStateContainer")
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        set_widget_style(frame, "QFrame#OperBlockEmptyStateContainer { background: transparent; border: none; }")
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(0)
-        header = self._card_header(display_name)
-        layout.addWidget(header)
 
         body_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
-        body = QWidget()
-        body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(64, 32, 64, 32)
-        body_layout.setSpacing(16)
-        body_layout.addStretch(1)
 
         empty_card = QFrame()
         empty_card.setObjectName("OperBlockEmptyStateCard")
-        empty_card.setMinimumHeight(438)
+        empty_card.setMaximumWidth(820)
         empty_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         set_widget_style(empty_card, """
             QFrame#OperBlockEmptyStateCard {
                 background-color: #FFFFFF;
                 border: 1px solid #DDE5EE;
-                border-radius: 14px;
+                border-radius: 20px;
             }
             QLabel {
                 background: transparent;
@@ -12382,10 +12376,13 @@ class OperBlockMainWidget(QWidget):
         empty_shadow.setOffset(0, 8)
         empty_card.setGraphicsEffect(empty_shadow)
 
-        empty_layout = QVBoxLayout(empty_card)
-        empty_layout.setContentsMargins(46, 34, 46, 36)
-        empty_layout.setSpacing(16)
-        empty_layout.addWidget(_OperBlockEmptyRoomIllustration(), 0, Qt.AlignCenter)
+        empty_layout = QHBoxLayout(empty_card)
+        empty_layout.setContentsMargins(28, 30, 28, 30)
+        empty_layout.setSpacing(24)
+        status_column = QVBoxLayout()
+        status_column.setSpacing(16)
+        status_column.addStretch(1)
+        status_column.addWidget(_OperBlockEmptyRoomIllustration(), 0, Qt.AlignCenter)
 
         status_row = QHBoxLayout()
         status_row.setContentsMargins(0, 0, 0, 0)
@@ -12403,41 +12400,59 @@ class OperBlockMainWidget(QWidget):
         free = QLabel("МЕСТО СВОБОДНО")
         free.setObjectName("OperBlockEmptyStateStatus")
         free.setAlignment(Qt.AlignCenter)
-        set_widget_style(free, "color: #16A34A; font-size: 25px; font-weight: 900; background: transparent;")
+        set_widget_style(free, "color: #16A34A; font-size: 22px; font-weight: 900; background: transparent;")
         status_row.addWidget(free, 0, Qt.AlignVCenter)
         status_row.addStretch(1)
-        empty_layout.addLayout(status_row)
+        status_column.addLayout(status_row)
 
         description = QLabel("В операционной нет активной операции.\nВы можете занять стол для нового пациента.")
         description.setObjectName("OperBlockEmptyStateDescription")
         description.setAlignment(Qt.AlignCenter)
         description.setWordWrap(True)
-        set_widget_style(description, "color: #5D7288; font-size: 15px; line-height: 130%;")
-        empty_layout.addWidget(description)
+        set_widget_style(description, "color: #5D7288; font-size: 14px;")
+        status_column.addWidget(description)
+        status_column.addStretch(1)
+        empty_layout.addLayout(status_column, 1)
+
+        divider = QFrame()
+        divider.setObjectName("OperBlockEmptyStateDivider")
+        divider.setFixedWidth(1)
+        set_widget_style(divider, "background-color: #E2E8F0; border: none;")
+        empty_layout.addWidget(divider)
+
+        actions = QVBoxLayout()
+        actions.setSpacing(12)
+        actions.addStretch(1)
+        heading = QLabel(display_name)
+        heading.setObjectName("OperBlockEmptyStateTitle")
+        heading.setAlignment(Qt.AlignCenter)
+        heading.setWordWrap(True)
+        set_widget_style(heading, "color: #31516F; font-size: 19px; font-weight: 700; background: transparent;")
+        actions.addWidget(heading)
+        actions.addSpacing(4)
+        occupy_button = self._make_empty_table_action_button(table_code, display_name)
+        occupy_button.setMinimumWidth(240)
+        actions.addWidget(occupy_button)
+        actions.addWidget(self._make_empty_table_queue_button(table_code, display_name))
 
         separator = QFrame()
         separator.setObjectName("OperBlockEmptyStateSeparator")
         separator.setFixedHeight(1)
         set_widget_style(separator, "background-color: #E2E8F0; border: none;")
-        empty_layout.addSpacing(2)
-        empty_layout.addWidget(separator)
-        empty_layout.addSpacing(2)
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(12)
-        action_row.addStretch(1)
-        occupy_button = self._make_empty_table_action_button(table_code, display_name)
-        occupy_button.setMinimumWidth(240)
-        occupy_button.setMaximumWidth(420)
-        action_row.addWidget(occupy_button, 2)
-        action_row.addWidget(self._make_empty_table_queue_button(table_code, display_name), 1)
-        action_row.addStretch(1)
-        empty_layout.addLayout(action_row)
+        actions.addSpacing(6)
+        actions.addWidget(separator)
+        actions.addSpacing(6)
+        actions.addWidget(self._make_empty_table_info_block())
+        actions.addStretch(1)
+        empty_layout.addLayout(actions, 1)
 
-        body_layout.addWidget(empty_card)
-        body_layout.addWidget(self._make_empty_table_info_block())
-        body_layout.addStretch(1)
-        layout.addWidget(body, 1)
+        layout.addStretch(1)
+        center_row = QHBoxLayout()
+        center_row.addStretch(1)
+        center_row.addWidget(empty_card, 1000)
+        center_row.addStretch(1)
+        layout.addLayout(center_row)
+        layout.addStretch(1)
         operblock_startup_metrics.record_since(
             "board_apply_card_body_ms",
             body_started,

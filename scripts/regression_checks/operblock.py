@@ -1329,6 +1329,27 @@ def _check_operblock_board_medication_empty_notice(app, widget) -> tuple[bool, s
         app.processEvents()
 
 
+def _check_operblock_empty_card_columns(card, empty_state, header, status, button, info) -> tuple[bool, str]:
+    from PySide6.QtWidgets import QPushButton
+
+    if empty_state.width() > 820 or abs(empty_state.geometry().center().x() - card.rect().center().x()) > 1:
+        return False, "empty-state card is not centered or exceeds its maximum width"
+    if abs(empty_state.geometry().center().y() - card.rect().center().y()) > 1:
+        return False, "empty-state card is not vertically centered"
+    if header.parentWidget() is not empty_state:
+        return False, "operating room title still belongs to an outer header"
+    queue = card.findChild(QPushButton, "OperBlockEmptyStateQueueButton")
+    if queue is None or queue.y() <= button.y() or queue.x() != button.x():
+        return False, "queue must be below the occupy button in the right column"
+    if header.y() >= button.y() or abs(header.geometry().center().x() - button.geometry().center().x()) > 1:
+        return False, "operating room title must be centered above the occupy button"
+    if status.x() >= button.x():
+        return False, "free status must be in the left column"
+    if info.parentWidget() is not empty_state or info.y() <= queue.y():
+        return False, "informational block must be inside the card below the queue"
+    return True, "ok"
+
+
 def _check_operblock_empty_table_card_layout(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -1353,9 +1374,6 @@ def _check_operblock_empty_table_card_layout(temp_root: str) -> tuple[bool, str]
         empty_state = card.findChild(QFrame, "OperBlockEmptyStateCard")
         if empty_state is None:
             return False, "empty table card did not render the central empty-state card"
-        width_ratio = empty_state.width() / max(1, card.width())
-        if width_ratio < 0.78 or width_ratio > 0.92:
-            return False, f"empty-state card width ratio is outside the requested range: {width_ratio:.3f}"
         if "#FFFFFF" not in empty_state.styleSheet() or "#DDE5EE" not in empty_state.styleSheet():
             return False, "empty-state card does not keep the white card and thin border styling"
         illustration = card.findChild(QWidget, "OperBlockEmptyStateIllustration")
@@ -1394,7 +1412,7 @@ def _check_operblock_empty_table_card_layout(temp_root: str) -> tuple[bool, str]
         info_text = card.findChild(QLabel, "OperBlockEmptyStateInfoText")
         if info_text is None or "После занятия стола" not in info_text.text():
             return False, "empty table card did not render the informational text"
-        return True, "ok"
+        return _check_operblock_empty_card_columns(card, empty_state, header, status, button, info)
     finally:
         card.deleteLater()
         app.processEvents()
