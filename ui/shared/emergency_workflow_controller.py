@@ -736,9 +736,12 @@ class EmergencyWorkflowController(QObject):
 
     def _restart_after_close(self):
         self._stop_timers_and_notices()
-        QApplication.instance().setProperty("remcard_restart_requested", True)
         if self.waiting:
             self.waiting.finish_with_code(0)
+        restart = getattr(self.window, "_restart_after_emergency_workflow", None)
+        if callable(restart) and restart():
+            return
+        QApplication.instance().setProperty("remcard_restart_requested", True)
         if not self.window.close():
             self._shutting_down = False
             QApplication.instance().setProperty("remcard_restart_requested", False)

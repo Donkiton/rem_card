@@ -213,6 +213,10 @@ class NurseMainWidget(QWidget):
             if is_compiled()
             else get_dev_local_operation_lock_path(ADD_PATIENT_LOCK_KEY)
         )
+        data_service = getattr(getattr(self, "patient_service", None), "data_service", None)
+        runtime = getattr(getattr(data_service, "db", None), "runtime_context", None)
+        if getattr(runtime, "mode", "") == "emergency":
+            lock_path = os.path.join(runtime.session_locks_dir, f"{ADD_PATIENT_LOCK_KEY}.lock")
         return RoleSessionLock(
             lock_path=lock_path,
             role=ADD_PATIENT_LOCK_KEY,

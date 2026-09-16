@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from dataclasses import replace
+import os
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +20,59 @@ def _simulate_fresh_path_import_state(monkeypatch):
     from rem_card.app import unified_preflight
 
     monkeypatch.setattr(unified_preflight, "_loaded_static_baza_roots", lambda: {})
+
+
+@pytest.mark.parametrize('role', ['doctor', 'nurse'])
+def test_explicit_restart_continuation_keeps_role_without_granting_admission(role):
+    from rem_card.app.unified_preflight import attach_startup_request, build_startup_request, take_emergency_role_after_chooser_ready
+    shell = SimpleNamespace()
+    attach_startup_request(shell, build_startup_request(resume_role=role))
+    assert take_emergency_role_after_chooser_ready(shell) == role
+    assert take_emergency_role_after_chooser_ready(shell) is None
+
+
+def test_invalid_copy_is_rejected_before_static_path_restart(tmp_path, monkeypatch):
+    from rem_card.app import unified_preflight as p
+    monkeypatch.setenv('REMCARD_EMERGENCY_DB_ROOT', str(tmp_path / 'local'))
+    monkeypatch.setattr(p, '_loaded_static_baza_roots', lambda: {'paths': str(tmp_path / 'central')})
+    monkeypatch.setattr(p, '_prepare_local_only_emergency_decision', lambda *a: SimpleNamespace(
+        allowed=False, status='no_valid_standby', user_message='Копия устарела'))
+    with pytest.raises(p.LocalOnlyStartupError) as error:
+        p.prepare_local_only_runtime_context(role='nurse', central_root=str(tmp_path / 'central'),
+            central_failure=p.CENTRAL_FAILURE_UNREACHABLE,
+            confirm_startup=lambda *a: pytest.fail('invalid copy offered'),
+            confirm_password=lambda *a: pytest.fail('invalid copy asked password'))
+    assert error.value.status == 'no_valid_standby'
+
+
+@pytest.mark.parametrize('cached_paths', [False, True])
+def test_new_session_is_authorized_and_persisted_before_restart(tmp_path, monkeypatch, cached_paths):
+    from rem_card.app import unified_preflight as p, emergency_startup
+    local = tmp_path / 'local'
+    central = tmp_path / 'central'
+    calls = []
+    leases = []
+    monkeypatch.setenv('REMCARD_EMERGENCY_DB_ROOT', str(local))
+    monkeypatch.setattr(p, '_loaded_static_baza_roots', lambda: {'paths': str(central)} if cached_paths else {})
+    decision = SimpleNamespace(allowed=True, status='standby_available', user_message='Свежая копия',
+        active_session_metadata=None, password_settings_db_path=str(local / 'settings.db'),
+        standby_metadata=SimpleNamespace(source_remote_db_path=str(central / 'archiv' / 'rao_journal.db')))
+    monkeypatch.setattr(p, '_prepare_local_only_emergency_decision', lambda *a: decision)
+    monkeypatch.setattr(emergency_startup, 'start_or_resume_emergency_session',
+        lambda *a, **kw: calls.append('persist') or SimpleNamespace(runtime_context=_emergency_context(local)))
+    acquire = p._acquire_local_only_lease
+    def track(*args):
+        lease = acquire(*args)
+        leases.append(lease)
+        return lease
+    monkeypatch.setattr(p, '_acquire_local_only_lease', track)
+    with pytest.raises(p.LocalOnlyRestartRequired):
+        p.prepare_local_only_runtime_context(role='nurse', central_root=str(central),
+            central_failure=p.CENTRAL_FAILURE_UNREACHABLE, restart_after_activation=True,
+            confirm_startup=lambda *a: calls.append('offer') or True,
+            confirm_password=lambda *a: calls.append('password') or True)
+    assert calls == ['offer', 'password', 'persist']
+    assert len(leases) == 1 and not leases[0].held
 
 
 def test_plain_role_hint_keeps_chooser_and_emergency_hint_dispatches_once():
@@ -526,8 +581,10 @@ def test_local_standby_validation_does_not_construct_network_context(tmp_path, m
         medical_db_path=str(local_root / "standby" / "rao_journal_standby.db"),
         settings_db_path=str(local_root / "standby" / "remcard_settings_standby.db"),
         source_remote_db_path=str(tmp_path / "central" / "archiv" / "rao_journal.db"),
+        updated_at="2026-01-01T12:00:00", created_at="2026-01-01T12:00:00",
     )
-    status = SimpleNamespace(ok=True, metadata=metadata)
+
+    status = emergency_standby.EmergencyStandbyRefreshResult(ok=True, status="valid", reason="ok", metadata=metadata)
     monkeypatch.setattr(emergency_startup, "find_resumable_active_session", lambda store: (None, "no resumable active session"))
     monkeypatch.setattr(emergency_startup, "_standby_metadata_matches_files", lambda *args: (True, "ok"))
     monkeypatch.setattr(emergency_workflow, "validate_emergency_patient_source", lambda path: "")
@@ -689,16 +746,42 @@ def test_real_local_only_bootstrap_from_synthetic_standby_never_touches_central(
         os.environ["REMCARD_STARTUP_QUICKCHECK_BACKGROUND_ENABLED"] = "0"
         from rem_card.app.unified_preflight import (
             CENTRAL_FAILURE_UNREACHABLE,
+            LocalOnlyStartupError,
+            LocalOnlyRestartRequired,
             bootstrap_local_only,
             prepare_local_only_runtime_context,
         )
+
+        # A standby is not permission for a doctor to start an emergency session.
+        try:
+            prepare_local_only_runtime_context(
+                role="doctor", central_root=forbidden_root,
+                central_failure=CENTRAL_FAILURE_UNREACHABLE,
+                confirm_startup=lambda *_: (_ for _ in ()).throw(AssertionError("doctor offered activation")),
+            )
+        except LocalOnlyStartupError as exc:
+            assert exc.status == "role_not_allowed", exc
+        else:
+            raise AssertionError("doctor activated standby")
+
+        try:
+            prepare_local_only_runtime_context(
+                role="nurse", central_root=forbidden_root,
+                central_failure=CENTRAL_FAILURE_UNREACHABLE,
+                confirm_startup=lambda *_: True, confirm_password=lambda *_: True,
+                restart_after_activation=True,
+            )
+        except LocalOnlyRestartRequired:
+            pass
+        else:
+            raise AssertionError("new activation must request restart")
 
         admission = prepare_local_only_runtime_context(
             role="nurse",
             central_root=forbidden_root,
             central_failure=CENTRAL_FAILURE_UNREACHABLE,
             confirm_startup=lambda *_: True,
-            confirm_password=lambda *_: True,
+            confirm_password=lambda *_: (_ for _ in ()).throw(AssertionError("active session asked password")),
         )
         container = None
         try:
@@ -711,6 +794,7 @@ def test_real_local_only_bootstrap_from_synthetic_standby_never_touches_central(
             assert os.path.normcase(paths.BAZA_DIR) == os.path.normcase(local_root)
             row = container.db_manager._remcard_conn.execute("SELECT COUNT(*) FROM patients").fetchone()
             assert int(row[0]) >= 1
+            active_path = container.db_manager.db_path
             from rem_card.app.unified_runtime import SessionShutdown
             result = SessionShutdown([container], role="nurse").run()
             assert result["ok"], result
@@ -722,6 +806,19 @@ def test_real_local_only_bootstrap_from_synthetic_standby_never_touches_central(
                 finally:
                     container.db_manager.close()
             admission.local_lease.release()
+        doctor = prepare_local_only_runtime_context(
+            role="doctor", central_root=forbidden_root,
+            central_failure=CENTRAL_FAILURE_UNREACHABLE,
+            confirm_startup=lambda *_: True,
+            confirm_password=lambda *_: (_ for _ in ()).throw(AssertionError("doctor asked password for active session")),
+        )
+        try:
+            assert doctor.runtime_context.medical_db_path == active_path
+            doctor_container = bootstrap_local_only(admission=doctor)
+            assert doctor_container.db_manager.db_path == active_path
+            assert SessionShutdown([doctor_container], role="doctor").run()["ok"]
+        finally:
+            doctor.local_lease.release()
         print("LOCAL_ONLY_REAL_BOOTSTRAP_OK")
         """
     )
@@ -741,3 +838,25 @@ def test_real_local_only_bootstrap_from_synthetic_standby_never_touches_central(
 
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "LOCAL_ONLY_REAL_BOOTSTRAP_OK" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows UNC path semantics")
+@pytest.mark.parametrize("role", ["doctor", "nurse", "operblock_emergency", "operblock_planned"])
+@pytest.mark.parametrize("configured", [r"\\localhost\RemCardTest", "\\\\localhost\\RemCardTest\\", "//LOCALHOST/remcardtest"])
+def test_central_admission_accepts_equivalent_unc_share_roots(monkeypatch, role, configured):
+    from rem_card.app import runtime_paths
+    from rem_card.app.unified_preflight import _require_central_admission
+
+    monkeypatch.setattr(runtime_paths, "resolve_baza_dir", lambda: configured)
+    _require_central_admission(_lease(Path(r"\\localhost\RemCardTest"), role=role), role)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows UNC path semantics")
+@pytest.mark.parametrize("protected", [r"\\localhost\Other", r"\\other\RemCardTest", r"\\localhost\RemCardTest\child"])
+def test_central_admission_rejects_different_unc_roots(monkeypatch, protected):
+    from rem_card.app import runtime_paths
+    from rem_card.app.unified_preflight import _require_central_admission
+
+    monkeypatch.setattr(runtime_paths, "resolve_baza_dir", lambda: r"\\localhost\RemCardTest")
+    with pytest.raises(RuntimeError, match="does not protect"):
+        _require_central_admission(_lease(Path(protected)), "nurse")

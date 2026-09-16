@@ -457,3 +457,25 @@ def test_sector_button_uses_user_icon_and_only_emergency_runtime(app, tmp_path):
     sync_emergency_mode_button(panel)
     app.processEvents()
     assert panel.btn_emergency_mode.isHidden()
+
+
+def test_unified_merge_restart_does_not_use_legacy_window_close(app, tmp_path, monkeypatch):
+    window = Window(Store(tmp_path))
+    controller = EmergencyWorkflowController(window)
+    calls = []
+    window._restart_after_emergency_workflow = lambda: calls.append('restart') or True
+    monkeypatch.setattr(window, 'close', lambda: pytest.fail('legacy close loses restart request'))
+    controller._restart_after_close()
+    assert calls == ['restart']
+    window.deleteLater()
+
+
+def test_local_emergency_button_dispatches_shell_action(app):
+    panel = QWidget()
+    panel.icon_dir = ''
+    calls = []
+    panel.request_emergency_mode_action = lambda: calls.append('reconnect')
+    button = create_emergency_mode_button(panel)
+    button.click()
+    assert calls == ['reconnect']
+    panel.deleteLater()

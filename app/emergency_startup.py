@@ -18,7 +18,11 @@ from rem_card.app.emergency_paths import (
     resolve_emergency_root,
     standby_settings_db_path,
 )
-from rem_card.app.emergency_standby import EmergencyStandbyManager
+from rem_card.app.emergency_standby import (
+    EmergencyStandbyManager,
+    EmergencyStandbyRefreshResult,
+    standby_status_user_message,
+)
 from rem_card.app.emergency_store import EmergencyLocalStore, EmergencyStoreError
 from rem_card.app.emergency_validation import (
     validate_medical_db_snapshot,
@@ -199,6 +203,19 @@ def _standby_metadata_matches_files(metadata: EmergencyStandbyMetadata, result) 
     return True, "ok"
 
 
+def _startup_message_with_standby_status(
+    base_message: str,
+    standby_status: EmergencyStandbyRefreshResult,
+    *,
+    last_observed_remote_change_id: int | None = None,
+) -> str:
+    standby_message = standby_status_user_message(
+        standby_status,
+        last_observed_remote_change_id=last_observed_remote_change_id,
+    )
+    return f"{base_message}\n\n{standby_message}"
+
+
 def validate_active_session_for_startup(metadata: EmergencySessionMetadata) -> tuple[bool, str]:
     if metadata.status not in {"active", "waiting", "merge_pending", "merging", "merge_failed"}:
         return False, f"session status is not resumable: {metadata.status}"
@@ -312,7 +329,12 @@ def find_resumable_active_session(store: EmergencyLocalStore) -> tuple[Emergency
 
 
 
-def prepare_emergency_startup(role: str | None, root: str | None = None) -> EmergencyStartupDecision:
+def prepare_emergency_startup(
+    role: str | None,
+    root: str | None = None,
+    *,
+    last_observed_remote_change_id: int | None = None,
+) -> EmergencyStartupDecision:
     resolved_root = resolve_emergency_root(root)
     store = EmergencyLocalStore(root=resolved_root, source_role=role)
     active_metadata, active_reason = find_resumable_active_session(store)
@@ -357,7 +379,11 @@ def prepare_emergency_startup(role: str | None, root: str | None = None) -> Emer
             role=role,
             allowed=False,
             status="no_valid_standby",
-            user_message=NO_VALID_STANDBY_MESSAGE,
+            user_message=_startup_message_with_standby_status(
+                NO_VALID_STANDBY_MESSAGE,
+                standby_status,
+                last_observed_remote_change_id=last_observed_remote_change_id,
+            ),
             root=resolved_root,
             technical_reason=reason,
         )
@@ -365,11 +391,21 @@ def prepare_emergency_startup(role: str | None, root: str | None = None) -> Emer
     metadata_ok, metadata_reason = _standby_metadata_matches_files(standby_status.metadata, standby_status)
     if not metadata_ok:
         record_emergency_startup_metric("emergency_startup_no_valid_standby", reason=metadata_reason)
+        invalid_status = replace(
+            standby_status,
+            ok=False,
+            status="invalid",
+            reason=metadata_reason,
+        )
         return EmergencyStartupDecision(
             role=role,
             allowed=False,
             status="no_valid_standby",
-            user_message=NO_VALID_STANDBY_MESSAGE,
+            user_message=_startup_message_with_standby_status(
+                NO_VALID_STANDBY_MESSAGE,
+                invalid_status,
+                last_observed_remote_change_id=last_observed_remote_change_id,
+            ),
             root=resolved_root,
             technical_reason=metadata_reason,
         )
@@ -378,9 +414,20 @@ def prepare_emergency_startup(role: str | None, root: str | None = None) -> Emer
 
     source_error = validate_emergency_patient_source(standby_status.metadata.medical_db_path)
     if source_error:
+        invalid_status = replace(
+            standby_status,
+            ok=False,
+            status="invalid",
+            reason=source_error,
+        )
         return EmergencyStartupDecision(
             role=role, allowed=False, status="no_valid_standby",
-            user_message=NO_VALID_STANDBY_MESSAGE, root=resolved_root,
+            user_message=_startup_message_with_standby_status(
+                NO_VALID_STANDBY_MESSAGE,
+                invalid_status,
+                last_observed_remote_change_id=last_observed_remote_change_id,
+            ),
+            root=resolved_root,
             technical_reason=source_error,
         )
 
@@ -388,7 +435,11 @@ def prepare_emergency_startup(role: str | None, root: str | None = None) -> Emer
         role=role,
         allowed=True,
         status="standby_available",
-        user_message=NURSE_EMERGENCY_OFFER_MESSAGE,
+        user_message=_startup_message_with_standby_status(
+            NURSE_EMERGENCY_OFFER_MESSAGE,
+            standby_status,
+            last_observed_remote_change_id=last_observed_remote_change_id,
+        ),
         root=resolved_root,
         password_settings_db_path=str(standby_status.metadata.settings_db_path or ""),
         standby_metadata=standby_status.metadata,
