@@ -92,6 +92,8 @@ def main(argv=None):
         if sys.stdout is not None:
             print("REMCARD_UNIFIED_SMOKE_OK")
         return
+    from rem_card.app.startup_diagnostics import start
+    start()
     from PySide6.QtWidgets import QApplication
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtCore import QTimer

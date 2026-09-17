@@ -90,7 +90,8 @@
     "tests/test_vital_validation.py",
     "tests/test_vitals_query_indexes.py",
     "tests/test_storage_maintenance.py",
-    "tests/test_db_wait_diagnostics.py"
+    "tests/test_db_wait_diagnostics.py",
+    "tests/test_startup_diagnostics.py"
   ],
   "ui": [
     "tests/test_role_entry_preload.py",

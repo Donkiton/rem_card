@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
+from rem_card.app.startup_diagnostics import measured, span, event
 from rem_card.app.db_access_classifier import classify_database_access_error
 from rem_card.app.jsonl_audit_log import write_audit_event
 from rem_card.app.runtime_paths import (
@@ -409,6 +410,7 @@ def update_client_policy_min_version(
     return changed
 
 
+@measured("startup_lock_acquire")
 def _acquire_lock_with_wait(
     lock_path: str,
     *,
@@ -500,14 +502,21 @@ def _release_lock(lock: Optional[FileWriteLock], heartbeat: Optional[_LockHeartb
         lock.release()
 
 
+@measured("startup_database_check")
 def _check_quick(db_path: str) -> tuple[bool, str, bool]:
     if not os.path.exists(db_path):
         return False, "database file does not exist", False
     conn = None
     try:
         uri = build_sqlite_file_uri(db_path, mode="ro")
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
-        configure_connection(conn, readonly=True, profile="network")
+        with span("startup_database_open"):
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
+        with span("startup_connection_configure"):
+            configure_connection(conn, readonly=True, profile="network")
+        try:
+            event("startup_database_metadata", size_bytes=os.path.getsize(db_path))
+        except OSError:
+            pass
         ok, result = run_quick_check(conn)
         return ok, result, not ok
     except Exception as exc:

@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from rem_card.app.db_wait_diagnostics import observe, mark_stage
+from rem_card.app.startup_diagnostics import measured
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.db_availability import DatabaseClosedError
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
@@ -427,6 +428,7 @@ def run_integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
             force_flush=not ok,
         )
 
+@measured("sqlite_quick_check")
 def run_quick_check(conn: sqlite3.Connection) -> tuple[bool, str]:
     started = time.perf_counter()
     ok = False
