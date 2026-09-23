@@ -4,9 +4,11 @@ import hashlib
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, Iterator
 
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
@@ -36,6 +38,153 @@ class SnapshotValidationResult:
     file_mtime: float = 0.0
     fingerprint: dict[str, Any] = field(default_factory=dict)
     details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _SnapshotFileIdentity:
+    normalized_path: str
+    device: int
+    inode: int
+    size_bytes: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True)
+class _SuccessfulSnapshotValidation:
+    identity: _SnapshotFileIdentity
+    schema_version: int
+    result: SnapshotValidationResult
+
+
+@dataclass
+class _SnapshotValidationAttempt:
+    successful: dict[tuple[str, str], _SuccessfulSnapshotValidation] = field(default_factory=dict)
+
+
+_SNAPSHOT_VALIDATION_ATTEMPT: ContextVar[_SnapshotValidationAttempt | None] = ContextVar(
+    "emergency_snapshot_validation_attempt",
+    default=None,
+)
+
+
+@contextmanager
+def emergency_snapshot_validation_attempt() -> Iterator[None]:
+    """Limit successful immutable-snapshot reuse to one startup admission attempt.
+
+    The caller must wrap the complete admitted startup sequence.  A new scope
+    always starts with an empty cache; no validation result survives the scope.
+    """
+
+    token = _SNAPSHOT_VALIDATION_ATTEMPT.set(_SnapshotValidationAttempt())
+    try:
+        yield
+    finally:
+        _SNAPSHOT_VALIDATION_ATTEMPT.reset(token)
+
+
+def _normalized_snapshot_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(path)))
+
+
+def _snapshot_file_identity(path: str) -> _SnapshotFileIdentity | None:
+    if not path:
+        return None
+    try:
+        stat_result = os.stat(path)
+    except OSError:
+        return None
+    if not os.path.isfile(path):
+        return None
+    return _SnapshotFileIdentity(
+        normalized_path=_normalized_snapshot_path(path),
+        device=int(getattr(stat_result, "st_dev", 0) or 0),
+        inode=int(getattr(stat_result, "st_ino", 0) or 0),
+        size_bytes=int(stat_result.st_size),
+        mtime_ns=int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
+        ctime_ns=int(getattr(stat_result, "st_ctime_ns", int(stat_result.st_ctime * 1_000_000_000))),
+    )
+
+
+def _result_matches_identity(result: SnapshotValidationResult, identity: _SnapshotFileIdentity) -> bool:
+    if not result.ok or not result.file_hash:
+        return False
+    if int(result.file_size or 0) != identity.size_bytes:
+        return False
+    fingerprint = dict(result.fingerprint or {})
+    try:
+        fingerprint_path = _normalized_snapshot_path(str(fingerprint.get("path") or ""))
+    except Exception:
+        return False
+    return (
+        fingerprint_path == identity.normalized_path
+        and int(fingerprint.get("size_bytes") or 0) == identity.size_bytes
+        and int(fingerprint.get("mtime_ns") or 0) == identity.mtime_ns
+    )
+
+
+def _record_validation_reuse(target: str) -> None:
+    try:
+        record_metric(
+            "emergency_snapshot_validation_reused",
+            1,
+            target=target,
+            reason="unchanged_success_within_startup_attempt",
+        )
+    except Exception:
+        pass
+
+
+def _validate_snapshot_with_attempt_cache(
+    target: str,
+    path: str,
+    validator: Callable[[str], SnapshotValidationResult],
+) -> SnapshotValidationResult:
+    attempt = _SNAPSHOT_VALIDATION_ATTEMPT.get()
+    if attempt is None:
+        return validator(path)
+
+    before = _snapshot_file_identity(path)
+    before_hash = _snapshot_hash_or_empty(path) if before is not None else ""
+    normalized_path = _normalized_snapshot_path(path) if path else ""
+    cache_key = (target, normalized_path)
+    cached = attempt.successful.get(cache_key)
+    if cached is not None and before == cached.identity:
+        # Windows timestamps can coincide for rapid same-size writes. Verify
+        # bytes as well, saving the repeated SQLite/schema validation only.
+        if (before_hash and before_hash == cached.result.file_hash
+                and _snapshot_file_identity(path) == before
+                and cached.schema_version == int(cached.result.schema_version or 0)):
+            _record_validation_reuse(target)
+            return cached.result
+
+    # Missing, replaced or mutated files must not leave a reusable success.
+    attempt.successful.pop(cache_key, None)
+    result = validator(path)
+    after_hash = _snapshot_hash_or_empty(path) if result.ok else ""
+    after = _snapshot_file_identity(path)
+    if result.ok and (before is None or after is None or before != after
+                      or not before_hash or before_hash != after_hash
+                      or after_hash != result.file_hash):
+        return SnapshotValidationResult(
+            ok=False,
+            reason="snapshot changed during validation",
+            details={"validation_target": target},
+        )
+    if result.ok and after is not None and _result_matches_identity(result, after):
+        attempt.successful[cache_key] = _SuccessfulSnapshotValidation(
+            identity=after,
+            schema_version=int(result.schema_version or 0),
+            result=result,
+        )
+    return result
+
+
+def _snapshot_hash_or_empty(path: str) -> str:
+    try:
+        return compute_file_hash(path)
+    except OSError:
+        return ""
 
 
 def compute_file_hash(path: str) -> str:
@@ -333,7 +482,7 @@ def _record_settings_snapshot_schema_drift(
         pass
 
 
-def validate_medical_db_snapshot(path: str) -> SnapshotValidationResult:
+def _validate_medical_db_snapshot_uncached(path: str) -> SnapshotValidationResult:
     base_ok, base_reason = _base_file_checks(path)
     if not base_ok:
         return SnapshotValidationResult(ok=False, reason=base_reason)
@@ -370,7 +519,15 @@ def validate_medical_db_snapshot(path: str) -> SnapshotValidationResult:
                 pass
 
 
-def validate_settings_db_snapshot(path: str) -> SnapshotValidationResult:
+def validate_medical_db_snapshot(path: str) -> SnapshotValidationResult:
+    from rem_card.app.startup_diagnostics import startup_span
+    with startup_span("snapshot_validation", target="snapshot_medical"):
+        return _validate_snapshot_with_attempt_cache(
+            "medical", path, _validate_medical_db_snapshot_uncached,
+        )
+
+
+def _validate_settings_db_snapshot_uncached(path: str) -> SnapshotValidationResult:
     base_ok, base_reason = _base_file_checks(path)
     if not base_ok:
         return SnapshotValidationResult(ok=False, reason=base_reason)
@@ -477,3 +634,11 @@ def validate_settings_db_snapshot(path: str) -> SnapshotValidationResult:
                 conn.close()
             except Exception:
                 pass
+
+
+def validate_settings_db_snapshot(path: str) -> SnapshotValidationResult:
+    from rem_card.app.startup_diagnostics import startup_span
+    with startup_span("snapshot_validation", target="snapshot_settings"):
+        return _validate_snapshot_with_attempt_cache(
+            "settings", path, _validate_settings_db_snapshot_uncached,
+        )

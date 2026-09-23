@@ -1,5 +1,8 @@
 """Preloading prepares empty UI without opening a patient/session."""
+import time
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from PySide6.QtCore import QTimer
@@ -7,6 +10,231 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage
 from rem_card.ui.shared.role_entry_preload import RoleEntryPreload
+from rem_card.ui.shared.staged_card_prewarm import StagedUiPrewarm
+
+
+def _process_until(app, predicate, timeout_sec=1.0):
+    deadline = time.monotonic() + timeout_sec
+    while not predicate() and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.001)
+    assert predicate()
+
+
+def test_staged_card_prewarm_yields_to_qt_heartbeat_between_steps():
+    app = QApplication.instance() or QApplication([])
+    owner = QWidget()
+    owner._is_closing = False
+    events = []
+    prewarmer = None
+
+    def heartbeat():
+        events.append("heartbeat")
+        if prewarmer is not None and not prewarmer.done:
+            QTimer.singleShot(1, owner, heartbeat)
+
+    steps = [(f"step_{index}", lambda index=index: events.append(f"step_{index}")) for index in range(4)]
+    prewarmer = StagedUiPrewarm(
+        owner,
+        role="doctor",
+        steps=steps,
+        stagger_ms=5,
+        metric_recorder=lambda *args, **kwargs: None,
+    )
+    try:
+        QTimer.singleShot(0, owner, heartbeat)
+        assert prewarmer.start()
+        _process_until(app, lambda: prewarmer.done)
+        positions = [events.index(f"step_{index}") for index in range(4)]
+        assert positions == sorted(positions)
+        for left, right in zip(positions, positions[1:]):
+            assert "heartbeat" in events[left + 1:right]
+    finally:
+        owner.deleteLater()
+        app.processEvents()
+
+
+def test_staged_card_prewarm_discards_queued_steps_on_role_shutdown():
+    app = QApplication.instance() or QApplication([])
+    owner = QWidget()
+    owner._is_closing = False
+    calls = []
+    prewarmer = StagedUiPrewarm(
+        owner,
+        role="nurse",
+        steps=[(f"step_{index}", lambda index=index: calls.append(index)) for index in range(3)],
+        stagger_ms=30,
+        metric_recorder=lambda *args, **kwargs: None,
+    )
+    try:
+        assert prewarmer.start()
+        _process_until(app, lambda: prewarmer.completed_steps == 1)
+        owner._is_closing = True
+        assert prewarmer.cancel(reason="role_shutdown")
+        deadline = time.monotonic() + 0.08
+        while time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.001)
+        assert calls == [0]
+        assert prewarmer.cancelled and not prewarmer.done
+    finally:
+        owner.deleteLater()
+        app.processEvents()
+
+
+def test_patient_open_finishes_remaining_card_prewarm_once():
+    app = QApplication.instance() or QApplication([])
+    owner = QWidget()
+    owner._is_closing = False
+    calls = []
+    prewarmer = StagedUiPrewarm(
+        owner,
+        role="doctor",
+        steps=[(f"step_{index}", lambda index=index: calls.append(index)) for index in range(4)],
+        stagger_ms=80,
+        metric_recorder=lambda *args, **kwargs: None,
+    )
+    try:
+        assert prewarmer.start()
+        _process_until(app, lambda: prewarmer.completed_steps == 1)
+        assert prewarmer.finish_now(reason="patient_open")
+        assert calls == [0, 1, 2, 3]
+        assert prewarmer.done
+        deadline = time.monotonic() + 0.12
+        while time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.001)
+        assert calls == [0, 1, 2, 3]
+    finally:
+        owner.deleteLater()
+        app.processEvents()
+
+
+def test_finish_now_stops_if_a_step_cancels_the_prewarm():
+    app = QApplication.instance() or QApplication([])
+    owner = QWidget()
+    owner._is_closing = False
+    calls = []
+    prewarmer = None
+
+    def cancel_step():
+        calls.append("cancel")
+        prewarmer.cancel(reason="context_switch")
+
+    prewarmer = StagedUiPrewarm(
+        owner,
+        role="doctor",
+        steps=[("cancel", cancel_step), ("late", lambda: calls.append("late"))],
+        stagger_ms=5,
+        metric_recorder=lambda *args, **kwargs: None,
+    )
+    try:
+        assert not prewarmer.finish_now(reason="patient_open")
+        assert calls == ["cancel"]
+        assert prewarmer.cancelled and not prewarmer.done
+    finally:
+        owner.deleteLater()
+        app.processEvents()
+
+
+def _build_role_card_widget(role):
+    from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
+    from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget
+
+    patient_service = MagicMock()
+    remcard_service = MagicMock()
+    remcard_service.status_service = MagicMock()
+    remcard_service.fluid_service = MagicMock()
+    remcard_service.data_service = None
+    shift_start = datetime(2026, 9, 23, 8, 0)
+    remcard_service.get_day_period.return_value = (shift_start, shift_start + timedelta(days=1))
+    remcard_service.normalize_time.side_effect = lambda value, fallback: value or fallback
+    remcard_service.is_time_input_valid.return_value = True
+    remcard_service.display_hint.side_effect = lambda value, _date: {"label": value, "text": ""}
+    return (
+        DoctorRemCardWidget(remcard_service, None, patient_service)
+        if role == "doctor"
+        else NurseMainWidget(patient_service, remcard_service)
+    )
+
+
+@pytest.mark.parametrize("role", ["doctor", "nurse"])
+def test_patient_open_during_partial_prewarm_builds_complete_role_card(role):
+    app = QApplication.instance() or QApplication([])
+    widget = _build_role_card_widget(role)
+    try:
+        assert not widget.has_full_layout()
+        prewarmer = widget._ensure_card_ui_prewarmer()
+        assert prewarmer.start()
+        _process_until(app, lambda: prewarmer.completed_steps == 2, timeout_sec=2.0)
+        assert not widget.has_full_layout()
+        assert widget._ensure_full_layout(reason="patient_open")
+        assert widget.has_full_layout()
+        assert widget._card_ui_prewarmer.done
+        assert hasattr(widget, "vitals_input")
+        assert getattr(widget.layout_manager, "orders_widget", None) is not None
+        assert widget.layout_manager.orders_widget.main_layout is not None
+        assert getattr(widget.layout_manager, "nurse_orders_manager", None) is not None
+    finally:
+        widget.shutdown()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_real_doctor_card_prewarm_keeps_qt_heartbeat_between_creation_groups():
+    app = QApplication.instance() or QApplication([])
+    widget = _build_role_card_widget("doctor")
+    prewarmer = widget._ensure_card_ui_prewarmer()
+    heartbeat_count = [0]
+    counts_before_steps = []
+
+    def heartbeat():
+        heartbeat_count[0] += 1
+        if not prewarmer.done and not prewarmer.cancelled and not prewarmer.failed:
+            QTimer.singleShot(1, widget, heartbeat)
+
+    wrapped_steps = []
+    for name, callback in prewarmer._steps:
+        def run(callback=callback):
+            counts_before_steps.append(heartbeat_count[0])
+            callback()
+        wrapped_steps.append((name, run))
+    prewarmer._steps = wrapped_steps
+    try:
+        QTimer.singleShot(0, widget, heartbeat)
+        assert prewarmer.start()
+        _process_until(app, lambda: prewarmer.done, timeout_sec=5.0)
+        assert len(counts_before_steps) == prewarmer.total_steps
+        assert all(after > before for before, after in zip(counts_before_steps, counts_before_steps[1:]))
+        assert widget.has_full_layout()
+    finally:
+        widget.shutdown()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_role_shutdown_stops_real_partial_card_prewarm():
+    app = QApplication.instance() or QApplication([])
+    widget = _build_role_card_widget("nurse")
+    prewarmer = widget._ensure_card_ui_prewarmer()
+    calls = []
+    prewarmer._steps = [
+        (name, lambda callback=callback, name=name: (calls.append(name), callback())[1])
+        for name, callback in prewarmer._steps
+    ]
+    try:
+        assert prewarmer.start()
+        _process_until(app, lambda: prewarmer.completed_steps == 1, timeout_sec=2.0)
+        widget.shutdown()
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.001)
+        assert len(calls) == 1
+        assert prewarmer.cancelled and not widget.has_full_layout()
+    finally:
+        widget.deleteLater()
+        app.processEvents()
 
 
 def test_shared_screen_is_empty_until_consumed_by_a_session(monkeypatch):
@@ -106,6 +334,7 @@ def test_entry_waits_for_data_and_discards_old_session(monkeypatch):
     page = SimpleNamespace(wake_initial_role_monitor=lambda: None)
     owner = SimpleNamespace(
         _closing=False, _leaving=False, role_window=page, session_id='current', role='doctor',
+        _entry_cancel=None,
         welcome=SimpleNamespace(set_preparing=lambda *args: events.append('loading')),
         entry_chrome=SimpleNamespace(set_role_mode=lambda value: events.append('chrome')),
         stack=SimpleNamespace(indexOf=lambda page: -1, addWidget=lambda page: events.append('add'),
@@ -125,3 +354,22 @@ def test_entry_waits_for_data_and_discards_old_session(monkeypatch):
     ready['ready'] = False
     owner._finish_role_entry(page, 'current', module.time.monotonic() - 1)
     assert events[-1] == 'failed'
+def test_failed_layout_transfer_disposes_prepared_widgets():
+    import pytest
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import isValid
+    from rem_card.ui.shared.staged_card_prewarm import StagedCardSectors
+    app = QApplication.instance() or QApplication([])
+    preparation = StagedCardSectors("doctor")
+    preparation.steps()[0][1]()
+    widgets = list(preparation._created)
+    assert widgets
+    def fail(sectors):
+        assert sectors
+        raise RuntimeError("synthetic layout failure")
+    with pytest.raises(RuntimeError, match="synthetic layout failure"):
+        preparation.build_layout(fail)
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+    assert all(not isValid(widget) for widget in widgets)

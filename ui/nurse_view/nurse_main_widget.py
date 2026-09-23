@@ -145,6 +145,9 @@ class NurseMainWidget(QWidget):
         self.report_controller = None
         self._card_ui_prewarm_started = False
         self._card_ui_prewarm_done = False
+        self._card_ui_prewarmer = None
+        self._card_sector_preparation = None
+        self._card_ui_prewarm_failed = False
         self._chart_init_pending = False
         self._last_applied_card_snapshot_signature = None
         self._last_applied_chart_signature = None
@@ -1552,7 +1555,25 @@ class NurseMainWidget(QWidget):
     def _ensure_full_layout(self, reason: str = "") -> bool:
         if self._is_closing:
             return False
+        if reason == "patient_open":
+            prewarmer = self._ensure_card_ui_prewarmer()
+            try:
+                prewarmer.finish_now(reason="patient_open")
+            except Exception as exc:
+                logger.warning("Nurse immediate card UI preparation failed: %s", exc, exc_info=True)
+                if not self._full_layout_created:
+                    return self._create_full_layout(reason=reason)
+            return bool(self._full_layout_created)
         if self._full_layout_created:
+            return True
+        return self._create_full_layout(reason=reason)
+
+    def _create_full_layout(self, *, reason: str, sector_preparation=None) -> bool:
+        if self._is_closing:
+            return False
+        if self._full_layout_created:
+            if sector_preparation is not None:
+                sector_preparation.dispose()
             return True
         if not hasattr(self, "main_stack"):
             return False
@@ -1561,13 +1582,22 @@ class NurseMainWidget(QWidget):
 
         old_shell = getattr(self, "_w1_shell", None)
         handoff = old_shell.create_layout_handoff() if old_shell is not None else None
-        try:
-            layout = NurseRemCardLayoutManager(
+
+        def create_layout(prepared_sectors=None):
+            return NurseRemCardLayoutManager(
                 patient_service=self.patient_service,
                 remcard_service=self.remcard_service,
                 parent=self.main_stack,
                 operblock_service=self.operblock_service,
                 w1_handoff=handoff,
+                prepared_sectors=prepared_sectors,
+            )
+
+        try:
+            layout = (
+                sector_preparation.build_layout(create_layout)
+                if sector_preparation is not None
+                else create_layout()
             )
         except Exception:
             if old_shell is not None and handoff is not None:
@@ -1598,6 +1628,78 @@ class NurseMainWidget(QWidget):
         self._retire_w1_shell(old_shell)
         logger.info("[NURSE_VIEW] lazy full layout created reason=%s", reason)
         return True
+
+    def _ensure_card_ui_prewarmer(self):
+        prewarmer = self._card_ui_prewarmer
+        if prewarmer is not None:
+            return prewarmer
+
+        from rem_card.ui.shared.staged_card_prewarm import StagedCardSectors, StagedUiPrewarm
+
+        sector_preparation = None
+        steps = []
+        if not self._full_layout_created:
+            sector_preparation = StagedCardSectors("nurse")
+            steps.extend(sector_preparation.steps())
+            steps.append(
+                (
+                    "layout_assembly",
+                    lambda preparation=sector_preparation: self._create_full_layout(
+                        reason="idle_prewarm",
+                        sector_preparation=preparation,
+                    ),
+                )
+            )
+        steps.extend(
+            (
+                ("card_widgets", self._prewarm_card_widgets),
+                ("orders_widget", self._prewarm_orders_widget),
+                ("current_orders", self._prewarm_current_orders),
+            )
+        )
+        self._card_sector_preparation = sector_preparation
+        prewarmer = StagedUiPrewarm(
+            self,
+            role="nurse",
+            steps=steps,
+            stagger_ms=CARD_UI_PREWARM_STAGGER_MS,
+            on_done=self._card_ui_prewarm_completed,
+            on_failed=self._card_ui_prewarm_failed_callback,
+            on_cancel=(sector_preparation.dispose if sector_preparation is not None else None),
+        )
+        self._card_ui_prewarmer = prewarmer
+        return prewarmer
+
+    def _card_ui_prewarm_completed(self):
+        self._card_ui_prewarm_started = False
+        self._card_ui_prewarm_done = True
+        logger.debug("Nurse card UI prewarm completed")
+
+    def _card_ui_prewarm_failed_callback(self, exc):
+        self._card_ui_prewarm_started = False
+        self._card_ui_prewarm_failed = True
+        logger.warning("Nurse staged card UI prewarm failed: %s", exc)
+
+    def _prewarm_card_widgets(self):
+        layout = getattr(self, "layout_manager", None)
+        if layout is not None:
+            layout.setUpdatesEnabled(False)
+        try:
+            self._ensure_card_widgets_initialized()
+        finally:
+            if layout is not None:
+                layout.setUpdatesEnabled(True)
+
+    def _prewarm_orders_widget(self):
+        ow = self._ensure_orders_widget()
+        if ow is not None and getattr(ow, "main_layout", None) is None:
+            ow.setup_ui()
+
+    def _prewarm_current_orders(self):
+        layout = getattr(self, "layout_manager", None)
+        if layout is not None and hasattr(layout, "ensure_nurse_orders_manager"):
+            layout.ensure_nurse_orders_manager()
+            self._bind_nurse_orders_balance_signals()
 
     def _wire_full_layout_signals(self):
         if self._full_layout_static_signals_bound:
@@ -1792,53 +1894,11 @@ class NurseMainWidget(QWidget):
     def _schedule_card_ui_prewarm(self):
         if self._card_ui_prewarm_started or self._card_ui_prewarm_done:
             return
-        if not self._full_layout_created and not self._ensure_full_layout(reason="idle_prewarm"):
+        if self._card_ui_prewarm_failed:
             return
-        self._card_ui_prewarm_started = True
-        QTimer.singleShot(0, self._run_card_ui_prewarm)
-
-    @after_window_transition
-    def _run_card_ui_prewarm(self):
-        if self._card_ui_prewarm_done:
-            return
-        try:
-            if hasattr(self, 'layout_manager'):
-                self.layout_manager.setUpdatesEnabled(False)
-            self._ensure_card_widgets_initialized()
-            QTimer.singleShot(CARD_UI_PREWARM_STAGGER_MS, self._run_card_ui_prewarm_stage_2)
-        except Exception as exc:
-            logger.warning("Nurse card UI prewarm stage1 failed: %s", exc)
-            self._card_ui_prewarm_started = False
-        finally:
-            if hasattr(self, 'layout_manager'):
-                self.layout_manager.setUpdatesEnabled(True)
-
-    @after_window_transition
-    def _run_card_ui_prewarm_stage_2(self):
-        if self._card_ui_prewarm_done:
-            return
-        try:
-            ow = self._ensure_orders_widget()
-            if ow is not None and getattr(ow, "main_layout", None) is None:
-                ow.setup_ui()
-            QTimer.singleShot(CARD_UI_PREWARM_STAGGER_MS, self._run_card_ui_prewarm_stage_3)
-        except Exception as exc:
-            logger.warning("Nurse card UI prewarm stage2 failed: %s", exc)
-            self._card_ui_prewarm_started = False
-
-    @after_window_transition
-    def _run_card_ui_prewarm_stage_3(self):
-        if self._card_ui_prewarm_done:
-            return
-        try:
-            if hasattr(self.layout_manager, 'ensure_nurse_orders_manager'):
-                self.layout_manager.ensure_nurse_orders_manager()
-                self._bind_nurse_orders_balance_signals()
-            self._card_ui_prewarm_done = True
-            logger.debug("Nurse card UI prewarm completed")
-        except Exception as exc:
-            logger.warning("Nurse card UI prewarm stage3 failed: %s", exc)
-            self._card_ui_prewarm_started = False
+        prewarmer = self._ensure_card_ui_prewarmer()
+        if prewarmer.start():
+            self._card_ui_prewarm_started = True
 
     def _schedule_journal_prewarm(self):
         if self._journal_prewarm_started or self._journal_prewarm_done:
@@ -2923,6 +2983,9 @@ class NurseMainWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        prewarmer = getattr(self, "_card_ui_prewarmer", None)
+        if prewarmer is not None:
+            prewarmer.cancel(reason="role_shutdown")
         self._balance_snapshot_sync.shutdown()
         if self._operblock_archive_viewer is not None:
             self._return_from_operblock_archive_viewer()

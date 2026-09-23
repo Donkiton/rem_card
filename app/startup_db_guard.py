@@ -22,6 +22,7 @@ from rem_card.app.runtime_paths import (
 )
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.version import APP_VERSION
+from rem_card.app.startup_check_worker import StartupCheckAborted, check_startup_cancelled
 from rem_card.app.sqlite_shared import (
     NETWORK_SAFE_DB_PROFILE,
     FileWriteLock,
@@ -501,14 +502,26 @@ def _release_lock(lock: Optional[FileWriteLock], heartbeat: Optional[_LockHeartb
 
 
 def _check_quick(db_path: str) -> tuple[bool, str, bool]:
+    from rem_card.app.startup_check_worker import current_startup_check_runner
+    from rem_card.app.startup_diagnostics import startup_span
+    with startup_span("startup_database_check", target="central_medical"):
+        runner = current_startup_check_runner()
+        return runner(db_path) if runner else _check_quick_direct(db_path)
+
+
+def _check_quick_direct(db_path: str) -> tuple[bool, str, bool]:
+    from rem_card.app.startup_diagnostics import startup_span
     if not os.path.exists(db_path):
         return False, "database file does not exist", False
     conn = None
     try:
         uri = build_sqlite_file_uri(db_path, mode="ro")
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
-        configure_connection(conn, readonly=True, profile="network")
-        ok, result = run_quick_check(conn)
+        with startup_span("startup_database_open", target="central_medical"):
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
+        with startup_span("startup_connection_configure", target="central_medical"):
+            configure_connection(conn, readonly=True, profile="network")
+        with startup_span("sqlite_quick_check", target="central_medical"):
+            ok, result = run_quick_check(conn)
         return ok, result, not ok
     except Exception as exc:
         reason = str(exc)
@@ -542,7 +555,12 @@ def _check_quick_with_retries(
             role=role,
             details={"db_path": db_path, "attempt": attempt, "reason": result},
         )
-        time.sleep(2.0)
+        from rem_card.app.startup_check_worker import current_startup_check_runner
+        wait = getattr(current_startup_check_runner(), "wait_retry", None)
+        if wait:
+            wait(2.0)
+        else:
+            time.sleep(2.0)
     return False, last_result, last_confirmed_corruption
 
 
@@ -1239,6 +1257,7 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             baza_dir=baza_dir,
             role=role,
         )
+        check_startup_cancelled()
         if ok:
             profile = _apply_network_safe_profile_with_lock(
                 baza_dir=baza_dir,
@@ -1248,6 +1267,7 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             )
             # DatabaseManager validates the exact same fingerprint and skips a
             # second full quick_check in this process.
+            check_startup_cancelled()
             _publish_startup_quickcheck_result(db_path)
             write_audit_event(
                 "db_guard_ok",
@@ -1298,7 +1318,11 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             role=role,
             details={"db_path": db_path, "reason": result},
         )
+        check_startup_cancelled()
         return recover_shared_db_with_locks(baza_dir=baza_dir, db_path=db_path, role=role, failure_reason=result)
+    except StartupCheckAborted:
+        # Cancellation/timeout is not corruption or an emergency-mode offer.
+        raise
     except TimeoutError as exc:
         write_audit_event(
             "db_guard_failed",

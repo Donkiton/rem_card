@@ -1505,10 +1505,13 @@ def _validate_compiled_role_startup(
     if not is_compiled() or role not in ROLE_KEYS:
         return True
 
+    from rem_card.app.startup_check_worker import StartupCheckAborted
     try:
         from rem_card.app.startup_db_guard import run_startup_db_guard
 
         result = run_startup_db_guard(role=role)
+    except StartupCheckAborted:
+        raise
     except Exception as exc:
         _write_startup_local_log(f"startup db guard crashed for role={role}: {exc}")
         _record_startup_database_failure(role, exc)

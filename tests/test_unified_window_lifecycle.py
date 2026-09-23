@@ -34,6 +34,68 @@ def state(mode, generation, operation=None):
     return dict(state=mode, generation=generation, operation_id=operation, owner_token='token')
 
 
+def test_random_clicks_cancelled_admission_releases_before_next_role(shell, monkeypatch, tmp_path):
+    shell.root = str(tmp_path)
+    calls = []
+    released = []
+    monkeypatch.setattr(shell, '_async', lambda *args: calls.append(args))
+    monkeypatch.setattr(shell, 'refresh_access', lambda: None)
+    shell.enter_role('nurse')
+    for _ in range(30):
+        shell.enter_role('doctor')
+    assert len(calls) == 1 and shell.role == 'nurse'
+    old_session = shell.session_id
+    shell.cancel_role_entry()
+    assert shell._busy
+    shell.enter_role('doctor')
+    assert len(calls) == 1
+    # Admission finished late; its lease must be released without preflight.
+    calls[0][1](SimpleNamespace(release=lambda: released.append('released')))
+    assert released == ['released'] and not shell._busy and shell.lease is None
+    shell.enter_role('doctor')
+    assert len(calls) == 2 and shell.session_id != old_session
+    shell.cancel_role_entry()
+    calls[1][1](SimpleNamespace(release=lambda: None))
+
+
+def test_maintenance_cancels_pending_entry_except_administrator(shell, monkeypatch, tmp_path):
+    import threading
+    shell._entry_cancel = threading.Event()
+    shell._busy = True
+    shell.role = 'doctor'
+    monkeypatch.setattr(shell, '_route_unreachable_access', lambda state: False)
+    shell._access_received(state('draining', 1, 'maintenance'))
+    assert shell._entry_cancel.is_set()
+    shell._entry_cancel = threading.Event()
+    shell._local_administrator = True
+    shell._access_received(state('draining', 2, 'maintenance2'))
+    assert not shell._entry_cancel.is_set()
+    shell._entry_cancel = None
+
+
+def test_close_during_probe_requests_cancel_without_releasing_lease(shell, monkeypatch):
+    import threading
+    from PySide6.QtGui import QCloseEvent
+    shell._entry_cancel = threading.Event()
+    shell._busy = True
+    lease = SimpleNamespace(release=lambda: pytest.fail('premature release'))
+    shell.lease = lease
+    event = QCloseEvent()
+    shell.closeEvent(event)
+    assert not event.isAccepted() and shell._pending_exit
+    assert shell._entry_cancel.is_set() and shell.lease is lease
+    shell.lease = None
+    shell._entry_cancel = None
+
+
+def test_failed_admission_clears_pending_cancel_state(shell, monkeypatch):
+    import threading
+    shell._entry_cancel = threading.Event()
+    shell._busy = True
+    shell._admission_failed(ValueError('synthetic admission failure'))
+    assert shell._entry_cancel is None and not shell._busy
+
+
 def test_initial_loading_precedes_role_chooser(shell, monkeypatch, tmp_path):
     from rem_card.app import runtime_paths
     monkeypatch.setattr(runtime_paths, 'is_compiled', lambda: False)
@@ -47,6 +109,22 @@ def test_initial_loading_precedes_role_chooser(shell, monkeypatch, tmp_path):
     assert shell.stack.currentWidget() is shell.loading
     shell._ready()
     assert shell.stack.currentWidget() is shell.welcome
+
+
+def test_cancel_during_window_construction_defers_shutdown_until_setup_unwinds(shell, monkeypatch):
+    import threading
+    shell._entry_cancel = threading.Event()
+    shell._entry_setup_active = True
+    shell._busy = True
+    shell.container = object()
+    shell.cancel_role_entry()
+    assert shell._entry_cancel.is_set()
+    assert not shell._leaving
+    calls = []
+    monkeypatch.setattr(shell, 'request_role_exit', lambda force=False: calls.append(force))
+    shell._finish_entry_setup()
+    assert calls == [True] and not shell._entry_setup_active
+    shell._entry_cancel = None
 
 
 def test_role_preparation_stays_on_chooser_and_error_restores_controls(shell, monkeypatch, tmp_path):
