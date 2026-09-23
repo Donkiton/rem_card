@@ -2,19 +2,19 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>remcard · интерактивная карта кода</title>
+<title>RemCard 5.1 · интерактивная карта кода</title>
 <style>
-:root{color-scheme:dark;--bg:#070b14;--panel:#0d1626;--line:#2a3955;--text:#edf3fb;--muted:#91a1ba;--up:#fb7185;--down:#5eead4;--flow:#fbbf24}*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:13px/1.45 "Segoe UI",system-ui,sans-serif;overflow:hidden}body{display:grid;grid-template-rows:auto auto 1fr}header{display:flex;gap:20px;align-items:flex-start;padding:15px 19px 11px;background:linear-gradient(#111a2c,#0a111e);border-bottom:1px solid #1e2b43}h1{font-size:20px;margin:0 0 5px}.meta{color:var(--muted);font-size:12px}.meta code{color:#cbd5e1}.stats{margin-left:auto;display:flex;gap:7px}.pill{padding:4px 9px;border:1px solid #344663;border-radius:999px;color:#bdcbe0;background:#111b2d}.toolbar{display:flex;gap:7px;align-items:center;padding:8px 11px;background:#0b1220;border-bottom:1px solid #1e2b43;overflow-x:auto}.toolbar input,.toolbar select,.toolbar button{height:32px;border:1px solid #334564;border-radius:7px;background:#111b2d;color:var(--text);padding:0 10px}.toolbar input{width:235px}.toolbar button{cursor:pointer;font-weight:600}.toolbar button:hover{background:#182640}.types{display:flex;gap:5px}.types button{--c:#94a3b8}.types button:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--c)}.types button.off{opacity:.35;text-decoration:line-through}.work{display:grid;grid-template-columns:minmax(0,1fr) 330px;min-height:0}.stage{position:relative;min-width:0;background:radial-gradient(circle at 50% 18%,#14233e,#090f1b 50%,#070b14)}svg{display:block;width:100%;height:100%;touch-action:none;cursor:grab}svg.pan{cursor:grabbing}.hint{position:absolute;left:11px;bottom:9px;padding:5px 8px;border:1px solid #263650;border-radius:7px;background:#08101ddd;color:#7184a0;pointer-events:none}aside{overflow:auto;padding:15px;border-left:1px solid #253550;background:linear-gradient(#0e1727,#09101c)}aside h2{font-size:17px;margin:0 0 3px}aside h3{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#8193ae;margin:15px 0 6px}aside p{margin:0;color:#c7d3e4}aside ul{padding-left:18px;margin:4px 0;color:#bac8da}aside code{color:#7dd3fc;word-break:break-word}.empty{text-align:center;color:var(--muted);padding:28px 6px}.kind{display:inline-block;margin:6px 0 11px;padding:2px 8px;border:1px solid #405474;border-radius:999px}.ev{margin:5px 0;padding:7px 8px;border:1px solid #263853;border-radius:6px;background:#091321}.flow-card{margin:6px 0;padding:7px 9px;border-left:3px solid var(--flow);background:#181a22}.flow-card b{display:block;color:#fde68a}.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:12px;text-align:left;font-size:11px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}.boundary{fill:#0b1424;stroke:#324360;stroke-width:1.2;stroke-dasharray:7 5}.boundary-title{fill:#8294af;font-size:12px;font-weight:700;letter-spacing:.1em}.edge{fill:none;stroke:#52627e;stroke-width:1.4;opacity:.52;marker-end:url(#arrow)}.edge.dim{opacity:.06}.edge.up{stroke:var(--up);stroke-width:2.5;opacity:1}.edge.down{stroke:var(--down);stroke-width:2.5;opacity:1}.edge.flow{stroke:var(--flow);stroke-width:3;opacity:1}.edge.hide,.node.hide{display:none}.hit{fill:none;stroke:transparent;stroke-width:12;cursor:pointer}.node{cursor:pointer;filter:drop-shadow(0 6px 9px #0008)}.node.dim{opacity:.14}.node .card{fill:#121d30;stroke:var(--c);stroke-width:1.5;rx:10}.node .band{fill:var(--c);opacity:.18;rx:10}.node .badge{fill:var(--c);font-size:9px;font-weight:700}.node .title{fill:#f4f7fb;font-size:13px;font-weight:700}.node .path{fill:#94a6c0;font-size:10px}.node .tests{fill:#687b98;font-size:9px}.node.selected .card{stroke:#fff;stroke-width:3}.node.upstream .card{stroke:var(--up);stroke-width:2.7}.node.downstream .card{stroke:var(--down);stroke-width:2.7}.node.in-flow .card{stroke:var(--flow);stroke-width:3}.node.search .card{stroke:#c084fc;stroke-width:3}@media(max-width:850px){.work{grid-template-columns:1fr}aside{position:absolute;right:0;top:112px;bottom:0;width:min(88vw,330px);z-index:5}.stats{display:none}}
+:root{color-scheme:dark;--bg:#070b14;--panel:#0d1626;--line:#2a3955;--text:#edf3fb;--muted:#91a1ba;--up:#fb7185;--down:#5eead4;--flow:#fbbf24}*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:13px/1.45 "Segoe UI",system-ui,sans-serif;overflow:hidden}body{display:grid;grid-template-rows:auto auto minmax(0,1fr)}header{display:flex;gap:20px;align-items:flex-start;padding:15px 19px 11px;background:linear-gradient(#111a2c,#0a111e);border-bottom:1px solid #1e2b43}h1{font-size:20px;margin:0 0 5px}.meta{color:var(--muted);font-size:12px}.meta code{color:#cbd5e1}.stats{margin-left:auto;display:flex;gap:7px}.pill{padding:4px 9px;border:1px solid #344663;border-radius:999px;color:#bdcbe0;background:#111b2d}.toolbar{display:flex;gap:7px;align-items:center;padding:8px 11px;background:#0b1220;border-bottom:1px solid #1e2b43;overflow-x:auto}.toolbar input,.toolbar select,.toolbar button{height:32px;border:1px solid #334564;border-radius:7px;background:#111b2d;color:var(--text);padding:0 10px}.toolbar input{width:235px}.toolbar button{cursor:pointer;font-weight:600}.toolbar button:hover{background:#182640}.types{display:flex;gap:5px}.types button{--c:#94a3b8}.types button:before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--c)}.types button.off{opacity:.35;text-decoration:line-through}.work{display:grid;grid-template-columns:minmax(0,1fr) 330px;min-height:0}.stage{position:relative;min-width:0;min-height:0;overflow:hidden;background:radial-gradient(circle at 50% 18%,#14233e,#090f1b 50%,#070b14)}svg{display:block;width:100%;height:100%;touch-action:none;cursor:grab}svg.pan{cursor:grabbing}.hint{position:absolute;left:11px;bottom:9px;padding:5px 8px;border:1px solid #263650;border-radius:7px;background:#08101ddd;color:#7184a0;pointer-events:none}aside{overflow:auto;padding:15px;border-left:1px solid #253550;background:linear-gradient(#0e1727,#09101c)}aside h2{font-size:17px;margin:0 0 3px}aside h3{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#8193ae;margin:15px 0 6px}aside p{margin:0;color:#c7d3e4}aside ul{padding-left:18px;margin:4px 0;color:#bac8da}aside code{color:#7dd3fc;word-break:break-word}.empty{text-align:center;color:var(--muted);padding:28px 6px}.kind{display:inline-block;margin:6px 0 11px;padding:2px 8px;border:1px solid #405474;border-radius:999px}.ev{margin:5px 0;padding:7px 8px;border:1px solid #263853;border-radius:6px;background:#091321}.flow-card{margin:6px 0;padding:7px 9px;border-left:3px solid var(--flow);background:#181a22}.flow-card b{display:block;color:#fde68a}.legend{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;margin-top:12px;text-align:left;font-size:11px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}.boundary{fill:#0b1424;stroke:#324360;stroke-width:1.2;stroke-dasharray:7 5}.boundary-title{fill:#8294af;font-size:12px;font-weight:700;letter-spacing:.1em}.edge{fill:none;stroke:#52627e;stroke-width:1.4;opacity:.52;marker-end:url(#arrow)}.edge.dim{opacity:.06}.edge.up{stroke:var(--up);stroke-width:2.5;opacity:1}.edge.down{stroke:var(--down);stroke-width:2.5;opacity:1}.edge.flow{stroke:var(--flow);stroke-width:3;opacity:1}.edge.hide,.node.hide{display:none}.hit{fill:none;stroke:transparent;stroke-width:12;cursor:pointer}.node{cursor:pointer;filter:drop-shadow(0 6px 9px #0008)}.node.dim{opacity:.14}.node .card{fill:#121d30;stroke:var(--c);stroke-width:1.5;rx:10}.node .band{fill:var(--c);opacity:.18;rx:10}.node .badge{fill:var(--c);font-size:9px;font-weight:700}.node .title{fill:#f4f7fb;font-size:13px;font-weight:700}.node .path{fill:#94a6c0;font-size:10px}.node .tests{fill:#687b98;font-size:9px}.node.selected .card{stroke:#fff;stroke-width:3}.node.upstream .card{stroke:var(--up);stroke-width:2.7}.node.downstream .card{stroke:var(--down);stroke-width:2.7}.node.in-flow .card{stroke:var(--flow);stroke-width:3}.node.search .card{stroke:#c084fc;stroke-width:3}@media(max-width:850px){.work{grid-template-columns:1fr;grid-template-rows:minmax(0,1fr) minmax(0,0.7fr)}aside{position:static;min-height:0;border-left:0;border-top:1px solid #253550}.stats{display:none}.hint{font-size:10px}.toolbar select{max-width:220px}}
 </style>
 </head>
 <body>
-<header><div><h1>remcard · интерактивная карта кода</h1><div class="meta">Сформировано <code id="generated"></code> из коммита <code id="commit"></code></div></div><div class="stats"><span class="pill" id="nc"></span><span class="pill" id="ec"></span><span class="pill" id="fc"></span><span class="pill">только подтверждённые связи</span></div></header>
+<header><div><h1>RemCard 5.1 · интерактивная карта кода</h1><div class="meta">Сформировано <code id="generated"></code> из коммита <code id="commit"></code></div></div><div class="stats"><span class="pill" id="nc"></span><span class="pill" id="ec"></span><span class="pill" id="fc"></span><span class="pill">только подтверждённые связи</span></div></header>
 <div class="toolbar"><input id="search" type="search" placeholder="Поиск модуля, пути или роли…"><select id="flow"><option value="">Все потоки</option></select><button id="fit">Вписать</button><button id="zin" title="Увеличить">＋</button><button id="zout" title="Уменьшить">−</button><button id="reset">Сбросить</button><div class="types" id="types"></div></div>
 <main class="work"><section class="stage"><svg id="map" viewBox="0 0 1320 860" aria-label="Интерактивный граф архитектуры"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0 0L0 6L7 3z" fill="#7487a6"/></marker></defs><g id="view"><g id="bounds"></g><g id="edges"></g><g id="nodes"></g></g></svg><div class="hint">Колесо: масштаб · фон: перемещение · модуль: перетаскивание · щелчок: трассировка зависимостей</div></section><aside id="details"></aside></main>
 <script id="codemap-data" type="application/json">
 {
-  "generated_at": "2026-08-06T09:18:11Z",
-  "generated_from_commit": "edf53f65f90d7d66a195e922b7a8de70348ae2d5",
+  "generated_at": "2026-09-23T09:52:30Z",
+  "generated_from_commit": "c4f7f3e520048e70bce21422d5e67fe2638922e3",
   "scope": [
     "launcher.py",
     "run_*.py",
@@ -29,84 +29,69 @@
   "nodes": [
     {
       "id": "entrypoints",
-      "label": "Точки запуска ролей",
+      "label": "Единая точка входа",
       "type": "entry",
       "boundary": "client",
-      "path": "launcher.py",
-      "role": "Подготавливает локальный пакет и запускает процесс по умолчанию, врача, медсестры, операционного блока, настройки пути или обновлятора.",
+      "path": "run_remcard.py",
+      "role": "RemCard.exe запускает unified_main и общий выбор четырёх ролей. Отдельный RemCardUpdater.exe обслуживает обновления. Старые Python-точки входа сохранены для совместимости.",
       "entrypoints": [
-        "launcher.py#run_rem_card",
-        "run_doctor.py#__main__",
-        "run_nurse.py#__main__",
-        "run_operblock.py#__main__",
+        "run_remcard.py#__main__",
+        "app/unified_main.py#main",
         "run_updater.py#__main__"
       ],
       "tests": [
-        "tests/test_checkout_name_independence.py",
-        "tests/test_compiled_first_run_path.py"
+        "tests/test_unified_main.py",
+        "tests/test_unified_update_package.py"
       ],
       "constraints": [
-        "Точки запуска вызывают bootstrap_local_rem_card до импорта модулей rem_card."
+        "PyInstaller собирает два EXE; ролевые Python-скрипты не являются отдельными пользовательскими EXE.",
+        "freeze_support выполняется до GUI bootstrap для дочерних процессов Windows."
       ],
       "evidence": [
         {
-          "path": "launcher.py",
-          "symbol": "run_rem_card"
+          "path": "run_remcard.py",
+          "symbol": "from rem_card.app.unified_main import main"
         },
         {
-          "path": "run_doctor.py",
-          "symbol": "main(forced_role=\"doctor\")"
+          "path": "RemCard.spec",
+          "symbol": "name='RemCard'"
         },
         {
-          "path": "run_nurse.py",
-          "symbol": "main(forced_role=\"nurse\")"
-        },
-        {
-          "path": "run_operblock.py",
-          "symbol": "main(forced_role=\"operblock\")"
-        },
-        {
-          "path": "run_updater.py",
-          "symbol": "sys.exit(main())"
+          "path": "RemCard.spec",
+          "symbol": "name='RemCardUpdater'"
         }
       ]
     },
     {
       "id": "startup_runtime",
-      "label": "Запуск и среда выполнения",
+      "label": "Единый запуск Qt",
       "type": "orchestration",
       "boundary": "application",
-      "path": "app/main.py",
-      "role": "Разбирает аргументы роли и пути, применяет ограничения единственного экземпляра и проверки БД, выбирает сетевую, автономную или аварийную среду, запускает обновления и владеет циклом событий Qt.",
+      "path": "app/unified_main.py",
+      "role": "Создаёт QApplication, получает блокировку единственного экземпляра приложения и показывает UnifiedWindow. Клиническое рабочее место загружается после выбора роли.",
       "entrypoints": [
-        "app/main.py#main",
-        "app/main.py#_main_impl"
+        "app/unified_main.py#main"
       ],
       "tests": [
-        "tests/test_startup_path_validation.py",
-        "tests/test_single_instance_offline_startup.py",
-        "tests/test_dev_role_lock_bypass.py"
+        "tests/test_unified_main.py",
+        "tests/test_unified_first_run_flow.py"
       ],
       "constraints": [
-        "Проверка сети и блокировка роли выполняются до создания контейнера.",
-        "Необработанные ошибки запуска фиксируются до завершения процесса."
+        "Single-instance действует на приложение, а не на каждую роль.",
+        "Дочерний процесс проверки БД обрабатывается через multiprocessing.freeze_support."
       ],
       "evidence": [
         {
-          "path": "app/main.py",
+          "path": "app/unified_main.py",
           "symbol": "main"
         },
         {
-          "path": "app/main.py",
-          "symbol": "_main_impl"
+          "path": "app/unified_main.py",
+          "symbol": "UnifiedWindow"
         },
         {
-          "path": "app/main.py",
-          "symbol": "_prepare_runtime_context_for_startup"
-        },
-        {
-          "path": "app/main.py",
-          "symbol": "_run_startup_application"
+          "path": "app/unified_main.py",
+          "symbol": "_prepare_single_instance_server"
         }
       ]
     },
@@ -146,11 +131,11 @@
     },
     {
       "id": "ui_shell",
-      "label": "Главное окно и маршрутизация ролей",
+      "label": "Встроенное рабочее место",
       "type": "ui",
       "boundary": "client",
       "path": "ui/main_window.py",
-      "role": "Управляет верхнеуровневым окном Qt, активирует контейнеры и экраны ролей, обрабатывает переходы при потере сети и координирует завершение работы.",
+      "role": "MainWindow встраивается в UnifiedWindow через EmbeddedRoleWindow; маршрутизирует экраны врача, медсестры и оперблока. Жизненным циклом единой сессии владеет внешняя оболочка.",
       "entrypoints": [
         "ui/main_window.py#MainWindow",
         "ui/main_window.py#MainWindow.init_with_role"
@@ -161,8 +146,8 @@
         "tests/test_ui_hang_watchdog.py"
       ],
       "constraints": [
-        "При запуске подготавливается только один начальный интерфейс роли.",
-        "Блокировки сессии роли освобождаются при смене роли и завершении работы."
+        "При входе создаётся выбранное рабочее место.",
+        "В единой оболочке допуск SessionLease заменяет legacy RoleSessionLock."
       ],
       "evidence": [
         {
@@ -170,16 +155,8 @@
           "symbol": "MainWindow"
         },
         {
-          "path": "ui/main_window.py",
-          "symbol": "_activate_initial_doctor_role"
-        },
-        {
-          "path": "ui/main_window.py",
-          "symbol": "_activate_initial_nurse_role"
-        },
-        {
-          "path": "ui/main_window.py",
-          "symbol": "_activate_initial_operblock_role"
+          "path": "ui/unified_window.py",
+          "symbol": "EmbeddedRoleWindow"
         }
       ]
     },
@@ -615,18 +592,20 @@
       "type": "resilience",
       "boundary": "persistence",
       "path": "app/local_replica_sync.py",
-      "role": "Поддерживает неблокирующую локальную реплику сетевой медицинской SQLite только для чтения и предоставляет локальное чтение с учётом курсора.",
+      "role": "Поддерживает локальную SQLite-реплику только для чтения через отдельный worker и Backup API. Контролирует готовность и свежесть, учитывает блокировку снимка и повторяет синхронизацию после временных ошибок.",
       "entrypoints": [
         "app/local_replica_sync.py#LocalReplicaSync",
         "app/local_replica_worker.py#main"
       ],
       "tests": [
         "tests/test_local_replica_sync.py",
-        "tests/test_network_maintenance.py"
+        "tests/test_network_maintenance.py",
+        "tests/test_local_replica_health.py",
+        "tests/test_replica_blocked_diagnostics.py"
       ],
       "constraints": [
-        "Включается только в сетевой среде, если REMCARD_LOCAL_FIRST_SYNC не отключает функцию.",
-        "Замена реплики сохраняет проверенное локальное соединение."
+        "Реплика не принимает клинические записи и не заменяет центральный COMMIT.",
+        "Читатель проверяет свежесть снимка; при недостаточной версии использует центральную БД."
       ],
       "evidence": [
         {
@@ -660,8 +639,8 @@
         "tests/test_operblock_offline_shadow_startup.py"
       ],
       "constraints": [
-        "Аварийный режим включается только после классифицированной сетевой ошибки и проверок роли и пароля.",
-        "Метаданные сессии и снимки SQLite проверяются перед использованием или объединением."
+        "Вход требует пригодной локальной копии и проверки её возраста; пустая медицинская база вместо копии не создаётся.",
+        "Возврат к сети и перенос локальных изменений выполняются отдельным сценарием."
       ],
       "evidence": [
         {
@@ -688,11 +667,12 @@
       "entrypoints": [
         "run_updater.py#__main__",
         "app/updater_main.py#main",
-        "app/update_launcher.py#launch_update"
+        "app/update_launcher.py#launch_unified_update"
       ],
       "tests": [
         "tests/test_updater_install_safety.py",
-        "tests/test_build_release_test_worktree.py"
+        "tests/test_build_release_test_worktree.py",
+        "tests/test_unified_update_package.py"
       ],
       "constraints": [
         "Обновлятор проверяет целевые пути и манифесты до замены файлов.",
@@ -709,7 +689,7 @@
         },
         {
           "path": "app/update_launcher.py",
-          "symbol": "launch_update"
+          "symbol": "launch_unified_update"
         }
       ]
     },
@@ -733,11 +713,11 @@
       "evidence": [
         {
           "path": "requirements.txt",
-          "symbol": "PySide6==6.11.1"
+          "symbol": "PySide6==6.11.2"
         },
         {
           "path": "requirements.txt",
-          "symbol": "reportlab==5.0.0"
+          "symbol": "reportlab==5.0.1"
         },
         {
           "path": "requirements.txt",
@@ -748,87 +728,106 @@
           "symbol": "pywin32==312"
         }
       ]
+    },
+    {
+      "id": "unified_shell",
+      "label": "Оболочка и выбор роли",
+      "type": "ui",
+      "boundary": "client",
+      "path": "ui/unified_window.py",
+      "role": "Показывает выбор четырёх ролей, настраивает путь к данным, запускает вход в фоне и переключает встроенные рабочие места. При выходе дожидается завершения записей и освобождения ресурсов.",
+      "entrypoints": [
+        "ui/unified_window.py#UnifiedWindow"
+      ],
+      "tests": [
+        "tests/test_unified_window_lifecycle.py",
+        "tests/test_unified_entry_pages.py",
+        "tests/test_unified_shutdown_resources.py"
+      ],
+      "constraints": [
+        "Несохранённый ввод требует подтверждения при выходе из роли.",
+        "SessionShutdown завершает принятые записи до освобождения SessionLease."
+      ],
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "UnifiedWindow"
+        }
+      ]
+    },
+    {
+      "id": "session_access",
+      "label": "Допуск сессий и обслуживание",
+      "type": "orchestration",
+      "boundary": "application",
+      "path": "app/unified_access.py",
+      "role": "SessionLease согласует допуск сессии с общим режимом обслуживания; MaintenanceStore хранит состояние обслуживания.",
+      "entrypoints": [
+        "app/unified_access.py#SessionLease"
+      ],
+      "tests": [
+        "tests/test_unified_access.py"
+      ],
+      "constraints": [
+        "Проверка допуска выполняется до создания записывающего контейнера."
+      ],
+      "evidence": [
+        {
+          "path": "app/unified_access.py",
+          "symbol": "SessionLease"
+        }
+      ]
+    },
+    {
+      "id": "unified_preflight",
+      "label": "Подготовка среды роли",
+      "type": "orchestration",
+      "boundary": "application",
+      "path": "app/unified_preflight.py",
+      "role": "Проверяет соответствие допуска роли и папки данных, подготавливает сетевую либо изолированную локальную среду и создаёт контейнер.",
+      "entrypoints": [
+        "app/unified_preflight.py#prepare_admitted_runtime_context"
+      ],
+      "tests": [
+        "tests/test_unified_preflight.py",
+        "tests/test_unified_runtime.py"
+      ],
+      "constraints": [
+        "Сетевой bootstrap требует действующего центрального SessionLease.",
+        "Локальный аварийный режим использует собственный допуск и не запускает центральные планировщики."
+      ],
+      "evidence": [
+        {
+          "path": "app/unified_preflight.py",
+          "symbol": "prepare_admitted_runtime_context"
+        }
+      ]
+    },
+    {
+      "id": "startup_probe",
+      "label": "Отменяемая проверка БД",
+      "type": "resilience",
+      "boundary": "persistence",
+      "path": "app/startup_check_worker.py",
+      "role": "Проверяет quick_check в дочернем процессе только для чтения. Учитывает отмену, тайм-аут и завершение worker до продолжения входа.",
+      "entrypoints": [
+        "app/startup_check_worker.py#run_startup_probe"
+      ],
+      "tests": [
+        "tests/test_startup_check_worker.py"
+      ],
+      "constraints": [
+        "Дочерний процесс не выполняет миграции, восстановление или запись политики."
+      ],
+      "evidence": [
+        {
+          "path": "app/startup_check_worker.py",
+          "symbol": "run_startup_probe"
+        }
+      ]
     }
   ],
   "edges": [
-    {
-      "from": "entrypoints",
-      "to": "startup_runtime",
-      "type": "imports",
-      "label": "импортирует main",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "launcher.py",
-          "symbol": "from rem_card.app.main import main"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "container",
-      "type": "calls",
-      "label": "создаёт зависимости",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_bootstrap_startup_container"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "ui_shell",
-      "type": "calls",
-      "label": "создаёт MainWindow",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_run_startup_application"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "emergency_runtime",
-      "type": "calls",
-      "label": "выбирает резервную среду",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_try_emergency_startup_after_network_failure"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "updater",
-      "type": "calls",
-      "label": "запускает проверку обновлений",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_launch_startup_update_after_single_instance"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "external_deps",
-      "type": "imports",
-      "label": "использует среду Qt",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_create_startup_qt_context"
-        }
-      ]
-    },
     {
       "from": "container",
       "to": "medical_db",
@@ -1265,12 +1264,12 @@
       "from": "emergency_runtime",
       "to": "medical_db",
       "type": "writes",
-      "label": "создаёт локальный снимок среды",
+      "label": "создаёт локальную среду из проверенной копии",
       "status": "evidenced",
       "evidence": [
         {
           "path": "app/emergency_store.py",
-          "symbol": "_create_empty_medical_snapshot"
+          "symbol": "create_active_session_from_standby"
         }
       ]
     },
@@ -1286,20 +1285,203 @@
           "symbol": "PySide6.QtWidgets"
         }
       ]
+    },
+    {
+      "from": "entrypoints",
+      "to": "startup_runtime",
+      "type": "imports",
+      "label": "запускает единое приложение",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "run_remcard.py",
+          "symbol": "from rem_card.app.unified_main import main"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "unified_shell",
+      "type": "calls",
+      "label": "создаёт оболочку",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_main.py",
+          "symbol": "UnifiedWindow"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "external_deps",
+      "type": "imports",
+      "label": "запускает Qt",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_main.py",
+          "symbol": "QApplication"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "session_access",
+      "type": "calls",
+      "label": "получает допуск роли",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "SessionLease"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "unified_preflight",
+      "type": "calls",
+      "label": "подготавливает среду",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "prepare_admitted_runtime_context"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "startup_probe",
+      "type": "calls",
+      "label": "подключает проверку с отменой",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "startup_check_runner"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "ui_shell",
+      "type": "calls",
+      "label": "создаёт встроенное рабочее место",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "EmbeddedRoleWindow"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "updater",
+      "type": "calls",
+      "label": "запускает полное обновление",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "launch_unified_update"
+        }
+      ]
+    },
+    {
+      "from": "unified_preflight",
+      "to": "container",
+      "type": "calls",
+      "label": "создаёт контейнер после допуска",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_preflight.py",
+          "symbol": "bootstrap_admitted_container"
+        }
+      ]
+    },
+    {
+      "from": "unified_preflight",
+      "to": "emergency_runtime",
+      "type": "calls",
+      "label": "подготавливает локальную среду",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_preflight.py",
+          "symbol": "prepare_local_only_runtime_context"
+        }
+      ]
+    },
+    {
+      "from": "unified_preflight",
+      "to": "session_access",
+      "type": "calls",
+      "label": "удерживает локальный допуск",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_preflight.py",
+          "symbol": "SessionLease"
+        }
+      ]
+    },
+    {
+      "from": "session_access",
+      "to": "settings_store",
+      "type": "reads",
+      "label": "согласует чтение общих настроек",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_runtime.py",
+          "symbol": "read_institution"
+        }
+      ]
+    },
+    {
+      "from": "startup_probe",
+      "to": "medical_db",
+      "type": "reads",
+      "label": "проверяет БД только для чтения",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/startup_check_worker.py",
+          "symbol": "_check_quick_direct"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "container",
+      "type": "calls",
+      "label": "завершает принятые записи и ресурсы",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "SessionShutdown"
+        }
+      ]
     }
   ],
   "flows": [
     {
       "id": "role_startup",
       "name": "Запуск роли до отображения рабочего места",
-      "trigger": "Пользователь запускает приложение по умолчанию или точку запуска конкретной роли.",
+      "trigger": "Пользователь запускает RemCard.exe и выбирает одну из четырёх ролей.",
       "steps": [
         "entrypoints",
         "startup_runtime",
-        "ui_shell",
-        "doctor_ui"
+        "unified_shell",
+        "unified_preflight",
+        "container"
       ],
-      "outcome": "Защищённый процесс Qt получает владение экземпляром роли и показывает выбранное рабочее место; путь врача представлен как основной, а ветви медсестры и операционного блока выходят из той же оболочки."
+      "outcome": "После допуска SessionLease и фоновых проверок оболочка показывает встроенное рабочее место. Отмена входа завершает проверку и освобождает ресурсы."
     },
     {
       "id": "clinical_write",
@@ -1342,15 +1524,28 @@
     {
       "id": "emergency_fallback",
       "name": "Переход от потери сети к аварийной среде",
-      "trigger": "При запуске медицинская сетевая БД классифицируется как недоступная для подходящей роли.",
+      "trigger": "Центральная база недоступна; пользователь выбирает доступный локальный режим.",
       "steps": [
-        "startup_runtime",
+        "unified_shell",
+        "unified_preflight",
         "emergency_runtime",
         "medical_db"
       ],
-      "outcome": "Для сессии открывается проверенная локальная среда медицинской БД и настроек, сохранённая для последующего восстановления или объединения."
+      "outcome": "После проверки пригодности и возраста копии открывается изолированная локальная среда. Возврат к сети и перенос изменений выполняются отдельно."
+    },
+    {
+      "id": "role_switch",
+      "name": "Выход из роли и смена рабочего места",
+      "trigger": "Пользователь нажимает «Роли» и подтверждает переход.",
+      "steps": [
+        "unified_shell",
+        "container"
+      ],
+      "outcome": "SessionShutdown дожидается завершения принятых записей и фоновых ресурсов, затем оболочка освобождает SessionLease и возвращает выбор ролей."
     }
-  ]
+  ],
+  "product_version": "5.1.0",
+  "scope_note": "Обзор основных компонентов единого приложения по исходникам указанного коммита; скриншоты README сделаны в сборке 5.1.0."
 }
 </script>
 <script>
