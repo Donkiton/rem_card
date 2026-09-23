@@ -136,6 +136,7 @@ def _check_crash_handler_clean_finalize_removes_session_files(temp_root: str) ->
 
 
 def _check_sector_ivl_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
+    from .common import _wait_for_ivl_snapshot
     from datetime import datetime
     from types import SimpleNamespace
 
@@ -179,24 +180,27 @@ def _check_sector_ivl_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str
     service = FakeIvlService()
     try:
         widget.set_runtime_context(service, 1)
+        _wait_for_ivl_snapshot(widget, app)
+        reads_before_write = service.summary_reads
         widget._enqueue_ivl_write(
             "regression_ivl_error",
             lambda: None,
             pending_text="Случай: сохранение...",
             error_title="Ошибка ИВЛ",
         )
-        app.processEvents()
+        _wait_for_ivl_snapshot(widget, app)
         if not service.enqueue_called:
             return False, "SectorIvl did not use enqueue_write"
         if widget._ivl_write_pending:
             return False, "SectorIvl kept pending state after write error"
         if not warnings or "forced ivl write failure" not in warnings[-1]:
             return False, f"SectorIvl did not show write error warning: {warnings}"
-        if service.summary_reads < 2:
+        if service.summary_reads != reads_before_write + 1:
             return False, "SectorIvl did not refresh from DB/service after write error"
         return True, "ok"
     finally:
         sector_ivl.CustomMessageBox.warning = original_warning
+        widget.shutdown()
         widget.close()
 
 

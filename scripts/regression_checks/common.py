@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _AST_SOURCE_LINE_CACHE: OrderedDict[int, tuple[str, list[bytes]]] = OrderedDict()
 _AST_SOURCE_LINE_CACHE_LIMIT = 16
 _REGRESSION_RESTORE_PROBES: list[Any] = []
+
+
+def _wait_for_ivl_snapshot(widget, app):
+    """Дождаться применения снимка и завершения фонового чтения ИВЛ."""
+    deadline = time.monotonic() + 5.0
+    while widget._refresh_pending or widget._refresh_worker is not None:
+        if time.monotonic() >= deadline:
+            raise AssertionError("IVL snapshot did not finish")
+        app.processEvents()
+        time.sleep(0.005)
 
 
 def _cached_source_segment(source: str, node: ast.AST, *, padded: bool = False) -> str | None:
