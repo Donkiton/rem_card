@@ -2,6 +2,7 @@ import os
 import threading
 from typing import TYPE_CHECKING
 
+from rem_card.app.startup_diagnostics import measured
 from rem_card.app.logger import logger
 from rem_card.app.roles import is_operblock_role
 from rem_card.app.paths import (
@@ -291,6 +292,7 @@ class Container:
         return scheduler
 
 
+@measured("role_bootstrap")
 def bootstrap(role: str | None = None, runtime_context=None) -> Container:
     participant = None
     if getattr(runtime_context, "mode", "") == "emergency" and role in {"doctor", "nurse"}:

@@ -11,6 +11,7 @@ from PySide6.QtCore import QSettings, Qt, QTimer, QFileSystemWatcher, QThread, Q
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget, QPushButton, QMessageBox, QDialog
 
+from rem_card.app import startup_diagnostics
 from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
 from rem_card.app.unified_runtime import CentralUnavailable, CompatibilityError, check_client_compatibility, lifecycle_event, SessionShutdown
 from rem_card.ui.shared.async_call import AsyncCallThread
@@ -237,6 +238,7 @@ class UnifiedWindow(QMainWindow):
         next_role()
 
     def _ready(self, _=None):
+        startup_diagnostics.event("chooser_ready")
         self.loading.complete_stage(3)
         self.loading.set_stage(4)
         self.loading.complete_stage(4)
@@ -299,6 +301,7 @@ class UnifiedWindow(QMainWindow):
         self.session_id = uuid.uuid4().hex
         session = self.session_id
         lifecycle_event("role_requested", session_id=session, role=role)
+        startup_diagnostics.role_requested(role, self.session_id)
         self.stack.setCurrentWidget(self.welcome)
         self.welcome.set_preparing(role, "Проверка доступа к рабочему месту…")
         if reuse_local:
@@ -528,6 +531,7 @@ class UnifiedWindow(QMainWindow):
                 os.environ[key] = value
         self._role_environment = None
 
+    @startup_diagnostics.measured("role_window_create")
     def _create_role_window(self):
         from rem_card.ui.main_window import MainWindow
 
@@ -656,6 +660,7 @@ class UnifiedWindow(QMainWindow):
         lifecycle_event("role_entry_duration_ms", session_id=self.session_id, role=self.role,
                         elapsed_ms=round((time.monotonic() - self._entry_started) * 1000, 3))
         self._entry_cancel = None
+        startup_diagnostics.role_ready()
         self.welcome.set_preparing()
         self._busy = False
         self._compatibility_error = ""
