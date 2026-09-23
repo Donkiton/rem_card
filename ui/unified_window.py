@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import time
+import threading
 import uuid
 
 from PySide6.QtCore import QSettings, Qt, QTimer, QFileSystemWatcher, QThread, QObject
@@ -39,6 +40,7 @@ class UnifiedWindow(QMainWindow):
         self.stack.addWidget(self.loading)
         self.stack.addWidget(self.welcome)
         self.welcome.role_selected.connect(self.enter_role)
+        self.welcome.cancel_entry_requested.connect(self.cancel_role_entry)
         self.welcome.settings_requested.connect(self.open_settings)
         self.welcome.about_requested.connect(self.about)
         self.welcome.update_requested.connect(self.update_application)
@@ -51,6 +53,10 @@ class UnifiedWindow(QMainWindow):
         self.role = ""
         self.session_id = ""
         self._busy = False
+        self._entry_cancel = None
+        self._entry_setup_active = False
+        self._entry_started = 0.0
+        self._entry_rejections = 0
         self._leaving = False
         self._shutdown = None
         self._pending_exit = False
@@ -129,6 +135,8 @@ class UnifiedWindow(QMainWindow):
             self._compatibility_error = str(exc)
             self._check_updates()
         self._busy = False
+        if self.container is None and self.lease is None:
+            self._entry_cancel = None
         self.loading.set_error(str(exc))
         local_allowed = self._central_unavailable and not self._compatibility_error
         self.welcome.set_access_state(str(exc), not local_allowed)
@@ -270,6 +278,10 @@ class UnifiedWindow(QMainWindow):
         if role not in (*ROLE_KEYS, "settings") or not self.root:
             return
         if self._closing or self._busy or self._leaving or self.container is not None:
+            self._entry_rejections += 1
+            if self._entry_rejections <= 3 or self._entry_rejections % 20 == 0:
+                lifecycle_event("role_entry_rejected", session_id=self.session_id, role=role,
+                                reason="transition_busy", count=self._entry_rejections)
             return
         reuse_local = self._requires_fresh_runtime and role in self._local_runtime_roles
         if self._requires_fresh_runtime and not reuse_local:
@@ -278,10 +290,15 @@ class UnifiedWindow(QMainWindow):
             return
         self._save_geometry("shell")
         self._busy = True
+        self._entry_cancel = threading.Event()
+        self._entry_started = time.monotonic()
+        self._entry_rejections = 0
         self._leave_notice = ""
         self._return_to_control = False
         self.role = role
         self.session_id = uuid.uuid4().hex
+        session = self.session_id
+        lifecycle_event("role_requested", session_id=session, role=role)
         self.stack.setCurrentWidget(self.welcome)
         self.welcome.set_preparing(role, "Проверка доступа к рабочему месту…")
         if reuse_local:
@@ -305,11 +322,45 @@ class UnifiedWindow(QMainWindow):
                 raise
             return lease
         def start_admission():
+            if session != self.session_id or self._entry_cancel is None:
+                return
+            if self._entry_cancel is not None and self._entry_cancel.is_set():
+                self._finish_cancelled_entry()
+                return
             if self._workers:
                 QTimer.singleShot(100, start_admission)
             else:
                 self._async(admission, self._admitted, self._admission_failed)
         start_admission()
+
+    def cancel_role_entry(self):
+        if self._entry_cancel is None:
+            return
+        self._entry_cancel.set()
+        self.welcome.cancel_entry_button.setEnabled(False)
+        self.welcome.set_access_state("Отмена входа, освобождение ресурсов…", True)
+        lifecycle_event("role_entry_cancel_requested", session_id=self.session_id, role=self.role)
+        if self.container is not None and not self._entry_setup_active:
+            self.request_role_exit(force=True)
+
+    def _finish_entry_setup(self):
+        self._entry_setup_active = False
+        if self.container is not None and self._entry_cancel is not None and self._entry_cancel.is_set():
+            self.request_role_exit(force=True)
+
+    def _finish_cancelled_entry(self):
+        if self.lease:
+            self.lease.release()
+            self.lease = None
+        self._restore_role_environment()
+        self._entry_cancel = None
+        self._busy = False
+        self.welcome.set_preparing()
+        lifecycle_event("role_entry_cancelled", session_id=self.session_id, role=self.role)
+        self.role = ""
+        self.refresh_access()
+        if self._pending_exit:
+            QTimer.singleShot(0, self.close)
 
     def _configure_role_environment(self):
         keys = ("REMCARD_UI_ROLE", "REMCARD_LOCAL_FIRST_SYNC", "REMCARD_LOCAL_OUTBOX_SYNC",
@@ -324,6 +375,9 @@ class UnifiedWindow(QMainWindow):
             os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
 
     def _admission_failed(self, exc):
+        if self._entry_cancel is not None and self._entry_cancel.is_set():
+            self._finish_cancelled_entry()
+            return
         if self.lease or self.container is not None or getattr(exc, "cleanup_failed", False) or getattr(exc, "runtime_container", None) is not None:
             self._admitted_failed(exc)
             return
@@ -332,28 +386,39 @@ class UnifiedWindow(QMainWindow):
             return
         self._central_unavailable = True
         self._local_only = True
+        self._entry_setup_active = True
         try:
             from rem_card.app.unified_preflight import prepare_local_only_runtime_context, bootstrap_local_only, CENTRAL_FAILURE_UNREACHABLE
-            admission = prepare_local_only_runtime_context(
-                role=self.role, central_root=self.root, central_failure=CENTRAL_FAILURE_UNREACHABLE,
-                restart_after_activation=True)
-            self.lease = admission.local_lease
-            self._configure_role_environment()
-            self.container = bootstrap_local_only(admission=admission, shell=self)
-            self._local_runtime_roles = (frozenset({"doctor", "nurse"}) if self.role in {"doctor", "nurse"}
-                                         else frozenset({"operblock_planned", "operblock_emergency"}))
-            from rem_card.app.main import _apply_app_theme
-            _apply_app_theme(QApplication.instance(), self.role)
+            from rem_card.app.emergency_validation import emergency_snapshot_validation_attempt
+            from rem_card.app.startup_diagnostics import startup_attempt
+            with startup_attempt(self.session_id, self.role), emergency_snapshot_validation_attempt():
+                admission = prepare_local_only_runtime_context(
+                    role=self.role, central_root=self.root, central_failure=CENTRAL_FAILURE_UNREACHABLE,
+                    restart_after_activation=True)
+                self.lease = admission.local_lease
+                self._configure_role_environment()
+                self.container = bootstrap_local_only(admission=admission, shell=self)
+                self._local_runtime_roles = (frozenset({"doctor", "nurse"}) if self.role in {"doctor", "nurse"}
+                                             else frozenset({"operblock_planned", "operblock_emergency"}))
+                from rem_card.app.main import _apply_app_theme
+                _apply_app_theme(QApplication.instance(), self.role)
             self._finish_admission()
             self.statusBar().clearMessage()
             self.statusBar().hide()
         except (Exception, SystemExit) as failure:
+            self._entry_setup_active = False
             self._admitted_failed(failure)
+        finally:
+            self._finish_entry_setup()
 
     def _admitted(self, lease):
         self.lease = lease
+        if self._entry_cancel is not None and self._entry_cancel.is_set():
+            self._finish_cancelled_entry()
+            return
         self._central_unavailable = False
         self._local_only = False
+        self._entry_setup_active = True
         try:
             self._configure_role_environment()
             from rem_card.app.bootstrap import bootstrap
@@ -364,26 +429,59 @@ class UnifiedWindow(QMainWindow):
             from rem_card.app.unified_preflight import get_startup_request, prepare_admitted_runtime_context, bootstrap_admitted_container
             request = get_startup_request(self)
             marker = request.emergency_startup_request if self.role == request.role else ""
-            runtime_context = prepare_admitted_runtime_context(
-                role=self.role, central_lease=lease, emergency_startup_request=marker)
-            self.container, _ = bootstrap_admitted_container(
-                bootstrap, role=self.role, central_lease=lease, runtime_context=runtime_context,
-                emergency_startup_request=marker)
+            from rem_card.app.startup_check_worker import startup_check_runner, StartupCheckAborted
+            from rem_card.app.startup_diagnostics import startup_attempt, startup_span
+            from rem_card.ui.shared.startup_check import responsive_startup_probe, responsive_startup_wait
+            from rem_card.app.emergency_validation import emergency_snapshot_validation_attempt
+            cancel = self._entry_cancel or threading.Event()
+            def check(path):
+                self.welcome.set_preparing(self.role, "Проверка целостности базы…")
+                return responsive_startup_probe(path, cancel)
+            def check_cancelled():
+                if cancel.is_set():
+                    raise StartupCheckAborted()
+            check.check_cancelled = check_cancelled
+            check.wait_retry = lambda seconds: responsive_startup_wait(cancel, seconds)
+            with startup_attempt(self.session_id, self.role), startup_check_runner(check), emergency_snapshot_validation_attempt():
+                with startup_span("role_preflight"):
+                    runtime_context = prepare_admitted_runtime_context(
+                        role=self.role, central_lease=lease, emergency_startup_request=marker)
+                if cancel.is_set():
+                    raise StartupCheckAborted()
+                self.welcome.set_preparing(self.role, "Подготовка рабочего места…")
+                with startup_span("role_bootstrap"):
+                    self.container, _ = bootstrap_admitted_container(
+                        bootstrap, role=self.role, central_lease=lease, runtime_context=runtime_context,
+                        emergency_startup_request=marker)
             self._finish_admission()
         except (Exception, SystemExit) as exc:
+            self._entry_setup_active = False
             self._admitted_failed(exc)
+        finally:
+            self._finish_entry_setup()
 
     def _finish_admission(self):
         from rem_card.app.unified_preflight import complete_startup_request
         self._owned_containers.append(self.container)
+        if self._entry_cancel is not None and self._entry_cancel.is_set():
+            self.request_role_exit(force=True)
+            return
         self.container.data_service.set_runtime_session(self.session_id, self.role)
         settings_service = self.container.settings_service
         settings_service.invalidate_cache()
         self._set_institution(settings_service.get_app_setting("institution", "identity", default={}))
-        self._create_role_window()
+        from rem_card.app.startup_diagnostics import startup_attempt, startup_span
+        with startup_attempt(self.session_id, self.role), startup_span("role_window_create"):
+            self._create_role_window()
         complete_startup_request(self)
 
     def _admitted_failed(self, exc):
+        from rem_card.app.startup_check_worker import StartupCheckAborted
+        if isinstance(exc, StartupCheckAborted) and not exc.cleanup_failed:
+            self._finish_cancelled_entry()
+            if exc.reason != "cancelled":
+                self.welcome.set_access_state(str(exc), False)
+            return
         restart_required = getattr(exc, "status", "") == "local_restart_required"
         if isinstance(exc, SystemExit):
             exc = RuntimeError("Открытие рабочего места отменено.")
@@ -404,6 +502,7 @@ class UnifiedWindow(QMainWindow):
                 self.lease = None
                 self._restore_role_environment()
         if self.container is None and self.lease is None:
+            self._entry_cancel = None
             self._local_only = False
             self._local_only_runtime_state = None
             self.setProperty("remcard_local_only_runtime", None)
@@ -502,6 +601,7 @@ class UnifiedWindow(QMainWindow):
             self.role_window.prepare_initial_role_ui_for_startup()
             if not self.role_window._initial_role_ui_ready:
                 raise RuntimeError("Не удалось подготовить выбранную роль.")
+            self._initial_data_started = time.monotonic()
             self.role_window.start_initial_role_refresh()
             if self.role not in {"doctor", "nurse"}:
                 self.role_window.wake_initial_role_monitor()
@@ -510,10 +610,15 @@ class UnifiedWindow(QMainWindow):
         if self.role in {"doctor", "nurse"}:
             page, session = self.role_window, self.session_id
             deadline = time.monotonic() + 30
+            transition_started = time.monotonic()
+            def transitioned():
+                lifecycle_event("role_entry_transition_ms", session_id=session, role=self.role,
+                                elapsed_ms=round((time.monotonic() - transition_started) * 1000, 3))
+                self._finish_role_entry(page, session, deadline)
             # The read workers now run during the resize. Keep clinical controls
             # hidden until both the animation and the first data refresh finish.
             self._animate_page(page, self.role, True,
-                               lambda: self._finish_role_entry(page, session, deadline),
+                               transitioned,
                                maximize_default=True, defer_page=True)
         else:
             self._animate_page(self.role_window, self.role, True, self._role_transition_ready,
@@ -522,8 +627,14 @@ class UnifiedWindow(QMainWindow):
     def _finish_role_entry(self, page, session, deadline):
         if self._closing or self._leaving or self.role_window is not page or self.session_id != session:
             return
+        if self._entry_cancel is not None and self._entry_cancel.is_set():
+            self.request_role_exit(force=True)
+            return
         from rem_card.app.main import _initial_w1_state
         if _initial_w1_state(page).get("ready"):
+            lifecycle_event("role_initial_data_observed_ready", session_id=session, role=self.role,
+                            elapsed_ms=round((time.monotonic() - getattr(self, "_initial_data_started", time.monotonic())) * 1000, 3),
+                            includes_transition=True)
             page.wake_initial_role_monitor()
             self.entry_chrome.set_role_mode(True)
             if self.stack.indexOf(page) < 0:
@@ -539,6 +650,12 @@ class UnifiedWindow(QMainWindow):
             QTimer.singleShot(40, self, lambda: self._finish_role_entry(page, session, deadline))
 
     def _role_transition_ready(self):
+        if self._entry_cancel is not None and self._entry_cancel.is_set():
+            self.request_role_exit(force=True)
+            return
+        lifecycle_event("role_entry_duration_ms", session_id=self.session_id, role=self.role,
+                        elapsed_ms=round((time.monotonic() - self._entry_started) * 1000, 3))
+        self._entry_cancel = None
         self.welcome.set_preparing()
         self._busy = False
         self._compatibility_error = ""
@@ -548,6 +665,13 @@ class UnifiedWindow(QMainWindow):
             self.request_role_exit()
 
     def request_role_exit(self, force=False):
+        if self._entry_setup_active:
+            if self._entry_cancel is not None:
+                self._entry_cancel.set()
+            return
+        if self.container is None and self._entry_cancel is not None:
+            self.cancel_role_entry()
+            return
         if self._leaving:
             return
         if self._role_exit_dialog is not None:
@@ -700,6 +824,7 @@ class UnifiedWindow(QMainWindow):
         self._owned_containers.clear()
         self._role_threads.clear()
         self.container = None
+        self._entry_cancel = None
         if self._local_only:
             self._suppress_exit_update = True
             self._requires_fresh_runtime = True
@@ -751,12 +876,16 @@ class UnifiedWindow(QMainWindow):
             self._last_state_request = False
             self.welcome.set_access_state("Состояние доступа неизвестно. Проверьте соединение.", True)
             self._central_unavailable = True
+            if self._entry_cancel is not None:
+                self.cancel_role_entry()
             if self.container and not self._leaving and not self._local_only:
                 self.request_role_exit(force=True)
         self._async(self.store.read, self._access_received, failure)
 
     def _route_unreachable_access(self, state):
         if state.get("state") == "unknown" and state.get("error") == "root_unavailable":
+            if self._entry_cancel is not None:
+                self.cancel_role_entry()
             self._central_unavailable = True
             self.welcome.set_access_state(
                 self._compatibility_error or "Общая база недоступна. Выберите роль для продолжения.",
@@ -798,6 +927,8 @@ class UnifiedWindow(QMainWindow):
             return
         blocked = state.get("state") != "open"
         admission_blocked = blocked and not (self._local_administrator and state.get("state") in {"draining", "maintenance"})
+        if admission_blocked and self._entry_cancel is not None:
+            self.cancel_role_entry()
         if state.get("state") != "unknown" and self.store.control_dir.is_dir() and str(self.store.control_dir) not in self._watcher.directories():
             self._watcher.addPath(str(self.store.control_dir))
         if not self._leaving:
@@ -1180,6 +1311,11 @@ class UnifiedWindow(QMainWindow):
             self.close()
 
     def closeEvent(self, event):
+        if self._entry_cancel is not None and self.container is None:
+            event.ignore()
+            self._pending_exit = True
+            self.cancel_role_entry()
+            return
         if self.container is not None:
             event.ignore()
             self.request_application_exit()

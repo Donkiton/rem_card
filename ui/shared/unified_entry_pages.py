@@ -439,6 +439,7 @@ class WelcomePage(_EntryPageBase):
     settings_requested = Signal()
     about_requested = Signal()
     update_requested = Signal()
+    cancel_entry_requested = Signal()
 
     _ROLE_DETAILS = (
         (ROLE_DOCTOR, "Врач", "Ведение пациентов,\nназначения, процедуры,\nанализы и отчёты", "#35b9ff"),
@@ -488,6 +489,8 @@ class WelcomePage(_EntryPageBase):
 
     def set_preparing(self, role='', message=''):
         self._preparing_role = role
+        self.cancel_entry_button.setVisible(bool(role))
+        self.cancel_entry_button.setEnabled(bool(role))
         self._preparing_message = message or 'Подготовка рабочего места…'
         for key, card in self.role_buttons.items():
             card.setProperty('preparing', key == role)
@@ -613,6 +616,11 @@ class WelcomePage(_EntryPageBase):
             self.role_buttons[role_key] = card
             self._role_cards.append(card)
         self.root_layout.addWidget(self.roles_area, 5)
+
+        self.cancel_entry_button = self._footer_button("Отменить вход")
+        self.cancel_entry_button.setVisible(False)
+        self.cancel_entry_button.clicked.connect(self.cancel_entry_requested)
+        self.root_layout.addWidget(self.cancel_entry_button, 0, Qt.AlignCenter)
 
         self.access_label = QLabel(self.content)
         self.access_label.setObjectName("UnifiedEntryAccessState")

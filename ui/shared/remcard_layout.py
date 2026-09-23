@@ -51,6 +51,7 @@ class RemCardLayoutManager(QWidget):
         parent=None,
         operblock_service=None,
         w1_handoff: W1LayoutHandoff | None = None,
+        prepared_sectors: dict | None = None,
     ):
         super().__init__(parent)
         if w1_handoff is not None and w1_handoff.role != "doctor":
@@ -60,6 +61,9 @@ class RemCardLayoutManager(QWidget):
         self.remcard_service = remcard_service
         self.operblock_service = operblock_service
         self._w1_handoff = w1_handoff
+        if prepared_sectors is not None and w1_handoff is None:
+            raise ValueError("Prepared sectors require an existing W1 handoff")
+        self._prepared_sectors = prepared_sectors
         self.current_admission_id = None
         self.current_date = None
         self.current_mode = "normal"
@@ -107,12 +111,13 @@ class RemCardLayoutManager(QWidget):
         self.main_layout.setSpacing(0)
 
         # 1. Создание секторов
-        sectors = SectorFactory.create_all_sectors(
+        sectors = self._prepared_sectors if self._prepared_sectors is not None else SectorFactory.create_all_sectors(
             include_optional_tabs=False,
             role_hint="doctor",
             include_balance_sections=False,
             include_w1_sectors=self._w1_handoff is None,
         )
+        self._prepared_sectors = None
             
         for name, instance in sectors.items():
             setattr(self, name, instance)

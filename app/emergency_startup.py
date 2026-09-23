@@ -446,6 +446,33 @@ def prepare_emergency_startup(
     )
 
 
+def _confirmed_standby_for_activation(
+    store: EmergencyLocalStore,
+    expected: EmergencyStandbyMetadata,
+) -> EmergencyStandbyMetadata:
+    """Reconfirm current standby eligibility immediately before copying it."""
+
+    # Validation is strictly local here.  EmergencyStandbyManager.__init__ also
+    # resolves network runtime paths for refresh operations, which would bind
+    # central path constants during a local-only activation.
+    manager = EmergencyStandbyManager.__new__(EmergencyStandbyManager)
+    manager.root = store.resolve_root()
+    manager.store = store
+    manager.settings_required = bool(getattr(store, "settings_required", True))
+    standby_status = manager.validate_standby()
+    current = standby_status.metadata
+    if not standby_status.ok or current is None:
+        raise EmergencyStoreError(
+            f"Standby больше не пригодна для запуска: {standby_status.reason or 'validation failed'}"
+        )
+    if current != expected:
+        raise EmergencyStoreError("Standby изменилась после подтверждения запуска")
+    metadata_ok, metadata_reason = _standby_metadata_matches_files(current, standby_status)
+    if not metadata_ok:
+        raise EmergencyStoreError(f"Standby больше не пригодна для запуска: {metadata_reason}")
+    return current
+
+
 def start_or_resume_emergency_session(
     decision: EmergencyStartupDecision,
     *,
@@ -460,7 +487,8 @@ def start_or_resume_emergency_session(
     if decision.active_session_metadata is not None:
         metadata = decision.active_session_metadata
     elif decision.standby_metadata is not None:
-        metadata = store.create_active_session_from_standby(decision.standby_metadata)
+        confirmed_standby = _confirmed_standby_for_activation(store, decision.standby_metadata)
+        metadata = store.create_active_session_from_standby(confirmed_standby)
     else:
         raise EmergencyStoreError("Нет standby metadata для запуска аварийного режима")
 

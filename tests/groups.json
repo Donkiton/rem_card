@@ -1,5 +1,6 @@
 {
   "core": [
+    "tests/test_startup_check_worker.py",
     "tests/test_unified_main.py",
     "tests/test_unified_database_setup.py",
     "tests/test_unified_access.py",
@@ -40,6 +41,7 @@
     "tests/test_emergency_authoritative_merge.py",
     "tests/test_emergency_review.py",
     "tests/test_emergency_storage_retention.py",
+    "tests/test_emergency_validation_scope.py",
     "tests/test_emergency_workflow.py",
     "tests/test_jsonl_audit_log.py",
     "tests/test_lazy_operblock_service_proxy.py",

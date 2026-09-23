@@ -47,18 +47,23 @@ def _check_lazy_full_card_role_contract(
         return False, f"{role}: startup must create LightweightW1Shell"
     if full_layout_name in init_source:
         return False, f"{role}: init_ui must not create {full_layout_name}"
-    if full_layout_name not in ensure_source:
-        return False, f"{role}: _ensure_full_layout must create {full_layout_name}"
+    create_source = _method_source(source, methods, "_create_full_layout")
+    if "_create_full_layout" not in ensure_source or full_layout_name not in create_source:
+        return False, f"{role}: _ensure_full_layout must delegate creation of {full_layout_name}"
     for marker in ("_full_layout_created", "_retire_w1_shell", "_wire_full_layout_signals"):
-        if marker not in ensure_source:
-            return False, f"{role}: _ensure_full_layout missing {marker}"
+        if marker not in create_source:
+            return False, f"{role}: _create_full_layout missing {marker}"
     if "_ensure_full_layout(reason=\"patient_open\")" not in load_source:
         return False, f"{role}: patient open must ensure full layout first"
     if "_patient_open_generation" not in load_source or "_set_nurse_orders_context_if_current" not in source:
         return False, f"{role}: deferred patient context must use generation guard"
 
     prewarm_source = _method_source(source, methods, "_schedule_card_ui_prewarm")
-    if "_ensure_full_layout(reason=\"idle_prewarm\")" not in prewarm_source:
+    staged_source = _method_source(source, methods, "_ensure_card_ui_prewarmer")
+    if ("_ensure_card_ui_prewarmer" not in prewarm_source
+            or "StagedUiPrewarm" not in staged_source
+            or "_create_full_layout" not in staged_source
+            or 'reason="idle_prewarm"' not in staged_source):
         return False, f"{role}: idle card UI prewarm must prepare the full layout before first patient open"
     selection_source = _method_source(source, methods, "_on_selection_mode_changed")
     if "ignored stale beds selection signal" not in selection_source:
