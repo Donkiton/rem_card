@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import socket
 import sqlite3
@@ -85,6 +86,20 @@ def _create_central_database(
         conn.commit()
     finally:
         conn.close()
+
+
+def _hold_snapshot_locks_until_killed(pipe, gate_path, lease_path):
+    locks = []
+    for path, source in (
+        (gate_path, "local_replica_snapshot_gate"),
+        (lease_path, "local_replica_snapshot"),
+    ):
+        lock = FileWriteLock(path, lease_duration_sec=15.0)
+        assert lock.acquire(owner_id="test-worker", source=source)
+        locks.append(lock)
+    pipe.send("locked")
+    # No voluntary release: exercise abrupt process death, not finally cleanup.
+    time.sleep(60)
 
 
 class _BlockingWorkerClient:
@@ -238,6 +253,56 @@ class LocalReplicaSyncTest(unittest.TestCase):
 
         self.assertFalse(list(lease_dir.glob("*.lock")))
 
+    def test_killed_worker_releases_its_snapshot_locks_for_other_clients(self):
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(self.root / "killed-reader-leases"),
+        )
+        context = multiprocessing.get_context("spawn")
+        parent_pipe, child_pipe = context.Pipe()
+        process = context.Process(
+            target=_hold_snapshot_locks_until_killed,
+            args=(child_pipe, client.snapshot_gate_path, client.snapshot_lease_path),
+        )
+        process.start()
+        child_pipe.close()
+        client._process, client._pipe = process, parent_pipe
+        try:
+            self.assertTrue(parent_pipe.poll(10), "worker failed to publish locks")
+            self.assertEqual(parent_pipe.recv(), "locked")
+            gate = Path(client.snapshot_gate_path)
+            lease = Path(client.snapshot_lease_path)
+            self.assertTrue(gate.exists() and lease.exists())
+            client._terminate()
+            deadline = time.monotonic() + 5
+            while (gate.exists() or lease.exists()) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertFalse(gate.exists())
+            self.assertFalse(lease.exists())
+            replacement = FileWriteLock(str(gate))
+            self.assertTrue(replacement.acquire(owner_id="next-client", source="local_replica_snapshot_gate"))
+            replacement.release()
+        finally:
+            client.close()
+
+    def test_stopped_worker_cleanup_preserves_other_owners_and_sources(self):
+        path = self.root / "protected.lock"
+        for pid, host, source, alive in (
+            (987654, socket.gethostname(), "local_replica_snapshot_gate", True),
+            (987654, socket.gethostname(), "local_replica_snapshot_gate", None),
+            (123456, socket.gethostname(), "local_replica_snapshot_gate", False),
+            (987654, "foreign-host", "local_replica_snapshot_gate", False),
+            (987654, socket.gethostname(), "database_write", False),
+        ):
+            with self.subTest(pid=pid, host=host, source=source, alive=alive):
+                content = json.dumps(dict(pid=pid, host=host, source=source,
+                    timestamp=time.time()-1000, lock_token="another-owner"))
+                path.write_text(content, encoding="utf-8")
+                with patch("rem_card.app.sqlite_shared.is_local_pid_alive", return_value=alive):
+                    self.assertFalse(FileWriteLock(str(path)).cleanup_stopped_local_owner(
+                        owner_pid=987654, owner_source="local_replica_snapshot_gate"))
+                self.assertEqual(path.read_text(encoding="utf-8"), content)
+
     def test_worker_timeout_covers_network_lease_stage(self):
         lease_dir = self.root / "lease-timeout"
         client = LocalReplicaWorkerClient(
@@ -350,7 +415,7 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertFalse(rotation_lock_path.exists())
         self.assertFalse(list(lease_dir.glob("*.lock")))
 
-    def test_two_clients_never_copy_the_central_database_in_parallel(self):
+    def test_two_roles_on_same_workstation_do_not_copy_in_parallel(self):
         lease_dir = self.root / "shared-reader-leases"
         first = LocalReplicaWorkerClient(
             central_db_path=str(self.central_path),
@@ -404,6 +469,33 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertTrue(first_temp_path.exists())
         self.assertFalse(gate_path.exists())
         self.assertFalse(list(lease_dir.glob("*.lock")))
+
+    def test_foreign_workstation_and_legacy_gate_do_not_block_copy(self):
+        lease_dir = self.root / "independent-reader-leases"
+        with patch("rem_card.app.local_replica_worker.socket.gethostname", return_value="PC-A"):
+            first = LocalReplicaWorkerClient(
+                central_db_path=str(self.central_path), snapshot_lease_dir=str(lease_dir),
+            )
+        with patch("rem_card.app.local_replica_worker.socket.gethostname", return_value="PC-B"):
+            second = LocalReplicaWorkerClient(
+                central_db_path=str(self.central_path), snapshot_lease_dir=str(lease_dir),
+            )
+        self.assertNotEqual(first.snapshot_gate_path, second.snapshot_gate_path)
+        foreign = FileWriteLock(first.snapshot_gate_path)
+        legacy = FileWriteLock(str(self.root / "replica_snapshot_copy.lock"))
+        self.assertTrue(foreign.acquire("PC-A", "local_replica_snapshot_gate"))
+        self.assertTrue(legacy.acquire("old-client", "local_replica_snapshot_gate"))
+        try:
+            result = second.sync(local_state={}, temp_db_path=str(self.root / "independent.db"))
+            self.assertEqual(result["status"], "snapshot_ready")
+            self.assertTrue(Path(first.snapshot_gate_path).exists())
+            self.assertTrue(Path(legacy.lock_path).exists())
+            self.assertFalse(list(lease_dir.glob("*.lock")))
+        finally:
+            foreign.release()
+            legacy.release()
+            first.close()
+            second.close()
 
     def test_two_clients_never_take_over_an_expired_foreign_snapshot_gate(self):
         lease_dir = self.root / "expired-gate-reader-leases"

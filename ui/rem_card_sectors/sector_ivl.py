@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QDateTime, QSettings, QTimer
+from PySide6.QtCore import Qt, QDateTime, QSettings, QTimer, Slot
 from PySide6.QtGui import QDoubleValidator, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -29,6 +29,7 @@ from rem_card.app.paths import get_icon_dir
 from rem_card.ui.shared.click_section_wheel_datetime_edit import ClickSectionWheelDateTimeEdit
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.styles.theme import COLOR_DANGER
 
@@ -229,6 +230,20 @@ class SectorIvl(BaseSectorWidget):
         self._input_context = (None, None)
         self._ivl_write_pending = False
         self._ivl_loading_key = None
+        self._refresh_generation = 0
+        self._refresh_worker = None
+        self._refresh_request = None
+        self._refresh_pending = False
+        self._refresh_closed = False
+        self._shutdown_requested = False
+        self._refresh_retry_count = 0
+        self._refresh_context_changed = False
+        self._snapshot_admission_datetime: Optional[datetime] = None
+        self._snapshot_latest_case = None
+        self._snapshot_active_case_events = []
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self._start_snapshot_refresh)
         self._history_events = []
         self._history_sort_desc = True
         self._restoring_history_header = False
@@ -1056,6 +1071,8 @@ class SectorIvl(BaseSectorWidget):
             (remcard_service is not None and remcard_service is not self.remcard_service)
             or (admission_id is not None and admission_id != self.admission_id)
         )
+        if context_changed:
+            self._invalidate_refresh_context()
         if remcard_service is not None:
             self.remcard_service = remcard_service
         if admission_id is not None:
@@ -1065,13 +1082,24 @@ class SectorIvl(BaseSectorWidget):
         self.refresh()
 
     def showEvent(self, event):  # noqa: N802
+        if self._refresh_closed and not self._shutdown_requested:
+            self._refresh_closed = False
+            self.refresh(force=True)
         super().showEvent(event)
         self.refresh()
 
-    def refresh(self):
+    def refresh(self, force: bool = False):
+        if self._refresh_closed:
+            return
         self._resolve_runtime_context()
         input_context = (self.remcard_service, self.admission_id)
-        if input_context != self._input_context:
+        context_changed = input_context != self._input_context
+        self._refresh_context_changed = context_changed
+        if context_changed:
+            self._invalidate_refresh_context()
+            if input_context[0] is not self._input_context[0]:
+                self._snapshot_cache.clear()
+                self._clear_snapshot_state()
             self._input_context = input_context
             self.event_type_combo.setCurrentIndex(0)
             self.mode_combo.setCurrentIndex(0)
@@ -1080,6 +1108,10 @@ class SectorIvl(BaseSectorWidget):
                 edit.clear()
             self._clear_extubation_reason()
             self.extubation_o2_flow_edit.clear()
+            now = QDateTime.currentDateTime()
+            self.start_dt_edit.setDateTime(now)
+            self.event_time_edit.setDateTime(now)
+            self.extubation_dt_edit.setDateTime(now)
 
         if not self.remcard_service or not self.admission_id:
             self.set_loading_state("Случай: пациент не выбран")
@@ -1087,23 +1119,27 @@ class SectorIvl(BaseSectorWidget):
 
         cached = self._get_cached_snapshot()
         if cached:
-            self._apply_snapshot(cached)
-            if self._is_cached_snapshot_current(cached):
-                return
+            if not self._ivl_write_pending:
+                cached_input_state = self._capture_input_state()
+                self._apply_snapshot(cached)
+                if not context_changed:
+                    self._restore_input_state(cached_input_state)
         else:
             self.set_loading_state()
 
-        summary = self.remcard_service.get_ventilation_summary(self.admission_id)
-        timeline = self.remcard_service.get_ventilation_timeline(self.admission_id)
-        latest_case = None
-        if not summary.get("active_case"):
-            latest_case = self.remcard_service.get_latest_ventilation_case(self.admission_id)
-
-        snapshot = self._make_snapshot(summary=summary, timeline=timeline, latest_case=latest_case)
-        self._store_snapshot(snapshot)
-        self._apply_snapshot(snapshot)
+        request_is_current = (
+            self._refresh_worker is not None
+            and self._request_is_current(self._refresh_request)
+        )
+        if not force and (self._refresh_pending or request_is_current):
+            return
+        self._refresh_generation += 1
+        self._refresh_pending = True
+        self._refresh_retry_count = 0
+        self._refresh_timer.start(0)
 
     def set_loading_state(self, status_text: str = "Случай: загрузка..."):
+        self._clear_snapshot_state()
         self.active_case_id = None
         self.lbl_case_status.setText(status_text)
         self.lbl_case_start.setText("")
@@ -1111,34 +1147,22 @@ class SectorIvl(BaseSectorWidget):
         self.lbl_total_duration.setText("--")
         self._set_tube_duration_text("--", alert=False)
         self._set_actions_enabled(False, has_case_history=False)
+        self._set_ivl_write_controls_enabled(False)
         self._history_events = []
         self.history_table.setRowCount(0)
+
+    def _clear_snapshot_state(self):
+        self._snapshot_admission_datetime = None
+        self._snapshot_latest_case = None
+        self._snapshot_active_case_events = []
+        self._active_case_revision = None
+        self._latest_case_revision = None
+        self._latest_event_revision_by_case = {}
 
     def _cache_key(self):
         if not self.admission_id:
             return None
         return (int(self.admission_id), "ivl")
-
-    def _current_change_id(self) -> Optional[int]:
-        if not self.remcard_service or not self.admission_id:
-            return None
-        if not hasattr(self.remcard_service, "get_latest_change_id"):
-            return None
-        try:
-            return int(
-                self.remcard_service.get_latest_change_id(
-                    admission_id=int(self.admission_id),
-                    include_global=False,
-                )
-                or 0
-            )
-        except TypeError:
-            try:
-                return int(self.remcard_service.get_latest_change_id(admission_id=int(self.admission_id)) or 0)
-            except Exception:
-                return None
-        except Exception:
-            return None
 
     def _get_cached_snapshot(self):
         key = self._cache_key()
@@ -1149,20 +1173,28 @@ class SectorIvl(BaseSectorWidget):
             self._snapshot_cache.move_to_end(key)
         return snapshot
 
-    def _is_cached_snapshot_current(self, snapshot) -> bool:
-        cached_version = snapshot.get("version") if snapshot else None
-        if cached_version is None:
-            return False
-        current_version = self._current_change_id()
-        return current_version is not None and int(current_version) <= int(cached_version)
-
-    def _make_snapshot(self, *, summary, timeline, latest_case):
+    def _make_snapshot(
+        self,
+        *,
+        summary,
+        timeline,
+        latest_case,
+        active_case=None,
+        active_case_events=None,
+        admission_datetime=None,
+        version=None,
+        key=None,
+    ):
+        active_case = active_case if active_case is not None else (summary or {}).get("active_case")
         return {
-            "key": self._cache_key(),
-            "version": self._current_change_id(),
+            "key": key if key is not None else self._cache_key(),
+            "version": version,
             "summary": dict(summary or {}),
             "timeline": list(timeline or []),
+            "active_case": active_case,
+            "active_case_events": list(active_case_events or []),
             "latest_case": latest_case,
+            "admission_datetime": admission_datetime,
         }
 
     def _store_snapshot(self, snapshot):
@@ -1179,11 +1211,196 @@ class SectorIvl(BaseSectorWidget):
         if key is not None:
             self._snapshot_cache.pop(key, None)
 
-    def _apply_snapshot(self, snapshot):
+    def _invalidate_refresh_context(self):
+        self._refresh_generation += 1
+        self._refresh_pending = False
+        self._refresh_request = None
+        self._refresh_timer.stop()
+
+    def _request_is_current(self, request):
+        return bool(
+            not self._refresh_closed
+            and request
+            and request["generation"] == self._refresh_generation
+            and request["key"] == self._cache_key()
+            and request["service"] is self.remcard_service
+        )
+
+    @staticmethod
+    def _load_ivl_snapshot(service, admission_id):
+        snapshot_builder = getattr(service, "build_ivl_snapshot", None)
+        if callable(snapshot_builder):
+            return snapshot_builder(
+                int(admission_id),
+                datetime.now(),
+                include_change_cursor=True,
+            )
+
+        # Compatibility for lightweight role/test services. The production
+        # facade always uses its read-scoped snapshot builder above.
+        summary = service.get_ventilation_summary(int(admission_id))
+        timeline = service.get_ventilation_timeline(int(admission_id))
+        active_case = (summary or {}).get("active_case")
+        latest_case = service.get_latest_ventilation_case(int(admission_id)) if not active_case else None
+        patient = service.get_patient(int(admission_id)) if hasattr(service, "get_patient") else None
+        return {
+            "admission_id": int(admission_id),
+            "summary": summary,
+            "timeline": timeline,
+            "active_case": active_case,
+            "active_case_events": [
+                event for event in timeline
+                if active_case is not None
+                and getattr(event, "ivl_episode_id", None) == getattr(active_case, "id", None)
+            ],
+            "latest_case": latest_case,
+            "admission_datetime": getattr(patient, "admission_datetime", None) if patient else None,
+            "change_id": None,
+        }
+
+    def _start_snapshot_refresh(self):
+        if self._refresh_closed or not self._refresh_pending or self._refresh_worker is not None:
+            return
+        if not self.remcard_service or not self.admission_id or self._ivl_write_pending:
+            return
+
+        request = {
+            "generation": self._refresh_generation,
+            "key": self._cache_key(),
+            "service": self.remcard_service,
+            "admission_id": int(self.admission_id),
+            "input_context": self._input_context,
+            "input_state": self._capture_input_state(),
+            "preserve_existing_inputs": bool(
+                self._get_cached_snapshot() and not self._refresh_context_changed
+            ),
+        }
+        self._refresh_context_changed = False
+        self._refresh_pending = False
+        self._refresh_request = request
+        worker = AsyncCallThread(self._load_ivl_snapshot, request["service"], request["admission_id"])
+        self._refresh_worker = worker
+        worker.succeeded.connect(self._on_snapshot_loaded)
+        worker.failed.connect(self._on_snapshot_failed)
+        worker.finished.connect(self._on_snapshot_finished)
+        worker.start()
+
+    @Slot(object)
+    def _on_snapshot_loaded(self, raw_snapshot):
+        request = self._refresh_request
+        if not self._request_is_current(request):
+            return
+        raw = dict(raw_snapshot or {})
+        summary = dict(raw.get("summary") or {})
+        timeline = list(raw.get("timeline") or [])
+        active_case = raw.get("active_case")
+        if active_case is None:
+            active_case = summary.get("active_case")
+        latest_case = raw.get("latest_case")
+        active_case_events = list(raw.get("active_case_events") or [])
+        if active_case and not active_case_events:
+            active_case_events = [
+                event for event in timeline
+                if getattr(event, "ivl_episode_id", None) == getattr(active_case, "id", None)
+            ]
+        snapshot = self._make_snapshot(
+            summary=summary,
+            timeline=timeline,
+            latest_case=latest_case,
+            active_case=active_case,
+            active_case_events=active_case_events,
+            admission_datetime=raw.get("admission_datetime"),
+            version=raw.get("change_id", raw.get("version")),
+            key=request["key"],
+        )
+        self._store_snapshot(snapshot)
+        self._refresh_retry_count = 0
+        same_context = request["input_context"] == (self.remcard_service, self.admission_id)
+        current_input_state = self._capture_input_state()
+        preserve_inputs = bool(
+            same_context
+            and (
+                request.get("preserve_existing_inputs")
+                or current_input_state != request["input_state"]
+            )
+        )
+        if not self._ivl_write_pending:
+            saved_state = current_input_state if preserve_inputs else None
+            self._apply_snapshot(snapshot, preserve_inputs=preserve_inputs)
+            if saved_state is not None:
+                self._restore_input_state(saved_state)
+
+    @Slot(object)
+    def _on_snapshot_failed(self, exc):
+        request = self._refresh_request
+        if not self._request_is_current(request):
+            return
+        self._refresh_retry_count += 1
+        if not self._get_cached_snapshot():
+            self.set_loading_state("Не удалось загрузить данные ИВЛ. Повторяем загрузку...")
+        else:
+            self.lbl_case_status.setText("Не удалось обновить данные ИВЛ. Повторяем загрузку...")
+            self._set_ivl_write_controls_enabled(False)
+        self._refresh_pending = True
+
+    @Slot()
+    def _on_snapshot_finished(self):
+        self._refresh_worker = None
+        self._refresh_request = None
+        if self._refresh_pending and not self._refresh_closed:
+            self._refresh_timer.start(30000 if self._refresh_retry_count > 2 else 120)
+
+    def _capture_input_state(self):
+        return {
+            "start_type": self.start_type_combo.currentData(),
+            "delivery_type": self.delivery_type_combo.currentData(),
+            "event_type": self.event_type_combo.currentData(),
+            "mode": self.mode_combo.currentData(),
+            "start_dt": self.start_dt_edit.dateTime().toPython(),
+            "event_dt": self.event_time_edit.dateTime().toPython(),
+            "event_indications": self.event_indications_edit.text(),
+            "parameters": {name: edit.text() for name, (_label, edit) in self.param_widgets.items()},
+            "extubation_reason": self.extubation_reason_edit.currentText(),
+            "o2_flow": self.extubation_o2_flow_edit.text(),
+            "extubation_dt": self.extubation_dt_edit.dateTime().toPython(),
+        }
+
+    @staticmethod
+    def _restore_combo_data(combo, value):
+        if value is None:
+            return
+        index = combo.findData(value)
+        model = combo.model()
+        item = model.item(index) if index >= 0 and hasattr(model, "item") else None
+        if index >= 0 and (item is None or item.isEnabled()):
+            combo.setCurrentIndex(index)
+
+    def _restore_input_state(self, state):
+        self._restore_combo_data(self.start_type_combo, state.get("start_type"))
+        self._restore_combo_data(self.delivery_type_combo, state.get("delivery_type"))
+        self._restore_combo_data(self.event_type_combo, state.get("event_type"))
+        self._restore_combo_data(self.mode_combo, state.get("mode"))
+        if state.get("start_dt") is not None:
+            self.start_dt_edit.setDateTime(QDateTime(state["start_dt"]))
+        if state.get("event_dt") is not None:
+            self.event_time_edit.setDateTime(QDateTime(state["event_dt"]))
+        self.event_indications_edit.setText(str(state.get("event_indications") or ""))
+        for name, value in (state.get("parameters") or {}).items():
+            if name in self.param_widgets:
+                self.param_widgets[name][1].setText(str(value or ""))
+        self.extubation_reason_edit.setEditText(str(state.get("extubation_reason") or ""))
+        self.extubation_o2_flow_edit.setText(str(state.get("o2_flow") or ""))
+        if state.get("extubation_dt") is not None:
+            self.extubation_dt_edit.setDateTime(QDateTime(state["extubation_dt"]))
+
+    def _apply_snapshot(self, snapshot, *, preserve_inputs: bool = False):
         summary = dict(snapshot.get("summary") or {})
         timeline = list(snapshot.get("timeline") or [])
         latest_case = snapshot.get("latest_case")
-        active_case = summary.get("active_case")
+        active_case = snapshot.get("active_case") or summary.get("active_case")
+        self._snapshot_admission_datetime = snapshot.get("admission_datetime")
+        self._snapshot_latest_case = latest_case or active_case
+        self._snapshot_active_case_events = list(snapshot.get("active_case_events") or [])
         self.active_case_id = active_case.id if active_case else None
         self._active_case_revision = int(getattr(active_case, "revision", 0) or 0) if active_case else None
         self._latest_case_revision = int(getattr(latest_case, "revision", 0) or 0) if latest_case else self._active_case_revision
@@ -1342,12 +1559,13 @@ class SectorIvl(BaseSectorWidget):
         self.admission_id = runtime_admission
 
     def _reload_history(self, events=None):
-        if not self.remcard_service or not self.admission_id:
+        if not self.admission_id:
             self._history_events = []
             self.history_table.setRowCount(0)
             return
         if events is None:
-            events = self.remcard_service.get_ventilation_timeline(self.admission_id)
+            cached = self._get_cached_snapshot() or {}
+            events = cached.get("timeline") or []
         self._history_events = list(events or [])
         self._populate_history_table(self._sorted_history_events())
 
@@ -1468,7 +1686,7 @@ class SectorIvl(BaseSectorWidget):
             self.start_dt_edit.setDateTime(QDateTime(min_dt))
 
         is_admission = self.start_type_combo.currentData() == "ADMISSION"
-        latest_case = self.remcard_service.get_latest_ventilation_case(self.admission_id)
+        latest_case = self._snapshot_latest_case
         allow_admission = latest_case is None
         model = self.start_type_combo.model()
         if model and hasattr(model, "item"):
@@ -1485,10 +1703,9 @@ class SectorIvl(BaseSectorWidget):
     def _get_min_start_datetime(self) -> datetime:
         patient_adm = self._get_admission_datetime() or datetime.now()
         min_dt = patient_adm
-        if self.remcard_service and self.admission_id:
-            latest_case = self.remcard_service.get_latest_ventilation_case(self.admission_id)
-            if latest_case and latest_case.end_time:
-                min_dt = max(min_dt, latest_case.end_time + timedelta(minutes=1))
+        latest_case = self._snapshot_latest_case
+        if latest_case and latest_case.end_time:
+            min_dt = max(min_dt, latest_case.end_time + timedelta(minutes=1))
         return min_dt
 
     def _apply_event_time_constraints(self):
@@ -1508,12 +1725,12 @@ class SectorIvl(BaseSectorWidget):
             self.event_time_edit.setDateTime(QDateTime(min_event))
 
     def _get_min_event_datetime(self) -> datetime:
-        if self.active_case_id and self.remcard_service:
-            events = self.remcard_service.get_ventilation_events(self.active_case_id)
+        if self.active_case_id:
+            events = self._snapshot_active_case_events
             if events:
                 return events[-1].timestamp
-            active_case = self.remcard_service.get_active_case(self.admission_id)
-            if active_case:
+            active_case = self._snapshot_latest_case
+            if active_case and getattr(active_case, "id", None) == self.active_case_id:
                 return active_case.start_time
         return self.start_dt_edit.dateTime().toPython()
 
@@ -1787,7 +2004,7 @@ class SectorIvl(BaseSectorWidget):
         case_id = self.active_case_id
         expected_case_revision = self._active_case_revision
         if not case_id:
-            latest_case = self.remcard_service.get_latest_ventilation_case(self.admission_id)
+            latest_case = self._snapshot_latest_case
             case_id = latest_case.id if latest_case else None
             expected_case_revision = int(getattr(latest_case, "revision", 0) or 0) if latest_case else None
 
@@ -1798,12 +2015,9 @@ class SectorIvl(BaseSectorWidget):
         service = self.remcard_service
         expected_last_event_revision = self._latest_event_revision_by_case.get(int(case_id))
         if expected_last_event_revision is None:
-            try:
-                events = service.get_ventilation_events(case_id)
-                if events:
-                    expected_last_event_revision = int(getattr(events[-1], "revision", 0) or 0)
-            except Exception:
-                expected_last_event_revision = None
+            events = self._snapshot_active_case_events
+            if events:
+                expected_last_event_revision = int(getattr(events[-1], "revision", 0) or 0)
 
         def operation():
             return service.rollback_last_ventilation_action(
@@ -1826,10 +2040,7 @@ class SectorIvl(BaseSectorWidget):
         )
 
     def _get_admission_datetime(self) -> Optional[datetime]:
-        if not self.remcard_service or not self.admission_id:
-            return None
-        patient = self.remcard_service.get_patient(self.admission_id)
-        return getattr(patient, "admission_datetime", None) if patient else None
+        return self._snapshot_admission_datetime
 
     def _set_tube_duration_text(self, duration_text: str, alert: bool):
         if alert:
@@ -1859,3 +2070,12 @@ class SectorIvl(BaseSectorWidget):
         if days > 0:
             return f"{days} д {hours:02d}:{minutes:02d}"
         return f"{hours:02d}:{minutes:02d}"
+
+    def closeEvent(self, event):  # noqa: N802
+        self.shutdown()
+        super().closeEvent(event)
+
+    def shutdown(self):
+        self._shutdown_requested = True
+        self._refresh_closed = True
+        self._invalidate_refresh_context()

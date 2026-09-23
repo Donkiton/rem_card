@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 
@@ -30,10 +32,24 @@ from rem_card.ui.admin_view import (  # noqa: E402
 )
 from rem_card.ui.admin_view.admin_main_widget import AdminMainWidget  # noqa: E402
 from rem_card.ui.shared.base_dialog import BaseStyledDialog  # noqa: E402
+from rem_card.ui.shared import display_settings_storage  # noqa: E402
+from rem_card.services import prescription_engine  # noqa: E402
 
 
 def application() -> QApplication:
     return QApplication.instance() or QApplication([])
+
+
+def wait_until(predicate, timeout=2.0) -> bool:
+    app = application()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.005)
+    app.processEvents()
+    return bool(predicate())
 
 
 def category_keys(widget: AdminMainWidget) -> list[str]:
@@ -316,5 +332,75 @@ def test_operblock_catalogs_open_and_save_inside_admin_settings(monkeypatch):
     assert widget.operblock_team_dialog is None
     assert widget.stack.currentWidget() is widget.menu_widget
 
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_display_settings_page_loads_network_payload_off_qt_thread(monkeypatch):
+    app = application()
+    monkeypatch.setattr(runtime_paths, "is_compiled", lambda: False)
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_load(_storage):
+        calls.append(threading.current_thread() is threading.main_thread())
+        started.set()
+        assert release.wait(2.0)
+        return {}
+
+    monkeypatch.setattr(display_settings_storage.DisplaySettingsStorage, "load", slow_load)
+    widget = AdminMainWidget(role="nurse")
+
+    widget.open_display_settings()
+    assert started.wait(1.0)
+    assert widget.display_settings_dialog is None
+    assert not widget.btn_display_settings.isEnabled()
+    release.set()
+
+    assert wait_until(lambda: widget.display_settings_dialog is not None)
+    assert calls == [False]
+    assert widget.stack.currentWidget() is widget.display_settings_dialog
+    assert widget.btn_display_settings.isEnabled()
+    widget.deleteLater()
+    app.processEvents()
+
+
+def test_settings_dictionary_refresh_coalesces_and_discards_stale_page(monkeypatch):
+    app = application()
+    monkeypatch.setattr(runtime_paths, "is_compiled", lambda: False)
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_reload(*, force_check=False):
+        calls.append((force_check, threading.current_thread() is threading.main_thread()))
+        started.set()
+        assert release.wait(2.0)
+
+    monkeypatch.setattr(prescription_engine.engine, "reload_if_changed", slow_reload)
+
+    class Page(QFrame):
+        def __init__(self):
+            super().__init__()
+            self.loads = 0
+
+        def load_data(self):
+            self.loads += 1
+
+    widget = AdminMainWidget(role="nurse")
+    first = Page()
+    second = Page()
+    widget.stack.addWidget(first)
+    widget.stack.addWidget(second)
+
+    widget._show_page(first)
+    assert started.wait(1.0)
+    widget._show_page(second)
+    release.set()
+
+    assert wait_until(lambda: second.loads == 1)
+    assert first.loads == 0
+    assert calls == [(True, False), (True, False)]
     widget.deleteLater()
     app.processEvents()

@@ -7,6 +7,7 @@ from typing import Any
 from PySide6.QtCore import QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QHeaderView,
     QHBoxLayout,
@@ -32,6 +33,7 @@ from rem_card.services.user_reports import (
     UserReportsService,
     report_status_label,
 )
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
@@ -44,8 +46,13 @@ class UserReportDialog(BaseStyledDialog):
         super().__init__("Репорт", parent)
         self.role = str(role or "").strip()
         self.service = service or UserReportsService()
+        self._submit_worker: AsyncCallThread | None = None
+        self._submit_closing = False
         self.resize(640, 460)
         self._setup_ui()
+        application = QApplication.instance()
+        if application is not None:
+            application.aboutToQuit.connect(self._on_application_about_to_quit)
 
     def _setup_ui(self):
         layout = self.content_layout
@@ -103,6 +110,8 @@ class UserReportDialog(BaseStyledDialog):
         return REPORT_TYPE_PROBLEM, self.problem_edit.toPlainText().strip()
 
     def _submit(self):
+        if self._submit_worker is not None:
+            return
         report_type, text = self._current_type_and_text()
         if not text:
             CustomMessageBox.warning(self, "Репорт", "Заполните текст перед отправкой.")
@@ -121,15 +130,61 @@ class UserReportDialog(BaseStyledDialog):
             return
 
         self.send_btn.setEnabled(False)
+        self.send_btn.setText("Отправка…")
         try:
-            self.service.submit_report(report_type=report_type, text=text, role=self.role)
+            worker = AsyncCallThread(
+                self.service.submit_report,
+                report_type=report_type,
+                text=text,
+                role=self.role,
+            )
+            self._submit_worker = worker
+            worker.succeeded.connect(self._on_submit_succeeded)
+            worker.failed.connect(self._on_submit_failed)
+            worker.finished.connect(self._on_submit_finished)
+            worker.start()
         except Exception as exc:
-            self.send_btn.setEnabled(True)
+            self._submit_worker = None
+            self._restore_submit_button()
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось отправить репорт:\n{exc}")
-            return
 
+    def _on_submit_succeeded(self, _result) -> None:
+        if self._submit_closing:
+            return
         self.submitted.emit()
         self.accept()
+
+    def _on_submit_failed(self, exc) -> None:
+        if self._submit_closing:
+            return
+        self._restore_submit_button()
+        CustomMessageBox.critical(self, "Ошибка", f"Не удалось отправить репорт:\n{exc}")
+
+    def _on_submit_finished(self) -> None:
+        worker = self._submit_worker
+        if worker is None:
+            return
+        self._submit_worker = None
+        worker.deleteLater()
+        if not self._submit_closing:
+            self._restore_submit_button()
+
+    def _restore_submit_button(self) -> None:
+        self.send_btn.setEnabled(True)
+        self.send_btn.setText("Отправить")
+
+    def _on_application_about_to_quit(self) -> None:
+        self._submit_closing = True
+
+    def closeEvent(self, event) -> None:
+        # Уже начатая запись завершается в фоне, но её callback больше не
+        # обращается к форме после закрытия окна.
+        self._submit_closing = True
+        super().closeEvent(event)
+
+    def reject(self) -> None:
+        self._submit_closing = True
+        super().reject()
 
 
 class UserReportsInboxDialog(SavedFramelessDialogMixin, BaseStyledDialog):

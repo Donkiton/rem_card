@@ -1189,7 +1189,14 @@ class FileWriteLock:
             **self._cleanup_metric_fields(snapshot, source=source, metric_context=metric_context),
         )
 
-    def _cleanup_local_dead_pid_lock(self, *, source: str, metric_context: dict[str, Any] | None = None) -> bool:
+    def _cleanup_local_dead_pid_lock(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+        expected_owner_pid: int | None = None,
+        expected_owner_source: str | None = None,
+    ) -> bool:
         started = time.perf_counter()
         snapshot = self._read_lock_snapshot()
         if not snapshot.exists:
@@ -1202,6 +1209,11 @@ class FileWriteLock:
         holder_pid = _coerce_lock_pid(payload.get("pid"))
         holder_host = str(payload.get("host") or "")
         current_host = socket.gethostname()
+        if expected_owner_pid is not None and (
+            holder_pid != expected_owner_pid
+            or str(payload.get("source") or "") != expected_owner_source
+        ):
+            return False
         if holder_pid is None:
             self._record_cleanup_skipped("missing_pid", snapshot, source=source, metric_context=metric_context)
             return False
@@ -1432,6 +1444,14 @@ class FileWriteLock:
             payload.get("pid"),
         )
         return True
+
+    def cleanup_stopped_local_owner(self, *, owner_pid: int, owner_source: str) -> bool:
+        """Clean only this dead local owner's lock, never a replacement owner."""
+        return self._cleanup_local_dead_pid_lock(
+            source="local_replica_worker_shutdown",
+            expected_owner_pid=owner_pid,
+            expected_owner_source=owner_source,
+        )
 
     def cleanup_abandoned(
         self,

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.theme_switch import ThemeSwitch
 from rem_card.ui.styles.admin_settings_styles import build_admin_settings_style
 
@@ -73,6 +74,11 @@ class AdminMainWidget(QWidget):
         self.btn_back_to_roles = None
         self._settings_import_worker = None
         self._settings_import_loading_key = None
+        self._page_refresh_worker = None
+        self._page_refresh_request = None
+        self._page_refresh_generation = 0
+        self._display_settings_worker = None
+        self._display_settings_loading_key = None
 
         self.setup_ui()
 
@@ -640,29 +646,59 @@ class AdminMainWidget(QWidget):
         return widget
 
     def _show_page(self, widget):
-        if widget is not None:
-            self._prepare_settings_surface(widget)
-            loading_key = show_app_loading(
-                self,
-                "Загрузка раздела...",
-                key=f"admin-page:{id(self)}",
-                auto_hide_ms=8000,
-                process_events=True,
-            )
-            try:
-                try:
-                    from rem_card.services.prescription_engine import engine
+        if widget is None:
+            return
+        self._prepare_settings_surface(widget)
+        self.stack.setCurrentWidget(widget)
+        if not callable(getattr(widget, "load_data", None)):
+            return
+        self._page_refresh_generation += 1
+        self._page_refresh_request = {
+            "generation": self._page_refresh_generation,
+            "widget": widget,
+        }
+        self._start_page_refresh_if_needed()
 
-                    engine.reload_if_changed(force_check=True)
-                except Exception:
-                    pass
-                load_data = getattr(widget, "load_data", None)
-                if callable(load_data):
-                    load_data()
-                self.stack.setCurrentWidget(widget)
-            finally:
-                if loading_key:
-                    hide_app_loading(self, loading_key, delay_ms=350)
+    @staticmethod
+    def _reload_prescription_settings(request: dict) -> dict:
+        try:
+            from rem_card.services.prescription_engine import engine
+
+            engine.reload_if_changed(force_check=True)
+            error = None
+        except Exception as exc:
+            error = exc
+        return {"request": request, "error": error}
+
+    def _start_page_refresh_if_needed(self):
+        if self._page_refresh_worker is not None:
+            return
+        request = self._page_refresh_request
+        self._page_refresh_request = None
+        if request is None:
+            return
+        worker = AsyncCallThread(self._reload_prescription_settings, request, parent=self)
+        self._page_refresh_worker = worker
+        worker.succeeded.connect(self._on_page_refresh_result, Qt.QueuedConnection)
+        worker.finished.connect(self._on_page_refresh_finished, Qt.QueuedConnection)
+        worker.start()
+
+    def _on_page_refresh_result(self, result: dict):
+        request = (result or {}).get("request") or {}
+        widget = request.get("widget")
+        if (
+            int(request.get("generation") or 0) != self._page_refresh_generation
+            or widget is None
+            or self.stack.currentWidget() is not widget
+        ):
+            return
+        load_data = getattr(widget, "load_data", None)
+        if callable(load_data):
+            load_data()
+
+    def _on_page_refresh_finished(self):
+        self._page_refresh_worker = None
+        self._start_page_refresh_if_needed()
 
     def _connect_back(self, widget):
         if hasattr(widget, "btn_back"):
@@ -789,13 +825,14 @@ class AdminMainWidget(QWidget):
                 self.print_dialog.set_context(*self._pending_print_context)
         return self.print_dialog
 
-    def _ensure_display_settings_page(self):
+    def _ensure_display_settings_page(self, *, initial_payload=None):
         if self.display_settings_dialog is None:
             from .dictionary_page_chrome import prepare_embedded_settings_page
             from .display_settings_dialog import DisplaySettingsDialog
 
             self.display_settings_dialog = DisplaySettingsDialog(
                 initial_role=self.role,
+                initial_payload=initial_payload,
                 parent=self,
             )
             prepare_embedded_settings_page(
@@ -1096,12 +1133,51 @@ class AdminMainWidget(QWidget):
         dialog.exec()
 
     def open_display_settings(self):
-        loading_key = self._show_settings_loading("Загрузка настроек отображения...", key="display")
-        try:
-            page = self._ensure_display_settings_page()
-        finally:
-            self._hide_settings_loading(loading_key)
+        if self.display_settings_dialog is not None:
+            self._show_page(self.display_settings_dialog)
+            return
+        if self._display_settings_worker is not None:
+            return
+        from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage
+
+        loading_key = self._show_settings_loading(
+            "Загрузка настроек отображения...",
+            key="display",
+            auto_hide_ms=300000,
+        )
+        worker = AsyncCallThread(DisplaySettingsStorage().load, parent=self)
+        self._display_settings_worker = worker
+        self._display_settings_loading_key = loading_key
+        self.btn_display_settings.setEnabled(False)
+        worker.succeeded.connect(self._on_display_settings_loaded, Qt.QueuedConnection)
+        worker.failed.connect(self._on_display_settings_load_failed, Qt.QueuedConnection)
+        worker.finished.connect(self._on_display_settings_load_finished, Qt.QueuedConnection)
+        worker.start()
+
+    def _on_display_settings_loaded(self, payload):
+        if self.sender() is not self._display_settings_worker:
+            return
+        page = self._ensure_display_settings_page(initial_payload=payload)
         self._show_page(page)
+
+    def _on_display_settings_load_failed(self, exc: Exception):
+        if self.sender() is not self._display_settings_worker:
+            return
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        CustomMessageBox.warning(
+            self,
+            "Настройки отображения",
+            f"Не удалось загрузить настройки: {exc}",
+        )
+
+    def _on_display_settings_load_finished(self):
+        if self.sender() is not self._display_settings_worker:
+            return
+        self._display_settings_worker = None
+        self.btn_display_settings.setEnabled(True)
+        self._hide_settings_loading(self._display_settings_loading_key)
+        self._display_settings_loading_key = None
 
     def open_background_settings(self):
         loading_key = self._show_settings_loading("Загрузка настроек фона...", key="background")

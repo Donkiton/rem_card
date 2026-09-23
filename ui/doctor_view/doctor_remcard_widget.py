@@ -1272,7 +1272,7 @@ class DoctorRemCardWidget(QWidget):
         try:
             sector_ivl = getattr(self.layout_manager, "sector_ivl", None)
             if sector_ivl is not None and hasattr(sector_ivl, "refresh"):
-                sector_ivl.refresh()
+                sector_ivl.refresh(force=True)
         except Exception:
             logger.exception("Doctor IVL partial refresh failed")
 
@@ -1658,6 +1658,9 @@ class DoctorRemCardWidget(QWidget):
                 self.layout_manager.beds_selection_widget.remcard_service = service
             if hasattr(self.layout_manager, "orders_widget") and self.layout_manager.orders_widget:
                 self.layout_manager.orders_widget.service = service
+            nurse_orders_manager = getattr(self.layout_manager, "nurse_orders_manager", None)
+            if nurse_orders_manager is not None and hasattr(nurse_orders_manager, "set_service"):
+                nurse_orders_manager.set_service(service)
 
         if hasattr(self, "vitals_input") and self.vitals_input:
             self.vitals_input.service = service
@@ -4518,6 +4521,9 @@ class DoctorRemCardWidget(QWidget):
             diagnostics.close()
         self._balance_snapshot_sync.shutdown()
         self._shutdown_snapshot_worker()
+        sector_ivl = getattr(getattr(self, "layout_manager", None), "sector_ivl", None)
+        if sector_ivl is not None and hasattr(sector_ivl, "shutdown"):
+            sector_ivl.shutdown()
         if hasattr(self, "chart") and self.chart and hasattr(self.chart, "shutdown"):
             self.chart.shutdown()
         if hasattr(self, "_balance_update_timer"):

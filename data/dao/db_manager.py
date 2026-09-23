@@ -40,6 +40,10 @@ from rem_card.app.local_replica_sync import (
     LocalReplicaSync,
     build_local_replica_path,
 )
+from rem_card.services.local_replica_health import (
+    LocalReplicaRoleHealth,
+    build_local_replica_health_path,
+)
 from rem_card.app.local_replica_worker import DEFAULT_REPLICA_SYNC_TIMEOUT_SEC
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
@@ -352,6 +356,9 @@ class DatabaseManager:
             central_db_path=self.db_path,
             client_id=self._client_id,
             role=self._runtime_role,
+        )
+        self._local_replica_health_path = build_local_replica_health_path(
+            self._local_replica_path
         )
         self._network_write_worker: NetworkWriteWorkerClient | None = None
         self._local_replica_visibility_lock = threading.Lock()
@@ -1160,6 +1167,7 @@ class DatabaseManager:
 
         keep_paths = {
             os.path.abspath(self._local_replica_path),
+            os.path.abspath(self._local_replica_health_path),
             os.path.abspath(LOCAL_REMCARD_OUTBOX_PATH),
         }
         for base_path in list(keep_paths):
@@ -1658,6 +1666,18 @@ class DatabaseManager:
             )
             return
         try:
+            role_entry_health = None
+            if self._runtime_role != "default":
+                role_entry_health = LocalReplicaRoleHealth(
+                    state_path=self._local_replica_health_path,
+                    role=self._runtime_role,
+                    database_path=self.db_path,
+                    client_id=self._client_id,
+                    logger=logger,
+                )
+                # Delivery uses a serialized daemon and the explicit database
+                # root, so role construction and the GUI never wait on SMB.
+                role_entry_health.request_pending_delivery()
             self._local_replica = LocalReplicaSync(
                 central_db_path=self.db_path,
                 local_db_path=self._local_replica_path,
@@ -1665,6 +1685,7 @@ class DatabaseManager:
                 logger=logger,
                 sync_interval_sec=self._local_sync_interval_sec,
                 sync_timeout_sec=LOCAL_REPLICA_SYNC_TIMEOUT_SEC,
+                role_entry_health=role_entry_health,
             )
             self._local_replica.set_failure_callback(
                 self._local_replica_failure_callback
