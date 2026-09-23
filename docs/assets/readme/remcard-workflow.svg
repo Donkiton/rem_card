@@ -1,64 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="470" viewBox="0 0 1200 470" role="img" aria-labelledby="title desc">
-  <title id="title">Общий рабочий контур Рем Карты</title>
-  <desc id="desc">Рабочие места врача, медсестры и оперблока связаны с общей папкой данных, медицинской базой, настройками и резервными копиями.</desc>
-
-  <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-      <path d="M0 0l10 5-10 5z" fill="#6F86A6"/>
-    </marker>
-  </defs>
-
-  <rect width="1200" height="470" rx="28" fill="#0B1220"/>
-
-  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
-    <text x="58" y="56" fill="#91A7C3" font-size="18" font-weight="700" letter-spacing="2.5">РАБОЧИЙ КОНТУР</text>
-    <text x="58" y="101" fill="#F8FAFC" font-size="40" font-weight="750">Три роли. Одна точка данных.</text>
-
-    <g fill="none" stroke="#6F86A6" stroke-width="3" marker-end="url(#arrow)">
-      <path d="M206 216v40c0 18 14 32 32 32h92"/>
-      <path d="M600 216v62"/>
-      <path d="M994 216v40c0 18-14 32-32 32h-92"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="490" viewBox="0 0 1200 490" role="img" aria-labelledby="title desc">
+  <title id="title">RemCard 5.1 — единое приложение, четыре роли</title>
+  <desc id="desc">RemCard.exe открывает врача, медсестру, плановый и экстренный оперблок. Рабочие места используют общую медицинскую базу, настройки и резервные копии. RemCardUpdater.exe устанавливает полные обновления.</desc>
+  <rect width="1200" height="490" rx="24" fill="#0B1220"/>
+  <g font-family="Segoe UI, sans-serif">
+    <text x="60" y="65" fill="#F8FAFC" font-size="40" font-weight="700">Одно приложение. Четыре роли.</text>
+    <text x="60" y="112" fill="#AFC0D6" font-size="26">RemCard.exe → выбор рабочего места</text>
+    <path d="M185 235v40h820v-40M455 235v40M725 235v40M600 275v35" fill="none" stroke="#526984" stroke-width="3"/>
+    <g font-size="25" font-weight="600" text-anchor="middle">
+      <rect x="60" y="155" width="250" height="80" rx="14" fill="#14263B" stroke="#4CA4FF"/>
+      <text x="185" y="204" fill="#E3F2FF">Врач</text>
+      <rect x="330" y="155" width="250" height="80" rx="14" fill="#122B24" stroke="#35C9AD"/>
+      <text x="455" y="204" fill="#E2F8EA">Медсестра</text>
+      <rect x="600" y="155" width="250" height="80" rx="14" fill="#202A35" stroke="#91A7C3"/>
+      <text x="725" y="189" fill="#E3F2FF">Плановый</text><text x="725" y="219" fill="#E3F2FF">оперблок</text>
+      <rect x="870" y="155" width="270" height="80" rx="14" fill="#29203B" stroke="#AE86E3"/>
+      <text x="1005" y="189" fill="#EEE5FF">Экстренный</text><text x="1005" y="219" fill="#EEE5FF">оперблок</text>
+      <rect x="230" y="310" width="740" height="95" rx="16" fill="#172338" stroke="#D7263D" stroke-width="2"/>
+      <text x="600" y="348" fill="#F8FAFC" font-size="30">Общая папка данных</text>
+      <text x="600" y="382" fill="#AFC0D6" font-size="23" font-weight="400">Медицинская БД · настройки · резервные копии</text>
     </g>
-
-    <g>
-      <rect x="58" y="132" width="296" height="84" rx="18" fill="#122B24" stroke="#35C975" stroke-width="2"/>
-      <circle cx="92" cy="174" r="10" fill="#35C975"/>
-      <text x="118" y="183" fill="#E2F8EA" font-size="27" font-weight="730">Врач</text>
-
-      <rect x="452" y="132" width="296" height="84" rx="18" fill="#14263B" stroke="#4CA4FF" stroke-width="2"/>
-      <circle cx="486" cy="174" r="10" fill="#4CA4FF"/>
-      <text x="512" y="183" fill="#E3F2FF" font-size="27" font-weight="730">Медсестра</text>
-
-      <rect x="846" y="132" width="296" height="84" rx="18" fill="#352028" stroke="#F45B69" stroke-width="2"/>
-      <circle cx="880" cy="174" r="10" fill="#F45B69"/>
-      <text x="906" y="183" fill="#FFE5E8" font-size="27" font-weight="730">Оперблок</text>
-    </g>
-
-    <g>
-      <rect x="330" y="264" width="540" height="92" rx="22" fill="#172338" stroke="#D7263D" stroke-width="3"/>
-      <circle cx="382" cy="310" r="23" fill="#D7263D"/>
-      <path d="M369 310h8l5-11 7 24 6-13h8" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="424" y="319" fill="#F8FAFC" font-size="31" font-weight="750">Общая папка данных</text>
-    </g>
-
-    <g fill="none" stroke="#526984" stroke-width="2">
-      <path d="M600 356v24H190v18"/>
-      <path d="M600 356v42"/>
-      <path d="M600 380h410v18"/>
-    </g>
-
-    <g font-size="21" font-weight="650">
-      <rect x="58" y="398" width="264" height="44" rx="13" fill="#111C2C" stroke="#34445D"/>
-      <circle cx="84" cy="420" r="6" fill="#D7263D"/>
-      <text x="102" y="427" fill="#D9E2EF">Медицинская БД</text>
-
-      <rect x="468" y="398" width="264" height="44" rx="13" fill="#111C2C" stroke="#34445D"/>
-      <circle cx="494" cy="420" r="6" fill="#4CA4FF"/>
-      <text x="512" y="427" fill="#D9E2EF">Настройки</text>
-
-      <rect x="878" y="398" width="264" height="44" rx="13" fill="#111C2C" stroke="#34445D"/>
-      <circle cx="904" cy="420" r="6" fill="#35C975"/>
-      <text x="922" y="427" fill="#D9E2EF">Резервные копии</text>
-    </g>
+    <text x="600" y="452" text-anchor="middle" fill="#AFC0D6" font-size="23">Полное обновление → RemCardUpdater.exe</text>
   </g>
 </svg>

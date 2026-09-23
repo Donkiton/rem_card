@@ -24,7 +24,7 @@
     <g transform="translate(62 52)">
       <circle cx="18" cy="18" r="18" fill="#D7263D"/>
       <path d="M8 18h6l4-8 5 17 4-9h4" fill="none" stroke="#FFFFFF" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="52" y="25" fill="#AFC0D6" font-size="19" font-weight="700" letter-spacing="2.5">WINDOWS · ОРИТ</text>
+      <text x="52" y="25" fill="#AFC0D6" font-size="19" font-weight="700" letter-spacing="2.5">REMCARD 5.1 · WINDOWS · ОРИТ</text>
     </g>
 
     <text x="62" y="166" fill="#F8FAFC" font-size="82" font-weight="760" letter-spacing="-2.5">Рем Карта</text>
