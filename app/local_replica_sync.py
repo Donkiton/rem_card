@@ -92,6 +92,8 @@ class LocalReplicaSync:
         self._snapshot_blocked_since = None
         self._snapshot_blocked_reported_at = None
         self._snapshot_blocked_reason = ""
+        self._snapshot_blocked_owner = ("", None)
+        self._snapshot_blocked_attempts = 0
         self._worker_client = worker_client or LocalReplicaWorkerClient(
             central_db_path=self.central_db_path,
             rotation_lock_path=self.rotation_lock_path,
@@ -135,6 +137,12 @@ class LocalReplicaSync:
             self._thread.join(timeout=2.0)
         self._thread = None
         self._close_local_conn()
+        # Do not wait for a concurrent attempt just to finalize diagnostics.
+        if self._sync_lock.acquire(blocking=False):
+            try:
+                self._reset_snapshot_blocked(outcome="stopped")
+            finally:
+                self._sync_lock.release()
 
     def trigger_fast_sync(self) -> None:
         self._fast_sync_evt.set()
@@ -258,7 +266,7 @@ class LocalReplicaSync:
                     "Local replica sync recovered after %s failed attempts.",
                     recovered_after,
                 )
-            self._reset_snapshot_blocked()
+            self._reset_snapshot_blocked(outcome=status)
             return True
         except (
             LocalReplicaRotationBusy,
@@ -352,23 +360,45 @@ class LocalReplicaSync:
                     )
             return False
         finally:
-            self._remove_replica_with_sidecars(temp_path)
-            self._sync_lock.release()
+            try:
+                self._remove_replica_with_sidecars(temp_path)
+                if self._stop_evt.is_set():
+                    self._reset_snapshot_blocked(outcome="stopped")
+            finally:
+                self._sync_lock.release()
 
-    def _reset_snapshot_blocked(self) -> None:
+    def _reset_snapshot_blocked(self, *, outcome: str = "interrupted") -> None:
+        if self._snapshot_blocked_since is not None:
+            record_metric(
+                "local_replica_snapshot_wait_finished", 1, outcome=outcome,
+                blocked_sec=round(max(0.0, time.monotonic() - self._snapshot_blocked_since), 1),
+                attempts=self._snapshot_blocked_attempts,
+                reason=self._snapshot_blocked_reason,
+                holder_host=self._snapshot_blocked_owner[0],
+                holder_pid=self._snapshot_blocked_owner[1],
+            )
         self._snapshot_blocked_since = None
         self._snapshot_blocked_reported_at = None
         self._snapshot_blocked_reason = ""
+        self._snapshot_blocked_owner = ("", None)
+        self._snapshot_blocked_attempts = 0
 
     def _record_snapshot_blocked(self, exc: LocalReplicaSnapshotBusy) -> None:
         """Report sustained contention without changing lock ownership or outage state."""
         now = time.monotonic()
         details = exc.gate_diagnostics
         reason = str(details.get("reason") or "unknown")
-        if self._snapshot_blocked_since is None or reason != self._snapshot_blocked_reason:
+        owner = (details.get("holder_host", ""), details.get("holder_pid"))
+        if (self._snapshot_blocked_since is None or reason != self._snapshot_blocked_reason
+                or owner != self._snapshot_blocked_owner):
+            self._reset_snapshot_blocked(outcome="owner_or_reason_changed")
             self._snapshot_blocked_since = now
             self._snapshot_blocked_reported_at = None
             self._snapshot_blocked_reason = reason
+            self._snapshot_blocked_owner = owner
+            record_metric("local_replica_snapshot_wait_started", 1, reason=reason,
+                          holder_host=owner[0], holder_pid=owner[1])
+        self._snapshot_blocked_attempts += 1
         elapsed = now - self._snapshot_blocked_since
         if elapsed < self.SNAPSHOT_BLOCKED_WARNING_SEC:
             return

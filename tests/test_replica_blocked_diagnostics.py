@@ -44,3 +44,67 @@ def test_prolonged_unreadable_gate_is_reported_without_degrading_database(tmp_pa
     worker.sync.return_value = {"status": "unchanged"}
     assert sync.sync_once()
     assert sync._snapshot_blocked_since is None
+
+
+def test_snapshot_wait_records_owner_change_and_success(tmp_path, monkeypatch):
+    metrics = []
+    monkeypatch.setattr(module, "record_metric", lambda name, *a, **kw: metrics.append((name, kw)))
+    worker = Mock()
+    worker.sync.side_effect = LocalReplicaSnapshotBusy(
+        {"reason": "other_host", "holder_host": "one", "holder_pid": 42})
+    sync = LocalReplicaSync(central_db_path=str(tmp_path / "central.db"),
+                            local_db_path=str(tmp_path / "local.db"), worker_client=worker)
+    for _ in range(3):
+        assert not sync.sync_once()
+    worker.sync.side_effect = LocalReplicaSnapshotBusy(
+        {"reason": "other_host", "holder_host": "two", "holder_pid": 43})
+    assert not sync.sync_once()
+    worker.sync.side_effect = None
+    worker.sync.return_value = {"status": "unchanged"}
+    assert sync.sync_once()
+    ended = [data for name, data in metrics if name == "local_replica_snapshot_wait_finished"]
+    assert [(e["holder_host"], e["attempts"], e["outcome"]) for e in ended] == [
+        ("one", 3, "owner_or_reason_changed"), ("two", 1, "unchanged")]
+
+
+def test_stopping_replica_closes_wait_without_claiming_recovery(tmp_path, monkeypatch):
+    metrics = []
+    monkeypatch.setattr(module, "record_metric", lambda name, *a, **kw: metrics.append((name, kw)))
+    worker = Mock()
+    worker.sync.side_effect = LocalReplicaSnapshotBusy({"reason": "other_host"})
+    sync = LocalReplicaSync(central_db_path=str(tmp_path / "central.db"),
+                            local_db_path=str(tmp_path / "local.db"), worker_client=worker)
+    assert not sync.sync_once()
+    sync.stop()
+    sync.stop()
+    ended = [data for name, data in metrics if name == "local_replica_snapshot_wait_finished"]
+    assert len(ended) == 1 and ended[0]["outcome"] == "stopped"
+
+
+def test_stop_during_attempt_finishes_wait_when_attempt_returns(tmp_path, monkeypatch):
+    import threading
+
+    metrics = []
+    monkeypatch.setattr(module, "record_metric", lambda name, *a, **kw: metrics.append((name, kw)))
+    entered, release = threading.Event(), threading.Event()
+
+    def busy(**kwargs):
+        entered.set()
+        release.wait(3)
+        raise LocalReplicaSnapshotBusy({"reason": "other_host"})
+
+    worker = Mock()
+    worker.sync.side_effect = busy
+    sync = LocalReplicaSync(central_db_path=str(tmp_path / "central.db"),
+                            local_db_path=str(tmp_path / "local.db"), worker_client=worker)
+    thread = threading.Thread(target=sync.sync_once)
+    thread.start()
+    try:
+        assert entered.wait(1)
+        sync.stop()  # Must not wait for diagnostics guarded by the running attempt.
+    finally:
+        release.set()
+        thread.join(3)
+    assert not thread.is_alive()
+    ended = [data for name, data in metrics if name == "local_replica_snapshot_wait_finished"]
+    assert len(ended) == 1 and ended[0]["outcome"] == "stopped"

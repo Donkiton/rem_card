@@ -252,6 +252,8 @@ class UnifiedWriteOutcomeTest(unittest.TestCase):
 
     def test_patient_auto_release_network_failure_is_registered_unknown(self):
         service = _service_harness()
+        refreshes = []
+        service.request_immediate_refresh = lambda **kwargs: refreshes.append(kwargs)
 
         class _PatientDao:
             @staticmethod
@@ -272,7 +274,45 @@ class UnifiedWriteOutcomeTest(unittest.TestCase):
             "auto_release_outcome_beds",
         )
         self.assertTrue(service._unknown_active_write)
+        self.assertEqual(refreshes, [])
         self.assertFalse(service.shutdown(timeout=1.0))
+
+    def test_patient_auto_release_zero_skips_refresh_but_positive_keeps_it(self):
+        for released, expected_refreshes in ((0, []), (2, [{"force_emit": True, "source": "auto_release_outcome_beds"}])):
+            service = _service_harness()
+            refreshes = []
+            service.request_immediate_refresh = lambda **kwargs: refreshes.append(kwargs)
+
+            class _PatientDao:
+                @staticmethod
+                def release_due_outcome_beds(*, delay_minutes):
+                    return released
+
+            patient_service = PatientService(_PatientDao(), data_service=service)
+            self.assertTrue(patient_service.maybe_release_due_outcome_beds_async(force=True))
+            self.assertTrue(
+                _wait_until(
+                    lambda: bool(service.write_outcomes())
+                    and service.write_outcomes()[0]["state"] == "committed"
+                )
+            )
+            self.assertEqual(refreshes, expected_refreshes)
+            self.assertTrue(service.shutdown(timeout=1.0))
+
+    def test_zero_result_of_other_write_still_refreshes(self):
+        service = _service_harness()
+        refreshes = []
+        service.request_immediate_refresh = lambda **kwargs: refreshes.append(kwargs)
+
+        self.assertTrue(service.enqueue_write("ordinary_write", lambda: 0))
+        self.assertTrue(
+            _wait_until(
+                lambda: bool(service.write_outcomes())
+                and service.write_outcomes()[0]["state"] == "committed"
+            )
+        )
+        self.assertEqual(refreshes, [{"force_emit": True, "source": "ordinary_write"}])
+        self.assertTrue(service.shutdown(timeout=1.0))
 
     def test_patient_auto_release_pending_write_blocks_shutdown_and_keeps_debounce(self):
         service = _service_harness()

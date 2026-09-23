@@ -3,6 +3,7 @@ from collections import OrderedDict
 import time
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QTimer, Signal
+from shiboken6 import isValid
 from .nurse_order_card import NurseOrderCard
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.app.logger import logger
@@ -29,7 +30,10 @@ class CurrentNurseOrdersWidget(QWidget):
     balanceRefreshRequested = Signal()
 
     def __init__(self, service, sector_1a, sector_5, parent=None):
-        super().__init__(parent)
+        # This is a non-visual controller for Sector1a. Give it the same Qt
+        # lifetime so its timer cannot outlive the layout and card children.
+        super().__init__(parent or sector_1a)
+        self.hide()
         self.service = service 
         self.sector_1a = sector_1a
         self.sector_5 = sector_5
@@ -43,13 +47,18 @@ class CurrentNurseOrdersWidget(QWidget):
         self._pending_marks = {}
         self._all_data = []
         self._snapshot_cache = OrderedDict()
+        self._is_shutting_down = False
         
         self._time_timer = QTimer(self)
         self._time_timer.setSingleShot(True)
         self._time_timer.timeout.connect(self._render_from_cache)
+        if self.sector_1a is not None:
+            self.sector_1a.destroyed.connect(self._on_sector_destroyed)
         self._clear_sector_5()
 
     def set_context(self, admission_id, shift_date):
+        if self._is_shutting_down:
+            return
         # Если пациент сменился, очищаем кэш виджетов
         if self._cache_key_for(self.admission_id, self.shift_date) != self._cache_key_for(admission_id, shift_date):
             self._clear_all_cards()
@@ -185,11 +194,43 @@ class CurrentNurseOrdersWidget(QWidget):
     def _clear_all_cards(self):
         if hasattr(self, "_time_timer"):
             self._time_timer.stop()
-        self.sector_1a.set_content(None)
+        cards = list(self.cards_1a.values())
+        # First detach the Python cache from the Qt objects. A deferred timer or
+        # a nested layout event must never find a card that is already queued
+        # for deletion.
         self.cards_1a.clear()
         self._card_signatures_1a.clear()
         self._last_render_signature_1a = None
+        for card in cards:
+            if isValid(card):
+                card.setParent(None)
+                card.deleteLater()
         self._clear_sector_5()
+
+    def _on_sector_destroyed(self, *_args):
+        # Sector1a owns the card widgets. Its child layout and labels are
+        # destroyed by Qt, while this non-visual manager can still be referenced
+        # by queued callbacks. Drop every Qt reference before such callbacks run.
+        self._is_shutting_down = True
+        self._time_timer.stop()
+        self.cards_1a.clear()
+        self._card_signatures_1a.clear()
+        self._last_render_signature_1a = None
+        self._pending_marks.clear()
+        self._all_data = []
+        self.sector_1a = None
+        self.sector_5 = None
+
+    def shutdown(self):
+        if self._is_shutting_down:
+            return
+        self._is_shutting_down = True
+        self._time_timer.stop()
+        self._clear_all_cards()
+        self._pending_marks.clear()
+        self._all_data = []
+        self.sector_1a = None
+        self.sector_5 = None
 
     def _clear_sector_5(self):
         return
@@ -206,7 +247,7 @@ class CurrentNurseOrdersWidget(QWidget):
         return abs(int(item_id))
 
     def refresh_data(self, *, force: bool = False):
-        if not self.admission_id or not self.shift_date:
+        if self._is_shutting_down or not self.admission_id or not self.shift_date:
             return
 
         if not force and self._apply_cached_snapshot_if_available() and self._is_cached_snapshot_current():
@@ -240,7 +281,7 @@ class CurrentNurseOrdersWidget(QWidget):
         self._render_from_cache()
 
     def handle_data_changes(self, payload: dict):
-        if not self.admission_id:
+        if self._is_shutting_down or not self.admission_id:
             return
 
         changed_entities = {
@@ -272,6 +313,10 @@ class CurrentNurseOrdersWidget(QWidget):
             self.refresh_data(force=True)
 
     def _render_from_cache(self):
+        if self._is_shutting_down or self.sector_1a is None or not isValid(self.sector_1a):
+            return
+        if self._drop_invalid_cached_cards():
+            self._last_render_signature_1a = None
         now = datetime.now()
         list_1a_data = [
             item
@@ -298,8 +343,11 @@ class CurrentNurseOrdersWidget(QWidget):
 
     def _sync_sector_widgets(self, sector, cache, data_list):
         """Синхронизирует виджеты в лейауте с данными без мерцания."""
-        if sector is None:
+        if sector is None or not isValid(sector):
             return False
+        ensure_ui = getattr(sector, "_ensure_ui", None)
+        if callable(ensure_ui):
+            ensure_ui()
         changed = False
         new_ids = {item['id'] for item in data_list}
         
@@ -327,7 +375,7 @@ class CurrentNurseOrdersWidget(QWidget):
                     changed = True
             else:
                 # Создаем новый виджет
-                card = NurseOrderCard(item)
+                card = NurseOrderCard(item, sector.cards_container)
                 card.statusChanged.connect(self.handle_status_change)
                 cache[admin_id] = card
                 self._card_signatures_1a[admin_id] = card_signature
@@ -341,6 +389,16 @@ class CurrentNurseOrdersWidget(QWidget):
                 changed = True
         return changed
 
+    def _drop_invalid_cached_cards(self):
+        dropped = False
+        for admin_id, card in list(self.cards_1a.items()):
+            if isValid(card):
+                continue
+            self.cards_1a.pop(admin_id, None)
+            self._card_signatures_1a.pop(admin_id, None)
+            dropped = True
+        return dropped
+
     def _visible_render_signature(self, data_list):
         return (
             tuple(int(item["id"]) for item in data_list if item.get("id") is not None),
@@ -350,7 +408,7 @@ class CurrentNurseOrdersWidget(QWidget):
     def _refresh_visible_card_signals(self, visible_ids):
         for admin_id in visible_ids or ():
             card = self.cards_1a.get(int(admin_id))
-            if card is not None and hasattr(card, "refresh_time_state"):
+            if card is not None and isValid(card) and hasattr(card, "refresh_time_state"):
                 card.refresh_time_state()
 
     @staticmethod
@@ -391,7 +449,7 @@ class CurrentNurseOrdersWidget(QWidget):
 
     def _schedule_next_time_boundary(self, now: datetime | None = None):
         self._time_timer.stop()
-        if not self._all_data:
+        if self._is_shutting_down or not self._all_data:
             return
 
         now = now or datetime.now()
@@ -474,6 +532,8 @@ class CurrentNurseOrdersWidget(QWidget):
         return patched
 
     def _on_mark_write_success(self, admin_id: int, _result=None):
+        if self._is_shutting_down:
+            return
         # Pending mark stays alive for a short grace window so stale read snapshots
         # cannot briefly resurrect the card in sector 1a.
         pending = self._pending_marks.get(int(admin_id))
@@ -484,6 +544,8 @@ class CurrentNurseOrdersWidget(QWidget):
         self.balanceRefreshRequested.emit()
 
     def _on_mark_write_error(self, admin_id: int, exc: Exception):
+        if self._is_shutting_down:
+            return
         self._pending_marks.pop(int(admin_id), None)
         self.refresh_data()
         self.localBalanceChanged.emit()
@@ -514,6 +576,8 @@ class CurrentNurseOrdersWidget(QWidget):
         )
 
     def handle_status_change(self, admin_id, mark):
+        if getattr(self, "_is_shutting_down", False):
+            return
         if self._is_lab_order_card_id(admin_id):
             if mark != NURSE_MARK_EXECUTED:
                 return

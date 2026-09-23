@@ -34,6 +34,7 @@ from rem_card.ui.shared.window_state import SavedFramelessDialogMixin  # noqa: E
 from rem_card.ui.procedures.procedures_panel import ProceduresPanel  # noqa: E402
 from rem_card.ui.styles.component_styles import build_procedure_create_button_style  # noqa: E402
 from rem_card.ui.styles.context_menu_style import _TextEditContextMenuFilter  # noqa: E402
+from rem_card.ui.shared.unified_chrome import EntryChrome  # noqa: E402
 
 
 def _application() -> QApplication:
@@ -581,9 +582,16 @@ def test_global_event_filters_ignore_qwidget_items():
     event = QEvent(QEvent.Resize)
     nutrition_widget = OralNutritionWidget(role="doctor")
     context_menu_filter = _TextEditContextMenuFilter(app)
+    owner = QWidget()
+    chrome = EntryChrome(owner, QWidget())
 
     assert nutrition_widget.eventFilter(widget_item, event) is False
     assert context_menu_filter.eventFilter(widget_item, event) is False
+    assert chrome.eventFilter(widget_item, event) is False
+
+    owner.deleteLater()
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
 
 
 def test_edit_dialog_delete_request_removes_selected_diet_version(monkeypatch):

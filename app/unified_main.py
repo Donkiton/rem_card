@@ -5,9 +5,37 @@ import argparse
 import multiprocessing
 import os
 import sys
+from contextlib import contextmanager
 
 
 COMPILED_WORKER_SMOKE_TIMEOUT_SECONDS = 20.0
+
+
+@contextmanager
+def _crash_session():
+    """One diagnostic session for the shell and all role switches."""
+    from rem_card.app.logger import init_crash_handler, finalize_crash_handler
+
+    init_crash_handler(role="unified")
+    result = {"exit_code": 0}
+    recorded = False
+    try:
+        yield result
+    except BaseException:
+        result["exit_code"] = 1
+        try:
+            from rem_card.services.crash_reports import capture_exception
+
+            recorded = bool(capture_exception("unhandled_python_exception", *sys.exc_info()))
+            if recorded:
+                # The top-level excepthook still writes the human-readable log,
+                # but must not create a second report after session finalization.
+                sys.exc_info()[1]._remcard_crash_reported = True
+        except Exception:
+            pass
+        raise
+    finally:
+        finalize_crash_handler(exit_code=result["exit_code"], crash_recorded=recorded)
 
 
 def _compiled_smoke_child() -> None:
@@ -118,21 +146,22 @@ def main(argv=None):
         if status != "shown":
             _show_unresponsive_single_instance_warning("RemCard")
         return
-    from rem_card.ui.unified_window import UnifiedWindow
-    from rem_card.app.unified_preflight import attach_startup_request, build_startup_request
-
-    window = UnifiedWindow()
-    startup_request = build_startup_request(
-        role=args.role,
-        emergency_startup_request=args.emergency_startup_request,
-        resume_role=getattr(args, "resume_role", None),
-    )
-    attach_startup_request(window, startup_request)
-    _connect_single_instance_requests(server, window, Qt, QTimer, logger)
-    window.show()
-    QTimer.singleShot(0, window.initialize)
     try:
-        app.exec()
+        with _crash_session() as session:
+            from rem_card.ui.unified_window import UnifiedWindow
+            from rem_card.app.unified_preflight import attach_startup_request, build_startup_request
+
+            window = UnifiedWindow()
+            startup_request = build_startup_request(
+                role=args.role,
+                emergency_startup_request=args.emergency_startup_request,
+                resume_role=getattr(args, "resume_role", None),
+            )
+            attach_startup_request(window, startup_request)
+            _connect_single_instance_requests(server, window, Qt, QTimer, logger)
+            window.show()
+            QTimer.singleShot(0, window.initialize)
+            session["exit_code"] = app.exec()
     finally:
         if listening:
             server.close()

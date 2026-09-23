@@ -25,6 +25,7 @@ _SUPPORTED = _DURATION_METRICS | {
     "sqlite_write_lock_acquired", "sqlite_write_lock_released",
     "settings_cache_hit", "emergency_standby_refresh_skipped",
     "local_replica_sync_failed",
+    "local_replica_sync_deferred", "sqlite_write_lock_stale_cleanup_skipped",
 }
 
 
@@ -84,6 +85,10 @@ def _routine(payload: dict[str, Any], duration: float | None) -> bool:
         )
     if name == "settings_cache_hit":
         return payload.get("value") == 1
+    if name == "local_replica_sync_deferred":
+        return payload.get("reason") in {"snapshot_busy", "writer_busy", "rotation_busy"}
+    if name == "sqlite_write_lock_stale_cleanup_skipped":
+        return payload.get("source") in _LOCK_SOURCES
     if name == "emergency_standby_refresh_skipped":
         return (payload.get("status") == "current"
                 and payload.get("detail") == "standby is already current")
@@ -141,6 +146,7 @@ class MetricAggregator:
         self._lock = threading.Lock()
         self._buckets: dict[tuple[Any, ...], _Bucket] = {}
         self._sync_state: tuple[Any, ...] | None = None
+        self._contention_states: dict[str, tuple[Any, ...]] = {}
         self._detail_deadline = 0.0
         self._detail_setting: str | None = None
 
@@ -161,7 +167,15 @@ class MetricAggregator:
     def observe(self, payload: dict[str, Any], *, force_raw: bool = False) -> bool:
         """Return True only when this record is represented by a pending summary."""
         name = payload.get("metric")
+        if name == "local_replica_sync_duration_ms":
+            # A successful check ends deferred contention, even in raw mode.
+            with self._lock:
+                self._contention_states.pop("local_replica_sync_deferred", None)
         if os.environ.get("REMCARD_METRICS_AGGREGATION_ENABLED", "1") == "0" or name not in _SUPPORTED:
+            return False
+        if name == "local_replica_sync_deferred" and payload.get("reason") not in {
+            "snapshot_busy", "writer_busy", "rotation_busy",
+        }:
             return False
         # Clinical write lock history is deliberately outside this policy.
         if name.startswith("sqlite_write_lock_") and payload.get("source") not in _LOCK_SOURCES:
@@ -173,12 +187,26 @@ class MetricAggregator:
                 if not isinstance(value, (str, int, bool)) or len(str(value)) > 128:
                     return False
                 labels[key] = value
+        if name == "sqlite_write_lock_stale_cleanup_skipped":
+            for label in ("holder_host", "holder_pid", "holder_source"):
+                value = payload.get(label)
+                if not isinstance(value, (str, int, type(None))) or len(str(value)) > 128:
+                    return False
+                labels[label] = value
         key = tuple(labels.items())
         duration = _duration(payload)
         error = _problem(payload)
         raw = force_raw or error or not _routine(payload, duration)
         now = self._clock()
         with self._lock:
+            if name in {"local_replica_sync_deferred", "sqlite_write_lock_stale_cleanup_skipped"}:
+                if name == "local_replica_sync_deferred":
+                    self._sync_state = None  # Preserve the first successful check after waiting.
+                state = tuple(str(payload.get(k, "")) for k in (
+                    "reason", "source", "lock_path", "holder_host", "holder_pid", "holder_source",
+                ))
+                raw = raw or state != self._contention_states.get(name)
+                self._contention_states[name] = state
             if name == "local_replica_sync_duration_ms":
                 # Keep the first state and every cursor/cycle/result transition.
                 state = tuple(str(payload.get(k, "")) for k in ("result", "change_cursor", "db_cycle"))
@@ -192,7 +220,8 @@ class MetricAggregator:
                     return False  # No eviction/loss when cardinality is exhausted.
                 bucket = _Bucket(labels, now, str(payload["ts"]), str(payload["ts"]))
                 self._buckets[key] = bucket
-                if name == "emergency_standby_refresh_skipped":
+                if name in {"emergency_standby_refresh_skipped", "local_replica_sync_deferred",
+                            "sqlite_write_lock_stale_cleanup_skipped"}:
                     raw = True  # Keep the first reason, summarize its repetitions.
             bucket.add(str(payload["ts"]), duration, raw, error)
         return not raw

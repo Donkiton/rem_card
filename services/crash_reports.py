@@ -525,6 +525,10 @@ def _process_stale_sessions() -> None:
         _remove_file(marker_path)
 
 
+def current_crash_session_id() -> str:
+    return _CURRENT_SESSION_ID
+
+
 def initialize_crash_session(role: str | None = None) -> str:
     global _FAULT_FILE, _CURRENT_MARKER_PATH, _CURRENT_NATIVE_PATH, _CURRENT_SESSION_ID
     with _STATE_LOCK:
