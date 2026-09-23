@@ -21,6 +21,7 @@ from rem_card.app.local_replica_worker import (
 )
 from rem_card.app.sqlite_shared import configure_connection
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
+from rem_card.services.local_replica_health import LocalReplicaRoleHealth
 
 
 def build_local_replica_path(
@@ -71,6 +72,7 @@ class LocalReplicaSync:
         sync_interval_sec: float = 2.0,
         sync_timeout_sec: float = DEFAULT_REPLICA_SYNC_TIMEOUT_SEC,
         worker_client: LocalReplicaWorkerClient | None = None,
+        role_entry_health: LocalReplicaRoleHealth | None = None,
     ):
         self.central_db_path = os.path.abspath(central_db_path)
         self.local_db_path = os.path.abspath(local_db_path)
@@ -99,6 +101,8 @@ class LocalReplicaSync:
             rotation_lock_path=self.rotation_lock_path,
             timeout_sec=self.sync_timeout_sec,
         )
+        self._role_entry_health = role_entry_health
+        self._role_entry_attempt_pending = role_entry_health is not None
 
         self.last_sync_ok_ts: float = 0.0
         self.last_sync_error: Optional[str] = None
@@ -168,7 +172,7 @@ class LocalReplicaSync:
                 if self.last_sync_ok_ts > 0
                 else None
             )
-            return {
+            snapshot = {
                 "enabled": True,
                 "ready": self._local_conn is not None and self.last_sync_ok_ts > 0,
                 "degraded": bool(self.last_sync_error),
@@ -185,6 +189,9 @@ class LocalReplicaSync:
                 "state": dict(self.last_state),
                 "local_db_path": self.local_db_path,
             }
+        if self._role_entry_health is not None:
+            snapshot["persistent_health"] = self._role_entry_health.snapshot()
+        return snapshot
 
     def fetch_all(self, query: str, params=()):
         with self._lock:
@@ -224,6 +231,9 @@ class LocalReplicaSync:
     def sync_once(self) -> bool:
         if not self._sync_lock.acquire(blocking=False):
             return False
+        with self._lock:
+            is_role_entry_attempt = self._role_entry_attempt_pending
+            self._role_entry_attempt_pending = False
         started = time.perf_counter()
         temp_path = self._build_temp_path()
         try:
@@ -240,6 +250,10 @@ class LocalReplicaSync:
             elif status != "unchanged":
                 raise RuntimeError(f"Unexpected local replica worker status: {status}")
             with self._lock:
+                if self._local_conn is None:
+                    raise RuntimeError(
+                        "Local replica worker confirmed state without a valid local copy"
+                    )
                 recovered_after = int(self.consecutive_failures)
                 self.last_sync_ok_ts = time.time()
                 self.last_sync_error = None
@@ -248,6 +262,14 @@ class LocalReplicaSync:
                 self._current_backoff_sec = 0.0
                 self._next_retry_not_before = 0.0
                 self.last_state = state
+            if self._role_entry_health is not None:
+                try:
+                    self._role_entry_health.record_success(status)
+                except Exception as health_exc:
+                    self.logger.warning(
+                        "Local replica health success recording failed: %s",
+                        health_exc,
+                    )
             record_metric(
                 "local_replica_sync_duration_ms",
                 round((time.perf_counter() - started) * 1000.0, 3),
@@ -302,6 +324,21 @@ class LocalReplicaSync:
                     3,
                 ),
             )
+            if is_role_entry_attempt and self._role_entry_health is not None:
+                with self._lock:
+                    local_copy_valid = self._local_conn is not None
+                try:
+                    self._role_entry_health.record_role_entry_failure(
+                        outcome="deferred",
+                        local_copy_valid=local_copy_valid,
+                        error_class=type(exc).__name__,
+                        error=str(exc),
+                    )
+                except Exception as health_exc:
+                    self.logger.warning(
+                        "Local replica deferred health recording failed: %s",
+                        health_exc,
+                    )
             return False
         except Exception as exc:
             self._reset_snapshot_blocked()
@@ -357,6 +394,24 @@ class LocalReplicaSync:
                     self.logger.warning(
                         "Local replica failure callback failed: %s",
                         callback_exc,
+                    )
+            if is_role_entry_attempt and self._role_entry_health is not None:
+                with self._lock:
+                    local_copy_valid = self._local_conn is not None
+                try:
+                    self._role_entry_health.record_role_entry_failure(
+                        outcome="failed",
+                        local_copy_valid=local_copy_valid,
+                        error_class=str(
+                            getattr(exc, "remote_error_class", "")
+                            or type(exc).__name__
+                        ),
+                        error=str(exc),
+                    )
+                except Exception as health_exc:
+                    self.logger.warning(
+                        "Local replica failed health recording failed: %s",
+                        health_exc,
                     )
             return False
         finally:

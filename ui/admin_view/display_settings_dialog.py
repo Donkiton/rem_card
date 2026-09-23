@@ -554,10 +554,14 @@ class Sector8SidesEditor(QWidget):
 
 
 class DisplaySettingsDialog(BaseStyledDialog):
-    def __init__(self, initial_role: str | None = "doctor", parent=None):
+    def __init__(self, initial_role: str | None = "doctor", initial_payload=None, parent=None):
         super().__init__("Расположение кнопок", parent)
         self.storage = DisplaySettingsStorage()
-        self.payload = self.storage.load()
+        self.payload = (
+            deepcopy(initial_payload)
+            if isinstance(initial_payload, dict)
+            else self.storage.load()
+        )
         self.role_drafts = {
             role: role_display_settings_from_payload(self.payload, role)
             for role in DISPLAY_ROLES

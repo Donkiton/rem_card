@@ -1212,7 +1212,7 @@ class NurseMainWidget(QWidget):
         try:
             sector_ivl = getattr(self.layout_manager, "sector_ivl", None)
             if sector_ivl is not None and hasattr(sector_ivl, "refresh"):
-                sector_ivl.refresh()
+                sector_ivl.refresh(force=True)
         except Exception:
             logger.exception("Nurse IVL partial refresh failed")
 
@@ -2927,6 +2927,9 @@ class NurseMainWidget(QWidget):
         if self._operblock_archive_viewer is not None:
             self._return_from_operblock_archive_viewer()
         self._shutdown_snapshot_worker()
+        sector_ivl = getattr(getattr(self, "layout_manager", None), "sector_ivl", None)
+        if sector_ivl is not None and hasattr(sector_ivl, "shutdown"):
+            sector_ivl.shutdown()
         if hasattr(self, "_balance_update_timer"):
             self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):

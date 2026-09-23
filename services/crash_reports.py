@@ -35,6 +35,7 @@ EVENT_TYPES = {
     "database_corruption",
     "database_unavailable_startup",
     "database_unavailable_runtime",
+    "local_replica_stale",
 }
 CRASH_SUBDIR_PARTS = ("logs", "diagnostics", "crashes")
 SHARED_DIR_NAMES = ("incoming", "processed", "summaries", "quarantine")
@@ -234,7 +235,22 @@ def _runtime_metadata(role: str | None = None) -> tuple[str, str]:
 def _allowed_details(details: dict[str, Any] | None) -> dict[str, Any]:
     source = details if isinstance(details, dict) else {}
     result: dict[str, Any] = {}
-    for key in ("failure_kind", "phase", "check_result", "thread_name", "previous_session_unclean"):
+    for key in (
+        "failure_kind",
+        "phase",
+        "check_result",
+        "thread_name",
+        "previous_session_unclean",
+        "database_key",
+        "client_id",
+        "actual_copy_installed_at",
+        "last_unchanged_verified_at",
+        "confirmed_age_sec",
+        "never_confirmed",
+        "local_copy_valid",
+        "error_class",
+        "error",
+    ):
         value = source.get(key)
         if value in (None, ""):
             continue

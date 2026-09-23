@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import logging
 import multiprocessing
 import os
 import re
@@ -66,9 +68,18 @@ def replica_snapshot_lease_dir(central_db_path: str) -> str:
     return os.path.join(baza_dir, "locks", "replica_snapshots")
 
 
-def replica_snapshot_gate_path(central_db_path: str) -> str:
+def replica_snapshot_gate_path(central_db_path: str, *, host: str | None = None) -> str:
     baza_dir = os.path.dirname(os.path.dirname(os.path.abspath(central_db_path)))
-    return os.path.join(baza_dir, "locks", "replica_snapshot_copy.lock")
+    return os.path.join(baza_dir, "locks", _snapshot_gate_name(host))
+
+
+def _snapshot_gate_name(host: str | None = None) -> str:
+    # Serialize roles on one workstation only. A dead foreign workstation must
+    # not stop every reader. The separate per-worker leases still protect
+    # rotation; SQLite and the writer-priority checks protect clinical writes.
+    identity = str(host or socket.gethostname()).strip().casefold()
+    host_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+    return f"replica_snapshot_copy_{host_key}.lock"
 
 
 def database_write_lock_path(central_db_path: str) -> str:
@@ -332,11 +343,9 @@ def _sync_snapshot_with_network_lease(
         snapshot_gate_path,
         stale_timeout_sec=60.0,
         lease_duration_sec=lease_duration_sec,
-        # This path is shared by different hosts. Atomic publication prevents
-        # this client from exposing partial JSON, but a malformed or expired
-        # foreign gate still cannot be reclaimed safely: it may belong to a live
-        # SMB client whose write or release is delayed. Preserve it until an
-        # explicit maintenance window confirms that every client is stopped.
+        # A workstation gate is normally owned by this host, so confirmed dead
+        # local PIDs can be recovered. Never reclaim ambiguous/foreign owners
+        # merely by age, including after a workstation rename or SMB delay.
         allow_expired_lease_cleanup=False,
         allow_legacy_replica_cleanup=False,
         allow_malformed_cleanup=False,
@@ -473,7 +482,7 @@ class LocalReplicaWorkerClient:
         )
         self.snapshot_gate_path = os.path.join(
             os.path.dirname(self.snapshot_lease_dir),
-            "replica_snapshot_copy.lock",
+            _snapshot_gate_name(),
         )
         self.writer_lock_path = database_write_lock_path(self.central_db_path)
         self.malformed_quarantine_dir = malformed_lock_quarantine_dir(
@@ -517,6 +526,7 @@ class LocalReplicaWorkerClient:
                 pass
         if process is None:
             return
+        worker_pid = process.pid
         if process.is_alive():
             process.terminate()
             process.join(timeout=0.5)
@@ -526,10 +536,37 @@ class LocalReplicaWorkerClient:
             except Exception:
                 pass
             process.join(timeout=0.5)
+        stopped = not process.is_alive()
+        if stopped and worker_pid is not None:
+            # Terminate/kill bypass the child's finally blocks. Only reclaim
+            # this confirmed-stopped local owner; never use lease age to take
+            # over a foreign worker. SMB cleanup must not extend the hard sync
+            # timeout, so perform it outside the caller's critical path.
+            threading.Thread(
+                target=self._cleanup_stopped_worker_locks,
+                args=(worker_pid,),
+                name="RemCardReplicaLockCleanup",
+                daemon=True,
+            ).start()
         try:
             process.close()
         except Exception:
             pass
+
+    def _cleanup_stopped_worker_locks(self, worker_pid: int) -> None:
+        for path, source in (
+            (self.snapshot_gate_path, "local_replica_snapshot_gate"),
+            (self.snapshot_lease_path, "local_replica_snapshot"),
+        ):
+            try:
+                FileWriteLock(path).cleanup_stopped_local_owner(
+                    owner_pid=worker_pid, owner_source=source,
+                )
+            except Exception:
+                logging.getLogger(__name__).warning(
+                    "Failed to clean stopped replica worker lock (pid=%s source=%s)",
+                    worker_pid, source, exc_info=True,
+                )
 
     def sync(
         self,

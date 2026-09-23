@@ -1790,6 +1790,7 @@ def _check_balance_loading_state_uses_placeholders(temp_root: str) -> tuple[bool
 
 
 def _check_lazy_section_snapshot_caches(temp_root: str) -> tuple[bool, str]:
+    from .common import _wait_for_ivl_snapshot
     from .orders import _wait_for_movement_snapshot
     _ = temp_root
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -1890,22 +1891,34 @@ def _check_lazy_section_snapshot_caches(temp_root: str) -> tuple[bool, str]:
             return False, f"events LRU cache mismatch: {event_keys}"
 
         ivl_widget.set_runtime_context(ivl_service, 1)
+        _wait_for_ivl_snapshot(ivl_widget, app)
         ivl_widget.set_runtime_context(ivl_service, 2)
+        _wait_for_ivl_snapshot(ivl_widget, app)
+        ivl_widget.lbl_case_status.setText("uncached sentinel")
         ivl_widget.set_runtime_context(ivl_service, 1)
+        if ivl_widget.lbl_case_status.text() != "Случай: не открыт":
+            return False, "ivl hot-cache was not applied before background refresh"
         ivl_patient_calls = [call[1] for call in ivl_service.calls if call[0] == "summary"]
         if ivl_patient_calls != [1, 2]:
-            return False, f"ivl hot-cache should avoid repeated DB load, calls={ivl_service.calls}"
+            return False, f"ivl hot-cache should not read synchronously, calls={ivl_service.calls}"
+        _wait_for_ivl_snapshot(ivl_widget, app)
+        if [call[1] for call in ivl_service.calls if call[0] == "summary"] != [1, 2, 1]:
+            return False, f"ivl cached patient was not refreshed in background: {ivl_service.calls}"
 
         for admission_id in range(3, 11):
             ivl_widget.set_runtime_context(ivl_service, admission_id)
+            _wait_for_ivl_snapshot(ivl_widget, app)
         ivl_widget.set_runtime_context(ivl_service, 1)
+        _wait_for_ivl_snapshot(ivl_widget, app)
         ivl_widget.set_runtime_context(ivl_service, 11)
+        _wait_for_ivl_snapshot(ivl_widget, app)
         ivl_keys = list(ivl_widget._snapshot_cache.keys())
         if len(ivl_keys) != 10 or (1, "ivl") not in ivl_keys or (2, "ivl") in ivl_keys:
             return False, f"ivl LRU cache mismatch: {ivl_keys}"
         return True, "ok"
     finally:
         events_widget.close()
+        ivl_widget.shutdown()
         ivl_widget.close()
 
 

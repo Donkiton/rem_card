@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from rem_card.data.dao import db_manager as db_manager_module
 from rem_card.data.dao.db_manager import DatabaseManager
 from rem_card.app.db_lifecycle import (
@@ -123,7 +125,8 @@ def test_only_exact_current_role_lock_nonce_is_ignored(tmp_path):
         lock.release()
 
 
-def test_rotation_waits_for_active_replica_snapshot_lease(tmp_path):
+@pytest.mark.parametrize("reader_count", [1, 2])
+def test_rotation_waits_for_active_replica_snapshot_lease(tmp_path, reader_count):
     archive_dir = tmp_path / "archiv"
     db_path = archive_dir / "rao_journal.db"
     _create_db(str(db_path))
@@ -134,6 +137,13 @@ def test_rotation_waits_for_active_replica_snapshot_lease(tmp_path):
         allow_expired_lease_cleanup=True,
     )
     assert lease.acquire("doctor-test", "local_replica_snapshot")
+    second = None
+    if reader_count == 2:
+        second = FileWriteLock(
+            str(lease_path.with_name("nurse-other-workstation.lock")),
+            lease_duration_sec=30.0, allow_expired_lease_cleanup=True,
+        )
+        assert second.acquire("nurse-other-workstation", "local_replica_snapshot")
     result = {}
 
     thread = threading.Thread(
@@ -148,8 +158,14 @@ def test_rotation_waits_for_active_replica_snapshot_lease(tmp_path):
         assert (archive_dir / "db_rotation.lock").exists()
         time.sleep(0.15)
         assert thread.is_alive()
+        if second is not None:
+            lease.release()
+            time.sleep(0.15)
+            assert thread.is_alive(), "rotation must wait for every workstation"
     finally:
         lease.release()
+        if second is not None:
+            second.release()
     thread.join(timeout=5.0)
     assert result["status"] == "rotated"
     assert not (archive_dir / "db_rotation.lock").exists()

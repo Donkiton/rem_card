@@ -732,16 +732,23 @@ class RemCardService(QObject):
         include_change_cursor: bool = False,
     ) -> Dict[str, Any]:
         summary = self.get_ventilation_summary(admission_id)
+        timeline = self.get_ventilation_timeline(admission_id)
+        active_case = summary.get("active_case")
+        latest_case = self.get_latest_ventilation_case(admission_id) if not active_case else None
+        patient = self.get_patient(admission_id)
         snapshot: Dict[str, Any] = {
             "admission_id": admission_id,
             "shift_date": date,
             "summary": summary,
-            "timeline": self.get_ventilation_timeline(admission_id),
-            "latest_case": (
-                self.get_latest_ventilation_case(admission_id)
-                if not summary.get("active_case")
-                else None
-            ),
+            "timeline": timeline,
+            "active_case": active_case,
+            "active_case_events": [
+                event for event in timeline
+                if active_case is not None
+                and getattr(event, "ivl_episode_id", None) == getattr(active_case, "id", None)
+            ],
+            "latest_case": latest_case,
+            "admission_datetime": getattr(patient, "admission_datetime", None) if patient else None,
         }
         if include_change_cursor:
             snapshot["change_id"] = self.get_latest_change_id(admission_id)

@@ -2,13 +2,14 @@ from datetime import datetime, timedelta
 from collections import OrderedDict
 import time
 from PySide6.QtWidgets import QWidget
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from shiboken6 import isValid
 from .nurse_order_card import NurseOrderCard
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.app.logger import logger
 from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
 from rem_card.services import persistent_snapshot_cache
+from rem_card.ui.shared.async_call import AsyncCallThread
 
 PENDING_MARK_TTL_SEC = 8.0
 SECTOR_1A_BEFORE_MIN = 60
@@ -48,6 +49,10 @@ class CurrentNurseOrdersWidget(QWidget):
         self._all_data = []
         self._snapshot_cache = OrderedDict()
         self._is_shutting_down = False
+        self._refresh_worker = None
+        self._refresh_request = None
+        self._refresh_generation = 0
+        self._persistent_cache_allowed = True
         
         self._time_timer = QTimer(self)
         self._time_timer.setSingleShot(True)
@@ -61,6 +66,7 @@ class CurrentNurseOrdersWidget(QWidget):
             return
         # Если пациент сменился, очищаем кэш виджетов
         if self._cache_key_for(self.admission_id, self.shift_date) != self._cache_key_for(admission_id, shift_date):
+            self._refresh_generation += 1
             self._clear_all_cards()
             self._pending_marks.clear()
             self._all_data = []
@@ -74,6 +80,21 @@ class CurrentNurseOrdersWidget(QWidget):
 
     def _cache_key(self):
         return self._cache_key_for(self.admission_id, self.shift_date)
+
+    def set_service(self, service):
+        if service is self.service:
+            return
+        self.service = service
+        # One manager can temporarily switch from the primary facade to an
+        # archive-readonly facade.  Their admission ids and shift dates can be
+        # identical, while the snapshot contents belong to different DBs.
+        self._persistent_cache_allowed = False
+        self._refresh_generation += 1
+        self._refresh_request = None
+        self._snapshot_cache.clear()
+        self._pending_marks.clear()
+        self._all_data = []
+        self._clear_all_cards()
 
     @classmethod
     def _cache_key_for(cls, admission_id, shift_date):
@@ -92,24 +113,6 @@ class CurrentNurseOrdersWidget(QWidget):
         if normalized.hour < 8:
             shift_start -= timedelta(days=1)
         return shift_start
-
-    def _current_change_id(self) -> int:
-        if not self.service or not self.admission_id:
-            return 0
-        observed_change_id = self._observed_change_id()
-        if observed_change_id is not None:
-            return observed_change_id
-        if hasattr(self.service, "get_latest_change_id"):
-            try:
-                return int(self.service.get_latest_change_id(admission_id=self.admission_id, include_global=False) or 0)
-            except TypeError:
-                try:
-                    return int(self.service.get_latest_change_id(admission_id=self.admission_id) or 0)
-                except Exception as exc:
-                    logger.warning("CurrentNurseOrdersWidget change_id lookup failed: %s", exc)
-            except Exception as exc:
-                logger.warning("CurrentNurseOrdersWidget change_id lookup failed: %s", exc)
-        return 0
 
     def _observed_change_id(self) -> int | None:
         getter = getattr(self.service, "get_observed_change_state", None)
@@ -131,11 +134,13 @@ class CurrentNurseOrdersWidget(QWidget):
         if key is None:
             return False
         snapshot = self._snapshot_cache.get(key)
-        if snapshot is None:
+        if snapshot is None and getattr(self, "_persistent_cache_allowed", True):
             snapshot = persistent_snapshot_cache.load_snapshot("current_orders", key)
             if snapshot is None:
                 return False
             self._snapshot_cache[key] = snapshot
+        if snapshot is None:
+            return False
         if not self._is_cache_snapshot_compatible(snapshot):
             self._snapshot_cache.pop(key, None)
             persistent_snapshot_cache.delete_snapshot("current_orders", key)
@@ -162,8 +167,14 @@ class CurrentNurseOrdersWidget(QWidget):
         snapshot = self._snapshot_cache.get(key)
         if snapshot is None:
             return False
+        # The monitor-owned cursor is an in-memory value.  Falling back to
+        # get_latest_change_id here would turn a cache check on the Qt thread
+        # into a network read.
+        observed_change_id = self._observed_change_id()
+        if observed_change_id is None:
+            return False
         try:
-            return self._current_change_id() <= int(snapshot.get("version") or 0)
+            return observed_change_id <= int(snapshot.get("version") or 0)
         except Exception as exc:
             logger.warning("CurrentNurseOrdersWidget cache version check failed: %s", exc)
             return False
@@ -175,18 +186,19 @@ class CurrentNurseOrdersWidget(QWidget):
         self._snapshot_cache[key] = {
             "cache_format_version": CURRENT_ORDERS_CACHE_FORMAT_VERSION,
             "version": (
-                self._current_change_id()
+                int(self._observed_change_id() or 0)
                 if version is None
                 else max(0, int(version))
             ),
             "data": [dict(item) for item in (data_list or [])],
         }
-        persistent_snapshot_cache.schedule_store_snapshot(
-            "current_orders",
-            key,
-            dict(self._snapshot_cache[key]),
-            expires_at=persistent_snapshot_cache.expiry_from_cache_key(key, shift_key_index=1),
-        )
+        if getattr(self, "_persistent_cache_allowed", True):
+            persistent_snapshot_cache.schedule_store_snapshot(
+                "current_orders",
+                key,
+                dict(self._snapshot_cache[key]),
+                expires_at=persistent_snapshot_cache.expiry_from_cache_key(key, shift_key_index=1),
+            )
         self._snapshot_cache.move_to_end(key)
         while len(self._snapshot_cache) > CURRENT_ORDERS_CACHE_LIMIT:
             self._snapshot_cache.popitem(last=False)
@@ -218,6 +230,7 @@ class CurrentNurseOrdersWidget(QWidget):
         self._last_render_signature_1a = None
         self._pending_marks.clear()
         self._all_data = []
+        self._cancel_refresh_worker()
         self.sector_1a = None
         self.sector_5 = None
 
@@ -226,6 +239,7 @@ class CurrentNurseOrdersWidget(QWidget):
             return
         self._is_shutting_down = True
         self._time_timer.stop()
+        self._cancel_refresh_worker()
         self._clear_all_cards()
         self._pending_marks.clear()
         self._all_data = []
@@ -253,32 +267,127 @@ class CurrentNurseOrdersWidget(QWidget):
         if not force and self._apply_cached_snapshot_if_available() and self._is_cached_snapshot_current():
             return
             
-        # Запрашиваем свежие данные
+        self._refresh_generation += 1
+        self._refresh_request = {
+            "generation": self._refresh_generation,
+            "service": self.service,
+            "admission_id": int(self.admission_id),
+            "shift_date": self._normalize_shift_date(self.shift_date),
+        }
+        self._start_refresh_worker_if_needed()
+
+    @staticmethod
+    def _load_refresh_request(request: dict) -> dict:
+        service = request["service"]
+        admission_id = int(request["admission_id"])
+        shift_date = request["shift_date"]
         try:
-            snapshot_builder = getattr(
-                self.service,
-                "build_current_nurse_orders_snapshot",
-                None,
-            )
+            snapshot_builder = getattr(service, "build_current_nurse_orders_snapshot", None)
             if callable(snapshot_builder):
-                snapshot = snapshot_builder(self.admission_id, self.shift_date)
+                snapshot = snapshot_builder(admission_id, shift_date)
                 all_data = list((snapshot or {}).get("data") or [])
                 snapshot_version = int((snapshot or {}).get("change_id") or 0)
             else:
-                all_data = self.service.get_nurse_orders_data(
-                    self.admission_id,
-                    self.shift_date,
+                all_data = list(service.get_nurse_orders_data(admission_id, shift_date) or [])
+                snapshot_version = CurrentNurseOrdersWidget._read_change_id(
+                    service,
+                    admission_id,
                 )
-                snapshot_version = self._current_change_id()
+            return {
+                "request": request,
+                "data": all_data,
+                "version": snapshot_version,
+                "error": None,
+            }
         except Exception as exc:
+            return {
+                "request": request,
+                "data": [],
+                "version": 0,
+                "error": exc,
+            }
+
+    @staticmethod
+    def _read_change_id(service, admission_id: int) -> int:
+        getter = getattr(service, "get_observed_change_state", None)
+        if not callable(getter):
+            getter = getattr(getattr(service, "data_service", None), "get_observed_change_state", None)
+        if callable(getter):
+            try:
+                state = getter() or {}
+                if state:
+                    return int(state.get("change_id") or 0)
+            except Exception:
+                pass
+        getter = getattr(service, "get_latest_change_id", None)
+        if not callable(getter):
+            return 0
+        try:
+            return int(getter(admission_id=admission_id, include_global=False) or 0)
+        except TypeError:
+            return int(getter(admission_id=admission_id) or 0)
+
+    def _start_refresh_worker_if_needed(self):
+        if self._is_shutting_down or self._refresh_worker is not None:
+            return
+        request = self._refresh_request
+        self._refresh_request = None
+        if request is None:
+            return
+        worker = AsyncCallThread(self._load_refresh_request, request, parent=self)
+        self._refresh_worker = worker
+        worker.succeeded.connect(self._on_refresh_result, Qt.QueuedConnection)
+        worker.finished.connect(self._on_refresh_finished, Qt.QueuedConnection)
+        try:
+            worker.start()
+        except Exception:
+            self._refresh_worker = None
+            raise
+
+    def _refresh_request_is_current(self, request: dict) -> bool:
+        if self._is_shutting_down or request.get("service") is not self.service:
+            return False
+        if int(request.get("generation") or 0) != self._refresh_generation:
+            return False
+        if not self.admission_id or int(request.get("admission_id") or 0) != int(self.admission_id):
+            return False
+        return self._cache_key_for(request.get("admission_id"), request.get("shift_date")) == self._cache_key()
+
+    def _on_refresh_result(self, result: dict):
+        request = (result or {}).get("request") or {}
+        if not self._refresh_request_is_current(request):
+            return
+        exc = result.get("error")
+        if exc is not None:
             if self._is_retryable_lock_error(exc):
                 self._log_lock_warning_throttled(exc)
             else:
-                logger.error("CurrentNurseOrdersWidget refresh failed: %s", exc, exc_info=True)
+                logger.error(
+                    "CurrentNurseOrdersWidget refresh failed: %s",
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
             return
-        self._store_snapshot_cache(all_data, version=snapshot_version)
+        all_data = list(result.get("data") or [])
+        self._store_snapshot_cache(all_data, version=int(result.get("version") or 0))
         self._all_data = self._apply_pending_marks(all_data)
         self._render_from_cache()
+
+    def _on_refresh_finished(self):
+        self._refresh_worker = None
+        if not self._is_shutting_down:
+            self._start_refresh_worker_if_needed()
+
+    def _cancel_refresh_worker(self):
+        self._refresh_generation += 1
+        self._refresh_request = None
+        worker = self._refresh_worker
+        self._refresh_worker = None
+        if worker is not None:
+            try:
+                worker.requestInterruption()
+            except RuntimeError:
+                pass
 
     def handle_data_changes(self, payload: dict):
         if self._is_shutting_down or not self.admission_id:

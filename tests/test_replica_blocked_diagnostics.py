@@ -1,3 +1,4 @@
+import sqlite3
 from unittest.mock import Mock
 
 from rem_card.app import local_replica_sync as module
@@ -5,7 +6,21 @@ from rem_card.app.local_replica_sync import LocalReplicaSync
 from rem_card.app.local_replica_worker import LocalReplicaSnapshotBusy, LocalReplicaWriterBusy
 
 
-def test_prolonged_unreadable_gate_is_reported_without_degrading_database(tmp_path, monkeypatch):
+def _install_valid_local_copy(sync, request):
+    # An "unchanged" reply confirms an existing replica; it cannot create one.
+    connection = sqlite3.connect(sync.local_db_path)
+    try:
+        connection.executescript(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);"
+            "CREATE TABLE change_log (id INTEGER PRIMARY KEY);"
+        )
+    finally:
+        connection.close()
+    sync._ensure_local_conn()
+    request.addfinalizer(sync.stop)
+
+
+def test_prolonged_unreadable_gate_is_reported_without_degrading_database(tmp_path, monkeypatch, request):
     clock = [10.0]
     monkeypatch.setattr(module.time, "monotonic", lambda: clock[0])
     metrics = []
@@ -42,11 +57,12 @@ def test_prolonged_unreadable_gate_is_reported_without_degrading_database(tmp_pa
     assert sync._snapshot_blocked_since == 370
     worker.sync.side_effect = None
     worker.sync.return_value = {"status": "unchanged"}
+    _install_valid_local_copy(sync, request)
     assert sync.sync_once()
     assert sync._snapshot_blocked_since is None
 
 
-def test_snapshot_wait_records_owner_change_and_success(tmp_path, monkeypatch):
+def test_snapshot_wait_records_owner_change_and_success(tmp_path, monkeypatch, request):
     metrics = []
     monkeypatch.setattr(module, "record_metric", lambda name, *a, **kw: metrics.append((name, kw)))
     worker = Mock()
@@ -61,6 +77,7 @@ def test_snapshot_wait_records_owner_change_and_success(tmp_path, monkeypatch):
     assert not sync.sync_once()
     worker.sync.side_effect = None
     worker.sync.return_value = {"status": "unchanged"}
+    _install_valid_local_copy(sync, request)
     assert sync.sync_once()
     ended = [data for name, data in metrics if name == "local_replica_snapshot_wait_finished"]
     assert [(e["holder_host"], e["attempts"], e["outcome"]) for e in ended] == [
