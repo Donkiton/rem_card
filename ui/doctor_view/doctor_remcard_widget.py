@@ -124,6 +124,9 @@ class DoctorRemCardWidget(QWidget):
         self._journal_prewarm_started = False
         self._journal_prewarm_done = False
         self._selection_mode = "beds"
+        from rem_card.ui.shared.doctor_navigation_diagnostics import DoctorNavigationDiagnostics
+
+        self._navigation_diagnostics = DoctorNavigationDiagnostics(self)
         self._settings_return_mode = None
         self._card_return_mode = None
         self._card_opened_from_global_archive = False
@@ -2784,6 +2787,9 @@ class DoctorRemCardWidget(QWidget):
         ):
             logger.debug("Doctor ignored stale beds selection signal during card mode")
             return
+        diagnostics = getattr(self, "_navigation_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.transition(self._selection_mode, str(mode or ""))
         self._selection_mode = str(mode or "")
         if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
             self._release_add_patient_lock()
@@ -3683,6 +3689,9 @@ class DoctorRemCardWidget(QWidget):
                 self.window().close()
 
     def on_back_clicked(self):
+        diagnostics = getattr(self, "_navigation_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.action("back_requested")
         viewer = getattr(self, "_operblock_archive_viewer", None)
         if (
             hasattr(self, "content_stack")
@@ -4504,6 +4513,9 @@ class DoctorRemCardWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        diagnostics = getattr(self, "_navigation_diagnostics", None)
+        if diagnostics is not None:
+            diagnostics.close()
         self._balance_snapshot_sync.shutdown()
         self._shutdown_snapshot_worker()
         if hasattr(self, "chart") and self.chart and hasattr(self.chart, "shutdown"):

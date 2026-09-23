@@ -74,12 +74,37 @@ def test_anomalies_are_raw_and_counted(fields):
     "orders_optimistic_conflict", "local_replica_sync_recovered", "runtime_outage_started",
     "runtime_outage_recovered", "event_loop_pause_ms", "ui_hard_hang_stack_dump",
     "backup_result", "new_unclassified_metric", "maintenance_task_started",
-    "maintenance_task_finished", "local_replica_sync_deferred",
+    "maintenance_task_finished",
 ])
 def test_unlisted_and_critical_events_are_untouched(name):
     agg = policy.MetricAggregator()
     assert not agg.observe(event(name, 1))
     assert agg.drain(force=True) == []
+
+
+def test_replica_contention_keeps_first_owner_changes_and_recovery():
+    clock = Clock()
+    agg = policy.MetricAggregator(clock=clock)
+    busy = event("local_replica_sync_deferred", 1, reason="snapshot_busy")
+    assert not agg.observe(busy)
+    for _ in range(1000):
+        assert agg.observe(busy)
+    success = event("local_replica_sync_duration_ms", 10, result="unchanged", change_cursor=1)
+    assert not agg.observe(success)
+    assert not agg.observe(busy)  # New wait after recovery remains raw.
+    skipped = event("sqlite_write_lock_stale_cleanup_skipped", 1,
+                    source="local_replica_snapshot_gate", reason="other_host",
+                    holder_host="pc-one", holder_pid=42)
+    assert not agg.observe(skipped)
+    assert agg.observe({**skipped, "holder_age_ms": 999999})
+    assert not agg.observe({**skipped, "holder_host": "pc-two"})
+    clock.now = 60
+    summaries = agg.drain()
+    assert sum(s["aggregated_count"] for s in summaries) == 1001
+    assert not agg.observe(skipped)  # Periodic raw evidence refreshes owner age.
+    assert not agg.observe(event("sqlite_write_lock_stale_cleanup_skipped", 1,
+                                 source="nurse_order_mark:1", reason="other_host"))
+    assert not agg.observe(event("local_replica_sync_deferred", 1, reason="unknown-new-reason"))
 
 
 def test_only_successful_replica_locks_are_aggregated():

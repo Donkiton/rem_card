@@ -125,6 +125,7 @@
     "tests/test_diet_sidebar.py",
     "tests/test_diet_template_dialog.py",
     "tests/test_display_settings_sector8_sides.py",
+    "tests/test_doctor_navigation_diagnostics.py",
     "tests/test_drug_dialog_geometry.py",
     "tests/test_drug_template_dilution_replace_dialog.py",
     "tests/test_duration_combo.py",

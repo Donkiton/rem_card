@@ -162,12 +162,13 @@ def log_exception(exc_type, exc_value, exc_traceback):
     try:
         from rem_card.services.crash_reports import capture_exception
 
-        capture_exception(
-            "unhandled_python_exception",
-            exc_type,
-            exc_value,
-            exc_traceback,
-        )
+        if not getattr(exc_value, "_remcard_crash_reported", False):
+            capture_exception(
+                "unhandled_python_exception",
+                exc_type,
+                exc_value,
+                exc_traceback,
+            )
     except Exception:
         pass
 

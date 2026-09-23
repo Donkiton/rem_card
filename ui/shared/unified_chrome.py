@@ -164,6 +164,7 @@ class EntryChrome(QWidget):
         owner.setWindowFlag(Qt.FramelessWindowHint, True)
         owner.setAttribute(Qt.WA_TranslucentBackground, True)
         QApplication.instance().installEventFilter(self)
+        owner.destroyed.connect(self._remove_application_event_filter)
         self.setMouseTracking(True)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(3, 3, 3, 3)
@@ -176,6 +177,11 @@ class EntryChrome(QWidget):
         self.title_bar = EntryTitleBar(owner, title, controls=not dialog)
         inner.addWidget(self.title_bar)
         inner.addWidget(body, 1)
+
+    def _remove_application_event_filter(self, *_args):
+        application = QApplication.instance()
+        if application is not None:
+            application.removeEventFilter(self)
 
     def set_role_mode(self, enabled):
         self.role_mode = bool(enabled)
@@ -231,7 +237,10 @@ class EntryChrome(QWidget):
                 self._update_masks()
         if event.type() in (QEvent.Enter, QEvent.MouseMove, QEvent.HoverMove) and isinstance(obj, QWidget) and self.isAncestorOf(obj):
             self.unsetCursor()
-        return super().eventFilter(obj, event)
+        # QApplication filters can receive Qt-internal QWidgetItem objects.
+        # The filter does not consume events, and QObject.eventFilter cannot
+        # accept those layout items as its watched QObject argument.
+        return False
 
     def paintEvent(self, event):
         p = QPainter(self)

@@ -525,7 +525,8 @@ class DataService(QObject):
                 DataService._set_write_outcome(self, accepted_write_id, "committed")
                 self._mark_operblock_write_remote_committed(operation_uuid, description)
                 self.write_finished.emit(description)
-                self.request_immediate_refresh(force_emit=True, source=description)
+                if DataService._should_refresh_after_write(description, result):
+                    self.request_immediate_refresh(force_emit=True, source=description)
                 self._mirror_operblock_write_after_commit(
                     description,
                     operation_uuid=operation_uuid,
@@ -1309,7 +1310,8 @@ class DataService(QObject):
                         )
                         return
                     self.write_finished.emit(description)
-                    self.request_immediate_refresh(force_emit=True, source=description)
+                    if DataService._should_refresh_after_write(description, result):
+                        self.request_immediate_refresh(force_emit=True, source=description)
                     self._success_callback_requested.emit(on_success, result)
                     self._mirror_operblock_write_after_commit(
                         description,
@@ -1345,6 +1347,11 @@ class DataService(QObject):
                 return True
         finally:
             DataService._finish_write_submission(self)
+
+    @staticmethod
+    def _should_refresh_after_write(description: str, result: Any) -> bool:
+        """Skip the forced refresh when auto-release found no beds to release."""
+        return not (description == "auto_release_outcome_beds" and result == 0)
 
     @Slot(object, object)
     def _dispatch_success_callback(self, callback: Optional[Callable[[Any], None]], result: Any):
