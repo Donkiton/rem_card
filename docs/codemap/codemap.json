@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-08-06T09:18:11Z",
-  "generated_from_commit": "edf53f65f90d7d66a195e922b7a8de70348ae2d5",
+  "generated_at": "2026-09-23T09:52:30Z",
+  "generated_from_commit": "c4f7f3e520048e70bce21422d5e67fe2638922e3",
   "scope": [
     "launcher.py",
     "run_*.py",
@@ -15,84 +15,69 @@
   "nodes": [
     {
       "id": "entrypoints",
-      "label": "Точки запуска ролей",
+      "label": "Единая точка входа",
       "type": "entry",
       "boundary": "client",
-      "path": "launcher.py",
-      "role": "Подготавливает локальный пакет и запускает процесс по умолчанию, врача, медсестры, операционного блока, настройки пути или обновлятора.",
+      "path": "run_remcard.py",
+      "role": "RemCard.exe запускает unified_main и общий выбор четырёх ролей. Отдельный RemCardUpdater.exe обслуживает обновления. Старые Python-точки входа сохранены для совместимости.",
       "entrypoints": [
-        "launcher.py#run_rem_card",
-        "run_doctor.py#__main__",
-        "run_nurse.py#__main__",
-        "run_operblock.py#__main__",
+        "run_remcard.py#__main__",
+        "app/unified_main.py#main",
         "run_updater.py#__main__"
       ],
       "tests": [
-        "tests/test_checkout_name_independence.py",
-        "tests/test_compiled_first_run_path.py"
+        "tests/test_unified_main.py",
+        "tests/test_unified_update_package.py"
       ],
       "constraints": [
-        "Точки запуска вызывают bootstrap_local_rem_card до импорта модулей rem_card."
+        "PyInstaller собирает два EXE; ролевые Python-скрипты не являются отдельными пользовательскими EXE.",
+        "freeze_support выполняется до GUI bootstrap для дочерних процессов Windows."
       ],
       "evidence": [
         {
-          "path": "launcher.py",
-          "symbol": "run_rem_card"
+          "path": "run_remcard.py",
+          "symbol": "from rem_card.app.unified_main import main"
         },
         {
-          "path": "run_doctor.py",
-          "symbol": "main(forced_role=\"doctor\")"
+          "path": "RemCard.spec",
+          "symbol": "name='RemCard'"
         },
         {
-          "path": "run_nurse.py",
-          "symbol": "main(forced_role=\"nurse\")"
-        },
-        {
-          "path": "run_operblock.py",
-          "symbol": "main(forced_role=\"operblock\")"
-        },
-        {
-          "path": "run_updater.py",
-          "symbol": "sys.exit(main())"
+          "path": "RemCard.spec",
+          "symbol": "name='RemCardUpdater'"
         }
       ]
     },
     {
       "id": "startup_runtime",
-      "label": "Запуск и среда выполнения",
+      "label": "Единый запуск Qt",
       "type": "orchestration",
       "boundary": "application",
-      "path": "app/main.py",
-      "role": "Разбирает аргументы роли и пути, применяет ограничения единственного экземпляра и проверки БД, выбирает сетевую, автономную или аварийную среду, запускает обновления и владеет циклом событий Qt.",
+      "path": "app/unified_main.py",
+      "role": "Создаёт QApplication, получает блокировку единственного экземпляра приложения и показывает UnifiedWindow. Клиническое рабочее место загружается после выбора роли.",
       "entrypoints": [
-        "app/main.py#main",
-        "app/main.py#_main_impl"
+        "app/unified_main.py#main"
       ],
       "tests": [
-        "tests/test_startup_path_validation.py",
-        "tests/test_single_instance_offline_startup.py",
-        "tests/test_dev_role_lock_bypass.py"
+        "tests/test_unified_main.py",
+        "tests/test_unified_first_run_flow.py"
       ],
       "constraints": [
-        "Проверка сети и блокировка роли выполняются до создания контейнера.",
-        "Необработанные ошибки запуска фиксируются до завершения процесса."
+        "Single-instance действует на приложение, а не на каждую роль.",
+        "Дочерний процесс проверки БД обрабатывается через multiprocessing.freeze_support."
       ],
       "evidence": [
         {
-          "path": "app/main.py",
+          "path": "app/unified_main.py",
           "symbol": "main"
         },
         {
-          "path": "app/main.py",
-          "symbol": "_main_impl"
+          "path": "app/unified_main.py",
+          "symbol": "UnifiedWindow"
         },
         {
-          "path": "app/main.py",
-          "symbol": "_prepare_runtime_context_for_startup"
-        },
-        {
-          "path": "app/main.py",
-          "symbol": "_run_startup_application"
+          "path": "app/unified_main.py",
+          "symbol": "_prepare_single_instance_server"
         }
       ]
     },
@@ -132,11 +117,11 @@
     },
     {
       "id": "ui_shell",
-      "label": "Главное окно и маршрутизация ролей",
+      "label": "Встроенное рабочее место",
       "type": "ui",
       "boundary": "client",
       "path": "ui/main_window.py",
-      "role": "Управляет верхнеуровневым окном Qt, активирует контейнеры и экраны ролей, обрабатывает переходы при потере сети и координирует завершение работы.",
+      "role": "MainWindow встраивается в UnifiedWindow через EmbeddedRoleWindow; маршрутизирует экраны врача, медсестры и оперблока. Жизненным циклом единой сессии владеет внешняя оболочка.",
       "entrypoints": [
         "ui/main_window.py#MainWindow",
         "ui/main_window.py#MainWindow.init_with_role"
@@ -147,8 +132,8 @@
         "tests/test_ui_hang_watchdog.py"
       ],
       "constraints": [
-        "При запуске подготавливается только один начальный интерфейс роли.",
-        "Блокировки сессии роли освобождаются при смене роли и завершении работы."
+        "При входе создаётся выбранное рабочее место.",
+        "В единой оболочке допуск SessionLease заменяет legacy RoleSessionLock."
       ],
       "evidence": [
         {
@@ -156,16 +141,8 @@
           "symbol": "MainWindow"
         },
         {
-          "path": "ui/main_window.py",
-          "symbol": "_activate_initial_doctor_role"
-        },
-        {
-          "path": "ui/main_window.py",
-          "symbol": "_activate_initial_nurse_role"
-        },
-        {
-          "path": "ui/main_window.py",
-          "symbol": "_activate_initial_operblock_role"
+          "path": "ui/unified_window.py",
+          "symbol": "EmbeddedRoleWindow"
         }
       ]
     },
@@ -601,18 +578,20 @@
       "type": "resilience",
       "boundary": "persistence",
       "path": "app/local_replica_sync.py",
-      "role": "Поддерживает неблокирующую локальную реплику сетевой медицинской SQLite только для чтения и предоставляет локальное чтение с учётом курсора.",
+      "role": "Поддерживает локальную SQLite-реплику только для чтения через отдельный worker и Backup API. Контролирует готовность и свежесть, учитывает блокировку снимка и повторяет синхронизацию после временных ошибок.",
       "entrypoints": [
         "app/local_replica_sync.py#LocalReplicaSync",
         "app/local_replica_worker.py#main"
       ],
       "tests": [
         "tests/test_local_replica_sync.py",
-        "tests/test_network_maintenance.py"
+        "tests/test_network_maintenance.py",
+        "tests/test_local_replica_health.py",
+        "tests/test_replica_blocked_diagnostics.py"
       ],
       "constraints": [
-        "Включается только в сетевой среде, если REMCARD_LOCAL_FIRST_SYNC не отключает функцию.",
-        "Замена реплики сохраняет проверенное локальное соединение."
+        "Реплика не принимает клинические записи и не заменяет центральный COMMIT.",
+        "Читатель проверяет свежесть снимка; при недостаточной версии использует центральную БД."
       ],
       "evidence": [
         {
@@ -646,8 +625,8 @@
         "tests/test_operblock_offline_shadow_startup.py"
       ],
       "constraints": [
-        "Аварийный режим включается только после классифицированной сетевой ошибки и проверок роли и пароля.",
-        "Метаданные сессии и снимки SQLite проверяются перед использованием или объединением."
+        "Вход требует пригодной локальной копии и проверки её возраста; пустая медицинская база вместо копии не создаётся.",
+        "Возврат к сети и перенос локальных изменений выполняются отдельным сценарием."
       ],
       "evidence": [
         {
@@ -674,11 +653,12 @@
       "entrypoints": [
         "run_updater.py#__main__",
         "app/updater_main.py#main",
-        "app/update_launcher.py#launch_update"
+        "app/update_launcher.py#launch_unified_update"
       ],
       "tests": [
         "tests/test_updater_install_safety.py",
-        "tests/test_build_release_test_worktree.py"
+        "tests/test_build_release_test_worktree.py",
+        "tests/test_unified_update_package.py"
       ],
       "constraints": [
         "Обновлятор проверяет целевые пути и манифесты до замены файлов.",
@@ -695,7 +675,7 @@
         },
         {
           "path": "app/update_launcher.py",
-          "symbol": "launch_update"
+          "symbol": "launch_unified_update"
         }
       ]
     },
@@ -719,11 +699,11 @@
       "evidence": [
         {
           "path": "requirements.txt",
-          "symbol": "PySide6==6.11.1"
+          "symbol": "PySide6==6.11.2"
         },
         {
           "path": "requirements.txt",
-          "symbol": "reportlab==5.0.0"
+          "symbol": "reportlab==5.0.1"
         },
         {
           "path": "requirements.txt",
@@ -734,87 +714,106 @@
           "symbol": "pywin32==312"
         }
       ]
+    },
+    {
+      "id": "unified_shell",
+      "label": "Оболочка и выбор роли",
+      "type": "ui",
+      "boundary": "client",
+      "path": "ui/unified_window.py",
+      "role": "Показывает выбор четырёх ролей, настраивает путь к данным, запускает вход в фоне и переключает встроенные рабочие места. При выходе дожидается завершения записей и освобождения ресурсов.",
+      "entrypoints": [
+        "ui/unified_window.py#UnifiedWindow"
+      ],
+      "tests": [
+        "tests/test_unified_window_lifecycle.py",
+        "tests/test_unified_entry_pages.py",
+        "tests/test_unified_shutdown_resources.py"
+      ],
+      "constraints": [
+        "Несохранённый ввод требует подтверждения при выходе из роли.",
+        "SessionShutdown завершает принятые записи до освобождения SessionLease."
+      ],
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "UnifiedWindow"
+        }
+      ]
+    },
+    {
+      "id": "session_access",
+      "label": "Допуск сессий и обслуживание",
+      "type": "orchestration",
+      "boundary": "application",
+      "path": "app/unified_access.py",
+      "role": "SessionLease согласует допуск сессии с общим режимом обслуживания; MaintenanceStore хранит состояние обслуживания.",
+      "entrypoints": [
+        "app/unified_access.py#SessionLease"
+      ],
+      "tests": [
+        "tests/test_unified_access.py"
+      ],
+      "constraints": [
+        "Проверка допуска выполняется до создания записывающего контейнера."
+      ],
+      "evidence": [
+        {
+          "path": "app/unified_access.py",
+          "symbol": "SessionLease"
+        }
+      ]
+    },
+    {
+      "id": "unified_preflight",
+      "label": "Подготовка среды роли",
+      "type": "orchestration",
+      "boundary": "application",
+      "path": "app/unified_preflight.py",
+      "role": "Проверяет соответствие допуска роли и папки данных, подготавливает сетевую либо изолированную локальную среду и создаёт контейнер.",
+      "entrypoints": [
+        "app/unified_preflight.py#prepare_admitted_runtime_context"
+      ],
+      "tests": [
+        "tests/test_unified_preflight.py",
+        "tests/test_unified_runtime.py"
+      ],
+      "constraints": [
+        "Сетевой bootstrap требует действующего центрального SessionLease.",
+        "Локальный аварийный режим использует собственный допуск и не запускает центральные планировщики."
+      ],
+      "evidence": [
+        {
+          "path": "app/unified_preflight.py",
+          "symbol": "prepare_admitted_runtime_context"
+        }
+      ]
+    },
+    {
+      "id": "startup_probe",
+      "label": "Отменяемая проверка БД",
+      "type": "resilience",
+      "boundary": "persistence",
+      "path": "app/startup_check_worker.py",
+      "role": "Проверяет quick_check в дочернем процессе только для чтения. Учитывает отмену, тайм-аут и завершение worker до продолжения входа.",
+      "entrypoints": [
+        "app/startup_check_worker.py#run_startup_probe"
+      ],
+      "tests": [
+        "tests/test_startup_check_worker.py"
+      ],
+      "constraints": [
+        "Дочерний процесс не выполняет миграции, восстановление или запись политики."
+      ],
+      "evidence": [
+        {
+          "path": "app/startup_check_worker.py",
+          "symbol": "run_startup_probe"
+        }
+      ]
     }
   ],
   "edges": [
-    {
-      "from": "entrypoints",
-      "to": "startup_runtime",
-      "type": "imports",
-      "label": "импортирует main",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "launcher.py",
-          "symbol": "from rem_card.app.main import main"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "container",
-      "type": "calls",
-      "label": "создаёт зависимости",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_bootstrap_startup_container"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "ui_shell",
-      "type": "calls",
-      "label": "создаёт MainWindow",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_run_startup_application"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "emergency_runtime",
-      "type": "calls",
-      "label": "выбирает резервную среду",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_try_emergency_startup_after_network_failure"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "updater",
-      "type": "calls",
-      "label": "запускает проверку обновлений",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_launch_startup_update_after_single_instance"
-        }
-      ]
-    },
-    {
-      "from": "startup_runtime",
-      "to": "external_deps",
-      "type": "imports",
-      "label": "использует среду Qt",
-      "status": "evidenced",
-      "evidence": [
-        {
-          "path": "app/main.py",
-          "symbol": "_create_startup_qt_context"
-        }
-      ]
-    },
     {
       "from": "container",
       "to": "medical_db",
@@ -1251,12 +1250,12 @@
       "from": "emergency_runtime",
       "to": "medical_db",
       "type": "writes",
-      "label": "создаёт локальный снимок среды",
+      "label": "создаёт локальную среду из проверенной копии",
       "status": "evidenced",
       "evidence": [
         {
           "path": "app/emergency_store.py",
-          "symbol": "_create_empty_medical_snapshot"
+          "symbol": "create_active_session_from_standby"
         }
       ]
     },
@@ -1272,20 +1271,203 @@
           "symbol": "PySide6.QtWidgets"
         }
       ]
+    },
+    {
+      "from": "entrypoints",
+      "to": "startup_runtime",
+      "type": "imports",
+      "label": "запускает единое приложение",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "run_remcard.py",
+          "symbol": "from rem_card.app.unified_main import main"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "unified_shell",
+      "type": "calls",
+      "label": "создаёт оболочку",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_main.py",
+          "symbol": "UnifiedWindow"
+        }
+      ]
+    },
+    {
+      "from": "startup_runtime",
+      "to": "external_deps",
+      "type": "imports",
+      "label": "запускает Qt",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_main.py",
+          "symbol": "QApplication"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "session_access",
+      "type": "calls",
+      "label": "получает допуск роли",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "SessionLease"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "unified_preflight",
+      "type": "calls",
+      "label": "подготавливает среду",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "prepare_admitted_runtime_context"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "startup_probe",
+      "type": "calls",
+      "label": "подключает проверку с отменой",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "startup_check_runner"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "ui_shell",
+      "type": "calls",
+      "label": "создаёт встроенное рабочее место",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "EmbeddedRoleWindow"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "updater",
+      "type": "calls",
+      "label": "запускает полное обновление",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "launch_unified_update"
+        }
+      ]
+    },
+    {
+      "from": "unified_preflight",
+      "to": "container",
+      "type": "calls",
+      "label": "создаёт контейнер после допуска",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_preflight.py",
+          "symbol": "bootstrap_admitted_container"
+        }
+      ]
+    },
+    {
+      "from": "unified_preflight",
+      "to": "emergency_runtime",
+      "type": "calls",
+      "label": "подготавливает локальную среду",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_preflight.py",
+          "symbol": "prepare_local_only_runtime_context"
+        }
+      ]
+    },
+    {
+      "from": "unified_preflight",
+      "to": "session_access",
+      "type": "calls",
+      "label": "удерживает локальный допуск",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_preflight.py",
+          "symbol": "SessionLease"
+        }
+      ]
+    },
+    {
+      "from": "session_access",
+      "to": "settings_store",
+      "type": "reads",
+      "label": "согласует чтение общих настроек",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/unified_runtime.py",
+          "symbol": "read_institution"
+        }
+      ]
+    },
+    {
+      "from": "startup_probe",
+      "to": "medical_db",
+      "type": "reads",
+      "label": "проверяет БД только для чтения",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "app/startup_check_worker.py",
+          "symbol": "_check_quick_direct"
+        }
+      ]
+    },
+    {
+      "from": "unified_shell",
+      "to": "container",
+      "type": "calls",
+      "label": "завершает принятые записи и ресурсы",
+      "status": "evidenced",
+      "evidence": [
+        {
+          "path": "ui/unified_window.py",
+          "symbol": "SessionShutdown"
+        }
+      ]
     }
   ],
   "flows": [
     {
       "id": "role_startup",
       "name": "Запуск роли до отображения рабочего места",
-      "trigger": "Пользователь запускает приложение по умолчанию или точку запуска конкретной роли.",
+      "trigger": "Пользователь запускает RemCard.exe и выбирает одну из четырёх ролей.",
       "steps": [
         "entrypoints",
         "startup_runtime",
-        "ui_shell",
-        "doctor_ui"
+        "unified_shell",
+        "unified_preflight",
+        "container"
       ],
-      "outcome": "Защищённый процесс Qt получает владение экземпляром роли и показывает выбранное рабочее место; путь врача представлен как основной, а ветви медсестры и операционного блока выходят из той же оболочки."
+      "outcome": "После допуска SessionLease и фоновых проверок оболочка показывает встроенное рабочее место. Отмена входа завершает проверку и освобождает ресурсы."
     },
     {
       "id": "clinical_write",
@@ -1328,13 +1510,26 @@
     {
       "id": "emergency_fallback",
       "name": "Переход от потери сети к аварийной среде",
-      "trigger": "При запуске медицинская сетевая БД классифицируется как недоступная для подходящей роли.",
+      "trigger": "Центральная база недоступна; пользователь выбирает доступный локальный режим.",
       "steps": [
-        "startup_runtime",
+        "unified_shell",
+        "unified_preflight",
         "emergency_runtime",
         "medical_db"
       ],
-      "outcome": "Для сессии открывается проверенная локальная среда медицинской БД и настроек, сохранённая для последующего восстановления или объединения."
+      "outcome": "После проверки пригодности и возраста копии открывается изолированная локальная среда. Возврат к сети и перенос изменений выполняются отдельно."
+    },
+    {
+      "id": "role_switch",
+      "name": "Выход из роли и смена рабочего места",
+      "trigger": "Пользователь нажимает «Роли» и подтверждает переход.",
+      "steps": [
+        "unified_shell",
+        "container"
+      ],
+      "outcome": "SessionShutdown дожидается завершения принятых записей и фоновых ресурсов, затем оболочка освобождает SessionLease и возвращает выбор ролей."
     }
-  ]
+  ],
+  "product_version": "5.1.0",
+  "scope_note": "Обзор основных компонентов единого приложения по исходникам указанного коммита; скриншоты README сделаны в сборке 5.1.0."
 }
