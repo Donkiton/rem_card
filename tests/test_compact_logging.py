@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import threading
 from datetime import datetime, timezone
@@ -70,7 +71,14 @@ def test_first_error_has_breadcrumbs_full_error_and_repeats_have_summary():
     assert len(output) == 2
     assert output[0].getMessage().startswith("TECHNICAL_BREADCRUMBS ")
     assert output[1] is first
-    assert "777" not in output[0].getMessage()
+    breadcrumbs = json.loads(output[0].getMessage().split(" ", 1)[1])
+    assert set(breadcrumbs) == {"schema_version", "incident", "events"}
+    assert breadcrumbs["schema_version"] == 1
+    assert breadcrumbs["events"]
+    for event in breadcrumbs["events"]:
+        assert set(event) == {
+            "age_ms", "level", "logger", "module", "function", "line", "event_key", "count",
+        }
     assert "disk unavailable" not in output[0].getMessage()
     for _ in range(8):
         assert policy.process(record("Save failed: %s", "disk unavailable", level=logging.ERROR)) == []
@@ -81,6 +89,23 @@ def test_first_error_has_breadcrumbs_full_error_and_repeats_have_summary():
     assert '"suppressed_count":9' in payload
     final = policy.close()
     assert len(final) == 1 and '"status":"shutdown"' in final[0].getMessage()
+
+
+def test_breadcrumbs_ignore_patient_values_when_hash_contains_same_digits(monkeypatch):
+    # This salt deliberately produces an event_key containing "777". Such a
+    # substring is valid in a hash and must not be mistaken for a leaked ID.
+    salt = (149).to_bytes(16, "big")
+    monkeypatch.setattr(compact_logging.secrets, "token_bytes", lambda size: salt)
+    outputs = []
+    marker = "PATIENT_PRIVACY_SENTINEL"
+    for admission_id in (777, 888, marker):
+        policy = compact_logging.CompactLogPolicy(clock=Clock())
+        policy.process(record("[OrdersClick] click_accept admission_id=%s", admission_id))
+        result = policy.process(record("Save failed: %s", "disk unavailable", level=logging.ERROR))
+        outputs.append(json.loads(result[0].getMessage().split(" ", 1)[1]))
+    assert "777" in outputs[0]["events"][0]["event_key"]
+    assert outputs[0] == outputs[1] == outputs[2]
+    assert marker not in json.dumps(outputs)
 
 
 def test_quiet_incident_closes_on_next_record():
