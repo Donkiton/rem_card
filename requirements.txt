@@ -5,9 +5,9 @@ numpy==2.4.6
 
 # Reports, PDF and analytics
 reportlab==5.0.1
-pypdf==6.18.1
+pypdf==6.19.0
 matplotlib==3.11.2
-pandas==3.0.5
+pandas==3.0.6
 pillow==12.3.0
 
 # Windows integration used by shortcuts/window helpers
