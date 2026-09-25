@@ -280,6 +280,10 @@ def inspect_schema_status(conn: sqlite3.Connection) -> SettingsSchemaStatus:
 
 
 def apply_schema(conn: sqlite3.Connection) -> None:
+    from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
+    if database_upgrades_disabled() and _table_names(conn):
+        require_compatible_schema(inspect_schema_status(conn).fastpath_ready)
+        return
     schema_sql = """
         CREATE TABLE IF NOT EXISTS settings_meta (
             key TEXT PRIMARY KEY,

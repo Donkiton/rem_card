@@ -178,6 +178,10 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
 
 def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     conn = cursor.connection
+    from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
+    if database_upgrades_disabled():
+        require_compatible_schema(is_operblock_schema_ready(conn))
+        return
 
     _ensure_column(conn, "admissions", "unit_scope", "TEXT", logger)
     _ensure_column(conn, "admissions", "admission_type", "TEXT", logger)
@@ -727,6 +731,9 @@ def ensure_operblock_schema(db_manager: Any) -> OperBlockSchemaResult:
     with controller.connection_guard(conn):
         if is_operblock_schema_ready(conn):
             return OperBlockSchemaResult(migrated=False)
+        from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
+        if database_upgrades_disabled():
+            require_compatible_schema(False)
 
     backup_path = ""
     create_backup = getattr(db_manager, "create_validated_backup", None)
