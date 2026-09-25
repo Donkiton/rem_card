@@ -16,6 +16,7 @@ from rem_card.app.unified_db_schema import (
     is_unified_schema_ready,
 )
 from rem_card.app.version import APP_VERSION
+from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
 
 
 SCHEMA_MIGRATION_LOCK_TIMEOUT_SEC = 60.0
@@ -189,6 +190,13 @@ def ensure_unified_schema_with_migration_backup(
     source: str = "schema_migration",
 ) -> SchemaMigrationResult:
     logger = logger or logging.getLogger(__name__)
+    if database_upgrades_disabled():
+        if controller is not None:
+            with controller.connection_guard(conn):
+                require_compatible_schema(is_unified_schema_ready(conn))
+        else:
+            require_compatible_schema(is_unified_schema_ready(conn))
+        return SchemaMigrationResult(migrated=False)
     _ = db_path
     effective_min_client_version = str(min_client_version or APP_VERSION or SCHEMA_REQUIRED_CLIENT_VERSION)
 

@@ -299,12 +299,17 @@ def _default_client_policy() -> dict[str, Any]:
 
 
 def _load_or_create_client_policy(baza_dir: str, role: Optional[str]) -> dict[str, Any]:
+    from rem_card.app.client_build_profile import database_upgrades_disabled
+    no_upgrades = database_upgrades_disabled()
     config_dir = os.path.join(baza_dir, "config")
-    os.makedirs(config_dir, exist_ok=True)
+    if not no_upgrades:
+        os.makedirs(config_dir, exist_ok=True)
     policy_path = os.path.join(config_dir, "client_policy.json")
 
     if not os.path.exists(policy_path):
         policy = _default_client_policy()
+        if no_upgrades:
+            return policy
         with open(policy_path, "w", encoding="utf-8") as fh:
             json.dump(policy, fh, ensure_ascii=False, indent=2)
         write_audit_event(
@@ -334,7 +339,7 @@ def _load_or_create_client_policy(baza_dir: str, role: Optional[str]) -> dict[st
     if not policy.get("min_client_version"):
         policy["min_client_version"] = REQUIRED_CLIENT_POLICY_VERSION
         changed = True
-    if changed:
+    if changed and not no_upgrades:
         with open(policy_path, "w", encoding="utf-8") as fh:
             json.dump(policy, fh, ensure_ascii=False, indent=2)
 
@@ -365,6 +370,9 @@ def update_client_policy_min_version(
     baza_dir: Optional[str] = None,
     reason: str = "schema_migration",
 ) -> bool:
+    from rem_card.app.client_build_profile import database_upgrades_disabled
+    if database_upgrades_disabled():
+        return False
     os.makedirs(os.path.dirname(policy_path), exist_ok=True)
     created = False
     try:

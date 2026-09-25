@@ -2,6 +2,7 @@ import logging
 import os
 import sqlite3
 from typing import Optional
+from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
 SCHEMA_FASTPATH_REV = 26
@@ -356,7 +357,8 @@ def _is_fastpath_schema_ready(conn: sqlite3.Connection) -> bool:
 
     # Compatibility route: older DBs may already be fully migrated but without marker.
     if _schema_contract_satisfied(conn, deep_column_check=True):
-        _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)
+        if not database_upgrades_disabled():
+            _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)
         return True
 
     return False
@@ -760,6 +762,9 @@ def _create_medical_audit_triggers(
 
 
 def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Logger] = None):
+    if database_upgrades_disabled():
+        require_compatible_schema(is_unified_schema_ready(conn))
+        return
     logger = logger or logging.getLogger(__name__)
     if _is_fastpath_schema_ready(conn):
         return

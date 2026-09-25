@@ -68,6 +68,12 @@ def _prepare_package_alias():
                 os.path.join(ALIAS_PACKAGE_ROOT, package_dir),
                 ignore=_ignore_non_python_package_files,
             )
+    if os.environ.get("REMCARD_BUILD_NO_DATABASE_UPGRADES") == "1":
+        profile_path = os.path.join(ALIAS_PACKAGE_ROOT, "app", "client_build_profile.py")
+        with open(profile_path, "r", encoding="utf-8") as fh:
+            profile = fh.read()
+        with open(profile_path, "w", encoding="utf-8") as fh:
+            fh.write(profile.replace("NO_DATABASE_UPGRADES = False", "NO_DATABASE_UPGRADES = True"))
     for resource_dir in ALIAS_RESOURCE_DIRS:
         source_dir = os.path.join(APP_ROOT, resource_dir)
         if os.path.isdir(source_dir):
