@@ -1591,6 +1591,19 @@ def _check_patient_form_open_is_deferred_from_callback(temp_root: str) -> tuple[
     return True, "ok"
 
 
+def _resource_method_calls(node: ast.AST, resource: str, method: str) -> list[ast.Call]:
+    """Find resource calls independently of arguments, whitespace and comments."""
+    calls = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call) or not isinstance(child.func, ast.Attribute):
+            continue
+        owner = child.func.value
+        owner_name = owner.id if isinstance(owner, ast.Name) else getattr(owner, "attr", None)
+        if owner_name == resource and child.func.attr == method:
+            calls.append(child)
+    return sorted(calls, key=lambda call: (call.lineno, call.col_offset))
+
+
 def _check_shutdown_queue_db_ordering_guards(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     data_service_text = (PROJECT_ROOT / "services" / "data_service.py").read_text(encoding="utf-8")
@@ -1615,7 +1628,8 @@ def _check_shutdown_queue_db_ordering_guards(temp_root: str) -> tuple[bool, str]
     close_source = _cached_source_segment(main_window_text, close_method) or ""
     if "set_shutting_down" not in close_source:
         return False, "MainWindow.closeEvent must mark DataService shutting down before UI shutdown"
-    if "db_manager.close(" in close_source or "data_service.shutdown()" in close_source:
+    if (_resource_method_calls(close_method, "db_manager", "close")
+            or _resource_method_calls(close_method, "data_service", "shutdown")):
         return False, "MainWindow.closeEvent must defer data resource shutdown until after Qt loop exits"
     if "clear_drafts()" in close_source:
         return False, "MainWindow.closeEvent must not enqueue clear_drafts during shutdown"
@@ -1633,11 +1647,11 @@ def _check_shutdown_queue_db_ordering_guards(temp_root: str) -> tuple[bool, str]
     if shutdown_func is None:
         return False, "app.main._shutdown_window_resources not found"
     shutdown_source = _cached_source_segment(main_app_text, shutdown_func) or ""
-    data_shutdown_idx = shutdown_source.find("data_service.shutdown()")
-    db_close_idx = shutdown_source.find("db_manager.close()")
-    if data_shutdown_idx < 0 or db_close_idx < 0:
+    shutdown_calls = _resource_method_calls(shutdown_func, "data_service", "shutdown")
+    close_calls = _resource_method_calls(shutdown_func, "db_manager", "close")
+    if not shutdown_calls or not close_calls:
         return False, "_shutdown_window_resources must drain DataService and close DB"
-    if data_shutdown_idx > db_close_idx:
+    if (shutdown_calls[0].lineno, shutdown_calls[0].col_offset) > (close_calls[0].lineno, close_calls[0].col_offset):
         return False, "_shutdown_window_resources must drain DataService before DB close"
     for marker in ("data_service_shutdown_ok", "DB manager close skipped", "DB manager close did not complete cleanly"):
         if marker not in shutdown_source:

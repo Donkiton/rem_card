@@ -18,6 +18,7 @@ class VitalBadge(QFrame):
     def __init__(self, label_text, value_text, bg_color, border_color, parent=None):
         super().__init__(parent)
         self.setObjectName("vital_badge_frame")
+        self.setProperty("preserveClinicalColors", True)
         self.bg_color = bg_color
         self.border_color = border_color
         self.setFixedHeight(32)

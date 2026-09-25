@@ -163,6 +163,49 @@ def _transfer_details():
     }
 
 
+def test_explicit_previous_evening_transfer_releases_bed_at_morning_check(monkeypatch):
+    from rem_card.data.dao import patient_dao
+    from rem_card.ui.rem_card_sectors.outcome_dialogs import TransferOutcomeDialog
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 24, 7)
+
+    monkeypatch.setattr(patient_dao, "datetime", Clock)
+    monkeypatch.setattr(TransferOutcomeDialog, "_restore_last_position", lambda self: None)
+    monkeypatch.setattr(TransferOutcomeDialog, "_save_last_position", lambda self: None)
+    app = QApplication.instance() or QApplication([])
+    source = datetime(2026, 9, 23, 8)
+    db = _MemoryDb(source)
+    dialog = TransferOutcomeDialog({}, source)
+
+    def write(operation, **kwargs):
+        with db.remcard_transaction() as cursor:
+            return operation(cursor)
+
+    db.run_write_operation = write
+    try:
+        dialog.time_picker.set_time("19:00")
+        dialog._on_accept()
+        payload = dialog.result_data
+        service = PatientStatusService(PatientStatusDAO(db))
+        assert service.change_status_with_outcome_details(
+            1, PatientStatus.TRANSFERRED, payload["event_time"],
+            reason_text=payload["reason_text"], user_id="TEST",
+            admission_details=payload["admission_details"],
+        ) is True
+        assert service.get_current_status(1).start_time == datetime(2026, 9, 23, 19)
+        assert patient_dao.PatientDAO(db).release_due_outcome_beds(30) == 1
+        bed = db.conn.execute("SELECT status, current_admission_id FROM beds").fetchone()
+        assert bed["status"] == "FREE"
+        assert bed["current_admission_id"] is None
+    finally:
+        dialog.deleteLater()
+        app.processEvents()
+        db.close()
+
+
 def test_late_time_after_0800_is_resolved_into_extension_of_previous_card():
     shift_date = datetime(2026, 8, 26, 8, 0)
     reference = datetime(2026, 8, 27, 8, 10)

@@ -789,7 +789,11 @@ class UnifiedWindow(QMainWindow):
             self.welcome.set_access_state("Ожидание завершения фоновой задачи. База ещё не освобождена.", True)
             QTimer.singleShot(100, self._wait_before_drain)
             return
-        self._async(self._shutdown.run, self._drained)
+        self._start_drain()
+
+    def _start_drain(self):
+        shutdown, application_exit = self._shutdown, self._pending_exit
+        self._async(lambda: shutdown.run(application_exit=application_exit), self._drained)
 
     def _drained(self, result):
         if self._transition.running:
@@ -856,7 +860,7 @@ class UnifiedWindow(QMainWindow):
 
     def _retry_drain(self):
         if self._shutdown:
-            self._async(self._shutdown.run, self._drained)
+            self._start_drain()
 
     def show_roles(self):
         if self.container is not None:
@@ -1328,7 +1332,8 @@ class UnifiedWindow(QMainWindow):
         if self._busy or self._leaving:
             event.ignore()
             return
-        if not self._exit_update_checked and not self._update_requested and not self._restart and not self._suppress_exit_update and self.root:
+        if (self.root and not self._exit_update_checked and not self._update_requested
+                and not self._restart and not self._suppress_exit_update and not self._central_unavailable):
             event.ignore()
             self._closing = True
             self._status_timer.stop()

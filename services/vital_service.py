@@ -1,4 +1,3 @@
-import os
 import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -9,9 +8,7 @@ from ..data.dto.remcard_dto import PatientStatus, VitalDTO
 from .shift_service import ShiftService
 from .vital_validation import validate_vital_dto
 from .vital_undo import undo_vital_change
-
-CHART_LOOKBACK_DAYS = max(0, int(os.environ.get("REMCARD_CHART_LOOKBACK_DAYS", "2")))
-CHART_LOOKAHEAD_DAYS = max(0, int(os.environ.get("REMCARD_CHART_LOOKAHEAD_DAYS", "1")))
+from .vital_context import vital_context_bounds
 
 
 class VitalService:
@@ -94,10 +91,7 @@ class VitalService:
 
     def get_chart_window_bounds(self, date: datetime) -> Tuple[datetime, datetime]:
         s_start, s_end = self.shift_service.get_day_period(date)
-        return (
-            s_start - timedelta(days=CHART_LOOKBACK_DAYS),
-            s_end + timedelta(days=CHART_LOOKAHEAD_DAYS),
-        )
+        return vital_context_bounds(s_start, s_end)
 
     def get_vitals_extended(self, admission_id: int, date: datetime) -> List[VitalDTO]:
         """Return shift vitals with bounded lookback/lookahead context for charts."""

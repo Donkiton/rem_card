@@ -742,6 +742,61 @@ def test_runtime_outage_suppresses_exit_update_check(shell, tmp_path, monkeypatc
     assert not event.ignored
 
 
+@pytest.mark.parametrize('database_busy', [False, True])
+def test_close_button_after_outage_releases_resources_with_unknown_receipt(shell, monkeypatch, database_busy):
+    from PySide6.QtCore import QTimer, Qt
+    from PySide6.QtTest import QTest
+    from rem_card.ui.shared.unified_chrome import _WindowButton
+
+    closed, quit_calls, scheduled = [], [], []
+    database_ready = not database_busy
+    data = SimpleNamespace(
+        _unknown_active_write=True,
+        shutdown=lambda *, application_exit=False: application_exit,
+        write_outcomes=lambda: [{"state": "unknown"}],
+    )
+    container = SimpleNamespace(data_service=data, db_manager=SimpleNamespace(
+        close=lambda: closed.append("db") or database_ready))
+    shell.container = container
+    lease = shell.lease = _Lease()
+    shell._shutdown = SessionShutdown([container])
+    shell._leaving = shell._busy = True
+    shell._central_unavailable = shell._suppress_exit_update = True
+    shell.stack.setCurrentWidget(shell.welcome)
+    monkeypatch.setattr(shell, '_async', lambda fn, done: done(fn()))
+    monkeypatch.setattr(QTimer, 'singleShot', lambda delay, callback: scheduled.append(callback))
+    monkeypatch.setattr(QApplication, 'quit', lambda: quit_calls.append(True))
+    shell.show()
+
+    shell._retry_drain()
+    assert not closed and lease.release_calls == 0
+    assert shell._leaving and shell.isVisible()
+    close_button = next(b for b in shell.entry_chrome.title_bar.findChildren(_WindowButton) if b.kind == 'close')
+    QTest.mouseClick(close_button, Qt.LeftButton)
+    assert shell._pending_exit
+    scheduled.pop(0)()
+
+    if database_busy:
+        assert closed == ['db'] and lease.release_calls == 0
+        assert not quit_calls and shell.container is container
+        database_ready = True
+        scheduled.pop(0)()
+    assert closed == ['db'] * (2 if database_busy else 1) and lease.release_calls == 1
+    assert quit_calls == [True] and not shell.isVisible()
+    assert shell.container is None and not shell._leaving
+    assert data._unknown_active_write and data.write_outcomes() == [{"state": "unknown"}]
+
+
+def test_unavailable_database_skips_network_update_lookup_on_close(shell, tmp_path, monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+    shell.root = str(tmp_path)
+    shell._central_unavailable = True
+    monkeypatch.setattr(shell, '_async', lambda *args: pytest.fail('network lookup during offline exit'))
+    event = QCloseEvent()
+    shell.closeEvent(event)
+    assert event.isAccepted()
+
+
 @pytest.mark.parametrize('role', ['doctor', 'nurse', 'operblock_emergency', 'operblock_planned'])
 def test_maintenance_acknowledgment_keeps_countdown_and_about_button(shell, monkeypatch, role):
     from PySide6.QtWidgets import QPushButton

@@ -1,5 +1,6 @@
 {
   "core": [
+    "tests/test_shutdown_safety_guard.py",
     "tests/test_startup_check_worker.py",
     "tests/test_unified_main.py",
     "tests/test_unified_database_setup.py",
@@ -97,6 +98,7 @@
     "tests/test_startup_diagnostics.py"
   ],
   "ui": [
+    "tests/test_transfer_outcome_dialog.py",
     "tests/test_role_entry_preload.py",
     "tests/test_workspace_backgrounds.py",
     "tests/test_unified_first_run_flow.py",

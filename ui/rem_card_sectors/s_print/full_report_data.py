@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
 
 from rem_card.services.shift_service import ShiftService
+from rem_card.services.vital_context import select_vitals_with_context, vital_context_bounds
 from .emergency_notice import attach_notice_for_period
 
 from .movement import (
@@ -29,6 +30,49 @@ def _as_datetime(value: Any) -> Optional[datetime]:
 
 def _in_half_open_range(moment: Optional[datetime], start: datetime, end: datetime) -> bool:
     return bool(moment and start <= moment < end)
+
+
+def prepare_report_vitals(vitals, patient, start, end, *, effective_bounds=None):
+    """Separate real daily records from interpolation anchors outside the day."""
+    context_start, context_end = vital_context_bounds(start, end)
+    admission = _as_datetime(getattr(patient, "admission_datetime", None))
+    transfer = _as_datetime(getattr(patient, "transfer_datetime", None))
+    if admission is not None:
+        context_start = max(context_start, admission.replace(second=0, microsecond=0))
+    if transfer is not None:
+        context_end = min(context_end, transfer.replace(second=0, microsecond=0))
+    bounds = effective_bounds or (max(start, context_start), min(end, context_end))
+    available = sorted(
+        (v for v in vitals if context_start <= v.timestamp <= context_end),
+        key=lambda v: v.timestamp,
+    )
+    return {
+        "vitals": [v for v in available if bounds[0] <= v.timestamp <= bounds[1]],
+        "vitals_context": select_vitals_with_context(available, start, end),
+        "vitals_effective_bounds": bounds,
+    }
+
+
+def collect_daily_report_vitals(service, admission_id, date, patient, start, end):
+    context_start, context_end = vital_context_bounds(start, end)
+    dao = getattr(service, "vitals_dao", None)
+    if dao is not None and hasattr(dao, "get_vitals"):
+        vitals = dao.get_vitals(admission_id, context_start, context_end)
+    elif hasattr(service, "get_vitals_extended"):
+        vitals = service.get_vitals_extended(admission_id, date)
+    else:
+        vitals = service.get_vitals(admission_id, date)
+    vital_service = getattr(service, "_vitals", None)
+    bounds = None
+    if vital_service and hasattr(vital_service, "get_effective_bounds_for_patient"):
+        bounds = vital_service.get_effective_bounds_for_patient(patient, date, default_bounds=(start, end))
+    data = prepare_report_vitals(vitals, patient, start, end, effective_bounds=bounds)
+    status_service = getattr(service, "status_service", None)
+    if status_service and hasattr(status_service, "get_active_intervals"):
+        data["vitals_active_intervals"] = status_service.get_active_intervals(
+            admission_id, context_start, context_end,
+        )
+    return data
 
 
 def _order_datetime(order: Any) -> Optional[datetime]:
@@ -212,7 +256,10 @@ class FullReportDataCollector:
             shift_key = start_dt.strftime("%Y-%m-%d %H:%M")
             day_data = self._base_day_data(patient, start_dt, end_dt)
             if self.config.get("vitals", True):
-                day_data["vitals"] = self._filter_vitals(all_vitals, vital_bounds_by_shift[shift_key])
+                day_data.update(prepare_report_vitals(
+                    all_vitals, patient, start_dt, end_dt,
+                    effective_bounds=vital_bounds_by_shift[shift_key],
+                ))
                 day_data["vitals_active_intervals"] = active_intervals_by_shift.get(shift_key, [])
 
             day_data["prescriptions"] = self._filter_orders(all_orders, start_dt, end_dt)
@@ -322,10 +369,11 @@ class FullReportDataCollector:
             key = start_dt.strftime("%Y-%m-%d %H:%M")
             if status_service and hasattr(status_service, "get_active_intervals"):
                 try:
+                    context_start, context_end = vital_context_bounds(start_dt, end_dt)
                     intervals_by_shift[key] = status_service.get_active_intervals(
                         self.admission_id,
-                        start_dt,
-                        end_dt,
+                        context_start,
+                        context_end,
                     )
                 except Exception:
                     intervals_by_shift[key] = []
@@ -355,7 +403,8 @@ class FullReportDataCollector:
             return []
         dao = getattr(self.remcard_service, "vitals_dao", None)
         if dao and hasattr(dao, "get_vitals"):
-            return dao.get_vitals(self.admission_id, report_start, report_end)
+            context_start, context_end = vital_context_bounds(report_start, report_end)
+            return dao.get_vitals(self.admission_id, context_start, context_end)
         return []
 
     def _get_all_orders(self, report_start: datetime, report_end: datetime) -> list[Any]:

@@ -27,13 +27,14 @@ class HybridShiftTimePicker(QWidget):
     HOURS = list(range(8, 24)) + list(range(0, 8))
     MINUTES = list(range(0, 60, 5))
 
-    def __init__(self, time_service=None, shift_date=None, parent=None, *, quick_actions=None):
+    def __init__(self, time_service=None, shift_date=None, parent=None, *, quick_actions=None, grid_only=False):
         super().__init__(parent)
         self._time_service = time_service
         self._shift_date = shift_date
         self._time = "08:00"
         self._last_valid_time = "08:00"
         self._offset_handler = None
+        self._grid_only = grid_only
         self._quick_actions = list(quick_actions or [
             ("Сейчас", None),
             ("-5 мин", -5),
@@ -52,14 +53,6 @@ class HybridShiftTimePicker(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(4)
 
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(4)
-
-        time_label = QLabel("Время:")
-        time_label.setObjectName("hybrid_time_label")
-        top_row.addWidget(time_label, 0)
-
         self.input = QLineEdit()
         self.input.setObjectName("hybrid_time_input")
         self.input.setPlaceholderText("HH:mm")
@@ -67,14 +60,21 @@ class HybridShiftTimePicker(QWidget):
         self.input.setMaxLength(5)
         self.input.returnPressed.connect(self._accept_input)
         self.input.editingFinished.connect(self._commit_input)
-        top_row.addWidget(self.input, 1)
-        root.addLayout(top_row)
+        if not self._grid_only:
+            top_row = QHBoxLayout()
+            top_row.setContentsMargins(0, 0, 0, 0)
+            top_row.setSpacing(4)
+            time_label = QLabel("Время:")
+            time_label.setObjectName("hybrid_time_label")
+            top_row.addWidget(time_label, 0)
+            top_row.addWidget(self.input, 1)
+            root.addLayout(top_row)
 
         quick_grid = QGridLayout()
         quick_grid.setContentsMargins(0, 0, 0, 0)
         quick_grid.setHorizontalSpacing(3)
         quick_grid.setVerticalSpacing(3)
-        for col, (label, delta) in enumerate(self._quick_actions):
+        for col, (label, delta) in enumerate([] if self._grid_only else self._quick_actions):
             btn = QPushButton(label)
             btn.setObjectName("hybrid_quick_button")
             btn.setFixedHeight(24)
@@ -83,7 +83,12 @@ class HybridShiftTimePicker(QWidget):
             else:
                 btn.clicked.connect(lambda checked=False, d=delta: self._apply_offset(d))
             quick_grid.addWidget(btn, 0, col)
-        root.addLayout(quick_grid)
+        if not self._grid_only:
+            root.addLayout(quick_grid)
+
+        if self._grid_only:
+            root.setSpacing(6)
+            root.addWidget(QLabel("Часы"))
 
         hour_grid = QGridLayout()
         hour_grid.setContentsMargins(0, 0, 0, 0)
@@ -112,6 +117,9 @@ class HybridShiftTimePicker(QWidget):
             btn.clicked.connect(lambda checked=False, m=minute: self._select_minute(m))
             self._minute_buttons[minute] = btn
             minute_grid.addWidget(btn, idx // 6, idx % 6)
+        if self._grid_only:
+            root.addSpacing(6)
+            root.addWidget(QLabel("Минуты"))
         root.addLayout(minute_grid)
 
         set_widget_style(self, """

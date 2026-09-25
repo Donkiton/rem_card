@@ -277,6 +277,40 @@ class UnifiedWriteOutcomeTest(unittest.TestCase):
         self.assertEqual(refreshes, [])
         self.assertFalse(service.shutdown(timeout=1.0))
 
+    def test_application_exit_preserves_unknown_but_releases_stopped_service(self):
+        service = _service_harness()
+        operation_id = service._register_accepted_write("network_save")
+        service._set_write_outcome(operation_id, "unknown", OSError("network path is unavailable"))
+        before = service.write_outcomes()
+
+        self.assertFalse(service.shutdown(timeout=1.0))
+        self.assertTrue(service.shutdown(timeout=1.0, application_exit=True))
+        self.assertEqual(service.write_outcomes(), before)
+        self.assertTrue(service._unknown_active_write)
+        self.assertFalse(service.shutdown(timeout=1.0))
+
+    def test_application_exit_still_waits_for_active_write(self):
+        service = _service_harness()
+        unknown_id = service._register_accepted_write("earlier_network_save")
+        service._set_write_outcome(unknown_id, "unknown")
+        started, release = threading.Event(), threading.Event()
+
+        def operation():
+            started.set()
+            release.wait(5.0)
+            return "saved"
+
+        try:
+            self.assertTrue(service.enqueue_write("active_save", operation))
+            self.assertTrue(started.wait(1.0))
+            self.assertFalse(service.shutdown(timeout=0.01, application_exit=True))
+            self.assertEqual([item["state"] for item in service.write_outcomes()], ["unknown", "pending"])
+        finally:
+            release.set()
+            service._queue._thread.join(timeout=2.0)
+        self.assertTrue(service.shutdown(timeout=1.0, application_exit=True))
+        self.assertEqual([item["state"] for item in service.write_outcomes()], ["unknown", "committed"])
+
     def test_patient_auto_release_zero_skips_refresh_but_positive_keeps_it(self):
         for released, expected_refreshes in ((0, []), (2, [{"force_emit": True, "source": "auto_release_outcome_beds"}])):
             service = _service_harness()
