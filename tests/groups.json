@@ -1,5 +1,6 @@
 {
   "core": [
+    "tests/test_shutdown_safety_guard.py",
     "tests/test_startup_check_worker.py",
     "tests/test_unified_main.py",
     "tests/test_unified_database_setup.py",
