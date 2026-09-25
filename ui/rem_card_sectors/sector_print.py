@@ -21,7 +21,7 @@ from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
 from rem_card.ui.rem_card_sectors.s_print.emergency_notice import attach_notice_for_period
-from rem_card.ui.rem_card_sectors.s_print.full_report_data import collect_full_report_data
+from rem_card.ui.rem_card_sectors.s_print.full_report_data import collect_daily_report_vitals, collect_full_report_data
 from rem_card.ui.rem_card_sectors.s_print.movement import is_non_movement_event, movement_comment_text
 
 
@@ -249,12 +249,14 @@ class DataCollectorWorker(QThread):
         return current_time
 
     @staticmethod
-    def _build_vitals_matrix(vitals, start_dt, end_dt, active_intervals=None):
+    def _build_vitals_matrix(vitals, start_dt, end_dt, active_intervals=None, *, context_vitals=None, effective_bounds=None):
         return build_vitals_report_matrix(
             vitals,
             start_dt,
             end_dt,
             active_intervals=active_intervals,
+            context_vitals=context_vitals,
+            effective_bounds=effective_bounds,
         )
 
     @staticmethod
@@ -265,6 +267,8 @@ class DataCollectorWorker(QThread):
             start_dt,
             end_dt,
             data.get("vitals_active_intervals"),
+            context_vitals=data.get("vitals_context"),
+            effective_bounds=data.get("vitals_effective_bounds"),
         )
         data["vital_settings"] = remcard_service.get_vital_settings_cached(data.get("admission_id", 0) or data.get("id", 0), start_dt)
 
@@ -530,14 +534,9 @@ class DataCollectorWorker(QThread):
             attach_notice_for_period(data, patient, start_dt, end_dt)
 
             if self.config.get("vitals", True):
-                data["vitals"] = self.remcard_service.get_vitals(self.admission_id, self.date)
-                status_service = getattr(self.remcard_service, "status_service", None)
-                if status_service and hasattr(status_service, "get_active_intervals"):
-                    data["vitals_active_intervals"] = status_service.get_active_intervals(
-                        self.admission_id,
-                        start_dt,
-                        end_dt,
-                    )
+                data.update(collect_daily_report_vitals(
+                    self.remcard_service, self.admission_id, self.date, patient, start_dt, end_dt,
+                ))
             
             data["prescriptions"] = self.remcard_service.get_orders(self.admission_id, self.date, only_committed=True)
 

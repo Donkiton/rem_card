@@ -1898,7 +1898,7 @@ def _acquire_role_lock_for_startup(
     return role_lock
 
 
-def _shutdown_window_resources(window, logger):
+def _shutdown_window_resources(window, logger, *, application_exit: bool = False):
     if not window:
         return True
     iter_containers = getattr(window, "iter_runtime_containers", None)
@@ -1920,7 +1920,8 @@ def _shutdown_window_resources(window, logger):
         if data_service:
             try:
                 logger.info("DataService shutdown started (%s)", container_label)
-                container_data_ok = bool(data_service.shutdown())
+                kwargs = {"application_exit": True} if application_exit else {}
+                container_data_ok = bool(data_service.shutdown(**kwargs))
                 logger.info(
                     "DataService shutdown finished (%s) result=%s",
                     container_label,

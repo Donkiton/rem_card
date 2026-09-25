@@ -1431,7 +1431,7 @@ class DataService(QObject):
         self._monitor.stop()
         return bool(self._monitor.wait(max(0, int(float(timeout or 0.0) * 1000))))
 
-    def shutdown(self, timeout: float = 5.0) -> bool:
+    def shutdown(self, timeout: float = 5.0, *, application_exit: bool = False) -> bool:
         logger.info("DataService shutdown: stopping monitor and write queue")
         self.set_shutting_down()
         timeout = max(0.0, float(timeout or 0.0))
@@ -1445,6 +1445,15 @@ class DataService(QObject):
                 logger.warning("DataUpdateMonitor did not stop before DataService shutdown timeout")
         drained = self._queue.shutdown(timeout=timeout)
         unsettled = self.unsettled_writes()
+        # A lost commit acknowledgement is historical uncertainty, not a live
+        # worker. Preserve it for diagnostics while allowing process exit.
+        # Role switches still require every accepted write to be confirmed.
+        blocking_writes = [
+            item for item in unsettled
+            if not application_exit or item.get("state") != "unknown"
+        ]
+        if application_exit and (self._unknown_active_write or unsettled):
+            logger.warning("Application exit with unconfirmed writes; outcomes remain unchanged")
         try:
             from rem_card.app.local_metrics import flush_metrics
 
@@ -1465,7 +1474,7 @@ class DataService(QObject):
             and monitor_stopped
             and drained
             and submissions_finished
-            and not unsettled
+            and not blocking_writes
         )
 
     def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):

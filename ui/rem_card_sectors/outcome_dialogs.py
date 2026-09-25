@@ -6,11 +6,13 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtCore import QDate, QLocale, QPoint, QSettings, Qt
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
+    QCalendarWidget,
     QComboBox,
+    QDateEdit,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -531,13 +533,77 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
         columns = QHBoxLayout()
         columns.setSpacing(14)
 
-        time_frame, time_layout = self._section("Время перевода")
-        time_frame.setFixedWidth(TRANSFER_TIME_SECTION_WIDTH)
-        self.time_picker = self._make_time_picker()
-        time_layout.addWidget(self.time_picker, 0, Qt.AlignLeft)
-        columns.addWidget(time_frame, 0)
+        time_frame, time_layout = self._section("Дата и время перевода")
+        time_layout.setAlignment(Qt.AlignTop)
+        self.time_picker = HybridShiftTimePicker(ShiftService, self.shift_date, grid_only=True)
+        set_widget_style(self.time_picker, source_style(self.time_picker) + """
+            QWidget { font-family: "Segoe UI"; }
+            QPushButton#hybrid_hour_button,
+            QPushButton#hybrid_minute_button {
+                font-family: "Segoe UI"; font-size: 14px; font-weight: normal;
+            }
+            QPushButton#hybrid_hour_button { font-weight: bold; }
+            QPushButton#hybrid_hour_button[active="true"] {
+                background: #087fff; color: white; border-color: #087fff;
+            }
+            QPushButton#hybrid_minute_button[active="true"] {
+                background: #dbeeff; color: #0066cc; border-color: #087fff;
+            }
+            QLabel { font-size: 14px; font-weight: bold; }
+        """)
+        for button in self.time_picker.findChildren(QPushButton):
+            button.setFixedHeight(30)
+        self.time_picker.set_time(ShiftService.now_time(datetime.now(), self.shift_date))
+        self.date_edit = QDateEdit()
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setLocale(QLocale(QLocale.Russian, QLocale.Russia))
+        calendar = self.date_edit.calendarWidget()
+        calendar.setFirstDayOfWeek(Qt.Monday)
+        calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        calendar.setGridVisible(False)
+        from rem_card.ui.procedures.procedure_styles import PROCEDURE_CALENDAR_STYLE
+        set_widget_style(calendar, PROCEDURE_CALENDAR_STYLE + """
+            QCalendarWidget QWidget { font-family: "Segoe UI"; font-size: 14px; }
+            QCalendarWidget QAbstractItemView { selection-background-color: #087fff; selection-color: white; }
+        """)
+        self.date_edit.setAccessibleName("Дата перевода")
+        self.date_edit.setMinimumWidth(150)
+        self.card_date_button = QPushButton("По карте")
+        self.card_date_button.setToolTip("Вернуть дату открытой карты")
+        self.card_date_button.clicked.connect(self._reset_transfer_date)
+        self.now_button = QPushButton("Сейчас")
+        self.now_button.setToolTip("Установить текущее время, не меняя дату")
+        self.now_button.clicked.connect(self._set_transfer_now)
+        for button in (self.card_date_button, self.now_button):
+            button.setObjectName("transfer_time_action")
+            button.setFixedWidth(106)
+            button.setMinimumHeight(30)
+        self._reset_transfer_date()
+
+        date_time_form = QGridLayout()
+        date_time_form.setHorizontalSpacing(8)
+        date_time_form.setVerticalSpacing(8)
+        date_label = QLabel("Дата:")
+        date_label.setBuddy(self.date_edit)
+        time_label = QLabel("Время:")
+        time_label.setBuddy(self.time_picker.input)
+        self.time_picker.input.setAccessibleName("Время перевода")
+        self.time_picker.input.setFixedWidth(90)
+        date_time_form.addWidget(date_label, 0, 0)
+        date_time_form.addWidget(self.date_edit, 0, 1)
+        date_time_form.addWidget(self.card_date_button, 0, 2)
+        date_time_form.addWidget(time_label, 1, 0)
+        date_time_form.addWidget(self.time_picker.input, 1, 1, Qt.AlignLeft)
+        date_time_form.addWidget(self.now_button, 1, 2)
+        date_time_form.setColumnStretch(1, 1)
+        time_layout.addLayout(date_time_form)
+        time_layout.addSpacing(4)
+        time_layout.addWidget(self.time_picker)
+        columns.addWidget(time_frame, 1)
 
         target_frame, target_layout = self._section("Куда переведен")
+        target_layout.setAlignment(Qt.AlignTop)
         form = QGridLayout()
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
@@ -546,6 +612,8 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
         self.department_combo.addItems(TRANSFER_DEPARTMENTS)
         self.department_combo.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
         self._apply_combo_view_style(self.department_combo)
+        set_widget_style(self.department_combo.view(), OUTCOME_COMBO_VIEW_STYLE +
+                         'QAbstractItemView { font-family: "Segoe UI"; font-size: 14px; }')
         profile = str(self.admission_context.get("department_profile") or "").strip()
         if profile:
             idx = self.department_combo.findText(profile)
@@ -557,34 +625,127 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
         self.lpu_combo.addItems(TRANSFER_LPUS)
         self.lpu_combo.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
         self._apply_combo_view_style(self.lpu_combo)
+        set_widget_style(self.lpu_combo.view(), OUTCOME_COMBO_VIEW_STYLE +
+                         'QAbstractItemView { font-family: "Segoe UI"; font-size: 14px; }')
         self.lpu_combo.currentTextChanged.connect(self._sync_lpu_visibility)
 
         self.lpu_other = QLineEdit()
         self.lpu_other.setPlaceholderText("Введите название другого ЛПУ")
         self.lpu_other.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
 
-        self.comment_edit = self._comment_line()
+        self.comment_edit = QPlainTextEdit(self.base_comment)
+        self.comment_edit.setPlaceholderText("Комментарий к переводу")
+        self.comment_edit.setMinimumHeight(72)
+        self.comment_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.comment_edit.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
 
         self.lpu_label = QLabel("Название ЛПУ:")
         self.lpu_other_label = QLabel("Уточнение ЛПУ:")
 
         form.addWidget(QLabel("Отделение / ЛПУ:"), 0, 0)
-        form.addWidget(self.department_combo, 0, 1)
-        form.addWidget(self.lpu_label, 1, 0)
-        form.addWidget(self.lpu_combo, 1, 1)
-        form.addWidget(self.lpu_other_label, 2, 0)
-        form.addWidget(self.lpu_other, 2, 1)
-        form.addWidget(QLabel("Комментарий:"), 3, 0)
-        form.addWidget(self.comment_edit, 3, 1)
+        form.addWidget(self.department_combo, 1, 0)
+        form.addWidget(self.lpu_label, 2, 0)
+        form.addWidget(self.lpu_combo, 3, 0)
+        form.addWidget(self.lpu_other_label, 4, 0)
+        form.addWidget(self.lpu_other, 5, 0)
+        form.addWidget(QLabel("Комментарий:"), 6, 0)
+        form.addWidget(self.comment_edit, 7, 0)
+        form.setRowStretch(7, 1)
 
         target_layout.addLayout(form)
         columns.addWidget(target_frame, 1)
 
         self.content_layout.addLayout(columns)
         self.content_layout.addLayout(self._buttons())
+        self.ok_btn.setText("Сохранить перевод")
+        self.cancel_btn.setText("Отмена")
+        set_widget_style(self.content_widget, source_style(self.content_widget) + """
+            QWidget { font-family: "Segoe UI"; font-size: 14px; color: #172033; }
+            QLabel { font-size: 14px; }
+            QLabel#section_title { font-size: 16px; font-weight: bold; }
+            QLineEdit, QPlainTextEdit, QComboBox { font-size: 14px; }
+            QPushButton#DialogOkBtn, QPushButton#DialogCancelBtn {
+                font-size: 14px; font-weight: bold;
+            }
+            QPushButton#DialogOkBtn { color: #ffffff; }
+            QDateEdit {
+                background: #ffffff; color: #172033;
+                border: 1px solid #ced4da; border-radius: 4px;
+                padding: 5px 36px 5px 8px; min-height: 22px; font-size: 11pt;
+            }
+            QDateEdit::drop-down {
+                subcontrol-origin: border; subcontrol-position: top right;
+                width: 32px; border-left: 1px solid #ced4da;
+                background: #f8f9fa;
+                border-top-right-radius: 4px; border-bottom-right-radius: 4px;
+            }
+            QDateEdit::down-arrow {
+                image: url("__TRANSFER_CALENDAR_ICON__"); width: 20px; height: 20px;
+            }
+            QLineEdit#hybrid_time_input { font-size: 11pt; font-weight: normal; }
+            QLineEdit#hybrid_time_input[invalid="true"] {
+                border: 2px solid #c0392b; background: #fff5f5;
+            }
+            QPushButton#transfer_time_action {
+                background: #f8f9fa; color: #172033;
+                border: 1px solid #bdc3c7; border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton#transfer_time_action:hover { background: #e9ecef; }
+            QPushButton#transfer_time_action:focus { border-color: #087fff; }
+            QPushButton#transfer_time_action:pressed,
+            QPushButton#DialogCancelBtn:pressed {
+                background: #cbd9e8;
+                border: 1px solid #7c94ad;
+                border-top-color: #536c86;
+                border-left-color: #536c86;
+                color: #172033;
+            }
+            QPushButton#DialogOkBtn:pressed {
+                background: #0056b8;
+                border: 1px solid #003f88;
+                border-top-color: #002e64;
+                border-left-color: #002e64;
+                color: #ffffff;
+            }
+        """.replace("__TRANSFER_CALENDAR_ICON__", _icon_qss_url("transfer_calendar.svg")))
         self._sync_lpu_visibility()
         self._restore_last_position()
+
+    def _reset_transfer_date(self):
+        card_start, _ = ShiftService.get_day_period(self.shift_date)
+        self.date_edit.setDate(QDate(card_start.year, card_start.month, card_start.day))
+
+    def _set_transfer_now(self):
+        self.time_picker.set_time(datetime.now().strftime("%H:%M"))
+
+    def _transfer_datetime(self) -> datetime:
+        # Дата выбрана явно: ни время, ни записи пациента не сдвигают её.
+        self.date_edit.interpretText()
+        if self.time_picker.input.text() != self.time_picker.value_str():
+            self.time_picker._commit_input()
+        day = self.date_edit.date().toPython()
+        hour, minute = map(int, self.time_picker.value_str().split(":"))
+        return datetime(day.year, day.month, day.day, hour, minute)
+
+    def _validate_transfer_datetime(self, value: datetime) -> bool:
+        if self.time_picker.input.property("invalid"):
+            CustomMessageBox.warning(self, "Проверьте время", "Введите время перевода в формате ЧЧ:ММ.")
+            return False
+        lower_bounds = [
+            (self._outcome_not_before(), "поступления или начала текущего статуса"),
+            (self._context_datetime("latest_activity_datetime"), "последней фактической записи пациента"),
+            (self._context_datetime("late_card_shift_start"), "начала карты"),
+        ]
+        for lower, description in lower_bounds:
+            if lower is not None and value < lower:
+                CustomMessageBox.warning(
+                    self, "Проверьте дату и время",
+                    f"Перевод {value:%d.%m.%Y %H:%M} указан раньше {description} "
+                    f"({lower:%d.%m.%Y %H:%M}). Проверьте дату, время и записи пациента.",
+                )
+                return False
+        return self._validate_late_outcome_deadline(value)
 
     def _sync_lpu_visibility(self):
         is_other_department = self.department_combo.currentText() == "Другое ЛПУ"
@@ -610,14 +771,14 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
             CustomMessageBox.warning(self, "Ошибка", "Укажите название другого ЛПУ.")
             return
 
-        event_time = self._resolve_picker_datetime(self.time_picker)
-        if not self._validate_late_outcome_deadline(event_time):
+        event_time = self._transfer_datetime()
+        if not self._validate_transfer_datetime(event_time):
             return
         destination = department
         if department == "Другое ЛПУ":
             destination = lpu_other or lpu or department
 
-        comment = self.comment_edit.text().strip()
+        comment = self.comment_edit.toPlainText().strip()
         reason = f"Куда переведен: {destination}"
         if comment:
             reason += f". Комментарий: {comment}"

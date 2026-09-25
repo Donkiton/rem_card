@@ -73,7 +73,7 @@ def lifecycle_event(event: str, *, session_id: str = "", role: str = "", **field
 
 
 class SessionShutdown:
-    """Own accepted writes until their result is known; never depend on a form callback."""
+    """Retain resources until role reuse or process exit is safe, independent of UI callbacks."""
 
     def __init__(self, containers, *, session_id: str | None = None, role: str = ""):
         self.containers = []
@@ -85,7 +85,7 @@ class SessionShutdown:
         self._lock = threading.Lock()
         self._completed: set[int] = set()
 
-    def run(self) -> dict:
+    def run(self, *, application_exit: bool = False) -> dict:
         from rem_card.app.main import _shutdown_window_resources
         from rem_card.app.logger import logger
         from types import SimpleNamespace
@@ -97,12 +97,14 @@ class SessionShutdown:
                 if id(container) in self._completed:
                     continue
                 data = getattr(container, "data_service", None)
-                # Unknown write is not an unsaved form. Keep both container and lease.
-                if bool(getattr(data, "_unknown_active_write", False)):
-                    blocked.append("Результат сетевой записи не подтверждён")
+                # An unknown receipt blocks role reuse, but must not trap the
+                # user in the application after all local work has stopped.
+                if bool(getattr(data, "_unknown_active_write", False)) and not application_exit:
+                    blocked.append("Результат сетевой записи не подтверждён. Для выхода закройте программу.")
                     continue
                 window = SimpleNamespace(iter_runtime_containers=lambda c=container: [c])
-                if _shutdown_window_resources(window, logger):
+                kwargs = {"application_exit": True} if application_exit else {}
+                if _shutdown_window_resources(window, logger, **kwargs):
                     self._completed.add(id(container))
                 else:
                     blocked.append("Ожидание завершения записи или закрытия соединения")

@@ -5,6 +5,8 @@ from typing import List, Tuple
 
 import numpy as np
 
+from rem_card.services.vital_context import select_vitals_with_context, vital_edge_points
+
 MAX_INTERPOLATED_POINTS_PER_CHUNK = max(
     128,
     int(os.environ.get("REMCARD_CHART_MAX_INTERPOLATED_POINTS", "2048")),
@@ -37,35 +39,24 @@ class ChartDataProcessor:
 
         end_time = start_time + timedelta(hours=max(1.0, float(visible_hours or CHART_VISIBLE_HOURS)))
 
-        before = []
-        inside = []
-        after = []
-        for vital in sorted_vitals:
-            ts = vital.timestamp
-            if ts < start_time:
-                before.append(vital)
-            elif ts > end_time:
-                after.append(vital)
-            else:
-                inside.append(vital)
-
-        selected = []
-        if CHART_EDGE_CONTEXT_POINTS > 0 and before:
-            selected.extend(before[-CHART_EDGE_CONTEXT_POINTS:])
-        selected.extend(inside)
-        if CHART_EDGE_CONTEXT_POINTS > 0 and after:
-            selected.extend(after[:CHART_EDGE_CONTEXT_POINTS])
-
-        if not selected:
-            if CHART_EDGE_CONTEXT_POINTS > 0 and before:
-                selected.extend(before[-CHART_EDGE_CONTEXT_POINTS:])
-            if CHART_EDGE_CONTEXT_POINTS > 0 and after:
-                selected.extend(after[:CHART_EDGE_CONTEXT_POINTS])
+        selected = select_vitals_with_context(
+            sorted_vitals, start_time, end_time, edge_points=CHART_EDGE_CONTEXT_POINTS,
+        )
 
         if MAX_RAW_POINTS_FOR_PROCESSING > 0 and len(selected) > MAX_RAW_POINTS_FOR_PROCESSING:
-            # Равномерная децимация для защиты UI от подвисаний на архивных массивах.
-            idx = np.linspace(0, len(selected) - 1, num=MAX_RAW_POINTS_FOR_PROCESSING, dtype=int)
-            selected = [selected[int(i)] for i in idx]
+            # Preserve context and both visible endpoints of every indicator.
+            inside = [v for v in selected if start_time <= v.timestamp <= end_time]
+            anchors = vital_edge_points(inside) + vital_edge_points(inside, from_end=True)
+            anchor_ids = {id(v) for v in anchors}
+            protected = {
+                i for i, v in enumerate(selected)
+                if v.timestamp < start_time or v.timestamp > end_time or id(v) in anchor_ids
+            }
+            candidates = [i for i in range(len(selected)) if i not in protected]
+            budget = max(0, MAX_RAW_POINTS_FOR_PROCESSING - len(protected))
+            idx = np.linspace(0, len(candidates) - 1, num=min(budget, len(candidates)), dtype=int)
+            kept = protected | {candidates[int(i)] for i in idx}
+            selected = [selected[i] for i in sorted(kept)]
 
         return selected
 

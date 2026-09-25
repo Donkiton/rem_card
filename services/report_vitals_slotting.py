@@ -77,6 +77,8 @@ def build_vitals_report_matrix(
     slots: int = 24,
     active_intervals: Sequence[Tuple[datetime, datetime]] | None = None,
     fields: Sequence[Tuple[str, str]] = VITAL_REPORT_FIELDS,
+    context_vitals: Iterable[Any] | None = None,
+    effective_bounds: Tuple[datetime, datetime] | None = None,
 ) -> Dict[int, Dict[str, Any]]:
     """
     Возвращает матрицу виталов для печати.
@@ -94,23 +96,23 @@ def build_vitals_report_matrix(
     valid.sort(key=lambda x: x.timestamp)
 
     matrix: Dict[int, Dict[str, Any]] = {}
-    selected_by_hour = select_latest_vitals_by_report_hour(valid, start_dt, end_dt, slots=slots)
-    for i, chosen_v in selected_by_hour.items():
-        row: Dict[str, Any] = {}
-        for matrix_key, attr in fields:
-            val = getattr(chosen_v, attr, None)
-            if val is not None:
-                row[matrix_key] = val
-        if row:
-            matrix[i] = row
+    for matrix_key, attr in fields:
+        # A later pulse-only row must not erase a real CVP in the same hour.
+        measured = [v for v in valid if getattr(v, attr, None) is not None]
+        selected_by_hour = select_latest_vitals_by_report_hour(measured, start_dt, end_dt, slots=slots)
+        for i, chosen_v in selected_by_hour.items():
+            matrix.setdefault(i, {})[matrix_key] = getattr(chosen_v, attr)
 
-    if not valid:
-        return matrix
+    # Context is used only for interpolation, never as a real hourly record.
+    interpolation_points = valid if context_vitals is None else sorted(
+        (v for v in context_vitals if getattr(v, "timestamp", None) is not None),
+        key=lambda v: v.timestamp,
+    )
 
     normalized_active_intervals = _normalize_active_intervals(active_intervals)
     for matrix_key, attr in fields:
         field_points = [
-            vital for vital in valid
+            vital for vital in interpolation_points
             if getattr(vital, attr, None) is not None
         ]
         if not field_points:
@@ -120,6 +122,8 @@ def build_vitals_report_matrix(
         for i in range(slots):
             target_dt = start_dt + timedelta(hours=i)
             if target_dt < start_dt or target_dt >= end_dt:
+                continue
+            if effective_bounds is not None and not (effective_bounds[0] <= target_dt <= effective_bounds[1]):
                 continue
 
             row = matrix.setdefault(i, {})
