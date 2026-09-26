@@ -724,17 +724,19 @@ def test_g63_uses_dynamic_grid_for_more_than_six_departments(monkeypatch):
 
 def test_authoritative_renderer_keeps_pie_step_histogram_and_dynamic_ward_grid(monkeypatch):
     from rem_card.services.analytics import graphs_service
+    from rem_card.services.analytics import graph_infographics
     import matplotlib.pyplot as plt
     from rem_card.ui.analytics import graphs_generators_1
-    calls = {"pie": 0, "step": 0, "step_x": None, "hist": 0, "subplots": []}
-    originals = {name: getattr(plt, name) for name in ("pie", "step", "hist", "subplots")}
-    monkeypatch.setattr(plt, "pie", lambda *args, **kwargs: (calls.__setitem__("pie", calls["pie"] + 1), originals["pie"](*args, **kwargs))[1])
+    calls = {"step": 0, "step_x": None, "hist": 0, "subplots": [], "figures": []}
+    originals = {name: getattr(plt, name) for name in ("step", "hist", "subplots")}
     monkeypatch.setattr(plt, "step", lambda *args, **kwargs: (calls.__setitem__("step", calls["step"] + 1), calls.__setitem__("step_x", list(args[0])), originals["step"](*args, **kwargs))[2])
     monkeypatch.setattr(plt, "hist", lambda *args, **kwargs: (calls.__setitem__("hist", calls["hist"] + 1), originals["hist"](*args, **kwargs))[1])
     def record_subplots(rows, columns, *args, **kwargs):
         calls["subplots"].append((rows, columns)); return originals["subplots"](rows, columns, *args, **kwargs)
     monkeypatch.setattr(plt, "subplots", record_subplots)
-    monkeypatch.setattr(graphs_generators_1, "save_plot", lambda title, _paths: f"<figure>{title}</figure>")
+    monkeypatch.setattr(graph_infographics, "render_scalar_overview", lambda *_args, **_kwargs: ("", set()))
+    monkeypatch.setattr(graph_infographics, "render_outcome_infographic", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(graphs_generators_1, "save_plot", lambda title, _paths: calls["figures"].append(plt.gcf()) or f"<figure>{title}</figure>")
     artifacts = {
         "g28": {"title": "Исходы", "unit": "случаев", "chart_kind": "pie", "series": ({"label": "выписан", "value": 2}, {"label": "умер", "value": 1})},
         "g41": {"title": "KM", "unit": "доля", "chart_kind": "step", "series": ({"label": "0,5", "x": 0.5, "value": 1.0}, {"label": "2", "x": 2.0, "value": 0.5})},
@@ -742,8 +744,11 @@ def test_authoritative_renderer_keeps_pie_step_histogram_and_dynamic_ward_grid(m
         "g63": {"title": "Палаты", "unit": "суток", "chart_kind": "ward_histograms", "series": tuple({"group": f"Отделение {index}", "label": "Случай", "value": index} for index in range(1, 8))},
     }
     html = graphs_service._render_authoritative_artifacts(list(artifacts), artifacts, ["#123"] * 8, [], "")
-    assert "Палаты" in html and calls["pie"] == calls["step"] == 1 and calls["hist"] >= 1
-    assert calls["subplots"] == [(4, 2)]
+    outcome_axis = calls["figures"][0].axes[0]
+    assert "Палаты" in html and calls["step"] == 1 and calls["hist"] >= 1
+    assert len(outcome_axis.patches) == 2
+    assert outcome_axis.get_xlabel() == "Доля, %"
+    assert calls["subplots"] == [(3, 2), (1, 2)]
     assert calls["step_x"] == [0.5, 2.0]
     plt.close("all")
 

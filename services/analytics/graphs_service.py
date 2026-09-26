@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import threading
 import time
+import math
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime
 from html import unescape
@@ -29,6 +31,10 @@ from rem_card.ui.styles.theme import (
 DEFAULT_CHART_COLORS = list(ANALYTICS_CHART_COLORS)
 _GRAPH_RENDER_LOCK = threading.RLock()
 MAX_AXIS_TICKS = 10
+_RANKED_NOMINAL_BAR_METRICS = frozenset({
+    "g4", "g5", "g23", "g24", "g25", "g26", "g27", "g30", "g32",
+    "g50", "g57", "g59", "g61", "g62",
+})
 # Public dispatch contract. Every selector is rendered from the platform
 # GraphMetricArtifact; no catalog item maps to a legacy SQL generator.
 def _dispatch_catalog() -> dict[str, str]:
@@ -135,12 +141,25 @@ def build_graphs_html(
 
 def _render_authoritative_artifacts(selected, artifacts, chart_colors, img_paths, html_content: str) -> str:
     """Render only serialized engine data; never query a clinical connection."""
+    from rem_card.services.analytics.graph_infographics import (
+        InfographicReportRenderer,
+        render_outcome_infographic,
+        render_scalar_overview,
+    )
+
     try:
         import matplotlib.pyplot as plt
         from rem_card.ui.analytics.graphs_generators_1 import save_plot
     except ImportError as error:  # pragma: no cover - installation contract
         raise RuntimeError("Для построения графиков требуется matplotlib.") from error
+    infographic_renderer = InfographicReportRenderer()
+    overview_html, infographic_keys = render_scalar_overview(
+        selected, artifacts, chart_colors, img_paths, renderer=infographic_renderer,
+    )
+    html_content += overview_html
     for index, key in enumerate(selected):
+        if key in infographic_keys:
+            continue
         artifact = artifacts[key]
         title = str(artifact.get("title") or key)
         chart_kind = str(artifact.get("chart_kind") or "bar")
@@ -148,22 +167,61 @@ def _render_authoritative_artifacts(selected, artifacts, chart_colors, img_paths
         if chart_kind == "table":
             html_content += _render_table_artifact(title, series)
             continue
-        labels, numeric = _numeric_series(series)
-        labels, numeric = _trim_empty_time_edges(labels, numeric)
-        display_labels = [_format_axis_label(label) for label in labels]
-        if not labels:
+        infographic_html = render_outcome_infographic(key, artifact, chart_colors, img_paths, renderer=infographic_renderer)
+        if infographic_html is not None:
+            html_content += infographic_html
+            continue
+        if not series:
             html_content += f"<div style='text-align:center'><h3>{xml_escape(title)}</h3><p>Нет данных для выбранной популяции.</p></div><br>"
             continue
         color = chart_colors[index % len(chart_colors)]
-        if chart_kind == "ward_histograms":
-            _render_ward_histograms(plt, artifact, series, numeric, color, title)
-        else:
-            _render_standard_chart(
-                plt, artifact, series, labels, display_labels, numeric,
-                chart_colors, color, title, chart_kind,
-            )
-        html_content += save_plot(title, img_paths)
+        panels = _artifact_panels(artifact)
+        for panel_index, panel in enumerate(panels):
+            panel_series = tuple(panel.get("series") or ())
+            labels, numeric = _numeric_series(panel_series)
+            labels, numeric = _trim_empty_time_edges(labels, numeric)
+            display_labels = [_format_axis_label(label) for label in labels]
+            panel_title = title if len(panels) == 1 else f"{title} · {panel_index + 1}/{len(panels)}"
+            if chart_kind == "ward_histograms":
+                _render_ward_histograms(plt, panel, panel_series, numeric, color, panel_title)
+            else:
+                _render_standard_chart(
+                    plt, panel, panel_series, labels, display_labels, numeric,
+                    chart_colors, color, panel_title, chart_kind,
+                )
+            html_content += save_plot(panel_title, img_paths)
     return html_content
+
+
+def _artifact_panels(artifact) -> list[Mapping[str, object]]:
+    """Paginate categorical figures for A4 without changing the source artifact."""
+    series = tuple(artifact.get("series") or ())
+    kind = str(artifact.get("chart_kind") or "bar")
+    if kind == "ward_histograms":
+        groups = sorted({str(row.get("group") or "Не указан") for row in series})
+        if len(groups) <= 6:
+            return [artifact]
+        return [
+            {**artifact, "series": tuple(row for row in series if str(row.get("group") or "Не указан") in groups[start:start + 6])}
+            for start in range(0, len(groups), 6)
+        ]
+    labels, values = _numeric_series(series)
+    if kind != "bar" or not _use_horizontal_bars(artifact, labels):
+        return [artifact]
+    rows = list(zip(series, values))
+    if _is_ranked_nominal_bar(artifact):
+        rows.sort(key=lambda pair: (not math.isfinite(pair[1]), -(pair[1] if math.isfinite(pair[1]) else 0)))
+    panels, page_rows, line_count = [], [], 0
+    for row, _value in rows:
+        label_lines = max(1, len(_wrapped_category_label(str(row.get("label") or "Не указан")).splitlines()))
+        if page_rows and (len(page_rows) >= 10 or line_count + label_lines > 18):
+            panels.append({**artifact, "series": tuple(page_rows)})
+            page_rows, line_count = [], 0
+        page_rows.append(row)
+        line_count += label_lines
+    if page_rows:
+        panels.append({**artifact, "series": tuple(page_rows)})
+    return panels or [artifact]
 
 
 def _render_table_artifact(title: str, series) -> str:
@@ -210,6 +268,8 @@ def _numeric_series(series) -> tuple[list[str], list[float]]:
 
 
 def _render_ward_histograms(plt, artifact, series, numeric, color: str, title: str) -> None:
+    from matplotlib.ticker import MaxNLocator
+
     groups: dict[str, list[float]] = {}
     for item, value in zip(series, numeric):
         groups.setdefault(str(item.get("group") or "Не указан"), []).append(value)
@@ -218,12 +278,16 @@ def _render_ward_histograms(plt, artifact, series, numeric, color: str, title: s
     figure, axes = plt.subplots(row_count, columns, figsize=(12, max(4, row_count * 3.2)))
     flat_axes = list(getattr(axes, "flat", [axes]))
     for axis, (group, group_values) in zip(flat_axes, sorted(groups.items())):
-        axis.hist(group_values, bins=min(20, max(1, len(group_values))), color=color, edgecolor="white")
-        axis.set_title(group)
+        finite_values = [value for value in group_values if math.isfinite(value)]
+        axis.hist(finite_values, bins=min(20, max(1, len(finite_values))), color=color, edgecolor="white")
+        axis.set_title(_wrapped_title(group, 36))
         axis.set_xlabel(str(artifact.get("unit") or "суток"))
+        axis.set_ylabel("Число случаев")
+        axis.yaxis.set_major_locator(MaxNLocator(integer=True))
+        _style_report_axis(axis, grid_axis="y")
     for axis in flat_axes[len(groups):]:
         axis.set_visible(False)
-    figure.suptitle(title)
+    figure.suptitle(_wrapped_title(title))
     figure.tight_layout()
 
 
@@ -231,15 +295,39 @@ def _render_standard_chart(
     plt, artifact, series, labels, display_labels, numeric,
     chart_colors, color: str, title: str, chart_kind: str,
 ) -> None:
-    plt.figure(figsize=(9, 4.5))
+    finite = [(label, value) for label, value in zip(labels, numeric) if math.isfinite(value)]
+    if chart_kind == "bar" and _is_scalar_bar_artifact(artifact, finite):
+        _render_scalar_kpi_card(plt, artifact, finite[0], title, color)
+        return
+
+    plt.figure(figsize=(9.6, _chart_height(labels, chart_kind, artifact)))
+    axis = plt.gca()
     if chart_kind == "pie":
-        colors = [chart_colors[position % len(chart_colors)] for position in range(len(labels))]
-        plt.pie(numeric, labels=labels, colors=colors, autopct="%1.0f%%")
+        # Outcomes are easier to compare as bars.  The renderer writes the
+        # canonical count beside the presentation-only percentage.
+        from rem_card.ui.analytics.chart_renderer import plot_pie_with_legend
+
+        plot_pie_with_legend(numeric, labels, chart_colors, preserve_order=True)
+        axis = plt.gca()
+        axis.set_title(_wrapped_title(title))
     elif chart_kind == "step":
         _render_step_chart(plt, series, labels, display_labels, numeric, color)
-    elif chart_kind == "histogram" and len(numeric) > 1:
-        plt.hist(numeric, bins=min(20, max(1, len(numeric))), color=color, edgecolor="white")
-        plt.xlabel(str(artifact.get("unit") or "значение"))
+        axis = plt.gca()
+        axis.set_title(_wrapped_title(title))
+        _style_report_axis(axis, grid_axis="y")
+    elif chart_kind == "histogram":
+        from matplotlib.ticker import MaxNLocator
+
+        values = [item[1] for item in finite]
+        if values:
+            plt.hist(values, bins=min(20, max(1, len(values))), color=color, edgecolor="white")
+        else:
+            axis.text(0.5, 0.5, "Нет наблюдений для построения распределения", ha="center", va="center", transform=axis.transAxes, color=TEXT_PRIMARY)
+        axis.set_xlabel(_value_axis_label(artifact, "Значение"))
+        axis.set_ylabel("Число случаев")
+        axis.yaxis.set_major_locator(MaxNLocator(integer=True))
+        axis.set_title(_wrapped_title(title))
+        _style_report_axis(axis, grid_axis="y")
     elif chart_kind == "line":
         dates = [_parse_axis_date(label) for label in labels]
         positions = (
@@ -248,15 +336,153 @@ def _render_standard_chart(
             else list(range(len(labels)))
         )
         marker = "o" if len(labels) <= 60 else None
-        plt.plot(positions, numeric, marker=marker, color=color, linewidth=1.8)
+        axis.plot(positions, numeric, marker=marker, color=color, linewidth=2.1)
         _set_sparse_ticks(plt, positions, display_labels)
+        axis.set_ylabel(_value_axis_label(artifact))
+        axis.set_title(_wrapped_title(title))
+        _style_report_axis(axis, grid_axis="y")
     else:
-        positions = list(range(len(labels)))
-        plt.bar(positions, numeric, color=color)
-        _set_sparse_ticks(plt, positions, display_labels)
-    plt.title(title)
-    plt.ylabel(str(artifact.get("unit") or ""))
-    plt.tight_layout()
+        chart_rows = list(zip(labels, display_labels, numeric))
+        if _is_ranked_nominal_bar(artifact):
+            chart_rows.sort(key=lambda row: (not math.isfinite(row[2]), -(row[2] if math.isfinite(row[2]) else 0)))
+        labels, display_labels, numeric = map(list, zip(*chart_rows))
+        horizontal = _use_horizontal_bars(artifact, display_labels)
+        if horizontal:
+            _render_horizontal_bars(axis, display_labels, numeric, color, artifact)
+        else:
+            positions = list(range(len(labels)))
+            bars = axis.bar(positions, numeric, color=color, edgecolor="white", linewidth=0.8)
+            _set_sparse_ticks(plt, positions, display_labels)
+            axis.set_ylabel(_value_axis_label(artifact))
+            _annotate_vertical_bars(axis, bars, numeric)
+            _style_report_axis(axis, grid_axis="y")
+        axis.set_title(_wrapped_title(title))
+    plt.tight_layout(pad=1.35)
+
+
+def _render_scalar_kpi_card(plt, artifact, item, title: str, color: str) -> None:
+    """Present a single calculated bar as a readable report KPI."""
+    label, value = item
+    figure, axis = plt.subplots(figsize=(9.6, 3.8))
+    axis.set_axis_off()
+    figure.patch.set_facecolor("white")
+    axis.set_facecolor("white")
+    unit = str(artifact.get("unit") or "").strip()
+    axis.text(0.5, 0.77, _wrapped_title(title, 56), ha="center", va="center", fontsize=16, fontweight="bold")
+    axis.text(0.5, 0.43, _format_chart_value(value), ha="center", va="center", fontsize=36, fontweight="bold", color=color)
+    axis.text(0.5, 0.25, unit or _clean_chart_label(label), ha="center", va="center", fontsize=13, color=TEXT_PRIMARY)
+    figure.subplots_adjust(left=0.05, right=0.95, top=0.92, bottom=0.08)
+    setattr(figure, "_remcard_manual_layout", True)
+
+
+def _render_horizontal_bars(axis, labels, values, color: str, artifact) -> None:
+    positions = list(range(len(labels)))
+    bars = axis.barh(positions, values, color=color, edgecolor="white", linewidth=0.8, height=0.64)
+    axis.set_yticks(positions)
+    axis.set_yticklabels([_wrapped_category_label(label) for label in labels])
+    axis.invert_yaxis()
+    axis.set_xlabel(_value_axis_label(artifact))
+    _style_report_axis(axis, grid_axis="x")
+    _annotate_horizontal_bars(axis, bars, values)
+
+
+def _annotate_vertical_bars(axis, bars, values) -> None:
+    finite = [value for value in values if math.isfinite(value)]
+    if not finite or len(bars) > 24:
+        return
+    span = max(abs(value) for value in finite) or 1
+    for bar, value in zip(bars, values):
+        if math.isfinite(value):
+            axis.text(bar.get_x() + bar.get_width() / 2, value + span * 0.025, _format_chart_value(value), ha="center", va="bottom", fontsize=10, color=TEXT_PRIMARY)
+    axis.margins(y=0.14)
+    setattr(axis, "_remcard_preserve_annotation_margin", True)
+
+
+def _annotate_horizontal_bars(axis, bars, values) -> None:
+    finite = [value for value in values if math.isfinite(value)]
+    if not finite:
+        return
+    span = max(abs(value) for value in finite) or 1
+    for bar, value in zip(bars, values):
+        if math.isfinite(value):
+            axis.text(value + span * 0.018, bar.get_y() + bar.get_height() / 2, _format_chart_value(value), ha="left", va="center", fontsize=10, color=TEXT_PRIMARY)
+    axis.margins(x=0.18)
+    setattr(axis, "_remcard_preserve_annotation_margin", True)
+
+
+def _style_report_axis(axis, *, grid_axis: str) -> None:
+    axis.grid(axis=grid_axis, color="#d6dde5", linewidth=0.7, alpha=0.65)
+    axis.grid(axis="y" if grid_axis == "x" else "x", visible=False)
+    axis.set_axisbelow(True)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+
+
+def _value_axis_label(artifact, prefix: str = "Значение") -> str:
+    unit = str(artifact.get("unit") or "").strip()
+    if unit == "%":
+        if artifact.get("metric_id") in {"g7", "g12", "g13", "g46", "g47", "g51"}:
+            return "Загрузка, %"
+        return "Доля, %"
+    return f"{prefix}, {unit}" if unit else prefix
+
+
+def _is_ranked_nominal_bar(artifact) -> bool:
+    return str(artifact.get("metric_id") or "") in _RANKED_NOMINAL_BAR_METRICS
+
+
+def _is_scalar_bar_artifact(artifact, finite) -> bool:
+    """Keep calendar/category one-point series as labelled charts.
+
+    The infographic path normally consumes these explicit scalar metrics.  If
+    that renderer is unavailable, the Matplotlib fallback remains a KPI card
+    without guessing that a one-month series is a scalar.
+    """
+    if len(finite) != 1:
+        return False
+    try:
+        from rem_card.services.analytics.graph_infographics import SCALAR_GRAPH_KEYS
+    except ImportError:  # pragma: no cover - compatibility for partial installs
+        return False
+    return str(artifact.get("metric_id") or "") in SCALAR_GRAPH_KEYS
+
+
+def _use_horizontal_bars(artifact, labels) -> bool:
+    metric_id = str(artifact.get("metric_id") or "")
+    if metric_id in _RANKED_NOMINAL_BAR_METRICS and len(labels) > 1:
+        return True
+    longest = max(map(len, labels), default=0)
+    # A one-point calendar series still carries its temporal position.  A
+    # single long nominal category instead needs the full horizontal label.
+    return longest > 14 and not all(_parse_axis_date(label) for label in labels)
+
+
+def _chart_height(labels, chart_kind: str, artifact) -> float:
+    if chart_kind == "bar" and _use_horizontal_bars(artifact, labels):
+        line_count = sum(max(1, len(_wrapped_category_label(label).splitlines())) for label in labels)
+        return max(4.4, 2.4 + 0.44 * line_count)
+    return 5.0
+
+
+def _wrapped_category_label(label: str) -> str:
+    return "\n".join(textwrap.wrap(_clean_chart_label(label), width=28, break_long_words=False))
+
+
+def _wrapped_title(title: str, width: int = 58) -> str:
+    return "\n".join(textwrap.wrap(str(title or ""), width=width, break_long_words=False))
+
+
+def _clean_chart_label(value) -> str:
+    text = str(value or "").strip()
+    return text if text else "Не указано"
+
+
+def _format_chart_value(value: float) -> str:
+    if not math.isfinite(value):
+        return "—"
+    if abs(value - round(value)) < 0.0001:
+        return str(int(round(value)))
+    return f"{value:.2f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
 def _render_step_chart(plt, series, labels, display_labels, numeric, color: str) -> None:

@@ -78,6 +78,8 @@ jobs:
     if: needs.plan.outputs.reuse != 'true'
     runs-on: windows-latest
     timeout-minutes: 20
+    env:
+      REMCARD_RUN_ANTV_SMOKE: "1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: ./.github/actions/setup-tests

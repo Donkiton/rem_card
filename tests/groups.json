@@ -185,6 +185,9 @@
     "tests/test_transfusion_protocol_report_setting.py",
     "tests/test_user_reports_dialog.py",
     "tests/test_vital_settings_dialog_cvp_button.py",
-    "tests/test_w1_layout_handoff.py"
+    "tests/test_w1_layout_handoff.py",
+    "tests/test_chart_presentation.py",
+    "tests/test_graph_infographics.py",
+    "tests/test_infographic_renderer.py"
   ]
 }
