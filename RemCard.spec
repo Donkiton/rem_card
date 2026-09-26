@@ -157,6 +157,10 @@ def _collect_local_submodules():
 
 HIDDEN_IMPORTS = _collect_local_submodules()
 HIDDEN_IMPORTS.extend(collect_submodules("reportlab"))
+HIDDEN_IMPORTS.extend((
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+))
 
 
 def _data_dir(relative_path):
@@ -328,6 +332,7 @@ a = Analysis(
 		_data_dir('data/mkb'),
 		_data_dir('data/patient_assets'),
 		_data_dir('procedure_templates'),
+		_data_dir(os.path.join('services', 'analytics', 'assets', 'antv')),
 
 		# шрифты и служебные данные ReportLab для прямого PDF-рендера
 		*collect_data_files('reportlab'),
