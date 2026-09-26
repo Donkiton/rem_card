@@ -112,6 +112,7 @@
     "tests/test_analytics_platform_cohorts.py",
     "tests/test_analytics_platform_contract.py",
     "tests/test_analytics_platform_ui.py",
+    "tests/test_archive_graphs_pdf_quality.py",
     "tests/test_archive_card_status_loading.py",
     "tests/test_archive_center_navigation.py",
     "tests/test_archive_query_optimizations.py",

@@ -51,6 +51,10 @@ class GraphsBuildResult:
     # used for this report.  Images are a presentation of this payload, not a
     # second analytics contract.
     artifacts: Mapping[str, Mapping[str, object]] | None = None
+    # The UI may use resized copies for its preview, while the report must
+    # keep this original HTML so ReportLab embeds the full-resolution charts.
+    # Kept after the existing fields to preserve positional construction.
+    preview_html: str | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +197,11 @@ def _numeric_series(series) -> tuple[list[str], list[float]]:
     ]
     numeric = []
     for item in series:
+        if item.get("value") is None:
+            # No denominator/observations in this calendar bucket: break the
+            # line instead of displaying a fabricated zero rate or duration.
+            numeric.append(float("nan"))
+            continue
         try:
             numeric.append(float(item.get("value")))
         except (TypeError, ValueError):
@@ -232,7 +241,12 @@ def _render_standard_chart(
         plt.hist(numeric, bins=min(20, max(1, len(numeric))), color=color, edgecolor="white")
         plt.xlabel(str(artifact.get("unit") or "значение"))
     elif chart_kind == "line":
-        positions = list(range(len(labels)))
+        dates = [_parse_axis_date(label) for label in labels]
+        positions = (
+            [(date - dates[0]).days for date in dates]
+            if dates and all(date is not None for date in dates)
+            else list(range(len(labels)))
+        )
         marker = "o" if len(labels) <= 60 else None
         plt.plot(positions, numeric, marker=marker, color=color, linewidth=1.8)
         _set_sparse_ticks(plt, positions, display_labels)

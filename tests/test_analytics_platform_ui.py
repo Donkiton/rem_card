@@ -11,6 +11,28 @@ import threading
 import pytest
 
 
+def test_calendar_line_uses_elapsed_days_and_breaks_undefined_values():
+    import math
+    import matplotlib.pyplot as plt
+    from rem_card.services.analytics.graphs_service import _numeric_series, _render_standard_chart
+
+    series = (
+        {"label": "2024-01", "value": 10},
+        {"label": "2024-02", "value": None},
+        {"label": "2024-03", "value": 20},
+    )
+    labels, numeric = _numeric_series(series)
+    try:
+        _render_standard_chart(plt, {"unit": "%"}, series, labels, labels, numeric,
+                               ["#123456"], "#123456", "Calendar", "line")
+        line = plt.gca().lines[0]
+        assert list(line.get_xdata()) == [0, 31, 60]
+        assert line.get_ydata()[0] == 10 and line.get_ydata()[2] == 20
+        assert math.isnan(line.get_ydata()[1])
+    finally:
+        plt.close("all")
+
+
 def test_workspace_has_stable_drillthrough_modes():
     app = QApplication.instance() or QApplication([])
     widget = AnalyticsWorkspace(); widget.resize(900, 220); widget.show(); app.processEvents()

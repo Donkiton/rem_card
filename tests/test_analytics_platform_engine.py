@@ -10,6 +10,99 @@ from rem_card.services.analytics.platform import AnalyticsEngine, AnalyticsPerio
 from rem_card.services.analytics.graph_catalog import GRAPH_GROUPS
 
 
+@pytest.mark.parametrize("patient_count, expected", [
+    (0, (0, 0, 0, 0, 0)),
+    (1, (1, 25, 1, 0, 1)),
+    (4, (2, 50, 4, 100 / 3, 4)),
+])
+def test_scalar_graph_summary_matches_calculated_bar(patient_count, expected):
+    cases = tuple(
+        SourceCase("scalar", str(index), MetricScope.RAO, datetime(2026, 1, 1), {
+            "transfer_datetime": "2026-01-04" if index == 0 else "2026-01-02",
+        })
+        for index in range(patient_count)
+    )
+
+    class Repo:
+        def fingerprints(self): return ("scalar-summary", str(patient_count))
+        def source_cases(self, scope, period): return cases
+
+    keys = ("g10", "g12", "g16", "g17", "g48")
+    results = AnalyticsEngine(Repo()).snapshot(
+        MetricScope.RAO, AnalyticsPeriod(datetime(2026, 1, 1), datetime(2026, 1, 4)),
+        metric_ids=keys,
+    ).results
+    for key, value in zip(keys, expected):
+        result = results[key]
+        assert result.rows[0]["value"] == pytest.approx(value)
+        assert result.numerator == pytest.approx(value)
+        assert result.denominator is None
+        text_value = f"{value:.2f}".rstrip("0").rstrip(".")
+        assert result.artifact["summary"].endswith(f": {text_value} {result.definition.unit}")
+
+
+@pytest.mark.parametrize("key", ["g1", "g6", "g7", "g9", "g13", "g29", "g34", "g45", "g46", "g56", "g58", "recovery_flow_months"])
+def test_monthly_graphs_keep_empty_month_with_correct_semantics(key):
+    cases = tuple(
+        SourceCase("calendar", str(month), MetricScope.RAO, datetime(2024, month, 1), {
+            "transfer_datetime": f"2024-{month:02d}-02",
+            "recovery_bed_stay": key.startswith("recovery_"),
+            "operations": ({"operation_datetime": f"2024-{month:02d}-01 12:00:00"},),
+            "transfusions": ({"datetime": f"2024-{month:02d}-01 12:00:00"},),
+            "ivl_episodes": ({"start_time": f"2024-{month:02d}-01", "end_time": f"2024-{month:02d}-02"},),
+        })
+        for month in (1, 3)
+    )
+
+    class Repo:
+        def fingerprints(self): return ("calendar-gap", key)
+        def source_cases(self, scope, period): return cases
+
+    result = AnalyticsEngine(Repo()).snapshot(
+        MetricScope.RAO, AnalyticsPeriod(datetime(2024, 1, 1), datetime(2024, 4, 1)),
+        metric_ids=(key,),
+    ).results[key]
+    assert [row["label"] for row in result.rows] == ["2024-01", "2024-02", "2024-03"]
+    assert result.rows[1]["value"] == (None if key in {"g29", "g34"} else 0)
+    assert result.artifact["source_case_ids"] == (() if key == "g29" else tuple(case.id for case in cases))
+
+
+def test_daily_admissions_keep_leap_day_and_exclude_end_boundary():
+    cases = tuple(SourceCase("days", str(day), MetricScope.RAO, stamp, {}) for day, stamp in enumerate((
+        datetime(2024, 2, 28), datetime(2024, 3, 1), datetime(2024, 3, 2),
+    )))
+
+    class Repo:
+        def fingerprints(self): return ("daily-calendar-gap",)
+        def source_cases(self, scope, period): return cases
+
+    result = AnalyticsEngine(Repo()).snapshot(
+        MetricScope.RAO, AnalyticsPeriod(datetime(2024, 2, 28), datetime(2024, 3, 2)),
+        metric_ids=("g3",),
+    ).results["g3"]
+    assert result.rows == (
+        {"label": "2024-02-28", "value": 1},
+        {"label": "2024-02-29", "value": 0},
+        {"label": "2024-03-01", "value": 1},
+    )
+    assert result.numerator == 2
+
+
+def test_calendar_padding_preserves_existing_carry_in_bucket():
+    from rem_card.services.analytics.platform.graph_builder import GraphArtifactBuilder
+    from types import SimpleNamespace
+
+    builder = GraphArtifactBuilder(
+        AnalyticsEngine, SimpleNamespace(graph_key="g9"), (),
+        AnalyticsPeriod(datetime(2026, 1, 1), datetime(2026, 2, 1)),
+    )
+    assert builder.calendar_series(({"label": "2025-11", "value": 0.25},)) == (
+        {"label": "2025-11", "value": 0.25},
+        {"label": "2025-12", "value": 0},
+        {"label": "2026-01", "value": 0},
+    )
+
+
 class Repository:
     def fingerprints(self): return ("fixture",)
     def source_cases(self, scope, _period):
