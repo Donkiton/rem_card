@@ -61,6 +61,14 @@ class UnifiedWindow(QMainWindow):
         self._leaving = False
         self._shutdown = None
         self._pending_exit = False
+        # The application entry point installs the process guard. Embedded/test
+        # windows do not own the lifetime of the hosting Python process.
+        self._exit_guard = None
+        self._exit_started = None
+        self._force_exit_prompt_open = False
+        self._lease_release_pending = False
+        self._exclusive_release_pending = False
+        self._drain_in_flight = False
         self._closing = False
         self._return_to_control = False
         self._restart = False
@@ -279,7 +287,7 @@ class UnifiedWindow(QMainWindow):
         from rem_card.app.roles import ROLE_KEYS
         if role not in (*ROLE_KEYS, "settings") or not self.root:
             return
-        if self._closing or self._busy or self._leaving or self.container is not None:
+        if self._closing or self._pending_exit or self._busy or self._leaving or self.container is not None:
             self._entry_rejections += 1
             if self._entry_rejections <= 3 or self._entry_rejections % 20 == 0:
                 lifecycle_event("role_entry_rejected", session_id=self.session_id, role=role,
@@ -353,17 +361,18 @@ class UnifiedWindow(QMainWindow):
 
     def _finish_cancelled_entry(self):
         if self.lease:
-            self.lease.release()
-            self.lease = None
+            self._release_session_lease(self._finish_cancelled_entry)
+            return
         self._restore_role_environment()
         self._entry_cancel = None
         self._busy = False
         self.welcome.set_preparing()
         lifecycle_event("role_entry_cancelled", session_id=self.session_id, role=self.role)
         self.role = ""
-        self.refresh_access()
         if self._pending_exit:
             QTimer.singleShot(0, self.close)
+        else:
+            self.refresh_access()
 
     def _configure_role_environment(self):
         keys = ("REMCARD_UI_ROLE", "REMCARD_LOCAL_FIRST_SYNC", "REMCARD_LOCAL_OUTBOX_SYNC",
@@ -501,16 +510,21 @@ class UnifiedWindow(QMainWindow):
                 self._busy = True
                 self.welcome.set_access_state("Подготовка не завершена; освобождение базы не подтверждено. Требуется завершить процесс.", True)
             else:
-                self.lease.release()
-                self.lease = None
-                self._restore_role_environment()
+                self._release_session_lease(lambda: self._finish_failed_admission(restart_required))
+                return
+        self._finish_failed_admission(restart_required)
+
+    def _finish_failed_admission(self, restart_required):
         if self.container is None and self.lease is None:
+            self._busy = False
             self._entry_cancel = None
             self._local_only = False
             self._local_only_runtime_state = None
             self.setProperty("remcard_local_only_runtime", None)
             self._restore_role_environment()
-            if restart_required:
+            if self._pending_exit:
+                self.close()
+            elif restart_required:
                 self._restart_resume_role = self.role if self.role in {"doctor", "nurse"} else None
                 self._restart_for_storage_boundary()
 
@@ -670,6 +684,8 @@ class UnifiedWindow(QMainWindow):
             self.request_role_exit()
 
     def request_role_exit(self, force=False):
+        if self._pending_exit:
+            self._begin_application_exit()
         if self._entry_setup_active:
             if self._entry_cancel is not None:
                 self._entry_cancel.set()
@@ -752,9 +768,12 @@ class UnifiedWindow(QMainWindow):
             if isinstance(widget, QDialog) and widget is not self:
                 widget.reject()
         if self._pending_exit:
-            # Hiding is not closing: keep the event loop and runtime alive
-            # until accepted writes have drained and the lease is released.
-            self.hide()
+            # Keep the title bar reachable while accepted writes drain.
+            self.stack.setCurrentWidget(self.welcome)
+            self.entry_chrome.set_role_mode(False)
+            self.stack.setEnabled(False)
+            self.welcome.set_access_state("Завершение сохранений и освобождение базы…", True)
+            self._set_exit_stage("draining", "Завершение сохранений и освобождение базы…")
         else:
             self.welcome.set_access_state("Завершение сохранений и освобождение базы…", True)
             self._animate_page(self.welcome, "shell", False, lambda: None)
@@ -776,6 +795,8 @@ class UnifiedWindow(QMainWindow):
         return any(isValid(thread) and thread.isRunning() for thread in self._role_threads)
 
     def _wait_before_drain(self):
+        if self._shutdown is None:
+            return
         # Keep shutdown/backup work out of the short live resize. The runtime
         # and its lease remain owned until both animation and writes finish.
         if self._transition.running:
@@ -792,10 +813,23 @@ class UnifiedWindow(QMainWindow):
         self._start_drain()
 
     def _start_drain(self):
+        if self._shutdown is None or self._drain_in_flight:
+            return
+        self._drain_in_flight = True
         shutdown, application_exit = self._shutdown, self._pending_exit
-        self._async(lambda: shutdown.run(application_exit=application_exit), self._drained)
+        self._async(lambda: shutdown.run(application_exit=application_exit), self._drained, self._drain_failed)
+
+    def _drain_failed(self, exc):
+        self._drain_in_flight = False
+        lifecycle_event("role_drain_failed", session_id=self.session_id, role=self.role,
+                        error_class=type(exc).__name__)
+        self.welcome.set_access_state("Не удалось завершить освобождение базы. Для выхода нажмите крестик.", True)
+        QTimer.singleShot(2000, self._retry_drain)
 
     def _drained(self, result):
+        self._drain_in_flight = False
+        if self._shutdown is None or self._lease_release_pending:
+            return
         if self._transition.running:
             QTimer.singleShot(40, lambda: self._drained(result))
             return
@@ -814,6 +848,39 @@ class UnifiedWindow(QMainWindow):
             self.welcome.set_access_state("Ожидание фоновых задач рабочего места…", True)
             QTimer.singleShot(500, lambda: self._drained(result))
             return
+        self._release_session_lease(self._finish_drained)
+
+    def _release_session_lease(self, done):
+        if self._lease_release_pending:
+            return
+        lease = self.lease
+        if lease is None:
+            done()
+            return
+        self._busy = True
+        self._lease_release_pending = True
+        self._set_exit_stage("release_session", "Освобождение сетевой сессии…")
+
+        def finished(error=None):
+            self._lease_release_pending = False
+            self.lease = None
+            if error is not None:
+                self._release_failed(error)
+            done()
+
+        self._async(lease.release, lambda _: finished(), finished)
+
+    def _release_failed(self, exc):
+        # Never reuse a runtime after uncertain OS-lock cleanup. The descriptor
+        # close was attempted by the lease; finish this process instead.
+        self._central_unavailable = self._suppress_exit_update = True
+        self._restart = self._update_requested = False
+        self._candidate = None
+        self._begin_application_exit()
+        lifecycle_event("session_release_failed", session_id=self.session_id, role=self.role,
+                        error_class=type(exc).__name__, winerror=getattr(exc, "winerror", None))
+
+    def _finish_drained(self):
         failures = []
         for container in self._shutdown.containers:
             data = getattr(container, "data_service", None)
@@ -841,9 +908,6 @@ class UnifiedWindow(QMainWindow):
         self._local_only_runtime_state = None
         self.setProperty("remcard_local_only_runtime", None)
         self._restore_role_environment()
-        if self.lease:
-            self.lease.release()
-            self.lease = None
         self.role = ""
         self._shutdown = None
         self._leaving = self._busy = False
@@ -1232,9 +1296,12 @@ class UnifiedWindow(QMainWindow):
         self._exit_update_checked = True
         self._update_found(candidate)
         if candidate is not None:
+            # Waiting for an answer is not a stuck shutdown.
+            self._cancel_exit_deadline()
             self._update_requested = QMessageBox.question(
                 self, "Обновление RemCard", f"Доступна версия {candidate.version}. Обновить перед выходом?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
+            self._begin_application_exit()
         self.close()
 
     def _exit_update_failed(self, exc):
@@ -1304,25 +1371,84 @@ class UnifiedWindow(QMainWindow):
         else:
             self.showNormal()
 
+    def _set_exit_stage(self, stage, message):
+        if self._exit_guard is not None:
+            self._exit_guard.set_stage(stage)
+        if self._pending_exit:
+            self.statusBar().show()
+            self.statusBar().showMessage(message + " Повторный крестик — принудительный выход. Лимит завершения — 30 с.")
+
+    def _begin_application_exit(self):
+        self._pending_exit = True
+        if self._exit_started is not None:
+            return
+        self._exit_started = time.monotonic()
+        if self._exit_guard is not None:
+            self._exit_guard.arm("shutdown")
+        self._status_timer.stop()
+        # A role exit can already be waiting for a worker/lease when the user
+        # first clicks close. Keep the independent shell title bar accessible.
+        self.entry_chrome.set_role_mode(False)
+        self._set_exit_stage("shutdown", "Закрытие RemCard…")
+
+    def _cancel_exit_deadline(self):
+        if self._exit_guard is not None:
+            self._exit_guard.disarm()
+        self._exit_started = None
+        self.statusBar().clearMessage()
+        self.statusBar().hide()
+
+    def _offer_force_exit(self):
+        exit_started, guard = self._exit_started, self._exit_guard
+        if self._force_exit_prompt_open or guard is None or exit_started is None:
+            return
+        self._force_exit_prompt_open = True
+        try:
+            answer = QMessageBox.question(
+                self, "Принудительное закрытие",
+                "Завершение программы ещё выполняется. Закрыть принудительно?\n\n"
+                "Несохранённые изменения и записи без подтверждения могут быть потеряны. "
+                "Обычное завершение ограничено 30 секундами с момента запроса выхода.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            # The modal loop can finish/cancel this exit or start a new one
+            # (for example after a failed updater launch). A stale answer must
+            # never arm another forced exit against the reopened application.
+            if (answer == QMessageBox.Yes and self._pending_exit
+                    and self._exit_started == exit_started
+                    and self._exit_guard is guard and guard.armed):
+                guard.force()
+        finally:
+            self._force_exit_prompt_open = False
+
     def request_application_exit(self, confirmed=False):
+        if self._exit_started is not None and not confirmed:
+            self._offer_force_exit()
+            return
         if self._leaving:
-            self._pending_exit = True
+            self._begin_application_exit()
             return
         if not confirmed:
             from rem_card.ui.shared.custom_message_box import CustomMessageBox
-            if CustomMessageBox.question(self, "Выход из программы", "Выйти из программы?") != QMessageBox.Yes:
+            if CustomMessageBox.question(self, "Выход из программы", "Выйти из программы?\n\n"
+                                         "При зависании завершение будет принудительно остановлено через 30 секунд. "
+                                         "Неподтверждённые изменения могут быть потеряны.") != QMessageBox.Yes:
                 self._pending_exit = False
                 return
-        self._pending_exit = True
+        self._begin_application_exit()
         if self.container is not None:
             self.request_role_exit(force=True)
         else:
             self.close()
 
     def closeEvent(self, event):
+        # Native Windows close events share the same escape hatch as our title bar.
+        if self._exit_started is not None and getattr(event, "spontaneous", lambda: False)():
+            event.ignore()
+            self._offer_force_exit()
+            return
         if self._entry_cancel is not None and self.container is None:
             event.ignore()
-            self._pending_exit = True
+            self._begin_application_exit()
             self.cancel_role_entry()
             return
         if self.container is not None:
@@ -1331,7 +1457,9 @@ class UnifiedWindow(QMainWindow):
             return
         if self._busy or self._leaving:
             event.ignore()
+            self._begin_application_exit()
             return
+        self._begin_application_exit()
         if (self.root and not self._exit_update_checked and not self._update_requested
                 and not self._restart and not self._suppress_exit_update and not self._central_unavailable):
             event.ignore()
@@ -1351,7 +1479,9 @@ class UnifiedWindow(QMainWindow):
             self._save_geometry("shell")
         self._status_timer.stop()
         if self.exclusive:
-            self.exclusive.release()
+            self._release_exclusive_for_exit()
+            event.ignore()
+            return
         if self._restart:
             from rem_card.app.main import _launch_requested_restart
             if self._restart_resume_role:
@@ -1365,7 +1495,9 @@ class UnifiedWindow(QMainWindow):
             launched = True
         if not launched:
             event.ignore()
+            self._cancel_exit_deadline()
             self._closing = self._restart = self._update_requested = self._pending_exit = False
+            self.stack.setEnabled(True)
             self._status_timer.start()
             self.show_roles()
             self.show()
@@ -1373,3 +1505,19 @@ class UnifiedWindow(QMainWindow):
             return
         event.accept()
         QApplication.quit()
+
+    def _release_exclusive_for_exit(self):
+        if self._exclusive_release_pending:
+            return
+        self._exclusive_release_pending = True
+        lease = self.exclusive
+        self._set_exit_stage("release_exclusive", "Освобождение доступа обслуживания…")
+
+        def finished(error=None):
+            self._exclusive_release_pending = False
+            self.exclusive = None
+            if error is not None:
+                self._release_failed(error)
+            self.close()
+
+        self._async(lease.release, lambda _: finished(), finished)

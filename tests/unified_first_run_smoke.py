@@ -149,8 +149,10 @@ def main() -> None:
     pages = []
     reopened.stack.currentChanged.connect(lambda _: pages.append((reopened.stack.currentWidget(), reopened.isVisible())))
     reopened.request_application_exit(confirmed=True)
-    if not reopened.isHidden():
-        raise RuntimeError("Application exit did not hide the window")
+    if not reopened.isVisible() or reopened.entry_chrome.title_bar.isHidden():
+        raise RuntimeError("Application exit must keep the close button visible until resources drain")
+    if reopened.stack.isEnabled():
+        raise RuntimeError("Application exit must disable clinical editing while resources drain")
     wait_until(app, lambda: reopened.container is None and reopened._closing, timeout=60.0)
     if reopened.lease is not None:
         raise RuntimeError("Application exit retained the database lease")

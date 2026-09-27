@@ -222,3 +222,25 @@ def test_admin_can_recover_released_maintenance_without_reopening_public_entry(t
         assert store.read()['state'] == 'open'
     finally:
         admin.release()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows UnlockFileEx error handling')
+def test_network_unlock_error_still_closes_descriptor_and_is_reported(tmp_path, monkeypatch):
+    import ctypes
+    from rem_card.app import unified_access
+    lock = unified_access._ByteLock(tmp_path / 'gate.lock', shared=True)
+    assert lock.acquire(blocking=False)
+    fd = lock._fd
+
+    def fail_unlock(*args):
+        ctypes.set_last_error(59)
+        return False
+
+    monkeypatch.setattr(unified_access._kernel32, 'UnlockFileEx', fail_unlock)
+    with pytest.raises(OSError) as error:
+        lock.release()
+    assert error.value.winerror == 59
+    with pytest.raises(OSError):
+        os.fstat(fd)
+    assert lock._fd is None
+    lock.release()
