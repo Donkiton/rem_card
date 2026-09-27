@@ -76,6 +76,10 @@ class PatientService:
         return self._release_due_outcome_beds_impl()
 
     def maybe_release_due_outcome_beds_async(self, force: bool = False) -> bool:
+        if self.data_service is not None:
+            outage_detected = getattr(self.data_service, "is_network_outage_detected", None)
+            if callable(outage_detected) and outage_detected():
+                return False
         now_mono = time.monotonic()
         with self._outcome_release_guard:
             if self._outcome_release_worker_active:

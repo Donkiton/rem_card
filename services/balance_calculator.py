@@ -184,18 +184,41 @@ class BalanceCalculator:
 
     @classmethod
     def _maybe_reload_engine(cls):
+        """Compatibility hook kept intentionally free of settings IO.
+
+        ``calculate`` is called by Qt timers and signals.  Its catalog refresh
+        is prepared by the view in ``AsyncCallThread`` and atomically applied
+        before the next calculation.
+        """
+        return False
+
+    @classmethod
+    def engine_reload_due(cls) -> bool:
+        """Cheap UI-safe gate that avoids creating a worker for every signal."""
+        return (time.monotonic() - cls._engine_last_reload_mono) >= cls._engine_reload_interval_sec
+
+    @classmethod
+    def prepare_engine_reload_if_due(cls):
+        """Read catalog versions/datasets in a background worker when due."""
         now_mono = time.monotonic()
         if (now_mono - cls._engine_last_reload_mono) < cls._engine_reload_interval_sec:
-            return
+            return None
         with cls._engine_reload_lock:
             now_mono = time.monotonic()
             if (now_mono - cls._engine_last_reload_mono) < cls._engine_reload_interval_sec:
-                return
+                return None
             cls._engine_last_reload_mono = now_mono
-            try:
-                engine.reload_if_changed()
-            except Exception:
-                pass
+        return engine.prepare_reload_if_changed()
+
+    @classmethod
+    def apply_prepared_engine_reload(cls, prepared) -> bool:
+        return bool(engine.apply_prepared_reload(prepared))
+
+    @classmethod
+    def refresh_engine_if_due_in_background(cls) -> bool:
+        """Use only from an already-background report worker."""
+        prepared = cls.prepare_engine_reload_if_due()
+        return bool(prepared and cls.apply_prepared_engine_reload(prepared))
 
     @classmethod
     def _resolve_terminal_limit(

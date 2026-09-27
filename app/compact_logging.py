@@ -289,6 +289,9 @@ class CompactLogHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
+    def flush(self) -> None:
+        self.target.flush()
+
     def close(self) -> None:
         if self._closed_once:
             return

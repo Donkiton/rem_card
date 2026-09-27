@@ -16,6 +16,7 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
+from PySide6.QtCore import QObject, Signal  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from rem_card.ui.doctor_view import doctor_remcard_widget as doctor_module  # noqa: E402
@@ -25,8 +26,31 @@ from rem_card.ui.doctor_view.components.beds_selection_widget import BedsSelecti
 from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget  # noqa: E402
 from rem_card.ui.rem_card_sectors.sector_2b import Sector2b  # noqa: E402
 from rem_card.ui.rem_card_sectors.sector_4_sub import Sector4v  # noqa: E402
+from rem_card.ui.rem_card_sectors import sector_7vit_b as notice_module  # noqa: E402
+from rem_card.ui.rem_card_sectors.sector_7vit_b import Sector7vit_b  # noqa: E402
 from rem_card.ui.rem_card_sectors.s_print.full_report_data import FullReportDataCollector  # noqa: E402
 from rem_card.ui.shared.patient_archive_dialog import CardListWidget  # noqa: E402
+
+
+class _DeferredNoticeWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(object)
+    finished = Signal()
+    instances = []
+
+    def __init__(self, fn, *args, **kwargs):
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.started = False
+        self.cancelled = False
+        self.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def quit(self):
+        self.cancelled = True
 
 
 class _VitalsStub:
@@ -315,7 +339,12 @@ class PlanCardTest(unittest.TestCase):
             _card_snapshot_cache={
                 "card_exists": True,
                 "yest_exists": True,
+                "current_card_exists": True,
+                "current_yest_exists": False,
+                "current_card_shift_start": current_shift_start,
                 "plan_card_available": True,
+                "plan_card_window_active": True,
+                "plan_card_target_date": plan_shift_start,
             },
             layout_manager=SimpleNamespace(
                 sector_4v=SimpleNamespace(btn_new_card=new_button, btn_plan_card=plan_button)
@@ -351,6 +380,8 @@ class PlanCardTest(unittest.TestCase):
                 "card_exists": True,
                 "has_any_card": True,
                 "yest_exists": False,
+                "current_card_exists": False,
+                "current_card_shift_start": current_shift_start,
                 "plan_card_available": False,
             },
         )
@@ -685,7 +716,14 @@ class PlanCardTest(unittest.TestCase):
             service=service,
             _archive_read_only_mode=False,
             _current_date=plan_shift_start,
-            _card_snapshot_cache={},
+            _card_snapshot_cache={
+                "current_card_exists": True,
+                "current_yest_exists": True,
+                "current_card_shift_start": current_shift_start,
+                "plan_card_available": True,
+                "plan_card_window_active": True,
+                "plan_card_target_date": plan_shift_start,
+            },
             safe_load_archived_card=lambda target_date: opened_dates.append(target_date),
         )
         _bind_plan_methods(widget)
@@ -729,6 +767,146 @@ class PlanCardTest(unittest.TestCase):
 
         self.assertEqual(results[0]["report_title"], "РЕАНИМАЦИОННАЯ КАРТА")
         self.assertEqual(results[1]["report_title"], "ПЛАНИРУЕМАЯ РЕАНИМАЦИОННАЯ КАРТА")
+
+    def test_notice_read_is_deferred_and_stale_result_cannot_replace_new_context(self):
+        _DeferredNoticeWorker.instances.clear()
+        first = SimpleNamespace(get_emergency_notice=lambda *_args, **_kwargs: self.fail("UI called central read"))
+        second = SimpleNamespace(get_emergency_notice=lambda *_args, **_kwargs: self.fail("UI called central read"))
+        with patch.object(notice_module, "AsyncCallThread", _DeferredNoticeWorker):
+            widget = Sector7vit_b()
+            try:
+                self.assertFalse(widget.set_context(first, 11))
+                old_worker = _DeferredNoticeWorker.instances[-1]
+                self.assertTrue(old_worker.started)
+                self.assertEqual(widget.status_label.text(), "Загрузка номера извещения...")
+
+                self.assertFalse(widget.set_context(second, 12))
+                new_worker = _DeferredNoticeWorker.instances[-1]
+                # Even the same patient reopened after B needs a distinct
+                # generation: queued completion of the first A is stale.
+                self.assertFalse(widget.set_context(first, 11))
+                reopened_worker = _DeferredNoticeWorker.instances[-1]
+                old_worker.succeeded.emit({"number": "old"})
+                self.assertEqual(widget.notice_edit.text(), "")
+
+                new_worker.succeeded.emit({"number": "new"})
+                self.assertEqual(widget.notice_edit.text(), "")
+                reopened_worker.succeeded.emit({"number": "reopened"})
+                self.assertEqual(widget.notice_edit.text(), "reopened")
+                reopened_worker.failed.emit(OSError("synthetic slow share"))
+                self.assertEqual(widget.notice_edit.text(), "reopened")
+            finally:
+                widget.shutdown()
+                widget.deleteLater()
+
+    def test_plan_card_buttons_use_snapshot_without_ui_database_read(self):
+        now = datetime(2026, 6, 22, 7, 30)
+        current_shift_start, plan_shift_start = ShiftService.get_day_period(now)
+        service = SimpleNamespace(
+            get_day_period=ShiftService.get_day_period,
+            has_card=lambda *_args, **_kwargs: self.fail("UI called central has_card"),
+        )
+        snapshot = {
+            "card_exists": True,
+            "has_any_card": True,
+            "yest_exists": True,
+            "current_card_exists": True,
+            "current_yest_exists": False,
+            "current_card_shift_start": current_shift_start,
+            "plan_card_available": True,
+            "plan_card_window_active": True,
+            "plan_card_exists": True,
+            "plan_card_target_date": plan_shift_start,
+        }
+        widget = SimpleNamespace(
+            admission_id=1,
+            service=service,
+            _archive_read_only_mode=False,
+            _current_date=plan_shift_start,
+            _card_snapshot_cache=snapshot,
+        )
+        _bind_plan_methods(widget)
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            self.assertEqual(widget._sector_4v_action_state(snapshot), (True, False, True, True))
+        finally:
+            doctor_module.datetime = original_datetime
+
+    def test_plan_card_snapshot_expires_at_medical_day_boundary_and_queues_refresh(self):
+        before_boundary = datetime(2026, 6, 22, 7, 30)
+        after_boundary = datetime(2026, 6, 22, 8, 1)
+        current_shift_start, old_plan_start = ShiftService.get_day_period(before_boundary)
+        _new_current_start, new_plan_start = ShiftService.get_day_period(after_boundary)
+        snapshot = {
+            "current_card_shift_start": current_shift_start,
+            "current_card_exists": True,
+            "current_yest_exists": False,
+            "plan_card_available": True,
+            "plan_card_window_active": True,
+            "plan_card_exists": True,
+            "plan_card_target_date": old_plan_start,
+        }
+        refreshes = []
+        widget = SimpleNamespace(
+            admission_id=1,
+            service=SimpleNamespace(get_day_period=ShiftService.get_day_period),
+            _archive_read_only_mode=False,
+            _current_date=old_plan_start,
+            _card_snapshot_cache=snapshot,
+            _last_plan_card_open_state=True,
+            _card_state_refresh_pending=False,
+            _is_closing=False,
+            _request_card_snapshot=lambda **kwargs: refreshes.append(kwargs),
+        )
+        for name in (
+            "_card_shift_start",
+            "_plan_card_state_for_admission",
+            "_is_plan_card_date",
+            "_is_plan_card_open",
+            "_sync_plan_card_ui_state",
+        ):
+            setattr(widget, name, MethodType(getattr(DoctorRemCardWidget, name), widget))
+        original_datetime = _freeze_doctor_datetime(after_boundary)
+        original_qtimer = doctor_module.QTimer
+        doctor_module.QTimer = SimpleNamespace(singleShot=lambda _delay_ms, callback: callback())
+        try:
+            state = widget._plan_card_state_for_admission(1)
+            self.assertFalse(state["plan_card_window_active"])
+            self.assertFalse(state["current_card_known"])
+            self.assertEqual(state["plan_card_target_date"], new_plan_start)
+            self.assertTrue(widget._sync_plan_card_ui_state())
+        finally:
+            doctor_module.QTimer = original_qtimer
+            doctor_module.datetime = original_datetime
+        self.assertEqual(refreshes, [{"show_empty_message": False, "load_scope": "patient_open_card"}])
+
+    def test_notice_worker_completion_after_widget_shutdown_is_ignored(self):
+        _DeferredNoticeWorker.instances.clear()
+        with patch.object(notice_module, "AsyncCallThread", _DeferredNoticeWorker):
+            widget = Sector7vit_b()
+            self.assertFalse(widget.set_context(SimpleNamespace(), 11))
+            worker = _DeferredNoticeWorker.instances[-1]
+            widget.shutdown()
+            widget.deleteLater()
+            self.app.processEvents()
+
+            # A queued worker completion can arrive after its receiving page
+            # closed.  The captured generation/closed guard must make it inert.
+            worker.succeeded.emit({"number": "late"})
+            worker.failed.emit(OSError("late failure"))
+            worker.finished.emit()
+
+    def test_known_empty_status_is_not_treated_as_unknown_outcome(self):
+        widget = SimpleNamespace(
+            admission_id=11,
+            _card_snapshot_cache={"status": None},
+            layout_manager=SimpleNamespace(_current_status_dto=None),
+        )
+        checker = MethodType(DoctorRemCardWidget._current_status_is_outcome, widget)
+        self.assertFalse(checker())
+
+        widget._card_snapshot_cache = {}
+        self.assertTrue(checker())
 
 
 if __name__ == "__main__":

@@ -344,3 +344,61 @@ def test_background_loader_uses_captured_service_not_new_patient_service(cls):
     owner = SimpleNamespace(service=None, remcard_service=None)
     cls._load_balance_snapshot_job(owner, {"context": (7, START, "live", "live", captured)})
     assert calls == [((7, START), {"include_change_cursor": True, "balance_only_committed": True})]
+
+
+def test_balance_calculation_does_not_read_catalog_versions_synchronously(monkeypatch):
+    from rem_card.services import balance_calculator as module
+
+    monkeypatch.setattr(
+        module.engine,
+        "reload_if_changed",
+        lambda *args, **kwargs: pytest.fail("balance calculation checked settings in UI thread"),
+    )
+    result = BalanceCalculator.calculate([], START, END)
+    assert result["daily"]["total"] == 0.0
+
+
+def test_balance_catalog_refresh_is_prepared_before_gui_apply(monkeypatch):
+    from rem_card.services import balance_calculator as module
+
+    prepared = {"baseline_signature": (1, 1), "signature": (2, 2), "loaded": {"drugs": {"x": {}}}}
+    monkeypatch.setattr(module.engine, "prepare_reload_if_changed", lambda: prepared)
+    applied = []
+    monkeypatch.setattr(module.engine, "apply_prepared_reload", lambda value: applied.append(value) or True)
+    monkeypatch.setattr(BalanceCalculator, "_engine_last_reload_mono", 0.0)
+
+    assert BalanceCalculator.prepare_engine_reload_if_due() == prepared
+    assert BalanceCalculator.apply_prepared_engine_reload(prepared)
+    assert applied == [prepared]
+
+
+@pytest.mark.parametrize("cls", [DoctorRemCardWidget, NurseMainWidget])
+def test_stale_balance_catalog_worker_cannot_apply_or_schedule_recalculation(cls):
+    applied, scheduled = [], []
+    calculator = SimpleNamespace(
+        apply_prepared_engine_reload=lambda payload: applied.append(payload) or True,
+    )
+    current = {"generation": 2}
+    card = SimpleNamespace(
+        _is_closing=False,
+        _balance_engine_request=current,
+        _balance_engine_generation=2,
+        _balance_calculator_cls=calculator,
+        _schedule_balance_update=lambda: scheduled.append(True),
+    )
+    card._balance_engine_request_is_current = MethodType(
+        cls._balance_engine_request_is_current,
+        card,
+    )
+    card._on_balance_engine_reload_prepared = MethodType(
+        cls._on_balance_engine_reload_prepared,
+        card,
+    )
+
+    card._on_balance_engine_reload_prepared({"generation": 1}, {"signature": "stale"})
+    assert applied == []
+    assert scheduled == []
+
+    card._on_balance_engine_reload_prepared(current, {"signature": "current"})
+    assert applied == [{"signature": "current"}]
+    assert scheduled == [True]

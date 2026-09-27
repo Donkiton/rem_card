@@ -20,6 +20,7 @@ from rem_card.app.local_metrics import record_metric
 from rem_card.app.paths import get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.services.archive_readonly_service import create_archive_readonly_service
+from rem_card.services.shift_service import ShiftService
 from rem_card.ui.shared.orders_balance_adapter import (
     apply_current_order_mark_overrides,
     apply_orders_widget_mark_overrides,
@@ -147,6 +148,9 @@ class DoctorRemCardWidget(QWidget):
         self._burn_patient_hint = None
         self._balance_runtime_cache = None
         self._balance_runtime_provisional = False
+        self._balance_engine_worker = None
+        self._balance_engine_request = None
+        self._balance_engine_generation = 0
         self._read_only_widget_signature = None
         self._operblock_archive_viewer = None
         self._operblock_archive_db_manager = None
@@ -157,6 +161,7 @@ class DoctorRemCardWidget(QWidget):
         self._full_layout_static_signals_bound = False
         self._patient_open_generation = 0
         self._last_plan_card_open_state = False
+        self._card_state_refresh_pending = False
         self._add_patient_lock = self._build_add_patient_lock()
         self._add_patient_lock_held = False
         self._add_patient_locked_by_other = False
@@ -1752,14 +1757,11 @@ class DoctorRemCardWidget(QWidget):
             or getattr(patient, "outcome", None)
         ):
             return True
-        if self.admission_id and getattr(self, "service", None) and hasattr(self.service, "get_current_status"):
-            try:
-                current_status = self.service.get_current_status(self.admission_id)
-            except Exception:
-                current_status = None
-            current_status_value = getattr(current_status, "status", None)
-            if current_status and getattr(current_status_value, "is_outcome", lambda: False)():
-                return True
+        if self.admission_id and "status" not in snapshot and layout_status is None:
+            # A fresh card context has no authoritative status until its
+            # snapshot arrives.  Keep creation controls blocked instead of
+            # presenting the unknown state as "no outcome".
+            return True
         return False
 
     def _apply_archive_read_only_state(self):
@@ -1880,13 +1882,29 @@ class DoctorRemCardWidget(QWidget):
             return left == right
 
     def _plan_card_state_for_admission(self, admission_id: int, now: datetime | None = None):
-        if not self.service or not hasattr(self.service, "build_plan_card_state"):
+        if int(admission_id or 0) != int(self.admission_id or 0):
             return {}
-        try:
-            return dict(self.service.build_plan_card_state(int(admission_id), now=now))
-        except Exception as exc:
-            logger.warning("Failed to resolve planned card state admission_id=%s: %s", admission_id, exc)
+        snapshot = self._card_snapshot_cache or {}
+        reference_dt = now or datetime.now()
+        current_start = self._card_shift_start(reference_dt)
+        if current_start is None:
             return {}
+        _start, target_date = self.service.get_day_period(reference_dt)
+        snapshot_current_start = snapshot.get("current_card_shift_start")
+        current_card_known = snapshot_current_start == current_start
+        snapshot_target_start = self._card_shift_start(snapshot.get("plan_card_target_date"))
+        target_start = self._card_shift_start(target_date)
+        plan_exists_known = snapshot_target_start == target_start
+        window_active = ShiftService.is_plan_card_window(reference_dt)
+        current_card_exists = bool(snapshot.get("current_card_exists")) if current_card_known else None
+        return {
+            "plan_card_available": bool(window_active and current_card_known and current_card_exists),
+            "plan_card_window_active": bool(window_active),
+            "plan_card_exists": bool(snapshot.get("plan_card_exists")) if plan_exists_known else False,
+            "plan_card_target_date": target_date,
+            "current_card_known": current_card_known,
+            "current_card_exists": current_card_exists,
+        }
 
     def _card_shift_start(self, value: datetime | None):
         if value is None or not self.service or not hasattr(self.service, "get_day_period"):
@@ -1929,19 +1947,13 @@ class DoctorRemCardWidget(QWidget):
 
     def _sector_4v_button_state(self, snapshot=None) -> tuple[bool, bool, bool]:
         snapshot = snapshot if isinstance(snapshot, dict) else (self._card_snapshot_cache or {})
-        if self._is_plan_card_open() and self.admission_id:
-            now = datetime.now()
-            plan_state = self._plan_card_state_for_admission(int(self.admission_id), now=now)
-            try:
-                card_exists = bool(self.service.has_card(int(self.admission_id), now))
-            except Exception:
-                card_exists = bool(plan_state.get("plan_card_available"))
-            try:
-                current_start, _current_end = self.service.get_day_period(now)
-                yest_exists = bool(self.service.has_card(int(self.admission_id), current_start - timedelta(days=1)))
-            except Exception:
-                yest_exists = bool(snapshot.get("yest_exists"))
-            return card_exists, yest_exists, bool(plan_state.get("plan_card_available"))
+        if self._is_plan_card_open():
+            # The snapshot builder performs these central reads off-thread.
+            # Missing state is deliberately conservative: a new card remains
+            # unavailable until an authoritative snapshot arrives.
+            card_exists = bool(snapshot.get("current_card_exists", True))
+            yest_exists = bool(snapshot.get("current_yest_exists", snapshot.get("yest_exists")))
+            return card_exists, yest_exists, bool(snapshot.get("plan_card_available"))
         return (
             bool(snapshot.get("card_exists")),
             bool(snapshot.get("yest_exists")),
@@ -1951,14 +1963,12 @@ class DoctorRemCardWidget(QWidget):
     def _sector_4v_action_state(self, snapshot=None) -> tuple[bool, bool, bool, bool]:
         snapshot = snapshot if isinstance(snapshot, dict) else (self._card_snapshot_cache or {})
         selected_card_exists, yest_exists, plan_card_available = self._sector_4v_button_state(snapshot)
-        current_card_exists = selected_card_exists
-        if self.admission_id and not self._is_same_medical_day(self._current_date, datetime.now()):
-            try:
-                current_card_exists = bool(self.service.has_card(int(self.admission_id), datetime.now()))
-            except Exception as exc:
-                logger.warning("Failed to resolve current card state admission_id=%s: %s", self.admission_id, exc)
-                # При недоступной БД нельзя безопасно разрешать создание потенциального дубля.
-                current_card_exists = True
+        current_state = self._plan_card_state_for_admission(int(self.admission_id or 0))
+        current_card_exists = (
+            bool(current_state.get("current_card_exists"))
+            if current_state.get("current_card_known")
+            else (selected_card_exists if self._is_same_medical_day(self._current_date, datetime.now()) else True)
+        )
         open_card_available = bool(snapshot.get("has_any_card", selected_card_exists) or current_card_exists)
         return current_card_exists, yest_exists, plan_card_available, open_card_available
 
@@ -1978,7 +1988,72 @@ class DoctorRemCardWidget(QWidget):
             layout.set_plan_card_mode(plan_card_open)
         previous = bool(getattr(self, "_last_plan_card_open_state", False))
         self._last_plan_card_open_state = bool(plan_card_open)
+        current_start = self._card_shift_start(datetime.now())
+        snapshot_start = (self._card_snapshot_cache or {}).get("current_card_shift_start")
+        if (
+            current_start is not None
+            and snapshot_start != current_start
+            and not self._card_state_refresh_pending
+            and not self._is_closing
+            and self.admission_id
+        ):
+            self._card_state_refresh_pending = True
+
+            def refresh_card_button_state(expected_start=current_start):
+                self._card_state_refresh_pending = False
+                if self._is_closing or not self.admission_id:
+                    return
+                if self._card_shift_start(datetime.now()) != expected_start:
+                    return
+                request_snapshot = getattr(self, "_request_card_snapshot", None)
+                if callable(request_snapshot):
+                    request_snapshot(show_empty_message=False, load_scope="patient_open_card")
+
+            QTimer.singleShot(0, refresh_card_button_state)
         return previous != bool(plan_card_open)
+
+    def _balance_engine_request_is_current(self, request) -> bool:
+        return bool(
+            not self._is_closing
+            and request is self._balance_engine_request
+            and request.get("generation") == self._balance_engine_generation
+        )
+
+    def _request_balance_engine_reload(self):
+        if self._is_closing or self._balance_engine_worker is not None:
+            return
+        calculator = self._balance_calculator_cls
+        if calculator is None or not calculator.engine_reload_due():
+            return
+        request = {"generation": self._balance_engine_generation}
+        self._balance_engine_request = request
+        worker = AsyncCallThread(calculator.prepare_engine_reload_if_due)
+        self._balance_engine_worker = worker
+        worker.succeeded.connect(lambda prepared, req=request: self._on_balance_engine_reload_prepared(req, prepared))
+        worker.failed.connect(lambda exc, req=request: self._on_balance_engine_reload_failed(req, exc))
+        worker.finished.connect(lambda req=request, current=worker: self._on_balance_engine_reload_finished(req, current))
+        worker.start()
+
+    def _on_balance_engine_reload_prepared(self, request, prepared):
+        if not self._balance_engine_request_is_current(request):
+            return
+        try:
+            changed = self._balance_calculator_cls.apply_prepared_engine_reload(prepared)
+        except Exception as exc:
+            logger.warning("Doctor balance catalog apply failed: %s", exc)
+            return
+        if changed:
+            self._schedule_balance_update()
+
+    def _on_balance_engine_reload_failed(self, request, exc):
+        if self._balance_engine_request_is_current(request):
+            logger.warning("Doctor balance catalog refresh failed: %s", exc)
+
+    def _on_balance_engine_reload_finished(self, request, worker):
+        if worker is self._balance_engine_worker:
+            self._balance_engine_worker = None
+        if request is self._balance_engine_request:
+            self._balance_engine_request = None
 
     def _should_ensure_initial_status_for_date(self, value: datetime) -> bool:
         if getattr(self, "_archive_read_only_mode", False):
@@ -3535,6 +3610,9 @@ class DoctorRemCardWidget(QWidget):
             from ...services.balance_calculator import BalanceCalculator
 
             self._balance_calculator_cls = BalanceCalculator
+        request_engine_reload = getattr(self, "_request_balance_engine_reload", None)
+        if callable(request_engine_reload):
+            request_engine_reload()
         runtime = self._balance_runtime_cache or {}
         if not runtime:
             return
@@ -4576,6 +4654,15 @@ class DoctorRemCardWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        self._balance_engine_generation += 1
+        balance_engine_worker = self._balance_engine_worker
+        self._balance_engine_worker = None
+        self._balance_engine_request = None
+        if balance_engine_worker is not None:
+            try:
+                balance_engine_worker.quit()
+            except Exception:
+                pass
         prewarmer = getattr(self, "_card_ui_prewarmer", None)
         if prewarmer is not None:
             prewarmer.cancel(reason="role_shutdown")
@@ -4587,6 +4674,9 @@ class DoctorRemCardWidget(QWidget):
         sector_ivl = getattr(getattr(self, "layout_manager", None), "sector_ivl", None)
         if sector_ivl is not None and hasattr(sector_ivl, "shutdown"):
             sector_ivl.shutdown()
+        sector_notice = getattr(getattr(self, "layout_manager", None), "sector_7vit_b", None)
+        if sector_notice is not None and hasattr(sector_notice, "shutdown"):
+            sector_notice.shutdown()
         if hasattr(self, "chart") and self.chart and hasattr(self.chart, "shutdown"):
             self.chart.shutdown()
         if hasattr(self, "_balance_update_timer"):

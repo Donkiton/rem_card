@@ -1,3 +1,4 @@
+import threading
 import time
 from types import SimpleNamespace
 
@@ -1153,12 +1154,40 @@ def test_update_question_suspends_exit_deadline_and_rearms_after_answer(shell, m
 def test_unified_doctor_outage_does_not_wait_for_monitor_in_gui(monkeypatch):
     from rem_card.ui.main_window import MainWindow
     from rem_card.ui.shared.custom_message_box import CustomMessageBox
-    closed = []
-    data = SimpleNamespace(prepare_runtime_outage_shutdown=lambda **kw: pytest.fail('blocking GUI shutdown'))
+    events = []
+    dialog_entered = threading.Event()
+    release_dialog = threading.Event()
+    data = SimpleNamespace(
+        quiesce_runtime_outage_background_work=lambda payload: events.append(('quiesced', payload)),
+        prepare_runtime_outage_shutdown=lambda **kw: pytest.fail('blocking GUI shutdown'),
+    )
     window = SimpleNamespace(
         _runtime_outage_handling=False, _is_closing=False, container=SimpleNamespace(data_service=data),
+        doctor_main=SimpleNamespace(stop_auto_refresh=lambda: events.append(('role_stopped', None))),
         stack=SimpleNamespace(setEnabled=lambda enabled: None),
-        window=lambda: SimpleNamespace(unified_controller=object()), close=lambda: closed.append(True))
-    monkeypatch.setattr(CustomMessageBox, 'warning', lambda *a: None)
-    MainWindow._handle_runtime_network_outage(window, {'role': 'doctor'})
-    assert closed == [True]
+        window=lambda: SimpleNamespace(unified_controller=object()), close=lambda: events.append(('closed', None)))
+
+    def unanswered_warning(*_args):
+        dialog_entered.set()
+        release_dialog.wait(1.0)
+
+    monkeypatch.setattr(CustomMessageBox, 'warning', unanswered_warning)
+    handler = threading.Thread(
+        target=MainWindow._handle_runtime_network_outage,
+        args=(window, {'role': 'doctor'}),
+        daemon=True,
+    )
+    handler.start()
+    assert dialog_entered.wait(0.5)
+    assert events == [
+        ('quiesced', {'role': 'doctor'}),
+        ('role_stopped', None),
+    ]
+    release_dialog.set()
+    handler.join(1.0)
+    assert not handler.is_alive()
+    assert events == [
+        ('quiesced', {'role': 'doctor'}),
+        ('role_stopped', None),
+        ('closed', None),
+    ]

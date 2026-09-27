@@ -43,6 +43,9 @@ _BOUND_METHODS = (
     "has_unsettled_writes",
     "_wait_for_write_submissions",
     "_emergency_write_submission_scope",
+    "block_new_writes_for_runtime_outage",
+    "quiesce_runtime_outage_background_work",
+    "is_network_outage_detected",
     "enqueue_write",
     "run_write",
     "set_shutting_down",
@@ -76,7 +79,7 @@ def _service_harness() -> SimpleNamespace:
     service._terminal_write_state = DataService._terminal_write_state
     service._uses_direct_central_runtime = lambda: False
     service._reject_write_if_emergency_paused = lambda _description: False
-    service._reject_write_if_outage = lambda _description: False
+    service._reject_write_if_outage = MethodType(DataService._reject_write_if_outage, service)
     service._record_operblock_write_intent = lambda _description: None
     service._opblock_interactive_write_metadata = (
         lambda _description, metadata=None: dict(metadata or {})
@@ -376,6 +379,50 @@ class UnifiedWriteOutcomeTest(unittest.TestCase):
         )
         self.assertFalse(patient_service._outcome_release_worker_active)
         self.assertFalse(patient_service.maybe_release_due_outcome_beds_async())
+        self.assertTrue(service.shutdown(timeout=1.0))
+
+    def test_runtime_outage_keeps_accepted_auto_release_settling_and_rejects_new_checks(self):
+        service = _service_harness()
+        started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        class _Monitor:
+            enabled = True
+
+            def set_enabled(self, enabled):
+                self.enabled = bool(enabled)
+
+            @staticmethod
+            def isRunning():
+                return False
+
+        class _PatientDao:
+            calls = 0
+
+            @classmethod
+            def release_due_outcome_beds(cls, *, delay_minutes):
+                _ = delay_minutes
+                cls.calls += 1
+                started.set()
+                release.wait(1.0)
+                return 1
+
+        service._monitor = _Monitor()
+        patient_service = PatientService(_PatientDao(), data_service=service)
+        self.assertTrue(patient_service.maybe_release_due_outcome_beds_async(force=True))
+        self.assertTrue(started.wait(1.0))
+
+        service.block_new_writes_for_runtime_outage({"category": "network_unavailable"})
+        self.assertFalse(service._monitor.enabled)
+        self.assertFalse(patient_service.maybe_release_due_outcome_beds_async(force=True))
+        self.assertEqual(_PatientDao.calls, 1)
+
+        release.set()
+        self.assertTrue(_wait_until(lambda: service.write_outcomes()[0]["state"] == "committed"))
+        self.assertEqual(service.unsettled_writes(), [])
+        self.assertFalse(patient_service.maybe_release_due_outcome_beds_async(force=True))
+        self.assertEqual(_PatientDao.calls, 1)
         self.assertTrue(service.shutdown(timeout=1.0))
 
 

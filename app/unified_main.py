@@ -111,6 +111,9 @@ def main(argv=None):
     multiprocessing.freeze_support()
     args = _parse_args(argv)
     if args.compiled_smoke:
+        from rem_card.app.client_build_profile import compiled_profile_matches_expectation
+        if not compiled_profile_matches_expectation():
+            raise SystemExit(4)
         from rem_card.ui.shared.unified_entry_pages import WelcomePage, StartupPage  # noqa: F401
         from rem_card.app.unified_access import MaintenanceStore  # noqa: F401
         if not _run_compiled_worker_smoke():

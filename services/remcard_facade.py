@@ -588,7 +588,22 @@ class RemCardService(QObject):
         yest_date = date - timedelta(days=1)
         card_exists = True if vitals else self.has_card(admission_id, date)
         has_any_card = bool(card_exists or self.has_any_cards_bulk([admission_id]).get(int(admission_id), False))
-        plan_card_state = self.build_plan_card_state(admission_id)
+        # These values are consumed by card buttons in the Qt thread.  Resolve
+        # every authoritative existence check while the snapshot scope is
+        # active so the UI never needs to query the central share itself.
+        now = datetime.now()
+        current_start, _current_end = self.get_day_period(now)
+        current_card_exists = (
+            bool(card_exists)
+            if self.get_day_period(date)[0] == current_start
+            else self.has_card(admission_id, now)
+        )
+        current_yest_exists = self.has_card(admission_id, current_start - timedelta(days=1))
+        plan_card_state = self.build_plan_card_state(
+            admission_id,
+            now=now,
+            current_card_exists=current_card_exists,
+        )
 
         snapshot: Dict[str, Any] = {
             "admission_id": admission_id,
@@ -606,6 +621,9 @@ class RemCardService(QObject):
             "card_exists": card_exists,
             "has_any_card": has_any_card,
             "yest_exists": self.has_card(admission_id, yest_date),
+            "current_card_exists": bool(current_card_exists),
+            "current_yest_exists": bool(current_yest_exists),
+            "current_card_shift_start": current_start,
             "has_vitals": bool(vitals),
             **plan_card_state,
         }

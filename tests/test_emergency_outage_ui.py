@@ -5,6 +5,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import types
 from types import MethodType, SimpleNamespace
 
@@ -389,3 +390,44 @@ def test_overlapping_pause_does_not_claim_an_unfinished_drain_is_ready():
     second = harness.pause_emergency_work(timeout_sec=0.02)
     first.join(1)
     assert second["ok"] is False and second["reason"] == "pause_in_progress"
+
+
+def test_runtime_outage_quiesces_monitor_and_repeated_maintenance_without_waiting():
+    from rem_card.services.data_service import DataService
+
+    harness = _pause_harness(runtime_mode="network")
+    harness._network_outage_detected = False
+    harness._network_outage_info = {}
+    scheduler_stop_timeouts = []
+    harness._emergency_standby_scheduler = SimpleNamespace(
+        stop=lambda *, timeout: scheduler_stop_timeouts.append(timeout) or True,
+    )
+    harness._emergency_restore_probe_scheduler = None
+    maintenance_calls = []
+    harness._poll_maintenance_tasks.append(lambda: maintenance_calls.append(True))
+    harness.block_new_writes_for_runtime_outage = MethodType(
+        DataService.block_new_writes_for_runtime_outage,
+        harness,
+    )
+    harness.quiesce_runtime_outage_background_work = MethodType(
+        DataService.quiesce_runtime_outage_background_work,
+        harness,
+    )
+    harness.set_change_monitor_enabled = MethodType(
+        DataService.set_change_monitor_enabled,
+        harness,
+    )
+
+    started = time.monotonic()
+    harness.block_new_writes_for_runtime_outage({"category": "network_unavailable"})
+    elapsed = time.monotonic() - started
+
+    for _ in range(5):
+        harness.run_poll_maintenance_tasks()
+    harness.set_change_monitor_enabled(True)
+
+    assert elapsed < 0.1
+    assert harness._monitor.enabled is False
+    assert scheduler_stop_timeouts == [0.0]
+    assert maintenance_calls == []
+    assert harness._network_outage_info == {"category": "network_unavailable"}

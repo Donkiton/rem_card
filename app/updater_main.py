@@ -1784,7 +1784,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: Optional[list[str]] = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if raw_args == ["--compiled-smoke"]:
-        return 0
+        from rem_card.app.client_build_profile import compiled_profile_matches_expectation
+        return 0 if compiled_profile_matches_expectation() else 4
     if raw_args and raw_args[0] == DEFERRED_CLEANUP_ARG:
         return _run_cleanup_mode(_parse_cleanup_args(raw_args[1:]))
     if raw_args:

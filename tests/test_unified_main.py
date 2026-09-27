@@ -123,6 +123,16 @@ def test_compiled_smoke_starts_real_spawn_worker():
     assert unified_main._run_compiled_worker_smoke(timeout_seconds=20.0)
 
 
+def test_compiled_smoke_rejects_wrong_database_upgrade_profile(monkeypatch):
+    from rem_card.app import client_build_profile
+
+    monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', False)
+    monkeypatch.setenv('REMCARD_SMOKE_EXPECT_NO_DATABASE_UPGRADES', '1')
+    with pytest.raises(SystemExit) as exc_info:
+        unified_main.main(['--compiled-smoke'])
+    assert exc_info.value.code == 4
+
+
 def test_compiled_smoke_is_safe_without_console_streams(monkeypatch):
     monkeypatch.setattr(unified_main.multiprocessing, "freeze_support", lambda: None)
     monkeypatch.setattr(unified_main, "_run_compiled_worker_smoke", lambda: True)

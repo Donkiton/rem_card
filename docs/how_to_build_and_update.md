@@ -74,6 +74,20 @@ Remove-Item Env:REMCARD_BUILD_NO_DATABASE_UPGRADES
 
 Вся приёмка выполняется до сетевой production-публикации.
 
+Для production-релиза 5.1.2 тот же запрет миграций обязателен:
+
+```powershell
+$env:REMCARD_BUILD_NO_DATABASE_UPGRADES = '1'
+.\.venv\Scripts\python.exe scripts\build_release.py `
+  --expected-version 5.1.2 --expected-commit <коммит GitHub main>
+Remove-Item Env:REMCARD_BUILD_NO_DATABASE_UPGRADES
+```
+
+Smoke-проверка обоих готовых EXE сверяет встроенный профиль с выбранным при
+сборке. Несовпадение останавливает выпуск. В `manifest.json` готового full-пакета
+должно быть `database_upgrades_disabled: true`. Это свойство сборки, а не команда
+изменить существующую БД; номер схемы и политика минимальной версии не повышаются.
+
 1. Настройте отдельную тестовую копию программы на локальную или изолированную тестовую папку данных.
 2. Убедитесь, что она видит локальный `UPD\releases\<новая версия>`.
 3. Проверьте обновление при запуске: старая тестовая копия должна закрыться, обновиться в своей папке и снова открыть тот же EXE.

@@ -1236,7 +1236,11 @@ def _check_doctor_create_card_enqueue_error_refreshes(temp_root: str) -> tuple[b
             _snapshot_worker=None,
             _create_card_after_snapshot=False,
             _snapshot_pending=None,
-            _card_snapshot_cache={},
+            # This scenario starts after an authoritative active-status snapshot.
+            # Unknown state intentionally blocks creation until loading finishes.
+            _card_snapshot_cache={
+                "status": SimpleNamespace(status=SimpleNamespace(is_outcome=lambda: False)),
+            },
             admission_id=1,
             service=service,
             layout_manager=layout_manager,

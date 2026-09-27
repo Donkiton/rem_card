@@ -8,8 +8,10 @@ from __future__ import annotations
 import atexit
 import logging
 import os
+import queue
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +19,12 @@ from typing import Iterable
 
 
 DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024
+DEFAULT_LOG_QUEUE_SIZE = 4096
+DEFAULT_LOG_BATCH_SIZE = 128
+DEFAULT_LOG_FLUSH_TIMEOUT_MS = 500
+MAX_LOG_QUEUE_SIZE = 16384
+MAX_LOG_BATCH_SIZE = 1024
+MAX_LOG_FLUSH_TIMEOUT_MS = 2000
 KNOWN_TEXT_PREFIXES = (
     "rem_card", "doctor", "nurse", "nurse_emergency", "operblock",
     "operblock_emergency", "operblock_planned", "path_setup", "startup",
@@ -35,6 +43,10 @@ def positive_int_setting(name: str, default: int) -> int:
         return max(1, int(os.environ.get(name, str(default))))
     except (ValueError, TypeError):
         return default
+
+
+def bounded_positive_int_setting(name: str, default: int, maximum: int) -> int:
+    return min(maximum, positive_int_setting(name, default))
 
 
 def safe_log_prefix(prefix: str) -> str:
@@ -184,11 +196,170 @@ class RuntimeLogHandler(logging.Handler):
         probe.path = None
         _request_cleanup(Path(directory))
 
+        self._queue_size = bounded_positive_int_setting(
+            "REMCARD_LOG_QUEUE_SIZE", DEFAULT_LOG_QUEUE_SIZE, MAX_LOG_QUEUE_SIZE,
+        )
+        self._batch_size = bounded_positive_int_setting(
+            "REMCARD_LOG_BATCH_SIZE", DEFAULT_LOG_BATCH_SIZE, MAX_LOG_BATCH_SIZE,
+        )
+        self._flush_timeout = (
+            bounded_positive_int_setting(
+                "REMCARD_LOG_FLUSH_TIMEOUT_MS", DEFAULT_LOG_FLUSH_TIMEOUT_MS,
+                MAX_LOG_FLUSH_TIMEOUT_MS,
+            ) / 1000.0
+        )
+        self._state_lock = threading.Lock()
+        self._dropped = 0
+        self._reported_dropped = 0
+        self._write_errors = 0
+        self._reported_write_errors = 0
+        self._accepting = True
+        self._closed_once = False
+        self._pid = os.getpid()
+        self._start_worker()
+
+    def _start_worker(self) -> None:
+        self._queue: queue.Queue[tuple[int, str]] = queue.Queue(maxsize=self._queue_size)
+        self._idle = threading.Event()
+        self._idle.set()
+        self._closing = threading.Event()
+        self._stopped = threading.Event()
+        self._worker = threading.Thread(
+            target=self._write_loop,
+            name=f"RemCardLogWriter-{safe_log_prefix(self.prefix)}",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _reset_after_fork(self) -> None:
+        """A child process cannot use the vanished worker inherited from its parent."""
+        current_pid = os.getpid()
+        if current_pid == self._pid:
+            return
+        self._pid = current_pid
+        self._state_lock = threading.Lock()
+        self._accepting = True
+        self._closed_once = False
+        self._start_worker()
+
+    def _pending_diagnostics(self) -> tuple[list[str], tuple[int, int]]:
+        with self._state_lock:
+            dropped = self._dropped
+            write_errors = self._write_errors
+            dropped_delta = dropped - self._reported_dropped
+            error_delta = write_errors - self._reported_write_errors
+        messages = []
+        if dropped_delta:
+            messages.append(
+                "Runtime log queue overflow; "
+                f"dropped_records={dropped_delta} queue_capacity={self._queue_size}"
+            )
+        if error_delta:
+            messages.append(f"Runtime log writer recovered; failed_batches={error_delta}")
+        lines = []
+        for message in messages:
+            record = logging.LogRecord(
+                "RemCard.RuntimeLog", logging.WARNING, __file__, 0, message, (), None,
+                func="_write_loop",
+            )
+            lines.append(self.format(record) + "\n")
+        return lines, (dropped, write_errors)
+
+    def _mark_diagnostics_written(self, totals: tuple[int, int]) -> None:
+        with self._state_lock:
+            self._reported_dropped = max(self._reported_dropped, totals[0])
+            self._reported_write_errors = max(self._reported_write_errors, totals[1])
+
+    def _write_loop(self) -> None:
+        try:
+            while True:
+                try:
+                    first = self._queue.get(timeout=0.05)
+                except queue.Empty:
+                    if self._closing.is_set():
+                        break
+                    continue
+
+                batch = [first]
+                while len(batch) < self._batch_size:
+                    try:
+                        batch.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        break
+                diagnostics, totals = self._pending_diagnostics()
+                lines = diagnostics + [line for _level, line in batch]
+                try:
+                    append_log_lines(self.directory, self.prefix, lines)
+                except Exception:
+                    # Logging must remain best-effort. The next successful batch
+                    # records how many write attempts were lost.
+                    with self._state_lock:
+                        self._write_errors += 1
+                else:
+                    self._mark_diagnostics_written(totals)
+                finally:
+                    for _item in batch:
+                        self._queue.task_done()
+                    with self._state_lock:
+                        if self._queue.empty():
+                            self._idle.set()
+        finally:
+            self._stopped.set()
+
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            append_log_lines(self.directory, self.prefix, [self.format(record) + "\n"])
+            self._reset_after_fork()
+            item = (record.levelno, self.format(record) + "\n")
+            with self._state_lock:
+                if not self._accepting:
+                    self._dropped += 1
+                    return
+                self._idle.clear()
+                try:
+                    self._queue.put_nowait(item)
+                    return
+                except queue.Full:
+                    pass
+
+                # Prefer a new warning/error over one older queued record. This
+                # is still non-blocking and keeps the queue strictly bounded.
+                if record.levelno >= logging.WARNING:
+                    try:
+                        self._queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    else:
+                        self._queue.task_done()
+                        self._dropped += 1
+                        try:
+                            self._queue.put_nowait(item)
+                            return
+                        except queue.Full:
+                            pass
+                self._dropped += 1
+                if self._queue.empty():
+                    self._idle.set()
         except Exception:
             self.handleError(record)
+
+    def flush(self) -> None:
+        if self._closed_once or os.getpid() != self._pid:
+            return
+        self._idle.wait(timeout=self._flush_timeout)
+
+    def close(self) -> None:
+        if self._closed_once:
+            return
+        self._closed_once = True
+        with self._state_lock:
+            self._accepting = False
+        deadline = time.monotonic() + self._flush_timeout
+        self._idle.wait(timeout=self._flush_timeout)
+        self._closing.set()
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining:
+            self._worker.join(timeout=remaining)
+        super().close()
 
 
 def close_log_writers() -> None:

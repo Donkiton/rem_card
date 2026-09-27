@@ -434,3 +434,16 @@ def test_release_gate_failure_includes_child_output(
     assert calls == 1
     assert "example_contract" in message
     assert "worker failure details" in message
+
+
+def test_release_smoke_checks_build_policy_in_every_executable(monkeypatch, tmp_path):
+    monkeypatch.setenv('REMCARD_BUILD_NO_DATABASE_UPGRADES', '1')
+    calls = []
+
+    def smoke(args, **kwargs):
+        calls.append((Path(args[0]).name, kwargs['env']['REMCARD_SMOKE_EXPECT_NO_DATABASE_UPGRADES']))
+        return build_release.subprocess.CompletedProcess(args, 0, b'', b'')
+
+    monkeypatch.setattr(build_release.subprocess, 'run', smoke)
+    build_release.run_compiled_smoke(tmp_path)
+    assert calls == [(name, '1') for name in build_release.REQUIRED_RELEASE_EXES]

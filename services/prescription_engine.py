@@ -71,6 +71,59 @@ class PrescriptionEngine:
                     raise
                 return False
 
+    def prepare_reload_if_changed(self, *, force_check: bool = False):
+        """Read settings off the UI thread and return an atomic apply payload.
+
+        The caller must invoke :meth:`apply_prepared_reload` in its receiving
+        thread.  This keeps readers of the in-memory dictionaries from seeing
+        a partially replaced catalog while a network settings read is running.
+        """
+        with self._lock:
+            if not force_check and self._last_loaded_signature is not None:
+                now_mono = time.monotonic()
+                if (now_mono - self._last_signature_check_mono) < self._signature_check_interval_sec:
+                    return None
+            self._last_signature_check_mono = time.monotonic()
+
+            # A concurrent explicit reload can finish while the network read
+            # below is in flight.  Such a prepared payload must not roll the
+            # in-memory catalog backwards when it reaches the GUI thread.
+            baseline_signature = self._last_loaded_signature
+
+        signature = self._current_signature()
+        with self._lock:
+            if not force_check and signature == self._last_loaded_signature:
+                return None
+        loaded = self._load_all()
+        return {
+            "baseline_signature": baseline_signature,
+            "signature": signature,
+            "loaded": loaded,
+        }
+
+    def apply_prepared_reload(self, prepared) -> bool:
+        """Apply a catalog read prepared by ``prepare_reload_if_changed``."""
+        if not prepared:
+            return False
+        loaded = prepared.get("loaded") if isinstance(prepared, dict) else None
+        signature = prepared.get("signature") if isinstance(prepared, dict) else None
+        if not isinstance(loaded, dict):
+            return False
+        # A foreground explicit catalog reload can still be using this lock
+        # while it reads settings.  Applying a background payload must never
+        # make the GUI wait for that network operation.
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if prepared.get("baseline_signature") != self._last_loaded_signature:
+                return False
+            for attr_name, _dict_name in self._DATASETS:
+                setattr(self, attr_name, loaded.get(attr_name, {}))
+            self._last_loaded_signature = signature
+        finally:
+            self._lock.release()
+        return True
+
     def _reload_locked(self, *, force: bool) -> bool:
         signature = self._current_signature()
         if not force and signature == self._last_loaded_signature:

@@ -134,6 +134,9 @@ class NurseMainWidget(QWidget):
         self._balance_widgets_bound = False
         self._balance_quick_oral_connected = False
         self._balance_calculator_cls = None
+        self._balance_engine_worker = None
+        self._balance_engine_request = None
+        self._balance_engine_generation = 0
         self._admin_signals_bound = False
         self._archive_signals_bound = False
         self._bound_archive_widget = None
@@ -1856,6 +1859,49 @@ class NurseMainWidget(QWidget):
     def _schedule_balance_update(self, *_args):
         self._balance_update_timer.start(self._balance_update_delay_ms)
 
+    def _balance_engine_request_is_current(self, request) -> bool:
+        return bool(
+            not self._is_closing
+            and request is self._balance_engine_request
+            and request.get("generation") == self._balance_engine_generation
+        )
+
+    def _request_balance_engine_reload(self):
+        if self._is_closing or self._balance_engine_worker is not None:
+            return
+        calculator = self._balance_calculator_cls
+        if calculator is None or not calculator.engine_reload_due():
+            return
+        request = {"generation": self._balance_engine_generation}
+        self._balance_engine_request = request
+        worker = AsyncCallThread(calculator.prepare_engine_reload_if_due)
+        self._balance_engine_worker = worker
+        worker.succeeded.connect(lambda prepared, req=request: self._on_balance_engine_reload_prepared(req, prepared))
+        worker.failed.connect(lambda exc, req=request: self._on_balance_engine_reload_failed(req, exc))
+        worker.finished.connect(lambda req=request, current=worker: self._on_balance_engine_reload_finished(req, current))
+        worker.start()
+
+    def _on_balance_engine_reload_prepared(self, request, prepared):
+        if not self._balance_engine_request_is_current(request):
+            return
+        try:
+            changed = self._balance_calculator_cls.apply_prepared_engine_reload(prepared)
+        except Exception as exc:
+            logger.warning("Nurse balance catalog apply failed: %s", exc)
+            return
+        if changed:
+            self._schedule_balance_update()
+
+    def _on_balance_engine_reload_failed(self, request, exc):
+        if self._balance_engine_request_is_current(request):
+            logger.warning("Nurse balance catalog refresh failed: %s", exc)
+
+    def _on_balance_engine_reload_finished(self, request, worker):
+        if worker is self._balance_engine_worker:
+            self._balance_engine_worker = None
+        if request is self._balance_engine_request:
+            self._balance_engine_request = None
+
     def _flush_scheduled_balance_update(self):
         self._update_balance_calculations()
 
@@ -2983,6 +3029,15 @@ class NurseMainWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        self._balance_engine_generation += 1
+        balance_engine_worker = self._balance_engine_worker
+        self._balance_engine_worker = None
+        self._balance_engine_request = None
+        if balance_engine_worker is not None:
+            try:
+                balance_engine_worker.quit()
+            except Exception:
+                pass
         prewarmer = getattr(self, "_card_ui_prewarmer", None)
         if prewarmer is not None:
             prewarmer.cancel(reason="role_shutdown")
@@ -2993,6 +3048,9 @@ class NurseMainWidget(QWidget):
         sector_ivl = getattr(getattr(self, "layout_manager", None), "sector_ivl", None)
         if sector_ivl is not None and hasattr(sector_ivl, "shutdown"):
             sector_ivl.shutdown()
+        sector_notice = getattr(getattr(self, "layout_manager", None), "sector_7vit_b", None)
+        if sector_notice is not None and hasattr(sector_notice, "shutdown"):
+            sector_notice.shutdown()
         if hasattr(self, "_balance_update_timer"):
             self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):
@@ -3026,6 +3084,9 @@ class NurseMainWidget(QWidget):
             from ...services.balance_calculator import BalanceCalculator
 
             self._balance_calculator_cls = BalanceCalculator
+        request_engine_reload = getattr(self, "_request_balance_engine_reload", None)
+        if callable(request_engine_reload):
+            request_engine_reload()
 
         adm_id = self.layout_manager.current_admission_id
         if not adm_id: return
