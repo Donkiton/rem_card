@@ -356,12 +356,12 @@ class ArchiveGraphsPage(QWidget):
             # Масштабирование PNG заметно тяжелее замены HTML. Выполняем его
             # здесь, в том же фоновом worker, чтобы готовность 20–65 графиков
             # не блокировала главный Qt-поток на несколько секунд.
-            result.html = fit_chart_images_to_width(
+            result.preview_html = fit_chart_images_to_width(
                 result.html,
                 preview_width,
                 resize_images=True,
             )
-            preview_paths = re.findall(r"<img\b[^>]*?\bsrc='([^']+)'", result.html)
+            preview_paths = re.findall(r"<img\b[^>]*?\bsrc='([^']+)'", result.preview_html)
             result.image_paths = list(dict.fromkeys([*result.image_paths, *preview_paths]))
             return result
         finally:
@@ -397,9 +397,10 @@ class ArchiveGraphsPage(QWidget):
         self._cleanup_temp_graph_files()
         self._remember_temp_graph_paths(image_paths)
         html = str(getattr(result, "html", "") or "")
+        preview_html = str(getattr(result, "preview_html", html) or html)
         self._latest_html = html
         self._latest_signature = request_signature or self._signature()
-        set_themed_html(self.report, html)
+        set_themed_html(self.report, preview_html)
         self._set_busy(False, "")
         if save_after and self._pending_pdf_path:
             path = self._pending_pdf_path

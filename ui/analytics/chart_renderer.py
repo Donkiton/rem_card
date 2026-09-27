@@ -19,7 +19,9 @@ from rem_card.ui.styles.theme import (
     TEXT_SECONDARY,
 )
 
-CHART_DPI = 170
+# Reports are printed and archived; keep the source PNG at print quality.
+# ``fit_chart_images_to_width`` makes a separate smaller copy for the preview.
+CHART_DPI = 300
 CHART_HTML_WIDTH = 860
 MIN_FIGURE_WIDTH_IN = 8.5
 MIN_FIGURE_HEIGHT_IN = 3.6
@@ -45,7 +47,7 @@ def configure_chart_style(chart_colors: Sequence[str]) -> None:
             "savefig.dpi": CHART_DPI,
             "figure.facecolor": BG_CARD,
             "savefig.facecolor": BG_CARD,
-            "axes.facecolor": BG_ALT_ROW,
+            "axes.facecolor": BG_CARD,
             "axes.edgecolor": BORDER_COLOR,
             "axes.labelcolor": TEXT_PRIMARY,
             "axes.labelsize": 13.5,
@@ -87,10 +89,11 @@ def save_plot(title: str, img_paths: list[str]) -> str:
 
 def chart_image_html(title: str, path: str) -> str:
     safe_path = escape(str(path), quote=True)
+    safe_title = escape(str(title or "График"), quote=True)
     return (
         "<div class='analytics-chart-block' "
         "style='text-align:center; page-break-inside:avoid; margin:18px auto 28px auto;'>"
-        f"<img src='{safe_path}' width='{CHART_HTML_WIDTH}' "
+        f"<img src='{safe_path}' alt='{safe_title}' width='{CHART_HTML_WIDTH}' "
         f"style='max-width:{CHART_HTML_WIDTH}px; height:auto; "
         f"border:1px solid {BORDER_LIGHT}; border-radius:4px; padding:3px; background:{BG_CARD};'>"
         "</div>"
@@ -118,18 +121,26 @@ def plot_pie_with_legend(
     value_formatter: Callable[[float], str] | None = None,
     legend_title: str | None = None,
     autopct: str | None = "%1.1f%%",
+    preserve_order: bool = False,
 ) -> None:
     import matplotlib.pyplot as plt
 
-    numeric_values = [_to_float(v) for v in values]
     text_labels = [_clean_label(label) for label in labels]
-    pairs = [(label, value) for label, value in zip(text_labels, numeric_values) if value > 0]
+    numeric_values = [_to_float(v) for v in values]
+    # A zero is a reported outcome, not an absent outcome.  Keep it (and an
+    # unavailable value) in the composition so presentation never silently
+    # changes the canonical series.
+    pairs = [
+        (label, value if math.isfinite(value) and value >= 0 else None)
+        for label, value in zip(text_labels, numeric_values)
+    ]
     if not pairs:
         return
 
-    pairs.sort(key=lambda item: item[1], reverse=True)
+    if not preserve_order:
+        pairs.sort(key=lambda item: (item[1] is None, -(item[1] or 0)))
     text_labels, numeric_values = zip(*pairs)
-    total = sum(numeric_values)
+    total = sum(value for value in numeric_values if value is not None)
     figure = plt.gcf()
     figure.set_size_inches(
         max(figure.get_figwidth(), 9.0),
@@ -141,18 +152,22 @@ def plot_pie_with_legend(
     ax.set_facecolor(BG_ALT_ROW)
 
     formatter = value_formatter or _format_number
-    percentages = [(value / total * 100.0 if total else 0.0) for value in numeric_values]
+    percentages = [value / total * 100.0 if value is not None and total else None for value in numeric_values]
     y_positions = list(range(len(numeric_values)))
-    bar_colors = list(colors)[: len(numeric_values)]
-    value_labels = [f"{formatter(value)} ({pct:.1f}%)" for value, pct in zip(numeric_values, percentages)]
+    palette = list(colors) or [TEXT_PRIMARY]
+    bar_colors = [palette[index % len(palette)] for index in range(len(numeric_values))]
+    value_labels = [
+        (f"{formatter(value)} ({pct:.1f}%)" if pct is not None else f"{formatter(value)} (—)") if value is not None else "—"
+        for value, pct in zip(numeric_values, percentages)
+    ]
     max_label_len = max((len(label) for label in value_labels), default=0)
     left_pad = 5.0
     right_pad = max(26.0, min(46.0, max_label_len * 1.25 + 8.0))
-    x_right = max(100.0, max(percentages, default=0.0)) + right_pad
+    x_right = max(100.0, max((pct for pct in percentages if pct is not None), default=0.0)) + right_pad
 
     rectangles = ax.barh(
         y_positions,
-        percentages,
+        [pct or 0.0 for pct in percentages],
         height=0.62,
         color=bar_colors,
         edgecolor=BG_CARD,
@@ -266,13 +281,24 @@ def _prepare_figure(figure) -> None:
     if width < MIN_FIGURE_WIDTH_IN or height < MIN_FIGURE_HEIGHT_IN:
         figure.set_size_inches(max(width, MIN_FIGURE_WIDTH_IN), max(height, MIN_FIGURE_HEIGHT_IN), forward=True)
     for ax in figure.axes:
+        # A report chart needs a quiet frame: the data and its labels, rather
+        # than a full boxed plotting area, carry the visual hierarchy.
+        ax.set_facecolor(BG_CARD)
         ax.title.set_color(TEXT_PRIMARY)
+        title = str(ax.get_title() or "")
+        if title:
+            ax.set_title("\n".join(
+                wrapped
+                for line in title.splitlines()
+                for wrapped in textwrap.wrap(line, width=58, break_long_words=False)
+            ))
         ax.xaxis.label.set_color(TEXT_PRIMARY)
         ax.yaxis.label.set_color(TEXT_PRIMARY)
         ax.tick_params(axis="both", colors=TEXT_SECONDARY)
-        for spine in ax.spines.values():
+        for side, spine in ax.spines.items():
             spine.set_color(BORDER_COLOR)
-        if ax.has_data():
+            spine.set_visible(side not in {"top", "right"})
+        if ax.has_data() and not getattr(ax, "_remcard_preserve_annotation_margin", False):
             try:
                 ax.margins(x=0.04, y=0.08)
             except Exception:
@@ -296,8 +322,8 @@ def _prepare_figure(figure) -> None:
 def _to_float(value) -> float:
     try:
         return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+    except (TypeError, ValueError, OverflowError):
+        return float("nan")
 
 
 def _clean_label(value, fallback: str = "Не указано") -> str:

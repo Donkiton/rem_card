@@ -524,6 +524,10 @@ class GraphArtifactBuilder:
         return self.cases
 
     def numerator_denominator(self, series, selected):
+        # These charts contain one already calculated scalar (including %).
+        # Reusing a family-wide sum here made the summary disagree with the bar.
+        if self.key in {"g10", "g12", "g16", "g17", "g48"}:
+            return series[0]["value"], None
         numerator: int | float | None = len(self.cases)
         denominator: int | float | None = None
         if self.key in {"g27", "g29", "g30", "g31", "g32", "g35", "g36", "g39", "g40", "g42"}:
@@ -543,14 +547,14 @@ class GraphArtifactBuilder:
             numerator = len(self.related("operations"))
         elif self.key in {"g58", "g59"}:
             numerator = len(self.related("transfusions"))
-        elif self.key in {"g6", "g7", "g12", "g13", "g46"}:
+        elif self.key in {"g6", "g7", "g13", "g46"}:
             numerator = sum(self.monthly_bed_days.values())
         elif self.key == "g9":
             from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT
             numerator, denominator = len(self.cases), STATISTICAL_BED_COUNT
         elif self.key == "g14":
             numerator = sum(float(item["value"]) for item in series)
-        elif self.key in {"g10", "g11", "g15", "g16", "g17", "g18", "g47", "g48", "g51", "g53"}:
+        elif self.key in {"g11", "g15", "g18", "g47", "g51", "g53"}:
             numerator = sum(self.daily_census.values())
         elif self.key in {"g49", "g50"}:
             numerator = sum(self.durations[item.id] for item in selected)
@@ -573,6 +577,38 @@ class GraphArtifactBuilder:
         line_graphs = {"g1", "g3", "g7", "g13", "g18", "g29", "g34", "g45", "g46", "g53", "g56", "g58"}
         return "line" if self.key in line_graphs else "bar"
 
+    def calendar_series(self, series):
+        """Keep empty calendar buckets; undefined ratios/means are not zero."""
+        daily_keys = {"g3", "g11", "g14", "g18", "g53"}
+        monthly_keys = {
+            "g1", "g6", "g7", "g9", "g13", "g29", "g34", "g45",
+            "g46", "g56", "g58", "recovery_flow_months",
+        }
+        if not series or self.key not in daily_keys | monthly_keys:
+            return series
+        daily = self.key in daily_keys
+        pattern = "%Y-%m-%d" if daily else "%Y-%m"
+        rows = {item["label"]: item for item in series}
+        # Preserve non-calendar categories instead of silently dropping them.
+        try:
+            observed_dates = [datetime.strptime(label, pattern) for label in rows]
+        except (TypeError, ValueError):
+            return series
+        cursor = self.period.start.replace(hour=0, minute=0, second=0, microsecond=0)
+        if not daily:
+            cursor = cursor.replace(day=1)
+        # Some existing metrics group overlapping stays by admission month.
+        # Padding must not discard their already calculated carry-in buckets.
+        cursor = min(cursor, min(observed_dates))
+        end = max(self.period.end, max(observed_dates) + timedelta(days=1))
+        missing = None if self.key in {"g29", "g34"} else 0
+        result = []
+        while cursor < end:
+            label = cursor.strftime(pattern)
+            result.append(rows.get(label, {"label": label, "value": missing}))
+            cursor = cursor + timedelta(days=1) if daily else (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+        return tuple(result)
+
     def build(self):
         from rem_card.services.analytics.graph_catalog import GRAPH_GROUPS
         from rem_card.services.analytics.platform.core import GraphMetricArtifact
@@ -583,6 +619,7 @@ class GraphArtifactBuilder:
         series = self.series()
         selected = self.selected_cases()
         numerator, denominator = self.numerator_denominator(series, selected)
+        series = self.calendar_series(series)
         source_ids = tuple(item.id for item in selected)
         display_value = self._display_value(numerator, denominator)
         summary = f"{self.definition.title}: {self._format_value(display_value)} {self.definition.unit}"
