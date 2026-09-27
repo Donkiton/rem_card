@@ -1062,6 +1062,10 @@ def test_native_second_close_offers_force_and_decline_keeps_deadline(shell, monk
 
 @pytest.mark.parametrize('start_another_exit', [False, True])
 def test_stale_force_answer_cannot_kill_reopened_application(shell, monkeypatch, start_another_exit):
+    from rem_card.ui import unified_window
+    # Windows/Python 3.11 can return the same monotonic timestamp for two
+    # consecutive requests. Ownership must not depend on clock resolution.
+    monkeypatch.setattr(unified_window, 'time', SimpleNamespace(monotonic=lambda: 123.0))
     guard = shell._exit_guard = _ExitGuard()
     shell._begin_application_exit()
 

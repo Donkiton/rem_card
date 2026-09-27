@@ -65,6 +65,7 @@ class UnifiedWindow(QMainWindow):
         # windows do not own the lifetime of the hosting Python process.
         self._exit_guard = None
         self._exit_started = None
+        self._exit_generation = 0
         self._force_exit_prompt_open = False
         self._lease_release_pending = False
         self._exclusive_release_pending = False
@@ -1383,6 +1384,7 @@ class UnifiedWindow(QMainWindow):
         if self._exit_started is not None:
             return
         self._exit_started = time.monotonic()
+        self._exit_generation += 1
         if self._exit_guard is not None:
             self._exit_guard.arm("shutdown")
         self._status_timer.stop()
@@ -1400,6 +1402,7 @@ class UnifiedWindow(QMainWindow):
 
     def _offer_force_exit(self):
         exit_started, guard = self._exit_started, self._exit_guard
+        exit_generation = self._exit_generation
         if self._force_exit_prompt_open or guard is None or exit_started is None:
             return
         self._force_exit_prompt_open = True
@@ -1414,7 +1417,7 @@ class UnifiedWindow(QMainWindow):
             # (for example after a failed updater launch). A stale answer must
             # never arm another forced exit against the reopened application.
             if (answer == QMessageBox.Yes and self._pending_exit
-                    and self._exit_started == exit_started
+                    and self._exit_started is not None and self._exit_generation == exit_generation
                     and self._exit_guard is guard and guard.armed):
                 guard.force()
         finally:
