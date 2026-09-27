@@ -73,7 +73,10 @@ class _WindowButton(QAbstractButton):
 
     def perform(self):
         if self.kind == 'close':
-            self.owner.close()
+            if hasattr(self.owner, 'request_application_exit'):
+                self.owner.request_application_exit()
+            else:
+                self.owner.close()
         elif self.kind == 'min':
             self.owner.showMinimized()
         elif getattr(self.owner, '_is_custom_maximized', False):

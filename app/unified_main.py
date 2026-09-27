@@ -154,6 +154,9 @@ def main(argv=None):
             from rem_card.app.unified_preflight import attach_startup_request, build_startup_request
 
             window = UnifiedWindow()
+            from rem_card.app.exit_watchdog import ExitWatchdog
+            from rem_card.app.runtime_paths import get_runtime_logs_dir
+            window._exit_guard = ExitWatchdog(diagnostic_dir=get_runtime_logs_dir())
             startup_request = build_startup_request(
                 role=args.role,
                 emergency_startup_request=args.emergency_startup_request,

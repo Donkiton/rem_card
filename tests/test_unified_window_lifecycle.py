@@ -51,11 +51,14 @@ def test_random_clicks_cancelled_admission_releases_before_next_role(shell, monk
     assert len(calls) == 1
     # Admission finished late; its lease must be released without preflight.
     calls[0][1](SimpleNamespace(release=lambda: released.append('released')))
+    assert shell._busy and not released
+    calls[1][1](calls[1][0]())
     assert released == ['released'] and not shell._busy and shell.lease is None
     shell.enter_role('doctor')
-    assert len(calls) == 2 and shell.session_id != old_session
+    assert len(calls) == 3 and shell.session_id != old_session
     shell.cancel_role_entry()
-    calls[1][1](SimpleNamespace(release=lambda: None))
+    calls[2][1](SimpleNamespace(release=lambda: None))
+    calls[3][1](calls[3][0]())
 
 
 def test_maintenance_cancels_pending_entry_except_administrator(shell, monkeypatch, tmp_path):
@@ -193,7 +196,7 @@ def test_confirmed_application_exit_does_not_ask_to_return_to_roles(shell, monke
     assert calls == [True]
 
 
-def test_application_exit_hides_window_but_keeps_runtime_until_drain(shell, monkeypatch):
+def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monkeypatch):
     from PySide6.QtWidgets import QWidget
     data = SimpleNamespace(set_shutting_down=lambda: None)
     container = SimpleNamespace(data_service=data)
@@ -209,8 +212,10 @@ def test_application_exit_hides_window_but_keeps_runtime_until_drain(shell, monk
     waits = []
     monkeypatch.setattr(shell, '_wait_before_drain', lambda: waits.append(True))
     shell.request_application_exit(confirmed=True)
-    assert shell.isHidden()
-    assert shell.stack.currentWidget() is role
+    assert shell.isVisible()
+    assert not shell.stack.isEnabled()
+    assert shell.stack.currentWidget() is shell.welcome
+    assert not shell.entry_chrome.title_bar.isHidden()
     assert shell.loading not in pages
     assert shell.container is container and shell._shutdown is not None
     assert shell._leaving and waits == [True]
@@ -255,7 +260,8 @@ def test_application_close_uses_exit_confirmation_not_role_confirmation(shell, m
     event = QCloseEvent()
     shell.closeEvent(event)
     assert not event.isAccepted()
-    assert messages == ['Выйти из программы?']
+    assert len(messages) == 1 and messages[0].startswith('Выйти из программы?')
+    assert '30 секунд' in messages[0] and 'потеряны' in messages[0]
     assert calls == [True]
 
 
@@ -318,6 +324,7 @@ def test_drain_waits_for_live_animation_without_releasing_runtime(shell, monkeyp
     from PySide6.QtCore import QRect, QTimer
     container = object()
     shell.container = container
+    shell._shutdown = SimpleNamespace(containers=[container])
     shell._transition.start(QRect(shell.geometry()), lambda: None, lambda: None)
     queued = []
     monkeypatch.setattr(QTimer, 'singleShot', lambda delay, callback: queued.append(callback))
@@ -524,6 +531,7 @@ def test_leaving_local_storage_keeps_chooser_but_blocks_central_bootstrap(shell,
     shell._leaving = True
     shell._shutdown = SimpleNamespace(containers=[])
     shell.lease = SimpleNamespace(release=lambda: calls.append('release'))
+    monkeypatch.setattr(shell, '_async', lambda fn, done, failed=None: done(fn()))
     monkeypatch.setattr(shell, '_role_threads_running', lambda: False)
     monkeypatch.setattr(shell, 'close', lambda: calls.append('close'))
     shell._drained({'ok': True})
@@ -694,6 +702,7 @@ def test_replaced_network_container_blocks_drain_until_both_owners_close(shell, 
         return container.close_ok
 
     monkeypatch.setattr(main, '_shutdown_window_resources', close_owner)
+    monkeypatch.setattr(shell, '_async', lambda fn, done, failed=None: done(fn()))
     shell.container = local_replacement
     shell._owned_containers = [old_network, local_replacement]
     shell.lease = _Lease()
@@ -763,7 +772,7 @@ def test_close_button_after_outage_releases_resources_with_unknown_receipt(shell
     shell._leaving = shell._busy = True
     shell._central_unavailable = shell._suppress_exit_update = True
     shell.stack.setCurrentWidget(shell.welcome)
-    monkeypatch.setattr(shell, '_async', lambda fn, done: done(fn()))
+    monkeypatch.setattr(shell, '_async', lambda fn, done, failed=None: done(fn()))
     monkeypatch.setattr(QTimer, 'singleShot', lambda delay, callback: scheduled.append(callback))
     monkeypatch.setattr(QApplication, 'quit', lambda: quit_calls.append(True))
     shell.show()
@@ -937,3 +946,219 @@ def test_failed_local_writes_remain_visible_on_chooser(shell, monkeypatch):
     shell._drained({'ok': True})
     assert 'Не выполнено сохранений: 1' in shell.welcome._access_message
     assert 'сессия сохранена' not in shell.welcome._access_message
+
+
+class _ExitGuard:
+    def __init__(self):
+        self.arms = []
+        self.armed = False
+        self.forced = 0
+        self.disarmed = 0
+
+    def arm(self, stage):
+        self.arms.append(stage)
+        self.armed = True
+
+    def set_stage(self, stage):
+        self.stage = stage
+
+    def force(self):
+        self.forced += 1
+
+    def disarm(self):
+        self.disarmed += 1
+        self.armed = False
+
+
+def _wait_for(predicate):
+    from PySide6.QtTest import QTest
+    deadline = time.monotonic() + 3
+    while not predicate() and time.monotonic() < deadline:
+        QTest.qWait(10)
+    assert predicate()
+
+
+def test_network_unlock_error_finishes_exit_instead_of_trapping_close(shell, monkeypatch):
+    import threading
+    from PySide6.QtCore import QThread
+    callbacks, release_threads = [], []
+    main_thread = threading.get_ident()
+    guard = shell._exit_guard = _ExitGuard()
+    shell._leaving = shell._busy = True
+    shell.container = object()
+    shell._shutdown = SimpleNamespace(containers=[])
+    shell._restart = shell._update_requested = True
+
+    def release():
+        release_threads.append(threading.get_ident())
+        error = OSError('synthetic network unlock failure')
+        error.winerror = 59
+        raise error
+
+    shell.lease = SimpleNamespace(release=release)
+    monkeypatch.setattr(shell, 'close', lambda: callbacks.append(QThread.currentThread()))
+    shell._drained({'ok': True})
+    _wait_for(lambda: not shell._workers)
+    assert release_threads and release_threads[0] != main_thread
+    assert callbacks == [QApplication.instance().thread()]
+    assert shell.lease is None and shell.container is None
+    assert not shell._busy and not shell._leaving
+    assert shell._pending_exit and shell._suppress_exit_update
+    assert not shell._restart and not shell._update_requested
+    assert guard.arms == ['shutdown']
+    monkeypatch.setattr(shell, '_async', lambda *a: pytest.fail('reused uncertain session'))
+    shell.enter_role('doctor')
+
+
+def test_hung_release_keeps_gui_responsive_and_second_cross_can_force(shell, monkeypatch):
+    import threading
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtTest import QTest
+    from rem_card.ui.shared.unified_chrome import _WindowButton
+    entered, unblock = threading.Event(), threading.Event()
+    calls, heartbeats = [], []
+    guard = shell._exit_guard = _ExitGuard()
+    shell._leaving = shell._busy = True
+    shell.container = object()
+    shell._shutdown = SimpleNamespace(containers=[])
+
+    def release():
+        calls.append('release')
+        entered.set()
+        unblock.wait(3)
+
+    shell.lease = SimpleNamespace(release=release)
+    monkeypatch.setattr(shell, 'close', lambda: None)
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a: QMessageBox.Yes)
+    shell.show()
+    try:
+        shell._drained({'ok': True})
+        _wait_for(entered.is_set)
+        shell._drained({'ok': True})
+        QTimer.singleShot(0, lambda: heartbeats.append(True))
+        _wait_for(lambda: bool(heartbeats))
+        button = next(b for b in shell.entry_chrome.title_bar.findChildren(_WindowButton) if b.kind == 'close')
+        QTest.mouseClick(button, Qt.LeftButton)
+        assert shell._pending_exit and guard.arms == ['shutdown']
+        assert shell.isVisible() and shell.lease is not None
+        QTest.mouseClick(button, Qt.LeftButton)
+        assert guard.forced == 1 and calls == ['release']
+    finally:
+        unblock.set()
+        _wait_for(lambda: not shell._workers)
+
+
+def test_native_second_close_offers_force_and_decline_keeps_deadline(shell, monkeypatch):
+    guard = shell._exit_guard = _ExitGuard()
+    shell._begin_application_exit()
+    started = shell._exit_started
+    prompts, ignored = [], []
+    monkeypatch.setattr(QMessageBox, 'question', lambda *a: prompts.append(a) or QMessageBox.No)
+    event = SimpleNamespace(spontaneous=lambda: True, ignore=lambda: ignored.append(True))
+    shell.closeEvent(event)
+    assert prompts and ignored and not guard.forced
+    assert shell._exit_started == started and guard.arms == ['shutdown']
+
+
+@pytest.mark.parametrize('start_another_exit', [False, True])
+def test_stale_force_answer_cannot_kill_reopened_application(shell, monkeypatch, start_another_exit):
+    from rem_card.ui import unified_window
+    # Windows/Python 3.11 can return the same monotonic timestamp for two
+    # consecutive requests. Ownership must not depend on clock resolution.
+    monkeypatch.setattr(unified_window, 'time', SimpleNamespace(monotonic=lambda: 123.0))
+    guard = shell._exit_guard = _ExitGuard()
+    shell._begin_application_exit()
+
+    def stale_answer(*args):
+        shell._cancel_exit_deadline()
+        shell._pending_exit = False
+        if start_another_exit:
+            shell._begin_application_exit()
+        return QMessageBox.Yes
+
+    monkeypatch.setattr(QMessageBox, 'question', stale_answer)
+    shell._offer_force_exit()
+    assert guard.forced == 0
+    assert guard.armed is start_another_exit
+
+
+def test_cancel_entry_unlock_error_also_finishes_exit(shell, monkeypatch):
+    import threading
+    shell._entry_cancel = threading.Event()
+    shell._busy = True
+    shell._exit_guard = _ExitGuard()
+    closed = []
+
+    def release():
+        raise OSError('synthetic release failure during entry cancellation')
+
+    shell.lease = SimpleNamespace(release=release)
+    monkeypatch.setattr(shell, 'close', lambda: closed.append(True))
+    shell._finish_cancelled_entry()
+    _wait_for(lambda: not shell._workers and bool(closed))
+    assert shell.lease is None and shell._entry_cancel is None and not shell._busy
+    assert shell._pending_exit
+
+
+def test_exclusive_unlock_error_prevents_restart_and_finishes_exit(shell, monkeypatch):
+    closed = []
+    shell._exit_guard = _ExitGuard()
+    shell._restart = True
+
+    def release():
+        raise OSError('synthetic exclusive unlock failure')
+
+    shell.exclusive = SimpleNamespace(release=release)
+    monkeypatch.setattr(shell, 'close', lambda: closed.append(True))
+    shell._release_exclusive_for_exit()
+    _wait_for(lambda: not shell._workers)
+    assert closed == [True] and shell.exclusive is None
+    assert shell._pending_exit and not shell._restart
+
+
+def test_drain_exception_retains_resources_and_allows_retry(shell, monkeypatch):
+    from PySide6.QtCore import QTimer
+    calls, scheduled = [], []
+    shell.container = object()
+    shell.lease = _Lease()
+    shell._shutdown = SimpleNamespace(run=lambda **kw: None)
+    monkeypatch.setattr(shell, '_async', lambda *args: calls.append(args))
+    monkeypatch.setattr(QTimer, 'singleShot', lambda ms, fn: scheduled.append(fn))
+    shell._start_drain()
+    shell._start_drain()
+    assert len(calls) == 1
+    calls[0][2](RuntimeError('synthetic drain failure'))
+    assert shell.container is not None and shell.lease.release_calls == 0
+    scheduled.pop()()
+    assert len(calls) == 2
+
+
+def test_update_question_suspends_exit_deadline_and_rearms_after_answer(shell, monkeypatch):
+    guard = shell._exit_guard = _ExitGuard()
+    shell._begin_application_exit()
+    observed = []
+    monkeypatch.setattr(shell, '_update_found', lambda candidate: None)
+    monkeypatch.setattr(shell, 'close', lambda: None)
+
+    def answer(*args):
+        observed.append((guard.disarmed, shell._exit_started))
+        return QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, 'question', answer)
+    shell._exit_update_found(SimpleNamespace(version='test'))
+    assert observed == [(1, None)] and guard.arms == ['shutdown', 'shutdown']
+    assert not shell._update_requested
+
+
+def test_unified_doctor_outage_does_not_wait_for_monitor_in_gui(monkeypatch):
+    from rem_card.ui.main_window import MainWindow
+    from rem_card.ui.shared.custom_message_box import CustomMessageBox
+    closed = []
+    data = SimpleNamespace(prepare_runtime_outage_shutdown=lambda **kw: pytest.fail('blocking GUI shutdown'))
+    window = SimpleNamespace(
+        _runtime_outage_handling=False, _is_closing=False, container=SimpleNamespace(data_service=data),
+        stack=SimpleNamespace(setEnabled=lambda enabled: None),
+        window=lambda: SimpleNamespace(unified_controller=object()), close=lambda: closed.append(True))
+    monkeypatch.setattr(CustomMessageBox, 'warning', lambda *a: None)
+    MainWindow._handle_runtime_network_outage(window, {'role': 'doctor'})
+    assert closed == [True]

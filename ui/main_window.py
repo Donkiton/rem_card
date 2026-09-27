@@ -551,7 +551,9 @@ class MainWindow(QMainWindow):
             from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
             CustomMessageBox.warning(None, "База данных недоступна", build_doctor_runtime_outage_message())
-            if data_service is not None:
+            # The unified shell drains resources in its worker. Waiting here
+            # would block the GUI before its close button can handle another click.
+            if data_service is not None and getattr(self.window(), "unified_controller", None) is None:
                 data_service.prepare_runtime_outage_shutdown(timeout=5.0)
             self.close()
             return
