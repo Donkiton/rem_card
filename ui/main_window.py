@@ -537,7 +537,29 @@ class MainWindow(QMainWindow):
             return
         self._runtime_outage_handling = True
         data_service = getattr(self.container, "data_service", None)
+        if data_service is not None:
+            # The dialog may remain open indefinitely.  Repeat the service-side
+            # idempotent gate here before opening it so synthetic/access-monitor
+            # outage signals cannot leave background polling alive.
+            quiesce = getattr(data_service, "quiesce_runtime_outage_background_work", None)
+            if not callable(quiesce):
+                quiesce = getattr(data_service, "block_new_writes_for_runtime_outage", None)
+            if callable(quiesce):
+                quiesce(payload)
         role = str((payload or {}).get("role") or self._initial_role or self._current_role_key() or "").lower()
+        focus_timer = getattr(self, "_focus_refresh_timer", None)
+        if focus_timer is not None:
+            try:
+                focus_timer.stop()
+            except RuntimeError:
+                pass
+        for role_widget in (getattr(self, "doctor_main", None), getattr(self, "nurse_main", None)):
+            stop_auto_refresh = getattr(role_widget, "stop_auto_refresh", None)
+            if callable(stop_auto_refresh):
+                try:
+                    stop_auto_refresh()
+                except Exception as exc:
+                    logger.warning("Runtime outage role refresh quiesce failed: %s", exc, exc_info=True)
         if is_operblock_role(role):
             self._handle_operblock_runtime_network_outage(payload, data_service=data_service, role=role)
             return

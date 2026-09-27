@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEd
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.styles.context_menu_style import install_russian_line_edit_context_menu
 from rem_card.ui.styles.theme import COLOR_DANGER
@@ -21,6 +22,10 @@ class Sector7vit_b(BaseSectorWidget):
         self.shift_date = None
         self._forced_read_only = False
         self._loaded_number = ""
+        self._notice_generation = 0
+        self._notice_worker = None
+        self._notice_request = None
+        self._notice_closed = False
         self.label.hide() # Скрываем стандартный заголовок
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         set_widget_style(self, "background: transparent;")
@@ -188,6 +193,12 @@ class Sector7vit_b(BaseSectorWidget):
         self.remcard_service = remcard_service
         self.admission_id = next_admission_id
         self.shift_date = shift_date
+        if context_changed:
+            self._notice_generation += 1
+            # A number belongs to the preceding admission until a fresh
+            # snapshot or authoritative read arrives.  Never relabel it as
+            # the new patient's number during that interval.
+            self.set_notice_data("")
         if not self.admission_id:
             if context_changed or self._loaded_number:
                 self.set_notice_data("")
@@ -234,21 +245,95 @@ class Sector7vit_b(BaseSectorWidget):
         if self.has_unsaved_changes() and not force:
             self._apply_enabled_state()
             return False
-        try:
-            try:
-                data = self.remcard_service.get_emergency_notice(
-                    self.admission_id,
-                    force_central=True,
-                )
-            except TypeError:
-                data = self.remcard_service.get_emergency_notice(self.admission_id)
-            self.set_notice_data(data.get("number", ""))
-            return True
-        except Exception as exc:
-            logger.warning("Не удалось загрузить номер экстренного извещения: %s", exc)
-            self.status_label.setText("Не удалось загрузить")
-            self._apply_enabled_state()
+        request = self._notice_request
+        if (
+            self._notice_worker is not None
+            and request is not None
+            and request["generation"] == self._notice_generation
+            and request["service"] is self.remcard_service
+            and request["admission_id"] == self.admission_id
+        ):
             return False
+
+        request = {
+            "generation": self._notice_generation,
+            "service": self.remcard_service,
+            "admission_id": self.admission_id,
+        }
+        self._notice_request = request
+        if not self._loaded_number and not self.has_unsaved_changes():
+            self.status_label.setText("Загрузка номера извещения...")
+        worker = AsyncCallThread(self._load_notice, request["service"], request["admission_id"])
+        worker._sector_7vit_b_request = request
+        self._notice_worker = worker
+        # Bound QObject slots are disconnected with this sector when a parent
+        # layout destroys it.  The request is owned by the worker so queued
+        # completions still identify their original A/B/A context.
+        worker.succeeded.connect(self._on_notice_loaded)
+        worker.failed.connect(self._on_notice_failed)
+        worker.finished.connect(self._on_notice_finished)
+        worker.start()
+        # Данные с центральной БД никогда не читаются из UI-потока. Пока
+        # запрос выполняется, вызывающий код может показать номер из снимка
+        # карты, не выдавая его за ответ authoritative-read.
+        return False
+
+    @staticmethod
+    def _load_notice(service, admission_id):
+        try:
+            return dict(service.get_emergency_notice(admission_id, force_central=True) or {})
+        except TypeError:
+            return dict(service.get_emergency_notice(admission_id) or {})
+
+    def _notice_request_is_current(self, request, worker) -> bool:
+        return bool(
+            not self._notice_closed
+            and request is self._notice_request
+            and worker is self._notice_worker
+            and request["generation"] == self._notice_generation
+            and request["service"] is self.remcard_service
+            and request["admission_id"] == self.admission_id
+        )
+
+    def _on_notice_loaded(self, data):
+        worker = self.sender()
+        request = getattr(worker, "_sector_7vit_b_request", None)
+        if not self._notice_request_is_current(request, worker) or self.has_unsaved_changes():
+            return
+        self.set_notice_data((data or {}).get("number", ""))
+
+    def _on_notice_failed(self, exc):
+        worker = self.sender()
+        request = getattr(worker, "_sector_7vit_b_request", None)
+        if not self._notice_request_is_current(request, worker):
+            return
+        logger.warning("Не удалось загрузить номер экстренного извещения: %s", exc)
+        # Не очищаем последнее достоверно показанное значение и не заменяем
+        # ошибку нулевым номером.
+        self.status_label.setText("Не удалось обновить номер извещения")
+        self._apply_enabled_state()
+
+    def _on_notice_finished(self):
+        worker = self.sender()
+        if worker is self._notice_worker:
+            self._notice_worker = None
+            self._notice_request = None
+
+    def shutdown(self):
+        self._notice_closed = True
+        self._notice_generation += 1
+        worker = self._notice_worker
+        self._notice_worker = None
+        self._notice_request = None
+        if worker is not None:
+            try:
+                worker.quit()
+            except Exception:
+                pass
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
     def _save_notice(self):
         if not self.editable or self._forced_read_only or not self.remcard_service or not self.admission_id:

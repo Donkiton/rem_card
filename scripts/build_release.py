@@ -281,6 +281,10 @@ def run_release_checks(root: Path) -> None:
 
 def run_compiled_smoke(package_dir: Path) -> None:
     """Prove that every shipped executable starts its frozen entrypoint successfully."""
+    smoke_env = dict(os.environ)
+    smoke_env["REMCARD_SMOKE_EXPECT_NO_DATABASE_UPGRADES"] = (
+        "1" if os.environ.get("REMCARD_BUILD_NO_DATABASE_UPGRADES") == "1" else "0"
+    )
     for exe_name in REQUIRED_RELEASE_EXES:
         executable = package_dir / exe_name
         print(f"Smoke-тест собранного EXE: {exe_name}...")
@@ -288,6 +292,7 @@ def run_compiled_smoke(package_dir: Path) -> None:
             result = subprocess.run(
                 [str(executable), "--compiled-smoke"],
                 cwd=str(package_dir),
+                env=smoke_env,
                 check=False,
                 timeout=COMPILED_SMOKE_TIMEOUT_SECONDS,
                 stdout=subprocess.PIPE,
@@ -665,6 +670,7 @@ def write_staged_full_manifest(
             "prog_dir": ".",
             "source_commit": source_commit,
             "settings_release": settings_release,
+            "database_upgrades_disabled": os.environ.get("REMCARD_BUILD_NO_DATABASE_UPGRADES") == "1",
             "files": normalize_file_inventory(file_inventory, required=True),
         }
     )

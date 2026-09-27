@@ -331,7 +331,10 @@ class DataService(QObject):
         return self._monitor.get_change_state()
 
     def set_change_monitor_enabled(self, enabled: bool):
-        self._monitor_enabled = bool(enabled)
+        enabled = bool(enabled)
+        if enabled and bool(getattr(self, "_network_outage_detected", False)):
+            return
+        self._monitor_enabled = enabled
         if self._monitor:
             self._monitor.set_enabled(self._monitor_enabled)
 
@@ -463,11 +466,17 @@ class DataService(QObject):
 
     def run_poll_maintenance_tasks(self):
         with self._emergency_pause_lock:
-            if self._emergency_pause_state is not None:
+            if (
+                self._emergency_pause_state is not None
+                or self._shutting_down
+                or bool(getattr(self, "_network_outage_detected", False))
+            ):
                 return
             self._poll_maintenance_active += 1
         try:
             for task in list(self._poll_maintenance_tasks):
+                if self._shutting_down or bool(getattr(self, "_network_outage_detected", False)):
+                    break
                 task_name = str(getattr(task, "__name__", "") or "poll_maintenance")
                 decision = should_defer_for_foreground_resume(
                     task_name,
@@ -681,11 +690,42 @@ class DataService(QObject):
         }
 
     def block_new_writes_for_runtime_outage(self, info: dict[str, Any] | None = None) -> None:
-        if self._network_outage_detected:
-            return
+        self.quiesce_runtime_outage_background_work(info)
+
+    def quiesce_runtime_outage_background_work(self, info: dict[str, Any] | None = None) -> None:
+        """Stop admitting recurring network work without waiting for workers."""
+        already_detected = bool(self._network_outage_detected)
         self._network_outage_detected = True
-        self._network_outage_info = dict(info or {})
-        logger.warning("Runtime network outage detected; new writes are blocked: %s", self._network_outage_info)
+        if info:
+            self._network_outage_info = dict(info)
+        elif not already_detected:
+            self._network_outage_info = {}
+
+        # This phase must never wait for the GUI or for a worker.  Pausing the
+        # monitor is thread-safe and wakes its event loop; accepted writes stay
+        # in LocalWriteQueue and retain their normal terminal outcome handling.
+        monitor = getattr(self, "_monitor", None)
+        if monitor is not None:
+            try:
+                monitor.set_enabled(False)
+            except Exception as exc:
+                logger.warning("Runtime outage monitor quiesce failed: %s", exc, exc_info=True)
+
+        for attr, label in (
+            ("_emergency_standby_scheduler", "Emergency standby scheduler"),
+            ("_emergency_restore_probe_scheduler", "Emergency restore probe scheduler"),
+        ):
+            scheduler = getattr(self, attr, None)
+            if scheduler is None:
+                continue
+            try:
+                scheduler.stop(timeout=0.0)
+            except Exception as exc:
+                logger.warning("%s runtime outage quiesce failed: %s", label, exc, exc_info=True)
+
+        if not already_detected:
+            logger.warning("Runtime network outage detected; background work and new writes are blocked: %s",
+                           self._network_outage_info)
 
     def _reject_write_if_outage(self, description: str) -> bool:
         if not self._network_outage_detected:
@@ -1483,7 +1523,7 @@ class DataService(QObject):
 
     @Slot(dict)
     def _emit_coordinated_changes(self, payload: dict):
-        if self._shutting_down:
+        if self._shutting_down or self._network_outage_detected:
             return
         if any((change or {}).get("settings_change") for change in (payload or {}).get("changes", [])):
             try:

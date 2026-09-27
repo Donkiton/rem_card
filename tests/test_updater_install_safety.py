@@ -15,6 +15,16 @@ from rem_card.app import update_launcher, updater_main  # noqa: E402
 from rem_card.app.update_checker import UpdateCandidate  # noqa: E402
 
 
+def test_updater_smoke_checks_embedded_database_upgrade_profile(monkeypatch):
+    from rem_card.app import client_build_profile
+
+    monkeypatch.setenv('REMCARD_SMOKE_EXPECT_NO_DATABASE_UPGRADES', '1')
+    monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', False)
+    assert updater_main.main(['--compiled-smoke']) == 4
+    monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', True)
+    assert updater_main.main(['--compiled-smoke']) == 0
+
+
 def _candidate(release_dir: Path, version: str = "4.1.5") -> UpdateCandidate:
     manifest_payload = {"version": version}
     manifest = release_dir / "manifest.json"

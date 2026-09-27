@@ -134,6 +134,9 @@ def build_print_balance_final(
     current_time: datetime,
     end_dt: datetime,
 ) -> dict:
+    # This function is invoked by report workers.  Keep report catalog
+    # freshness without moving settings reads back into Qt balance handlers.
+    BalanceCalculator.refresh_engine_if_due_in_background()
     transfer_time, outcome_time = _resolve_terminal_times(remcard_service, admission_id)
     balance_res = BalanceCalculator.calculate(
         orders,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -231,6 +232,99 @@ def test_shutdown_preserves_busy_local_writer_without_waiting(tmp_path):
     finally:
         release.set()
         thread.join(timeout=2)
+
+
+def _log_record(message: str, *, level: int = logging.INFO) -> logging.LogRecord:
+    return logging.LogRecord("RemCard", level, __file__, 1, message, (), None)
+
+
+def test_runtime_handler_flush_persists_queued_records(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMCARD_LOG_FLUSH_TIMEOUT_MS", "1000")
+    handler = storage.RuntimeLogHandler(str(tmp_path), "doctor")
+    handler.setFormatter(logging.Formatter("%(levelname)s:%(message)s"))
+    handler.handle(_log_record("first"))
+    handler.handle(_log_record("second", level=logging.WARNING))
+    handler.flush()
+    handler.close()
+
+    content = "".join(path.read_text(encoding="utf-8") for path in tmp_path.glob("doctor_*.log"))
+    assert content == "INFO:first\nWARNING:second\n"
+
+
+def test_runtime_handler_settings_have_hard_upper_bounds(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMCARD_LOG_QUEUE_SIZE", "999999999")
+    monkeypatch.setenv("REMCARD_LOG_BATCH_SIZE", "999999999")
+    monkeypatch.setenv("REMCARD_LOG_FLUSH_TIMEOUT_MS", "999999999")
+    handler = storage.RuntimeLogHandler(str(tmp_path), "doctor")
+    try:
+        assert handler._queue_size == storage.MAX_LOG_QUEUE_SIZE
+        assert handler._batch_size == storage.MAX_LOG_BATCH_SIZE
+        assert handler._flush_timeout == storage.MAX_LOG_FLUSH_TIMEOUT_MS / 1000.0
+    finally:
+        handler.close()
+
+
+def test_runtime_handler_emit_and_close_stay_bounded_while_writer_is_stuck(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMCARD_LOG_QUEUE_SIZE", "2")
+    monkeypatch.setenv("REMCARD_LOG_FLUSH_TIMEOUT_MS", "50")
+    handler = storage.RuntimeLogHandler(str(tmp_path), "doctor")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked_append(*_args, **_kwargs):
+        entered.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(storage, "append_log_lines", blocked_append)
+    started = time.monotonic()
+    handler.handle(_log_record("first"))
+    assert time.monotonic() - started < 0.1
+    assert entered.wait(timeout=1)
+
+    started = time.monotonic()
+    for index in range(100):
+        handler.handle(_log_record(f"queued-{index}"))
+    assert time.monotonic() - started < 0.1
+    assert handler._queue.qsize() <= 2
+
+    started = time.monotonic()
+    handler.close()
+    assert time.monotonic() - started < 0.2
+    assert handler._worker.is_alive()
+    release.set()
+    assert handler._stopped.wait(timeout=2)
+
+
+def test_runtime_handler_reports_queue_loss_and_keeps_new_warning(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMCARD_LOG_QUEUE_SIZE", "1")
+    monkeypatch.setenv("REMCARD_LOG_FLUSH_TIMEOUT_MS", "1000")
+    handler = storage.RuntimeLogHandler(str(tmp_path), "doctor")
+    entered = threading.Event()
+    release = threading.Event()
+    batches: list[list[str]] = []
+
+    def controlled_append(_directory, _prefix, lines, **_kwargs):
+        materialized = list(lines)
+        batches.append(materialized)
+        if len(batches) == 1:
+            entered.set()
+            release.wait(timeout=5)
+
+    monkeypatch.setattr(storage, "append_log_lines", controlled_append)
+    handler.handle(_log_record("first"))
+    assert entered.wait(timeout=1)
+    handler.handle(_log_record("older queued info"))
+    handler.handle(_log_record("dropped info"))
+    handler.handle(_log_record("urgent warning", level=logging.WARNING))
+    release.set()
+    handler.flush()
+    handler.close()
+
+    content = "".join(line for batch in batches for line in batch)
+    assert "urgent warning" in content
+    assert "older queued info" not in content
+    assert "Runtime log queue overflow" in content
+    assert "dropped_records=2" in content
 
 
 def test_preview_never_deletes_and_apply_preserves_changed_files(tmp_path):

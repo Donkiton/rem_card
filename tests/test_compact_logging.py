@@ -228,6 +228,16 @@ def test_handler_policy_failure_keeps_source_record(monkeypatch):
     handler.close()
 
 
+def test_handler_flush_delegates_to_file_target(monkeypatch):
+    target = ListHandler()
+    flushed = []
+    monkeypatch.setattr(target, "flush", lambda: flushed.append(True))
+    handler = compact_logging.CompactLogHandler(target)
+    handler.flush()
+    assert flushed == [True]
+    handler.close()
+
+
 @pytest.fixture
 def fault_file(monkeypatch):
     stream = io.StringIO()

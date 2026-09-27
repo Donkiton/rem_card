@@ -66,3 +66,36 @@ def test_incompatible_database_rejected_without_writes(tmp_path, monkeypatch):
             call()
         assert list(conn.iterdump()) == before
     assert not (tmp_path / 'backup').exists()
+
+
+def test_compatible_settings_and_operblock_do_not_write(monkeypatch):
+    settings = sqlite3.connect(':memory:')
+    medical = sqlite3.connect(':memory:')
+    try:
+        settings_schema.apply_schema(settings)
+        unified_db_schema.ensure_unified_schema(medical)
+        _apply_operblock_schema(medical.cursor())
+        medical.commit()
+        before = [list(conn.iterdump()) for conn in (settings, medical)]
+        monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', True)
+        controller = SimpleNamespace(connection_guard=lambda connection: nullcontext())
+        manager = SimpleNamespace(_remcard_conn=medical, write_controller=controller)
+        settings_schema.apply_schema(settings)
+        result = ensure_operblock_schema(manager)
+        _apply_operblock_schema(medical.cursor())
+        assert not result.migrated
+        assert [list(conn.iterdump()) for conn in (settings, medical)] == before
+    finally:
+        settings.close()
+        medical.close()
+
+
+@pytest.mark.parametrize('embedded,expected,ok', [
+    (True, '1', True), (False, '1', False), (True, '0', False),
+    (False, '0', True), (True, 'invalid', False),
+])
+def test_smoke_checks_embedded_policy_without_overriding_it(monkeypatch, embedded, expected, ok):
+    monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', embedded)
+    monkeypatch.setenv('REMCARD_SMOKE_EXPECT_NO_DATABASE_UPGRADES', expected)
+    assert client_build_profile.compiled_profile_matches_expectation() is ok
+    assert client_build_profile.database_upgrades_disabled() is embedded
