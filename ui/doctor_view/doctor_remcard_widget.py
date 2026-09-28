@@ -3074,7 +3074,7 @@ class DoctorRemCardWidget(QWidget):
             return
 
         from rem_card.ui.shared.vitals_widget import VitalsWidget
-        from .components.balance_controller import BalanceController
+        from rem_card.ui.shared.components.balance_controller import BalanceController
 
         self.vitals_input = VitalsWidget(
             self.service,
@@ -4114,7 +4114,7 @@ class DoctorRemCardWidget(QWidget):
             )
 
     def on_calculator_clicked(self, *, anchor_center=None):
-        from .components.infusion_calculator import InfusionCalculatorDialog
+        from rem_card.ui.shared.components.infusion_calculator import InfusionCalculatorDialog
         from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
 
         # Чистый запуск без передачи веса пациента (калькулятор стартует с 0)
@@ -4124,7 +4124,7 @@ class DoctorRemCardWidget(QWidget):
 
     def on_burn_calculator_clicked(self, *, anchor_center=None):
         from rem_card.services.burn_infusion_calculator import is_acute_burn_mkb
-        from .components.burn_infusion_calculator import BurnInfusionCalculatorDialog
+        from rem_card.ui.shared.components.burn_infusion_calculator import BurnInfusionCalculatorDialog
         from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
 
         patient = self._burn_patient_for_context(load_if_missing=True)
@@ -4175,7 +4175,7 @@ class DoctorRemCardWidget(QWidget):
         )
 
     def on_electrolyte_calculator_clicked(self, *, anchor_center=None):
-        from .components.electrolyte_calculator import ElectrolyteCalculatorDialog
+        from rem_card.ui.shared.components.electrolyte_calculator import ElectrolyteCalculatorDialog
         from rem_card.ui.shared.components.calculation_launcher import exec_calculation_dialog
 
         dialog = ElectrolyteCalculatorDialog(

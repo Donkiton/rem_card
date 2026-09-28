@@ -43,9 +43,7 @@ from rem_card.services.operblock_medication_presets import (
     operblock_medication_preset_requires_narcotic_sheet,
 )
 from rem_card.services.operblock_route_settings import (
-    normalize_operblock_route_code,
     operblock_comment_with_route,
-    strip_operblock_route_tag,
 )
 from rem_card.services.operblock_anesthesia_types import normalize_operblock_anesthesia_type_label
 from rem_card.services.operblock_handoff_service import (
@@ -176,14 +174,6 @@ def normalize_operblock_history_number(value: str) -> str:
     if not all(ch.isalnum() for part in parts for ch in part):
         raise ValueError("Номер истории может содержать только буквы, цифры и необязательный символ '/'.")
     return text
-
-
-def normalize_operblock_order_route(value: str | None) -> str:
-    return normalize_operblock_route_code(value)
-
-
-def _strip_operblock_order_route_tag(comment: str) -> str:
-    return strip_operblock_route_tag(comment)
 
 
 def _operblock_order_comment_with_route(comment: str, route: str | None) -> str:

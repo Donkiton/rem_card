@@ -33,14 +33,6 @@ def operblock_table_code_for_role(role: str | None) -> str | None:
     return OPERBLOCK_ROLE_TABLE_CODES.get(normalize_role_key(role))
 
 
-def operblock_role_for_table_code(table_code: str | None) -> str | None:
-    code = str(table_code or "").strip().lower()
-    for role, role_table_code in OPERBLOCK_ROLE_TABLE_CODES.items():
-        if role_table_code == code:
-            return role
-    return None
-
-
 def role_display_name(role: str | None) -> str:
     role_key = normalize_role_key(role)
     return ROLE_DISPLAY_NAMES.get(role_key, str(role or ""))

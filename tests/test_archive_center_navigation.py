@@ -17,7 +17,7 @@ from PySide6.QtCore import QEvent, QObject  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QStackedWidget, QWidget  # noqa: E402
 
 from rem_card.ui.archive_center.archive_main_widget import ArchiveMainWidget  # noqa: E402
-from rem_card.ui.analytics.graphs_catalog import GRAPH_GROUPS  # noqa: E402
+from rem_card.services.analytics.graph_catalog import GRAPH_GROUPS  # noqa: E402
 from rem_card.ui.archive_center.statistics_page import ArchiveStatisticsPage  # noqa: E402
 from rem_card.ui.doctor_view.archive_widget import ARCHIVE_MODE_OPERBLOCK, ARCHIVE_MODE_RAO, ArchiveWidget  # noqa: E402
 from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget  # noqa: E402

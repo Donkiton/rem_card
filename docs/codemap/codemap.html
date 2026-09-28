@@ -8,15 +8,15 @@
 </style>
 </head>
 <body>
-<header><div><h1>RemCard 5.1 · интерактивная карта кода</h1><div class="meta">Сформировано <code id="generated"></code> из коммита <code id="commit"></code></div></div><div class="stats"><span class="pill" id="nc"></span><span class="pill" id="ec"></span><span class="pill" id="fc"></span><span class="pill">только подтверждённые связи</span></div></header>
+<header><div><h1>RemCard 5.1 · интерактивная карта кода</h1><div class="meta">Сформировано <code id="generated"></code> из коммита <code id="commit"></code> · точки входа актуализированы 28.09.2026</div></div><div class="stats"><span class="pill" id="nc"></span><span class="pill" id="ec"></span><span class="pill" id="fc"></span><span class="pill">только подтверждённые связи</span></div></header>
 <div class="toolbar"><input id="search" type="search" placeholder="Поиск модуля, пути или роли…"><select id="flow"><option value="">Все потоки</option></select><button id="fit">Вписать</button><button id="zin" title="Увеличить">＋</button><button id="zout" title="Уменьшить">−</button><button id="reset">Сбросить</button><div class="types" id="types"></div></div>
 <main class="work"><section class="stage"><svg id="map" viewBox="0 0 1320 860" aria-label="Интерактивный граф архитектуры"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0 0L0 6L7 3z" fill="#7487a6"/></marker></defs><g id="view"><g id="bounds"></g><g id="edges"></g><g id="nodes"></g></g></svg><div class="hint">Колесо: масштаб · фон: перемещение · модуль: перетаскивание · щелчок: трассировка зависимостей</div></section><aside id="details"></aside></main>
 <script id="codemap-data" type="application/json">
 {
   "generated_at": "2026-09-23T09:52:30Z",
   "generated_from_commit": "c4f7f3e520048e70bce21422d5e67fe2638922e3",
+  "maintenance_note": "2026-09-28: точки входа актуализированы для rework; остальная карта отражает исходный коммит генерации.",
   "scope": [
-    "launcher.py",
     "run_*.py",
     "app/",
     "data/dao/",
@@ -33,7 +33,7 @@
       "type": "entry",
       "boundary": "client",
       "path": "run_remcard.py",
-      "role": "RemCard.exe запускает unified_main и общий выбор четырёх ролей. Отдельный RemCardUpdater.exe обслуживает обновления. Старые Python-точки входа сохранены для совместимости.",
+      "role": "RemCard.exe запускает unified_main и общий выбор четырёх ролей. Отдельный RemCardUpdater.exe обслуживает обновления. Запуск из исходников также выполняется через run_remcard.py; старые ролевые Python-скрипты удалены.",
       "entrypoints": [
         "run_remcard.py#__main__",
         "app/unified_main.py#main",
@@ -44,7 +44,7 @@
         "tests/test_unified_update_package.py"
       ],
       "constraints": [
-        "PyInstaller собирает два EXE; ролевые Python-скрипты не являются отдельными пользовательскими EXE.",
+        "PyInstaller собирает два EXE; отдельные ролевые Python-точки входа удалены.",
         "freeze_support выполняется до GUI bootstrap для дочерних процессов Windows."
       ],
       "evidence": [

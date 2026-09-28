@@ -116,14 +116,6 @@ class ArchiveReadOnlyDatabaseManager:
             finally:
                 cursor.close()
 
-    def fetch_all_journal(self, query: str, params: Sequence = (), *, cancel_check=None):
-        """Compatibility alias for legacy journal callers."""
-        return self.fetch_all_remcard(query, params, cancel_check=cancel_check)
-
-    def fetch_one_journal(self, query: str, params: Sequence = ()):
-        """Compatibility alias for legacy journal callers."""
-        return self.fetch_one_remcard(query, params)
-
     def get_data_version(self) -> int:
         row = self.fetch_one_remcard("SELECT value FROM meta WHERE key = 'app_data_version'")
         return int(row[0]) if row and row[0] is not None else 0

@@ -24,6 +24,16 @@ from rem_card.app.full_update_manifest import (  # noqa: E402
 from scripts import build_release, publish_full_update  # noqa: E402
 
 
+LEGACY_PACKAGE_EXES = (
+    "RemCardDoctor.exe",
+    "RemCardNurse.exe",
+    "RemCardOperBlockEmergency.exe",
+    "RemCardOperBlockPlanned.exe",
+    "RemCardPathSetup.exe",
+    "RemCardUpdater.exe",
+)
+
+
 def _write_update_package(root: Path, executable_names: tuple[str, ...]) -> None:
     root.mkdir(parents=True)
     (root / "ready.ok").write_text("ready\n", encoding="utf-8")
@@ -44,25 +54,21 @@ def _write_update_package(root: Path, executable_names: tuple[str, ...]) -> None
         (root / name).write_bytes(name.encode("ascii"))
 
 
-@pytest.mark.parametrize(
-    ("required_exes", "expected_layout"),
-    (
-        (updater_main.UNIFIED_REQUIRED_EXES, "unified"),
-        (updater_main.LEGACY_REQUIRED_EXES, "legacy"),
-    ),
-)
-def test_updater_accepts_unified_and_legacy_full_packages(
-    tmp_path: Path,
-    required_exes: tuple[str, ...],
-    expected_layout: str,
-) -> None:
-    package = tmp_path / expected_layout
-    _write_update_package(package, required_exes)
+def test_updater_accepts_unified_full_package(tmp_path: Path) -> None:
+    package = tmp_path / "unified"
+    _write_update_package(package, updater_main.UNIFIED_REQUIRED_EXES)
 
     manifest = updater_main._validate_source(str(package))
 
     assert manifest["version"] == "4.4.0"
-    assert updater_main._detect_package_layout(str(package)) == expected_layout
+    assert updater_main._detect_package_layout(str(package)) == "unified"
+
+
+def test_updater_rejects_retired_role_package(tmp_path: Path) -> None:
+    package = tmp_path / "legacy"
+    _write_update_package(package, LEGACY_PACKAGE_EXES)
+    with pytest.raises(RuntimeError, match="единой структуре EXE"):
+        updater_main._validate_source(str(package))
 
 
 def test_updater_rejects_partial_mixed_executable_layout(tmp_path: Path) -> None:
@@ -72,7 +78,7 @@ def test_updater_rejects_partial_mixed_executable_layout(tmp_path: Path) -> None
         ("RemCardUpdater.exe", "RemCardDoctor.exe", "RemCardNurse.exe"),
     )
 
-    with pytest.raises(RuntimeError, match="ни единой, ни прежней структуре"):
+    with pytest.raises(RuntimeError, match="единой структуре EXE"):
         updater_main._validate_source(str(package))
 
 
@@ -101,21 +107,20 @@ def test_unified_layout_does_not_bypass_manifest_hash_verification(tmp_path: Pat
     assert installed.read_bytes() == b"installed"
 
 
-@pytest.mark.parametrize(
-    "required_exes",
-    (update_checker.UNIFIED_REQUIRED_RELEASE_EXES, update_checker.LEGACY_REQUIRED_RELEASE_EXES),
-)
-def test_update_checker_discovers_both_supported_layouts(
-    tmp_path: Path,
-    required_exes: tuple[str, ...],
-) -> None:
+def test_update_checker_discovers_unified_layout(tmp_path: Path) -> None:
     package = tmp_path / "4.4.0"
-    _write_update_package(package, required_exes)
+    _write_update_package(package, update_checker.UNIFIED_REQUIRED_RELEASE_EXES)
 
     candidate = update_checker._load_candidate(str(package))
 
     assert candidate is not None
     assert candidate.version == "4.4.0"
+
+
+def test_update_checker_ignores_retired_role_package(tmp_path: Path) -> None:
+    package = tmp_path / "legacy"
+    _write_update_package(package, LEGACY_PACKAGE_EXES)
+    assert update_checker._load_candidate(str(package)) is None
 
 
 def test_process_detection_includes_unified_and_legacy_targets(
@@ -219,24 +224,20 @@ def test_build_validation_requires_exact_two_executable_layout(
         )
 
 
-@pytest.mark.parametrize(
-    ("required_exes", "expected_layout"),
-    (
-        (publish_full_update.UNIFIED_REQUIRED_RELEASE_EXES, "unified"),
-        (publish_full_update.LEGACY_REQUIRED_RELEASE_EXES, "legacy"),
-    ),
-)
-def test_network_publisher_recognizes_both_layouts(
-    tmp_path: Path,
-    required_exes: tuple[str, ...],
-    expected_layout: str,
-) -> None:
-    package = tmp_path / expected_layout
+def test_network_publisher_recognizes_unified_layout(tmp_path: Path) -> None:
+    package = tmp_path / "unified"
     package.mkdir()
-    for name in required_exes:
+    for name in publish_full_update.UNIFIED_REQUIRED_RELEASE_EXES:
         (package / name).write_bytes(b"exe")
 
-    assert publish_full_update._detect_executable_layout(package) == expected_layout
+    assert publish_full_update._detect_executable_layout(package) == "unified"
+
+
+def test_network_publisher_rejects_retired_role_package(tmp_path: Path) -> None:
+    package = tmp_path / "legacy"
+    _write_update_package(package, LEGACY_PACKAGE_EXES)
+    with pytest.raises(publish_full_update.PublishError, match="единый набор EXE"):
+        publish_full_update._detect_executable_layout(package)
 
 
 def test_network_publisher_rejects_mixed_final_layout(tmp_path: Path) -> None:

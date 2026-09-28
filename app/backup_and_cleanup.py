@@ -203,15 +203,6 @@ def _write_json_atomic(path: str, payload: dict) -> None:
     os.replace(tmp_path, path)
 
 
-def _read_json_file(path: str) -> dict | None:
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        return None
-
-
 def _reservation_is_stale(path: str, now: datetime) -> bool:
     try:
         mtime = _network_file_datetime(path)

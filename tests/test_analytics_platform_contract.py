@@ -1,7 +1,7 @@
 from rem_card.services.analytics.detailed_statistics_service import SECTION_GROUPS
 from rem_card.services.analytics.operblock_statistics_service import OPERBLOCK_SECTION_GROUPS
 from rem_card.services.analytics.platform import MetricScope, PopulationKind, default_metric_registry
-from rem_card.ui.analytics.graphs_catalog import GRAPH_GROUPS
+from rem_card.services.analytics.graph_catalog import GRAPH_GROUPS
 
 
 def test_registry_covers_existing_selectors_and_mandatory_kpis():

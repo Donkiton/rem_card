@@ -260,14 +260,7 @@ def _runtime_restart_args(marker_path: str, *, role: str = "nurse") -> list[str]
     script_path = os.path.abspath(argv0) if argv0 and os.path.isfile(argv0) else ""
     if not script_path:
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        role_script = {
-            "doctor": "run_doctor.py",
-            "nurse": "run_nurse.py",
-            "operblock": "run_operblock.py",
-            "operblock_emergency": "run_operblock_emergency.py",
-            "operblock_planned": "run_operblock_planned.py",
-        }.get(normalized_role, "launcher.py")
-        script_path = os.path.join(project_root, role_script)
+        script_path = os.path.join(project_root, "run_remcard.py")
     return [
         os.path.abspath(sys.executable),
         script_path,

@@ -32,8 +32,21 @@ def test_nested_retries_delay_next_task_without_identifying_original_holder(tmp_
     monkeypatch.setattr(sqlite_shared, 'record_metric', lambda name, value, **kw: attempts.append(name))
     queue = sqlite_shared.LocalWriteQueue()
     done = threading.Event()
+    begin_wait = threading.Event()
+    release_begin = threading.Event()
     failures = []
     calls = []
+    real_mark_stage = sqlite_shared.mark_stage
+
+    def mark_stage_with_handshake(stage):
+        real_mark_stage(stage)
+        if stage == 'sqlite_begin_wait' and not begin_wait.is_set():
+            begin_wait.set()
+            if not release_begin.wait(3):
+                raise AssertionError('sqlite_begin_wait handshake was not released')
+
+    monkeypatch.setattr(sqlite_shared, 'mark_stage', mark_stage_with_handshake)
+
     def operation():
         calls.append(1)
         with controller.transaction(conn, source='save_vital') as cursor:
@@ -41,20 +54,25 @@ def test_nested_retries_delay_next_task_without_identifying_original_holder(tmp_
     try:
         queue.submit(operation, 'save_vital:SECRET_PATIENT', on_error=failures.append, retries_left=1)
         queue.submit(done.set, 'following_action', retryable=False)
-        assert not done.wait(.03)
+        assert begin_wait.wait(1)
+        assert not done.is_set()
+        monkeypatch.setattr(diagnostics, 'THRESHOLD_SEC', 0)
+        monkeypatch.setattr(diagnostics, '_last_snapshot', float('-inf'))
         diagnostics._snapshot()
+        snapshots = [p for event, p in events if event == 'DB_WAIT_SNAPSHOT']
+        assert snapshots
+        assert any(op['stage'] == 'sqlite_begin_wait' for op in snapshots[-1]['operations'])
+        release_begin.set()
         assert done.wait(3)
         assert len(calls) == 2
         assert attempts.count('sqlite_locked_count') == 4
         assert len(failures) == 1
-        snapshots = [p for event, p in events if event == 'DB_WAIT_SNAPSHOT']
-        assert snapshots
-        assert any(op['stage'] == 'sqlite_begin_wait' for op in snapshots[0]['operations'])
         assert 'SECRET_PATIENT' not in str(events)
         holder.execute('ROLLBACK')
         operation()
         assert holder.execute('SELECT count(*) FROM sample').fetchone()[0] == 1
     finally:
+        release_begin.set()
         queue.shutdown(3)
         if holder.in_transaction:
             holder.rollback()

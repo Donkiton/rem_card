@@ -130,7 +130,7 @@ def test_dev_restart_drops_current_process_database_pin(monkeypatch, tmp_path):
 
     captured = {}
     monkeypatch.setattr(app_main, "is_compiled", lambda: False)
-    monkeypatch.setattr(sys, "argv", [str(tmp_path / "run_doctor.py"), "--example"])
+    monkeypatch.setattr(sys, "argv", [str(tmp_path / "run_remcard.py"), "--example"])
     monkeypatch.setenv("REMCARD_BAZA_DIR", str(tmp_path / "old_database"))
     monkeypatch.setenv(runtime_paths.DEV_RUNTIME_BAZA_PIN_ENV, str(os.getpid()))
 
@@ -146,7 +146,7 @@ def test_dev_restart_drops_current_process_database_pin(monkeypatch, tmp_path):
 
     assert app_main._launch_requested_dev_restart() is True
     assert captured["program"] == sys.executable
-    assert captured["arguments"] == [str(tmp_path / "run_doctor.py"), "--example"]
+    assert captured["arguments"] == [str(tmp_path / "run_remcard.py"), "--example"]
     assert "REMCARD_BAZA_DIR" not in os.environ
     assert runtime_paths.DEV_RUNTIME_BAZA_PIN_ENV not in os.environ
 

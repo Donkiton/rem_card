@@ -30,26 +30,12 @@ UNIFIED_REQUIRED_RELEASE_EXES = (
     "RemCard.exe",
     "RemCardUpdater.exe",
 )
-# Releases whose installed checker predates this dual-layout contract cannot
-# discover a unified-only package. Deploy a legacy-layout bridge release with
-# this checker before publishing the first unified-only release to those PCs.
-LEGACY_REQUIRED_RELEASE_EXES = (
-    "RemCardDoctor.exe",
-    "RemCardNurse.exe",
-    "RemCardOperBlockEmergency.exe",
-    "RemCardOperBlockPlanned.exe",
-    "RemCardPathSetup.exe",
-    "RemCardUpdater.exe",
-)
 REQUIRED_RELEASE_EXES = UNIFIED_REQUIRED_RELEASE_EXES
 TERMINAL_UPDATE_LOCK_STATES = frozenset({"completed", "released"})
 
 
 def _has_supported_executable_layout(prog_dir: str) -> bool:
-    return any(
-        all(os.path.isfile(os.path.join(prog_dir, name)) for name in required)
-        for required in (UNIFIED_REQUIRED_RELEASE_EXES, LEGACY_REQUIRED_RELEASE_EXES)
-    )
+    return all(os.path.isfile(os.path.join(prog_dir, name)) for name in REQUIRED_RELEASE_EXES)
 
 
 def _normalize_target_path(path: str) -> str:
