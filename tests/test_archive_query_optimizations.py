@@ -274,7 +274,7 @@ def test_operblock_archive_page_uses_one_connection_casefold_and_half_open_end(t
     _create_mixed_archive(db_path)
     clear_archive_schema_cache()
 
-    from rem_card.services import operblock_service as operblock_service_module
+    from rem_card.services.operblock import archive_sources as operblock_archive_module
 
     original_connect = sqlite3.connect
     connect_calls = 0
@@ -284,7 +284,7 @@ def test_operblock_archive_page_uses_one_connection_casefold_and_half_open_end(t
         connect_calls += 1
         return original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(operblock_service_module.sqlite3, "connect", counted_connect)
+    monkeypatch.setattr(operblock_archive_module.sqlite3, "connect", counted_connect)
     total, rows = OperBlockService._fetch_archive_case_page_from_db(
         str(db_path),
         start_dt="2026-07-12 00:00:00",
@@ -321,7 +321,7 @@ def test_public_operblock_page_opens_external_archive_once(tmp_path, monkeypatch
     current_path.touch()
     clear_archive_schema_cache()
 
-    from rem_card.services import operblock_service as operblock_service_module
+    from rem_card.services.operblock import archive_sources as operblock_archive_module
 
     original_connect = sqlite3.connect
     connect_calls = 0
@@ -331,7 +331,7 @@ def test_public_operblock_page_opens_external_archive_once(tmp_path, monkeypatch
         connect_calls += 1
         return original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(operblock_service_module.sqlite3, "connect", counted_connect)
+    monkeypatch.setattr(operblock_archive_module.sqlite3, "connect", counted_connect)
     service = object.__new__(OperBlockService)
     service.db = SimpleNamespace(
         db_path=str(current_path),

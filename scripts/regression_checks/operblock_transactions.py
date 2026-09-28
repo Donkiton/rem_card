@@ -106,7 +106,7 @@ def _check_opblock_idle_metrics_events_exist(temp_root: str) -> tuple[bool, str]
     sources = "\n".join(
         (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
         for rel_path in (
-            "ui/operblock_view/operblock_main_widget.py",
+            "ui/operblock_view/features/write_coordinator.py",
             "ui/main_window.py",
             "app/sqlite_shared.py",
             "services/data_service.py",
@@ -198,7 +198,7 @@ def _check_uiwatchdog_opblock_context_fields(temp_root: str) -> tuple[bool, str]
 
 def _check_opblock_idle_tracker_does_not_change_behavior(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
-    source = (PROJECT_ROOT / "ui/operblock_view/operblock_main_widget.py").read_text(encoding="utf-8")
+    source = (PROJECT_ROOT / "ui/operblock_view/features/write_coordinator.py").read_text(encoding="utf-8")
     forbidden = (
         "should_defer_background_io",
         "sqlite3.connect",
@@ -299,7 +299,7 @@ def _check_opblock_foreground_resume_lease_events_exist(temp_root: str) -> tuple
             "app/foreground_activity.py",
             "services/data_service.py",
             "ui/main_window.py",
-            "ui/operblock_view/operblock_main_widget.py",
+            "ui/operblock_view/features/write_coordinator.py",
             "scripts/analyze_opblock_idle_stalls.py",
         )
     )
@@ -551,7 +551,7 @@ def _check_opblock_write_metadata_marks_interactive_operations(temp_root: str) -
         for rel_path in (
             "services/data_service.py",
             "data/dao/db_manager.py",
-            "ui/operblock_view/operblock_main_widget.py",
+            "ui/operblock_view/features/write_coordinator.py",
         )
     )
     required = (
@@ -753,7 +753,7 @@ def _check_ui_busy_timeout_message_is_controlled(temp_root: str) -> tuple[bool, 
 
 def _check_ui_pending_cleared_after_busy_timeout(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
-    source = (PROJECT_ROOT / "ui/operblock_view/operblock_main_widget.py").read_text(encoding="utf-8")
+    source = (PROJECT_ROOT / "ui/operblock_view/features/write_coordinator.py").read_text(encoding="utf-8")
     required = (
         "ui_pending_cleared_after_busy_timeout",
         "_is_interactive_busy_timeout",

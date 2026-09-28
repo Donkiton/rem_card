@@ -22,7 +22,7 @@ def _check_operblock_medication_aliases_quick_search(temp_root: str) -> tuple[bo
         load_operblock_medication_presets,
         save_operblock_medication_presets,
     )
-    import rem_card.ui.operblock_view.operblock_main_widget as operblock_widget_module
+    import rem_card.ui.operblock_view.features.quick_orders as operblock_widget_module
     from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
 
     seed_dir = os.path.join(temp_root, "seed")
@@ -615,13 +615,9 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
     from rem_card.data.dao.db_manager import DatabaseManager
     from rem_card.data.dto.remcard_dto import VitalDTO
     from rem_card.services.operblock_service import OperBlockService
-    from rem_card.ui.operblock_view.operblock_main_widget import (
-        OperBlockMainWidget,
-        OperationStageTimeEditDialog,
-        StartAnesthesiaDialog,
-        StartSurgeryDialog,
-        OperationStagesDialog,
-    )
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+    from rem_card.ui.operblock_view.operblock_medication_edit_dialogs import OperationStageTimeEditDialog
+    from rem_card.ui.operblock_view.operblock_stage_dialogs import StartAnesthesiaDialog, StartSurgeryDialog, OperationStagesDialog
     from PySide6.QtWidgets import QApplication
 
     db_path = os.path.join(temp_root, "operblock_operation_stages.db")
@@ -962,7 +958,7 @@ def _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups(temp_root:
 
     from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QLineEdit, QPushButton, QWidget
 
-    from rem_card.ui.operblock_view.operblock_main_widget import OccupyTableDialog
+    from rem_card.ui.operblock_view.operblock_admission_dialogs import OccupyTableDialog
     from rem_card.ui.styles.theme import STYLE_PATIENT_FORM_CANCEL_BUTTON
 
     _ = temp_root
@@ -1233,7 +1229,7 @@ def _check_operblock_board_preview_action_buttons(full_card) -> tuple[bool, str]
 def _check_operblock_board_progress_stepper_centered(app, widget, base_dt: datetime) -> tuple[bool, str]:
     from PySide6.QtCore import QPoint
 
-    from rem_card.ui.operblock_view.operblock_main_widget import _OperBlockBoardProgressStepper
+    from rem_card.ui.operblock_view.operblock_visual_primitives import _OperBlockBoardProgressStepper
 
     block = widget._board_progress_block(
         {
@@ -1654,10 +1650,8 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 
     from rem_card.services.operblock_service import OperBlockService
-    from rem_card.ui.operblock_view.operblock_main_widget import (
-        OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT,
-        OperBlockMainWidget,
-    )
+    from rem_card.ui.operblock_view.operblock_visual_primitives import OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
 
     app = QApplication.instance() or QApplication([])
     widget = OperBlockMainWidget.__new__(OperBlockMainWidget)

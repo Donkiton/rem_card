@@ -24,13 +24,10 @@ from rem_card.services.operblock_service import (  # noqa: E402
     OperBlockSourceMovementChangedError,
 )
 from rem_card.services.concurrency import DataConflictError  # noqa: E402
-from rem_card.ui.operblock_view.operblock_main_widget import (  # noqa: E402
-    OperBlockAdmissionTimeInput,
-    OperBlockMainWidget,
-    OperationStagesDialog,
-    _operblock_format_time_edit_text,
-    _operblock_time_minutes_from_text,
-)
+from rem_card.ui.operblock_view.operblock_admission_dialogs import OperBlockAdmissionTimeInput  # noqa: E402
+from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget  # noqa: E402
+from rem_card.ui.operblock_view.operblock_stage_dialogs import OperationStagesDialog  # noqa: E402
+from rem_card.ui.operblock_view.operblock_helpers import _operblock_format_time_edit_text, _operblock_time_minutes_from_text  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -423,7 +420,7 @@ class OperBlockStartedAtTest(unittest.TestCase):
                 raise sqlite3.OperationalError("database is locked")
             return "ok"
 
-        with patch("rem_card.services.operblock_service.time.sleep") as sleep_mock:
+        with patch("rem_card.services.operblock.core.time.sleep") as sleep_mock:
             result = self.service._run_report_read_operation("operblock_report_context", operation)
 
         self.assertEqual(result, "ok")
@@ -699,7 +696,7 @@ class OperBlockAdmissionTimeInputWidgetTest(unittest.TestCase):
         )
 
         with patch(
-            "rem_card.ui.operblock_view.operblock_main_widget.CustomMessageBox.warning"
+            "rem_card.ui.shared.custom_message_box.CustomMessageBox.warning"
         ) as warning:
             OperBlockMainWidget._on_release_case_error(
                 widget,

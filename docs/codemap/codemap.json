@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-09-23T09:52:30Z",
   "generated_from_commit": "c4f7f3e520048e70bce21422d5e67fe2638922e3",
-  "maintenance_note": "2026-09-28: точки входа актуализированы для rework; остальная карта отражает исходный коммит генерации.",
+  "maintenance_note": "2026-09-28: точки входа и реализации операционного блока актуализированы для rework (этапы 2–3); остальная карта отражает исходный коммит генерации.",
   "scope": [
     "run_*.py",
     "app/",
@@ -238,11 +238,11 @@
           "symbol": "OperBlockMainWidget"
         },
         {
-          "path": "ui/operblock_view/operblock_main_widget.py",
+          "path": "ui/operblock_view/features/write_coordinator.py",
           "symbol": "_enqueue_write"
         },
         {
-          "path": "ui/operblock_view/operblock_main_widget.py",
+          "path": "ui/operblock_view/features/stages.py",
           "symbol": "_start_anesthesia"
         }
       ]
@@ -345,11 +345,11 @@
           "symbol": "OperBlockService"
         },
         {
-          "path": "services/operblock_service.py",
+          "path": "services/operblock/case_lifecycle.py",
           "symbol": "create_operation_case"
         },
         {
-          "path": "services/operblock_service.py",
+          "path": "services/operblock/stages.py",
           "symbol": "start_anesthesia"
         }
       ]
@@ -991,7 +991,7 @@
       "status": "evidenced",
       "evidence": [
         {
-          "path": "ui/operblock_view/operblock_main_widget.py",
+          "path": "ui/operblock_view/features/stages.py",
           "symbol": "_start_anesthesia"
         }
       ]
@@ -1120,7 +1120,7 @@
           "symbol": "changes_detected"
         },
         {
-          "path": "ui/operblock_view/operblock_main_widget.py",
+          "path": "ui/operblock_view/features/refresh.py",
           "symbol": "_on_changes_detected"
         }
       ]
@@ -1159,7 +1159,7 @@
       "status": "evidenced",
       "evidence": [
         {
-          "path": "services/operblock_service.py",
+          "path": "services/operblock/board.py",
           "symbol": "build_operblock_board_snapshot"
         }
       ]
@@ -1172,7 +1172,7 @@
       "status": "evidenced",
       "evidence": [
         {
-          "path": "services/operblock_service.py",
+          "path": "services/operblock/case_lifecycle.py",
           "symbol": "create_operation_case"
         }
       ]

@@ -285,7 +285,7 @@ class OperBlockUiLatencyTest(unittest.TestCase):
     def test_start_anesthesia_preparation_does_not_block_ui_thread(self):
         harness = _StartAnesthesiaHarness(_SlowStartAnesthesiaService())
         with patch(
-            "rem_card.ui.operblock_view.operblock_main_widget.load_start_anesthesia_options",
+            "rem_card.ui.operblock_view.features.stages.load_start_anesthesia_options",
             return_value={
                 "anesthesia_types": [],
                 "anesthesiologists": [],
@@ -304,7 +304,7 @@ class OperBlockUiLatencyTest(unittest.TestCase):
     def test_start_anesthesia_discards_result_for_another_case(self):
         harness = _StartAnesthesiaHarness(_SlowStartAnesthesiaService(delay_seconds=0.1))
         with patch(
-            "rem_card.ui.operblock_view.operblock_main_widget.load_start_anesthesia_options",
+            "rem_card.ui.operblock_view.features.stages.load_start_anesthesia_options",
             return_value={
                 "anesthesia_types": [],
                 "anesthesiologists": [],

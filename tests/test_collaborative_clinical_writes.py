@@ -138,7 +138,7 @@ def test_empty_balance_cell_write_policy_is_unchanged(db):
 def test_operblock_undo_receipt_survives_worker_serialization(db, monkeypatch):
     from rem_card.services.operblock_service import OperBlockService
     from rem_card.app.network_write_worker import _encode_result, _decode_result
-    monkeypatch.setattr("rem_card.services.operblock_service.validate_operblock_runtime_path", lambda _: None)
+    monkeypatch.setattr("rem_card.services.operblock.vitals.validate_operblock_runtime_path", lambda _: None)
     service = OperBlockService(db)
     service._assert_active_operation_for_admission = lambda *_: {"operation_case_id": 1, "started_at": SHIFT.isoformat()}
     service._assert_datetime_in_operation_bounds = lambda *_a, **_k: None

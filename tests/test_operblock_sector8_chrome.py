@@ -17,11 +17,9 @@ from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget  # noqa: E402
 
 from rem_card.ui.doctor_view.components.sector8_panel import Sector8Panel  # noqa: E402
 from rem_card.ui.nurse_view.components.nurse_sector8_panel import NurseSector8Panel  # noqa: E402
-from rem_card.ui.operblock_view import operblock_main_widget  # noqa: E402
-from rem_card.ui.operblock_view.operblock_main_widget import (  # noqa: E402
-    OperBlockMainWidget,
-    OperBlockSector8Panel,
-)
+from rem_card.ui.operblock_view import operblock_visual_primitives  # noqa: E402
+from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget  # noqa: E402
+from rem_card.ui.operblock_view.operblock_visual_primitives import OperBlockSector8Panel  # noqa: E402
 from rem_card.ui.rem_card_sectors.sector_8 import Sector8  # noqa: E402
 
 
@@ -51,12 +49,12 @@ def _display_settings(*, back_visible: bool = True, roles_visible: bool = True) 
 
 def _make_panel(monkeypatch, *, back_visible: bool = True, roles_visible: bool = True) -> OperBlockSector8Panel:
     monkeypatch.setattr(
-        operblock_main_widget,
+        operblock_visual_primitives,
         "role_display_settings_from_payload",
         lambda _payload, _role: _display_settings(back_visible=back_visible, roles_visible=roles_visible),
     )
     monkeypatch.setattr(
-        operblock_main_widget.DisplaySettingsStorage,
+        operblock_visual_primitives.DisplaySettingsStorage,
         "load",
         lambda _self: {},
     )

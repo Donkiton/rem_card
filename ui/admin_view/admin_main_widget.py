@@ -941,7 +941,7 @@ class AdminMainWidget(QWidget):
                 load_operblock_medication_presets,
                 save_operblock_medication_presets,
             )
-            from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMedicationPresetsDialog
+            from rem_card.ui.operblock_view.operblock_preset_dialogs import OperBlockMedicationPresetsDialog
 
             presets = load_operblock_medication_presets(include_disabled=True)
             dialog = OperBlockMedicationPresetsDialog(
@@ -961,7 +961,7 @@ class AdminMainWidget(QWidget):
     def _ensure_operblock_anesthesia_types_page(self):
         if self.operblock_anesthesia_types_dialog is None:
             from rem_card.services.operblock_anesthesia_types import load_operblock_anesthesia_types
-            from rem_card.ui.operblock_view.operblock_main_widget import OperBlockAnesthesiaTypesDialog
+            from rem_card.ui.operblock_view.operblock_settings_dialogs import OperBlockAnesthesiaTypesDialog
 
             dialog = OperBlockAnesthesiaTypesDialog(
                 load_operblock_anesthesia_types(),
@@ -980,7 +980,7 @@ class AdminMainWidget(QWidget):
     def _ensure_operblock_team_page(self):
         if self.operblock_team_dialog is None:
             from rem_card.services.operblock_team import load_operblock_team
-            from rem_card.ui.operblock_view.operblock_main_widget import OperBlockTeamDialog
+            from rem_card.ui.operblock_view.operblock_settings_dialogs import OperBlockTeamDialog
 
             dialog = OperBlockTeamDialog(load_operblock_team(), parent=self)
             self.operblock_team_dialog = self._attach_operblock_settings_page(

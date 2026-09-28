@@ -134,7 +134,7 @@ def test_vital_undo_is_disabled_for_foreign_rows(widget):
 
 
 def test_operblock_queued_writer_retains_original_operation_context():
-    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockVitalsServiceAdapter
+    from rem_card.ui.operblock_view.operblock_vitals_adapter import OperBlockVitalsServiceAdapter
     from rem_card.data.dto.remcard_dto import VitalDTO
     calls = []
     def add(dto, **kwargs):
