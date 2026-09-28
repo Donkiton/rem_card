@@ -253,8 +253,12 @@ def test_confirmed_application_exit_does_not_ask_to_return_to_roles(shell, monke
     assert calls == [True]
 
 
-def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monkeypatch):
+@pytest.mark.parametrize('exit_action', ['button', 'native_close'])
+def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monkeypatch, exit_action):
     from PySide6.QtWidgets import QWidget
+    from PySide6.QtGui import QCloseEvent
+    from rem_card.ui.shared.custom_message_box import CustomMessageBox
+    monkeypatch.setattr(CustomMessageBox, 'question', lambda *a, **k: QMessageBox.Yes)
     data = SimpleNamespace(set_shutting_down=lambda: None)
     container = SimpleNamespace(data_service=data)
     role = QWidget()
@@ -268,14 +272,51 @@ def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monk
     shell.stack.currentChanged.connect(lambda _: pages.append(shell.stack.currentWidget()))
     waits = []
     monkeypatch.setattr(shell, '_wait_before_drain', lambda: waits.append(True))
-    shell.request_application_exit(confirmed=True)
+    if exit_action == 'button':
+        shell.request_application_exit()
+    else:
+        event = QCloseEvent()
+        shell.closeEvent(event)
+        assert not event.isAccepted()
     assert shell.isVisible()
     assert not shell.stack.isEnabled()
-    assert shell.stack.currentWidget() is shell.welcome
+    assert shell.stack.currentWidget() is shell._exit_page
     assert not shell.entry_chrome.title_bar.isHidden()
     assert shell.loading not in pages
     assert shell.container is container and shell._shutdown is not None
     assert shell._leaving and waits == [True]
+    # Simulate a delayed update check after runtime disposal: neither phase
+    # may expose the role chooser, even for one currentChanged signal.
+    closed = []
+    monkeypatch.setattr(shell, 'close', lambda: closed.append(True))
+    shell._finish_drained()
+    shell.show_roles()
+    QApplication.processEvents()
+    assert closed == [True]
+    assert shell.stack.currentWidget() is shell._exit_page
+    assert shell.welcome not in pages
+
+
+def test_application_exit_during_return_to_roles_cancels_transition(shell, monkeypatch):
+    from unittest.mock import Mock
+    shell._leaving = True
+    transition = Mock()
+    shell._transition = transition
+    shell.request_application_exit(confirmed=True)
+    transition.cancel.assert_called_once()
+    assert shell.stack.currentWidget() is shell._exit_page
+    assert not shell.stack.isEnabled()
+
+
+def test_role_button_still_returns_to_chooser_after_drain(shell, monkeypatch):
+    shell.container = SimpleNamespace(data_service=SimpleNamespace(set_shutting_down=lambda: None))
+    monkeypatch.setattr(shell, '_wait_before_drain', lambda: None)
+    monkeypatch.setattr(shell, '_animate_page', lambda page, *args: shell.stack.setCurrentWidget(page))
+    monkeypatch.setattr(shell, 'refresh_access', lambda: None)
+    shell.request_role_exit(force=True)
+    shell._finish_drained()
+    assert not shell._pending_exit
+    assert shell.stack.currentWidget() is shell.welcome
 
 
 @pytest.mark.parametrize('index,result', [(0, QMessageBox.Yes), (1, QMessageBox.No)])

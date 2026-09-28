@@ -61,6 +61,7 @@ class UnifiedWindow(QMainWindow):
         self._leaving = False
         self._shutdown = None
         self._pending_exit = False
+        self._exit_page = None
         # The application entry point installs the process guard. Embedded/test
         # windows do not own the lifetime of the hosting Python process.
         self._exit_guard = None
@@ -961,10 +962,8 @@ class UnifiedWindow(QMainWindow):
                 widget.reject()
         if self._pending_exit:
             # Keep the title bar reachable while accepted writes drain.
-            self.stack.setCurrentWidget(self.welcome)
             self.entry_chrome.set_role_mode(False)
             self.stack.setEnabled(False)
-            self.welcome.set_access_state("Завершение сохранений и освобождение базы…", True)
             self._set_exit_stage("draining", "Завершение сохранений и освобождение базы…")
         else:
             self.welcome.set_access_state("Завершение сохранений и освобождение базы…", True)
@@ -1128,6 +1127,8 @@ class UnifiedWindow(QMainWindow):
             self._start_drain()
 
     def show_roles(self):
+        if self._pending_exit:
+            return
         if self.container is not None:
             self.request_role_exit()
             return
@@ -1598,6 +1599,19 @@ class UnifiedWindow(QMainWindow):
         if self._exit_guard is not None:
             self._exit_guard.arm("shutdown")
         self._status_timer.stop()
+        # Keep a dedicated page selected throughout drain, role disposal and
+        # the exit update check. Removing the role must not reveal the chooser.
+        self._transition.cancel()
+        if self._exit_page is None:
+            from PySide6.QtWidgets import QLabel, QVBoxLayout
+            self._exit_page = QWidget()
+            layout = QVBoxLayout(self._exit_page)
+            label = QLabel("Завершение работы…")
+            label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(label)
+            self.stack.addWidget(self._exit_page)
+        self.stack.setCurrentWidget(self._exit_page)
+        self.stack.setEnabled(False)
         # A role exit can already be waiting for a worker/lease when the user
         # first clicks close. Keep the independent shell title bar accessible.
         self.entry_chrome.set_role_mode(False)
