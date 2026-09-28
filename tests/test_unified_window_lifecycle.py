@@ -287,6 +287,41 @@ def test_inner_content_is_clipped_and_role_mode_restores_entry_header(shell):
     assert not chrome.content.mask().contains(QPoint(0, 0))
 
 
+@pytest.mark.parametrize('role_mode', [False, True])
+@pytest.mark.parametrize('theme', ['light', 'dark'])
+@pytest.mark.parametrize('maximize_mode', ['native', 'custom'])
+def test_maximized_frame_fills_all_corners_and_restores_rounding(shell, role_mode, theme, maximize_mode):
+    from PySide6.QtCore import QPoint
+    chrome = shell.entry_chrome
+    chrome.set_role_mode(role_mode)
+    chrome.set_theme(theme)
+    shell.showNormal()
+    QApplication.processEvents()
+    normal = shell.grab().toImage()
+    assert normal.pixelColor(0, 0).alpha() == 0
+
+    if maximize_mode == 'native':
+        shell.showMaximized()
+    else:
+        shell._is_custom_maximized = True
+        chrome._update_masks()
+        chrome.update()
+    QApplication.processEvents()
+    maximized = shell.grab().toImage()
+    for x in (0, maximized.width() - 1):
+        for y in (0, maximized.height() - 1):
+            assert maximized.pixelColor(x, y).alpha() == 255
+    assert chrome.content.mask().contains(QPoint(0, 0))
+
+    shell._is_custom_maximized = False
+    shell.showNormal()
+    chrome._update_masks()
+    chrome.update()
+    QApplication.processEvents()
+    assert shell.grab().toImage().pixelColor(0, 0).alpha() == 0
+    assert not chrome.content.mask().contains(QPoint(0, 0))
+
+
 def test_transition_passes_intermediate_rectangles_and_returns_to_saved_size(shell, monkeypatch):
     from PySide6.QtCore import QRect, QEventLoop, QTimer
     display = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 1920, 1040))
