@@ -805,9 +805,7 @@ class SectorW1a(BaseSectorWidget):
             version = int(row.get("expected_revision", row.get("version", 0)) or 0)
             service = self.service
             def operation(aid=admin_id, value=mark):
-                if hasattr(service, "set_nurse_order_mark"):
-                    return service.set_nurse_order_mark(aid, value, expected_version=version)
-                return service.set_nurse_status(aid, value, expected_version=version)
+                return service.set_nurse_order_mark(aid, value, expected_version=version)
 
             description = f"nurse_order_panel_mark:w1a:{admin_id}"
 

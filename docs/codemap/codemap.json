@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-09-23T09:52:30Z",
   "generated_from_commit": "c4f7f3e520048e70bce21422d5e67fe2638922e3",
-  "maintenance_note": "2026-09-28: точки входа, оперблок, карта врача и назначения актуализированы для rework (этапы 2–3); остальная карта отражает исходный коммит генерации.",
+  "maintenance_note": "2026-09-28: точки входа, оперблок, карта врача, назначения и прямые импорты DAO актуализированы для rework (этапы 2–4); остальная карта отражает исходный коммит генерации.",
   "scope": [
     "run_*.py",
     "app/",
@@ -477,7 +477,7 @@
       "role": "Репозитории SQL и отображение DTO для пациентов, статусов, показателей, жидкостей, назначений, ИВЛ, диет, лабораторных назначений, процедур и курсоров синхронизации.",
       "entrypoints": [
         "data/dao/patient_dao.py#PatientDAO",
-        "data/dao/remcard_dao.py#VitalsDAO",
+        "data/dao/vitals_dao.py#VitalsDAO",
         "data/dao/orders_dao.py#OrdersDAO"
       ],
       "tests": [
@@ -495,7 +495,7 @@
           "symbol": "PatientDAO"
         },
         {
-          "path": "data/dao/remcard_dao.py",
+          "path": "data/dao/vitals_dao.py",
           "symbol": "VitalsDAO"
         },
         {

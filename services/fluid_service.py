@@ -4,6 +4,7 @@ from ..data.dto.remcard_dto import FluidDTO
 from ..data.dao.fluids_dao import FluidsDAO
 from .concurrency import DataConflictError, DATA_CONFLICT_MESSAGE, assert_revision_matches
 from .vital_service import VitalService
+from rem_card.services.write_dispatch import enqueue_service_write
 
 
 BALANCE_OUTPUT_FIELDS = {"urine", "drain_output", "ng_output", "stool", "other_output"}
@@ -51,23 +52,7 @@ class FluidService:
         on_success: Optional[Callable[[Any], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
     ):
-        if self.data_service:
-            self.data_service.enqueue_write(
-                description=description,
-                operation=operation,
-                on_success=on_success,
-                on_error=on_error,
-            )
-            return
-        try:
-            result = operation()
-        except Exception as exc:
-            if on_error:
-                on_error(exc)
-                return
-            raise
-        if on_success:
-            on_success(result)
+        enqueue_service_write(self.data_service, description, operation, on_success, on_error)
 
     def get_balance_bounds(self, admission_id: int, date: datetime) -> Tuple[datetime, datetime]:
         """

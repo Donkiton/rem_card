@@ -5,6 +5,7 @@ from typing import Any, Callable, List, Optional
 from ..data.dto.remcard_dto import PatientDTO
 from ..data.dao.patient_dao import PatientDAO
 from rem_card.app.logger import logger
+from rem_card.services.write_dispatch import enqueue_service_write
 
 class PatientService:
     def __init__(self, dao: PatientDAO, data_service=None):
@@ -23,23 +24,7 @@ class PatientService:
         on_success=None,
         on_error=None,
     ):
-        if self.data_service:
-            self.data_service.enqueue_write(
-                description=description,
-                operation=operation,
-                on_success=on_success,
-                on_error=on_error,
-            )
-            return
-        try:
-            result = operation()
-        except Exception as exc:
-            if on_error:
-                on_error(exc)
-                return
-            raise
-        if on_success:
-            on_success(result)
+        enqueue_service_write(self.data_service, description, operation, on_success, on_error)
 
     def sync_patients(self):
         self.dao.sync_from_journal()

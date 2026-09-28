@@ -92,7 +92,7 @@ class LazyRemCardServiceProxy:
 
     @staticmethod
     def _create_service(*args, status_service=None, data_service=None):
-        from rem_card.services.remcard_service import RemCardService
+        from rem_card.services.remcard_facade import RemCardService
 
         return RemCardService(
             *args,
@@ -164,13 +164,11 @@ class Container:
         operblock_schema_prepared: bool = False,
     ):
         from rem_card.data.dao.patient_status_dao import PatientStatusDAO
-        from rem_card.data.dao.remcard_dao import (
-            FluidsDAO,
-            OrdersDAO,
-            PatientDAO,
-            VentilationDAO,
-            VitalsDAO,
-        )
+        from rem_card.data.dao.fluids_dao import FluidsDAO
+        from rem_card.data.dao.orders_dao import OrdersDAO
+        from rem_card.data.dao.patient_dao import PatientDAO
+        from rem_card.data.dao.ventilation_dao import VentilationDAO
+        from rem_card.data.dao.vitals_dao import VitalsDAO
         from rem_card.services.data_service import DataService
         from rem_card.services.patient_status_service import PatientStatusService
         from rem_card.services.patient_service import PatientService
@@ -225,7 +223,7 @@ class Container:
             self.read_coordinator = None
         else:
             from rem_card.services.read_coordinator import ReadCoordinator
-            from rem_card.services.remcard_service import RemCardService
+            from rem_card.services.remcard_facade import RemCardService
 
             self.remcard_service = RemCardService(
                 self.vitals_dao,

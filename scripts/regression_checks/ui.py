@@ -226,9 +226,13 @@ def _check_order_row_delete_without_times_marks_draft(temp_root: str) -> tuple[b
     from datetime import datetime
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.remcard_facade import RemCardService
 
     db_path = os.path.join(temp_root, "orders_no_times_delete.db")
     manager = DatabaseManager(db_path, db_path)
@@ -311,11 +315,15 @@ def _check_orders_cell_delete_draft_and_noop_toggle(temp_root: str) -> tuple[boo
     from PySide6.QtCore import Qt
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
     from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
     from rem_card.services.read_coordinator import ReadCoordinator
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.remcard_facade import RemCardService
     from rem_card.ui.shared.orders_model import OrdersModel
 
     db_path = os.path.join(temp_root, "orders_cell_delete_draft.db")
@@ -461,10 +469,14 @@ def _check_order_row_edit_updates_existing_order(temp_root: str) -> tuple[bool, 
     from datetime import datetime
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
     from rem_card.services.order_service import OrderConflictError
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.remcard_facade import RemCardService
 
     db_path = os.path.join(temp_root, "orders_row_edit.db")
     manager = DatabaseManager(db_path, db_path)
@@ -605,10 +617,14 @@ def _check_orders_optimistic_lock_conflicts(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
     from rem_card.services.order_service import ORDER_CONFLICT_MESSAGE, OrderConflictError
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.remcard_facade import RemCardService
 
     db_path = os.path.join(temp_root, "orders_optimistic_lock.db")
     manager = DatabaseManager(db_path, db_path)

@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Any, Callable, Optional
 
 from rem_card.app.patient_age import parse_date_value
+from rem_card.services.write_dispatch import enqueue_service_write
 from rem_card.services.concurrency import assert_revision_matches
 from rem_card.services.patient_bed_management.recovery_beds import is_recovery_bed_number
 from rem_card.services.operblock_handoff_service import (
@@ -51,23 +52,7 @@ class PatientBedManagementService:
         self.data_service = data_service
 
     def enqueue_write(self, description: str, operation: Callable[[], Any], on_success=None, on_error=None):
-        if self.data_service:
-            self.data_service.enqueue_write(
-                description=description,
-                operation=operation,
-                on_success=on_success,
-                on_error=on_error,
-            )
-            return
-        try:
-            result = operation()
-        except Exception as exc:
-            if on_error:
-                on_error(exc)
-                return
-            raise
-        if on_success:
-            on_success(result)
+        enqueue_service_write(self.data_service, description, operation, on_success, on_error)
 
     def get_beds_snapshot(self):
         return self.db.fetch_all_remcard(

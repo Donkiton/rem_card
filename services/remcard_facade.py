@@ -2108,19 +2108,6 @@ class RemCardService(QObject):
     def cancel_doctor_order_mark(self, admin_id: int, *, expected_version: Optional[int] = None):
         self._orders.cancel_doctor_action(admin_id, expected_version=expected_version)
 
-    # Backward compatibility for widgets expecting OrderDomainService-like API
-    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
-        self._orders.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
-
-    def cancel_nurse_action(self, admin_id: int, *, expected_version: Optional[int] = None):
-        self._orders.cancel_nurse_action(admin_id, expected_version=expected_version)
-
-    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
-        self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
-
-    def cancel_doctor_action(self, admin_id: int, *, expected_version: Optional[int] = None):
-        self._orders.cancel_doctor_action(admin_id, expected_version=expected_version)
-
     @staticmethod
     def _card_datetime(value: Any) -> Optional[datetime]:
         if value in (None, ""):

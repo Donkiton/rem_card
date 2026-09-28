@@ -153,7 +153,7 @@ def test_order_panels_send_displayed_version_to_captured_service(panel):
     from rem_card.ui.shared.components.current_orders_widget import CurrentNurseOrdersWidget
     from rem_card.ui.rem_card_sectors.sector_w1a import SectorW1a
     requests, written = [], []
-    service = SimpleNamespace(set_nurse_status=lambda *args, **kwargs: written.append((args, kwargs)))
+    service = SimpleNamespace(set_nurse_order_mark=lambda *args, **kwargs: written.append((args, kwargs)))
     harness = SimpleNamespace(
         _display_enabled=True, _pending_marks={}, _all_data=[{"id": 17, "version": 7, "expected_revision": 7}], service=service,
         _is_lab_order_card_id=lambda _: False, _get_pending_mark=lambda _: None,

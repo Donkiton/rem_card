@@ -97,7 +97,9 @@
     "tests/test_vitals_query_indexes.py",
     "tests/test_storage_maintenance.py",
     "tests/test_db_wait_diagnostics.py",
-    "tests/test_startup_diagnostics.py"
+    "tests/test_startup_diagnostics.py",
+    "tests/test_service_write_dispatch.py",
+    "tests/test_order_read_bounds.py"
   ],
   "ui": [
     "tests/test_transfer_outcome_dialog.py",
