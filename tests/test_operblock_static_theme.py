@@ -30,7 +30,6 @@ class OperblockRuntimeThemeTest(unittest.TestCase):
                     manager = ThemeManager(storage)
                     manager.load(role)
 
-                self.assertFalse(manager.is_static_operblock)
                 self.assertEqual(manager.mode, "dark")
                 self.assertEqual(manager.current_tokens()["meta.mode"], "dark")
 

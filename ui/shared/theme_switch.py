@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import math
 
 from PySide6.QtCore import QEasingCurve, QPointF, QRectF, QSize, Qt, Signal, QVariantAnimation
@@ -10,7 +9,7 @@ from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen,
 from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QMessageBox, QStyle
 
 
-FULL_RUNTIME_THEME_ENV = "REMCARD_FULL_RUNTIME_THEME"
+from rem_card.ui.styles.theme_policy import full_runtime_theme_enabled
 
 # Палитра намеренно находится рядом с отрисовкой переключателя: он не зависит
 # от разбора QSS и остаётся читаемым до применения глобальной темы приложения.
@@ -25,9 +24,7 @@ def _blend(light: str, dark: str, progress: float) -> QColor:
 def runtime_theme_enabled() -> bool:
     """Возвращает состояние главного флага динамической темы."""
 
-    # Runtime theme включён по умолчанию; явный ``=0`` остаётся безопасным
-    # master-off для сборок и аварийного отката.
-    return str(os.environ.get(FULL_RUNTIME_THEME_ENV, "1")).strip().lower() not in {"0", "false", "no", "off"}
+    return full_runtime_theme_enabled()
 
 
 def get_theme_manager():

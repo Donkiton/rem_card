@@ -39,12 +39,12 @@ from rem_card.app.roles import (
     role_display_name,
 )
 from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
+from rem_card.ui.styles.theme_policy import full_runtime_theme_enabled
 
 
 STARTUP_TRACE_ENV = "REMCARD_STARTUP_TRACE"
 STARTUP_W1_WAIT_MS_ENV = "REMCARD_STARTUP_W1_WAIT_MS"
 STARTUP_W1_WAIT_DEFAULT_MS = 300
-FULL_RUNTIME_THEME_ENV = "REMCARD_FULL_RUNTIME_THEME"
 STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
 EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT = "Войти в программу"
 EMERGENCY_STARTUP_PASSWORD_TEXT = "Ввести аварийный пароль"
@@ -352,8 +352,7 @@ def _reset_runtime_theme_to_light(app):
 
 def _apply_app_theme(app, role: Optional[str] = None):
     _install_no_button_focus_rect_style(app)
-    feature_value = str(os.environ.get(FULL_RUNTIME_THEME_ENV, "1")).strip().lower()
-    if feature_value in {"0", "false", "no", "off"}:
+    if not full_runtime_theme_enabled():
         _apply_basic_app_theme(app)
         return
     manager = None
