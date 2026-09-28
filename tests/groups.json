@@ -100,7 +100,8 @@
     "tests/test_startup_diagnostics.py",
     "tests/test_service_write_dispatch.py",
     "tests/test_order_read_bounds.py",
-    "tests/test_settings_file_storage.py"
+    "tests/test_settings_file_storage.py",
+    "tests/test_rework_guardrails.py"
   ],
   "ui": [
     "tests/test_transfer_outcome_dialog.py",

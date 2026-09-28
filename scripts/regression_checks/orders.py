@@ -3037,7 +3037,7 @@ def _check_orders_finish_after_content_hash_guard(temp_root: str) -> tuple[bool,
 
     def slow_finalize_snapshot(*args, **kwargs):
         entered_finalize.set()
-        release_finalize.wait(1.0)
+        release_finalize.wait(5.0)
         return original_finalize(*args, **kwargs)
 
     coordinator._finalize_snapshot = slow_finalize_snapshot
@@ -3059,8 +3059,14 @@ def _check_orders_finish_after_content_hash_guard(temp_root: str) -> tuple[bool,
         thread.start()
         if not entered_finalize.wait(1.0):
             return False, "snapshot did not reach content_hash_finalize"
-        time.sleep(0.16)
-        retired = coordinator._is_orders_refresh_retired("orders-000001-" + context.hash()[:6])
+        # Watchdog runs in another thread: a fixed 160 ms sleep left only
+        # ~40 ms for scheduling/logging and flaked under parallel CI load.
+        request_id = "orders-000001-" + context.hash()[:6]
+        deadline = time.monotonic() + 2.0
+        retired = coordinator._is_orders_refresh_retired(request_id)
+        while not retired and time.monotonic() < deadline:
+            time.sleep(0.01)
+            retired = coordinator._is_orders_refresh_retired(request_id)
         if not retired:
             return False, "hung content_hash_finalize request was not retired by watchdog"
         if retired.get("status") == "finished":
@@ -3085,6 +3091,7 @@ def _check_orders_finish_after_content_hash_guard(temp_root: str) -> tuple[bool,
         return True, "ok"
     finally:
         release_finalize.set()
+        thread.join(timeout=2.0)
         coordinator._finalize_snapshot = original_finalize
         read_coordinator.record_metric = original_metric
         read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = original_stall_threshold

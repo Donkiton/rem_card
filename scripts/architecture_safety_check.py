@@ -27,6 +27,8 @@ try:
 except Exception:
     pass
 
+from scripts.rework_guardrails import check_rework_boundaries  # noqa: E402
+
 
 WRITE_SQL_RE = re.compile(r"\.execute\(\s*(?:[rubfRUBF]*)(['\"]{1,3})\s*(INSERT|UPDATE|DELETE|BEGIN|COMMIT|ALTER|DROP|CREATE)\b", re.IGNORECASE)
 PRIVATE_SERVICE_RE = re.compile(r"\b(?:service|remcard_service)\._[A-Za-z]\w*")
@@ -215,6 +217,7 @@ def main() -> int:
         _check_recovery_lock_guard(),
         _check_settings_db_guardrails(),
         _check_settings_runtime_catalog_boundaries(),
+        *check_rework_boundaries(PROJECT_ROOT),
     ]
     failed = [check for check in checks if not check.get("ok")]
     report = {

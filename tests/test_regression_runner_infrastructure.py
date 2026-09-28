@@ -7,6 +7,7 @@ import stat
 import sys
 import tempfile
 import time
+import threading
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,37 @@ from scripts import regression_safety_checks as regression
 from scripts import sanity_failfast_runner as sanity
 from scripts.regression_checks.registry import RegressionCheck
 from scripts.regression_checks.scheduling import partition_checks
+
+
+def test_content_hash_guard_tolerates_delayed_watchdog_scheduling(tmp_path, monkeypatch):
+    from rem_card.services.read_coordinator import ReadCoordinator
+    from scripts.regression_checks.orders import _check_orders_finish_after_content_hash_guard
+
+    original = ReadCoordinator._start_orders_load_watchdog
+    timers = []
+
+    def delayed_start(self, **kwargs):
+        timer = threading.Timer(0.25, lambda: original(self, **kwargs))
+        timers.append(timer)
+        timer.start()
+
+    monkeypatch.setattr(ReadCoordinator, "_start_orders_load_watchdog", delayed_start)
+    try:
+        ok, details = _check_orders_finish_after_content_hash_guard(str(tmp_path))
+        assert ok, details
+    finally:
+        for timer in timers:
+            timer.join(timeout=2.0)
+
+
+def test_content_hash_guard_still_rejects_missing_watchdog(tmp_path, monkeypatch):
+    from rem_card.services.read_coordinator import ReadCoordinator
+    from scripts.regression_checks.orders import _check_orders_finish_after_content_hash_guard
+
+    monkeypatch.setattr(ReadCoordinator, "_start_orders_load_watchdog", lambda *args, **kwargs: None)
+    ok, details = _check_orders_finish_after_content_hash_guard(str(tmp_path))
+    assert not ok
+    assert "not retired by watchdog" in details
 
 
 def test_static_widget_inspection_follows_only_connected_mixins(tmp_path):
