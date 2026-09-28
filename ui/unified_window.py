@@ -1432,9 +1432,8 @@ class UnifiedWindow(QMainWindow):
             return
         if not confirmed:
             from rem_card.ui.shared.custom_message_box import CustomMessageBox
-            if CustomMessageBox.question(self, "Выход из программы", "Выйти из программы?\n\n"
-                                         "При зависании завершение будет принудительно остановлено через 30 секунд. "
-                                         "Неподтверждённые изменения могут быть потеряны.") != QMessageBox.Yes:
+            if CustomMessageBox.question(self, "Выход из программы",
+                                         "Вы действительно хотите выйти из программы?") != QMessageBox.Yes:
                 self._pending_exit = False
                 return
         self._begin_application_exit()
