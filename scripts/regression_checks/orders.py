@@ -2427,18 +2427,90 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
         app.processEvents()
 
 
+def _check_post_finalize_ui_retry(service, shift_date, context, metrics) -> tuple[bool, str]:
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.services.read_coordinator import OrdersRefreshCancelled
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
+
+    class FakeSignal:
+        def disconnect(self, _slot):
+            return None
+
+    class FakeWorker:
+        succeeded = FakeSignal()
+        failed = FakeSignal()
+        finished = FakeSignal()
+
+        @staticmethod
+        def isRunning():
+            return True
+
+    app = QApplication.instance() or QApplication([])
+    app.processEvents()
+    widget = OrdersWidget(service=service, admission_id=26, shift_date=shift_date, defer_ui=True)
+    try:
+        widget._snapshot_worker = FakeWorker()
+        widget._active_request_source = "post_finalize"
+        widget._active_request_seq = 10
+        widget._active_request_id = "orders-ui-current"
+        widget._active_request_generation = 10
+        widget._active_request_started_monotonic = time.monotonic() - 1.0
+        widget._on_post_finalize_snapshot_watchdog()
+        metric_names = {name for name, _value, _fields in metrics}
+        if "orders_post_finalize_retry_scheduled" not in metric_names:
+            return False, "post_finalize watchdog did not schedule guaranteed retry"
+
+        retry_metric_count = sum(1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled")
+        widget._snapshot_worker = FakeWorker()
+        widget._active_request_source = "post_finalize"
+        widget._active_request_seq = 11
+        widget._active_request_id = "orders-ui-cancelled"
+        widget._active_request_generation = 11
+        widget._active_request_started_monotonic = time.monotonic() - 1.0
+        widget._on_snapshot_failed(OrdersRefreshCancelled("regression post_finalize sql step timeout"))
+        widget._on_snapshot_finished()
+        retry_metric_count_after_cancel = sum(
+            1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled"
+        )
+        if retry_metric_count_after_cancel <= retry_metric_count:
+            return False, "post_finalize controlled cancel did not schedule retry"
+
+        widget._snapshot_seq = 12
+        widget._active_request_id = "orders-ui-new"
+        widget._active_request_generation = 12
+        widget._apply_snapshot(
+            {
+                "seq": 11,
+                "admission_id": 26,
+                "shift_date": shift_date,
+                "context_key": context.cache_key(),
+                "context_hash": context.hash(),
+                "source": "post_finalize",
+                "request_id": "orders-ui-old",
+                "generation": 11,
+                "snapshot": {"load_trace_id": "orders-old", "admission_id": 26},
+            }
+        )
+        metric_names = {name for name, _value, _fields in metrics}
+        if "orders_refresh_late_result_ignored" not in metric_names:
+            return False, "late UI result was not ignored/logged"
+    finally:
+        widget.shutdown()
+        widget.close()
+    return True, "ok"
+
+
 def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
 
     import rem_card.app.foreground_activity as foreground_activity
     import rem_card.data.dao.db_manager as dbm
     import rem_card.services.remcard_facade as remcard_facade
     import rem_card.services.read_coordinator as read_coordinator
     from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
-    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
     _ = temp_root
     metrics: list[tuple[str, object, dict]] = []
@@ -2684,72 +2756,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             if required not in metric_names:
                 return False, f"missing metric {required}; got {sorted(metric_names)}"
 
-        class FakeSignal:
-            def disconnect(self, _slot):
-                return None
-
-        class FakeWorker:
-            succeeded = FakeSignal()
-            failed = FakeSignal()
-            finished = FakeSignal()
-
-            @staticmethod
-            def isRunning():
-                return True
-
-        app = QApplication.instance() or QApplication([])
-        app.processEvents()
-        widget = OrdersWidget(service=service, admission_id=26, shift_date=shift_date, defer_ui=True)
-        try:
-            widget._snapshot_worker = FakeWorker()
-            widget._active_request_source = "post_finalize"
-            widget._active_request_seq = 10
-            widget._active_request_id = "orders-ui-current"
-            widget._active_request_generation = 10
-            widget._active_request_started_monotonic = time.monotonic() - 1.0
-            widget._on_post_finalize_snapshot_watchdog()
-            metric_names = {name for name, _value, _fields in metrics}
-            if "orders_post_finalize_retry_scheduled" not in metric_names:
-                return False, "post_finalize watchdog did not schedule guaranteed retry"
-
-            retry_metric_count = sum(1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled")
-            widget._snapshot_worker = FakeWorker()
-            widget._active_request_source = "post_finalize"
-            widget._active_request_seq = 11
-            widget._active_request_id = "orders-ui-cancelled"
-            widget._active_request_generation = 11
-            widget._active_request_started_monotonic = time.monotonic() - 1.0
-            widget._on_snapshot_failed(OrdersRefreshCancelled("regression post_finalize sql step timeout"))
-            widget._on_snapshot_finished()
-            retry_metric_count_after_cancel = sum(
-                1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled"
-            )
-            if retry_metric_count_after_cancel <= retry_metric_count:
-                return False, "post_finalize controlled cancel did not schedule retry"
-
-            widget._snapshot_seq = 12
-            widget._active_request_id = "orders-ui-new"
-            widget._active_request_generation = 12
-            widget._apply_snapshot(
-                {
-                    "seq": 11,
-                    "admission_id": 26,
-                    "shift_date": shift_date,
-                    "context_key": context.cache_key(),
-                    "context_hash": context.hash(),
-                    "source": "post_finalize",
-                    "request_id": "orders-ui-old",
-                    "generation": 11,
-                    "snapshot": {"load_trace_id": "orders-old", "admission_id": 26},
-                }
-            )
-            metric_names = {name for name, _value, _fields in metrics}
-            if "orders_refresh_late_result_ignored" not in metric_names:
-                return False, "late UI result was not ignored/logged"
-        finally:
-            widget.shutdown()
-            widget.close()
-        return True, "ok"
+        return _check_post_finalize_ui_retry(service, shift_date, context, metrics)
     finally:
         allow_stall_watchdog_to_continue.set()
         service.release.set()

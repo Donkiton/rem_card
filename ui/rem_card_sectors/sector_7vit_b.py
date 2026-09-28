@@ -219,6 +219,8 @@ class Sector7vit_b(BaseSectorWidget):
             and edit_text == value
             and self.notice_value.text() == title_text
         ):
+            # An unchanged (including empty) value is still a completed load.
+            self.status_label.setText("")
             self._apply_enabled_state()
             return
         self._loaded_number = value
@@ -298,7 +300,11 @@ class Sector7vit_b(BaseSectorWidget):
     def _on_notice_loaded(self, data):
         worker = self.sender()
         request = getattr(worker, "_sector_7vit_b_request", None)
-        if not self._notice_request_is_current(request, worker) or self.has_unsaved_changes():
+        if not self._notice_request_is_current(request, worker):
+            return
+        if self.has_unsaved_changes():
+            self.status_label.setText("")
+            self._apply_enabled_state()
             return
         self.set_notice_data((data or {}).get("number", ""))
 

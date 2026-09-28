@@ -62,7 +62,6 @@ REQUIRED_BAZA_DIRS = (
     "quarantine",
     "quarantine/shared_db",
     "quarantine/snapshots",
-    "rem_card",
     "report",
     "session_locks",
     "settings",

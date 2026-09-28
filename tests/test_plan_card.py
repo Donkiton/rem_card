@@ -809,6 +809,51 @@ class PlanCardTest(unittest.TestCase):
                 widget.shutdown()
                 widget.deleteLater()
 
+    def test_notice_empty_result_finishes_loading_for_both_roles(self):
+        service = SimpleNamespace()
+        with patch.object(notice_module, "AsyncCallThread", _DeferredNoticeWorker):
+            for role in ("doctor", "nurse"):
+                with self.subTest(role=role):
+                    widget = Sector7vit_b(role=role)
+                    try:
+                        widget.set_context(service, 11)
+                        worker = _DeferredNoticeWorker.instances[-1]
+                        self.assertEqual(widget.status_label.text(), "Загрузка номера извещения...")
+                        worker.succeeded.emit({"number": ""})
+                        worker.finished.emit()
+                        self.assertEqual(widget.status_label.text(), "")
+                        self.assertEqual(widget.notice_value.text(), "№ извещения: —")
+                        self.assertIsNone(widget._notice_worker)
+                        widget.refresh()
+                        worker = _DeferredNoticeWorker.instances[-1]
+                        worker.failed.emit(OSError("synthetic unavailable"))
+                        worker.finished.emit()
+                        self.assertEqual(widget.status_label.text(), "Не удалось обновить номер извещения")
+                        widget.refresh()
+                        worker = _DeferredNoticeWorker.instances[-1]
+                        worker.succeeded.emit({"number": ""})
+                        worker.finished.emit()
+                        self.assertEqual(widget.status_label.text(), "")
+                    finally:
+                        widget.shutdown()
+                        widget.deleteLater()
+
+    def test_notice_completed_read_preserves_draft_and_clears_loading(self):
+        with patch.object(notice_module, "AsyncCallThread", _DeferredNoticeWorker):
+            widget = Sector7vit_b(role="doctor")
+            try:
+                widget.set_context(SimpleNamespace(), 11)
+                worker = _DeferredNoticeWorker.instances[-1]
+                widget.notice_edit.setText("123")
+                worker.succeeded.emit({"number": ""})
+                worker.finished.emit()
+                self.assertEqual(widget.notice_edit.text(), "123")
+                self.assertTrue(widget.save_btn.isEnabled())
+                self.assertEqual(widget.status_label.text(), "")
+            finally:
+                widget.shutdown()
+                widget.deleteLater()
+
     def test_plan_card_buttons_use_snapshot_without_ui_database_read(self):
         now = datetime(2026, 6, 22, 7, 30)
         current_shift_start, plan_shift_start = ShiftService.get_day_period(now)

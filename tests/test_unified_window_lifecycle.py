@@ -35,6 +35,62 @@ def state(mode, generation, operation=None):
     return dict(state=mode, generation=generation, operation_id=operation, owner_token='token')
 
 
+@pytest.mark.parametrize('active,pending,expected', [(False, 0, False), (False, 2, True), (True, 0, True)])
+def test_opblock_scheduler_is_created_only_for_role_or_pending_queue(tmp_path, monkeypatch, active, pending, expected):
+    from unittest.mock import Mock
+    from rem_card.app import operblock_local_sync as sync, operblock_offline_store as store
+    (tmp_path / 'active').mkdir()
+    (tmp_path / 'active' / 'operblock_local.db').touch()
+    monkeypatch.setattr(store, 'get_operblock_offline_root', lambda: str(tmp_path))
+    monkeypatch.setattr(sync, 'completed_pending_count', lambda root: pending)
+    factory = Mock()
+    monkeypatch.setattr(sync, 'OperBlockLocalSyncScheduler', factory)
+    host = SimpleNamespace(_closing=False, _local_operblock=active, _leaving=False,
+                           _opblock_sync=None, root='test-central', _on_opblock_sync_status=lambda p: None)
+    UnifiedWindow._configure_opblock_sync(host)
+    assert factory.called == expected
+    if expected:
+        assert factory.call_args.kwargs['maintenance_enabled'] == active
+        host._leaving = True
+        host._opblock_sync_close_pending = False
+        UnifiedWindow._request_opblock_sync(host)
+        host._opblock_sync.set_maintenance_enabled.assert_called_with(False)
+
+
+@pytest.mark.parametrize('role', ['doctor', 'nurse'])
+def test_empty_opblock_background_cycle_does_not_resize_clinical_page(role):
+    from PySide6.QtWidgets import QMainWindow, QWidget, QStatusBar
+    app = QApplication.instance() or QApplication([])
+    window = QMainWindow()
+    window.role = role
+    window._pending_exit = False
+    window._maintenance_deadline = None
+    window._opblock_pending_delivery = 0
+    page = QWidget()
+    window.setCentralWidget(page)
+    window.resize(1000, 700)
+    window.show()
+    app.processEvents()
+    before = page.geometry()
+    try:
+        for payload in ({'state': 'sending', 'pending': 0, 'ok': True},
+                        {'state': 'maintenance', 'pending': 0, 'ok': True},
+                        {'state': 'idle', 'pending': 0, 'ok': True}):
+            UnifiedWindow._on_opblock_sync_status(window, payload)
+            app.processEvents()
+            assert page.geometry() == before
+            bar = window.findChild(QStatusBar)
+            assert bar is None or not bar.isVisible()
+        UnifiedWindow._on_opblock_sync_status(window, {'state': 'sending', 'pending': 2})
+        app.processEvents()
+        assert window.statusBar().isVisible()
+        assert '(2)' in window.statusBar().currentMessage()
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
 def test_random_clicks_cancelled_admission_releases_before_next_role(shell, monkeypatch, tmp_path):
     shell.root = str(tmp_path)
     calls = []

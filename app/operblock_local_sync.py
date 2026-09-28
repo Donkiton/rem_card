@@ -29,7 +29,7 @@ def completed_pending_count(local_root: str) -> int:
         """).fetchone()[0])
 
 
-def _export_worker(central_root: str, local_root: str, connection) -> None:
+def _export_worker(central_root: str, local_root: str, connection, maintenance_enabled: bool = True) -> None:
     # Spawned worker only. Its lifetime is bounded by the UI scheduler, including
     # a hung SMB open or a lost COMMIT acknowledgement. UUID receipts allow retry.
     try:
@@ -37,8 +37,11 @@ def _export_worker(central_root: str, local_root: str, connection) -> None:
         from rem_card.app.operblock_offline_migration import run_pending_operblock_offline_migration
         from rem_card.app.operblock_local_storage import backup_local_operations, prune_verified_local_cases, retention_due
 
-        backup_local_operations(local_root)
         pending = completed_pending_count(local_root)
+        if not pending and not maintenance_enabled:
+            connection.send({"ok": True, "pending": 0})
+            return
+        backup_local_operations(local_root)
         if not central_root or (not pending and not retention_due(local_root)):
             connection.send({"ok": True, "pending": completed_pending_count(local_root)})
             return
@@ -48,8 +51,9 @@ def _export_worker(central_root: str, local_root: str, connection) -> None:
                 if not result.ok:
                     connection.send(asdict(result))
                     return
-            prune_verified_local_cases(manager, local_root)
-        connection.send(asdict(result) if pending else {"ok": True})
+            if maintenance_enabled:
+                prune_verified_local_cases(manager, local_root)
+        connection.send({**(asdict(result) if pending else {"ok": True}), "pending": completed_pending_count(local_root)})
     except BaseException as exc:
         connection.send({"ok": False, "reason": str(exc), "error_class": type(exc).__name__})
     finally:
@@ -61,7 +65,7 @@ class OperBlockLocalSyncScheduler(QObject):
     WORKER_TIMEOUT_SEC = 45.0
     RETRY_DELAYS_SEC = (15, 30, 60, 120, 300)
 
-    def __init__(self, central_root: str, parent=None, local_root: str | None = None):
+    def __init__(self, central_root: str, parent=None, local_root: str | None = None, *, maintenance_enabled: bool = True):
         super().__init__(parent)
         self.central_root = str(central_root or "")
         self.local_root = os.path.abspath(local_root or get_operblock_offline_root())
@@ -73,6 +77,7 @@ class OperBlockLocalSyncScheduler(QObject):
         self._closing_callback = None
         self._close_deadline = None
         self._stopped = False
+        self._maintenance_enabled = maintenance_enabled
         self._retry = QTimer(self)
         self._retry.setSingleShot(True)
         self._retry.timeout.connect(self.request_sync)
@@ -88,14 +93,15 @@ class OperBlockLocalSyncScheduler(QObject):
         try:
             count = completed_pending_count(self.local_root)
             local_exists = (Path(self.local_root) / "active" / "operblock_local.db").is_file()
-            backup_due = local_exists and time.monotonic() - self._last_backup_started >= 60
+            backup_due = self._maintenance_enabled and local_exists and time.monotonic() - self._last_backup_started >= 60
             if (not count or not self.central_root) and not backup_due:
                 self._publish({"ok": True, "pending": count, "state": "waiting" if count else "idle"})
-                self._retry.start(15000)
+                if count or self._maintenance_enabled:
+                    self._retry.start(15000)
                 return
             context = multiprocessing.get_context("spawn")
             receiver, sender = context.Pipe(duplex=False)
-            process = context.Process(target=_export_worker, args=(self.central_root, self.local_root, sender), daemon=True)
+            process = context.Process(target=_export_worker, args=(self.central_root, self.local_root, sender, self._maintenance_enabled), daemon=True)
             try:
                 process.start()
             except BaseException:
@@ -106,7 +112,8 @@ class OperBlockLocalSyncScheduler(QObject):
             self._receiver, self._process = receiver, process
             self._started = time.monotonic()
             self._last_backup_started = self._started
-            self._publish({"ok": True, "pending": count, "state": "sending"})
+            # A backup-only cycle is maintenance, not a case delivery.
+            self._publish({"ok": True, "pending": count, "state": "sending" if count and self.central_root else "maintenance"})
             self._poll.start()
         except Exception as exc:
             self._finish({"ok": False, "state": "waiting", "reason": str(exc)})
@@ -154,15 +161,29 @@ class OperBlockLocalSyncScheduler(QObject):
 
     def _finish(self, result):
         self._dispose_worker()
+        # Read the durable queue, not just an acknowledgement: a failed or
+        # partial export must keep retrying, while an empty queue stays asleep.
+        pending = None
+        try:
+            pending = completed_pending_count(self.local_root)
+        except Exception:
+            pass
+        if pending is not None:
+            result = {**result, "pending": pending}
         self._failures = 0 if result.get("ok") else self._failures + 1
         self._publish({**result, "state": "idle" if result.get("ok") else "waiting"})
         if self._closing_callback is not None:
             callback, self._closing_callback = self._closing_callback, None
             self.stop()
             QTimer.singleShot(0, callback)
-        elif not self._stopped:
+        elif not self._stopped and (self._maintenance_enabled or pending != 0):
             delay = self.RETRY_DELAYS_SEC[min(max(self._failures - 1, 0), len(self.RETRY_DELAYS_SEC) - 1)]
             self._retry.start(delay * 1000)
+
+    def set_maintenance_enabled(self, enabled, *, request=True):
+        self._maintenance_enabled = bool(enabled)
+        if request:
+            self.request_sync()
 
     def set_central_root(self, central_root):
         from rem_card.app.operblock_local_destination import configure_operblock_destination

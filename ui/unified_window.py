@@ -246,6 +246,10 @@ class UnifiedWindow(QMainWindow):
                 get_operblock_offline_root,
             )
             local_root = get_operblock_offline_root()
+            maintenance_enabled = bool(self._local_operblock and not self._leaving)
+            from rem_card.app.operblock_local_sync import completed_pending_count
+            if self._opblock_sync is None and not maintenance_enabled and not completed_pending_count(local_root):
+                return
             local_exists = Path(get_operblock_offline_metadata_path(local_root)).is_file()
             if not local_exists:
                 local_exists = (Path(local_root) / "active" / "operblock_local.db").is_file()
@@ -258,9 +262,11 @@ class UnifiedWindow(QMainWindow):
                     self.root,
                     parent=self,
                     local_root=local_root,
+                    maintenance_enabled=maintenance_enabled,
                 )
                 self._opblock_sync.status_changed.connect(self._on_opblock_sync_status)
             else:
+                self._opblock_sync.set_maintenance_enabled(maintenance_enabled, request=False)
                 setter = getattr(self._opblock_sync, "set_central_root", None)
                 if callable(setter):
                     setter(self.root)
@@ -276,7 +282,7 @@ class UnifiedWindow(QMainWindow):
     def _request_opblock_sync(self):
         scheduler = self._opblock_sync
         if scheduler is not None and not self._opblock_sync_close_pending:
-            scheduler.request_sync()
+            scheduler.set_maintenance_enabled(bool(self._local_operblock and not self._leaving))
 
     def _pause_opblock_sync_for_local_admission(self):
         """Release backup/export file handles before local recovery/bootstrap."""
@@ -297,7 +303,7 @@ class UnifiedWindow(QMainWindow):
         elif bool((payload or {}).get("ok")) and state == "idle":
             self._opblock_pending_delivery = 0
         pending = self._opblock_pending_delivery
-        if state == "sending":
+        if state == "sending" and pending:
             self.statusBar().show()
             self.statusBar().showMessage(
                 f"Оперблок: отправка завершённых карт ({pending})…"
@@ -308,8 +314,13 @@ class UnifiedWindow(QMainWindow):
                 f"Оперблок: локально сохранено {pending}; ожидает отправки в общую базу."
             )
         elif not self._maintenance_deadline:
-            self.statusBar().clearMessage()
-            self.statusBar().hide()
+            # statusBar() creates a visible bar on first access. Background
+            # backups with an empty queue must not change the clinical layout.
+            from PySide6.QtWidgets import QStatusBar
+            bar = self.findChild(QStatusBar, options=Qt.FindDirectChildrenOnly)
+            if bar is not None:
+                bar.clearMessage()
+                bar.hide()
 
     def _initial_compatible(self, _):
         self._compatibility_error = ""

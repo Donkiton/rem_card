@@ -22,6 +22,38 @@ class LocalSyncTest(unittest.TestCase):
             self.assertEqual(calls, ["closed"])
             self.assertTrue(scheduler._stopped)
 
+    def test_queue_only_mode_sleeps_when_empty_and_retries_until_drained(self):
+        with tempfile.TemporaryDirectory() as root:
+            scheduler = sync.OperBlockLocalSyncScheduler("", local_root=root, maintenance_enabled=False)
+            try:
+                with patch.object(sync, "completed_pending_count", return_value=0), patch.object(sync.multiprocessing, "get_context") as spawn:
+                    scheduler.request_sync()
+                    self.assertFalse(scheduler._retry.isActive())
+                    spawn.assert_not_called()
+                with patch.object(sync, "completed_pending_count", return_value=2):
+                    scheduler._finish({"ok": False})
+                    self.assertTrue(scheduler._retry.isActive())
+                scheduler._retry.stop()
+                with patch.object(sync, "completed_pending_count", return_value=0):
+                    scheduler._finish({"ok": True})
+                    self.assertFalse(scheduler._retry.isActive())
+                    scheduler.set_maintenance_enabled(True)
+                    self.assertTrue(scheduler._retry.isActive())
+                    scheduler.set_maintenance_enabled(False)
+                    self.assertFalse(scheduler._retry.isActive())
+            finally:
+                scheduler.stop()
+
+    def test_queue_only_worker_does_not_backup_or_access_network_when_empty(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as root:
+            pipe = Mock()
+            with patch('rem_card.app.operblock_local_storage.backup_local_operations') as backup, patch('rem_card.app.operblock_local_destination.open_central_for_operblock') as central:
+                sync._export_worker('unused-network-root', root, pipe, False)
+            backup.assert_not_called()
+            central.assert_not_called()
+            pipe.send.assert_called_once_with({'ok': True, 'pending': 0})
+
     def test_worker_timeout_terminates_process_and_retains_retry(self):
         class Process:
             alive = True
@@ -56,9 +88,12 @@ class LocalSyncTest(unittest.TestCase):
                 conn.execute("CREATE TABLE local_work(value TEXT)")
                 conn.commit()
             scheduler = sync.OperBlockLocalSyncScheduler("", local_root=root)
+            statuses = []
+            scheduler.status_changed.connect(statuses.append)
             try:
                 scheduler.request_sync()
                 self.assertIsNotNone(scheduler._process)
+                self.assertEqual(statuses[-1]["state"], "maintenance")
                 deadline = time.monotonic() + 20
                 while scheduler._process is not None and time.monotonic() < deadline:
                     self.app.processEvents()
