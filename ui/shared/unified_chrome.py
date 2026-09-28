@@ -251,6 +251,12 @@ class EntryChrome(QWidget):
         light = self.property('entry_theme') == 'light'
         p.setBrush(self.palette().window() if self.role_mode else QColor('#f4f1ed' if light else '#0c2944'))
         p.setPen(QPen(self.palette().mid().color() if self.role_mode else QColor('#a5b9cb' if light else '#81b4d6'), 1.2))
+        if self.owner.isMaximized() or getattr(self.owner, '_is_custom_maximized', False):
+            # The maximized mask is rectangular: fill its corners and outer
+            # pixels too, so child content cannot protrude past a rounded frame.
+            p.fillRect(self.rect(), p.brush())
+            p.drawRect(QRectF(self.rect()).adjusted(1, 1, -1, -1))
+            return
         radius = 4 if self.role_mode else 12
         p.drawRoundedRect(QRectF(self.rect()).adjusted(1, 1, -1, -1), radius, radius)
 
