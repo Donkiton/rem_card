@@ -261,8 +261,7 @@ def test_application_close_uses_exit_confirmation_not_role_confirmation(shell, m
     event = QCloseEvent()
     shell.closeEvent(event)
     assert not event.isAccepted()
-    assert len(messages) == 1 and messages[0].startswith('Выйти из программы?')
-    assert '30 секунд' in messages[0] and 'потеряны' in messages[0]
+    assert messages == ['Вы действительно хотите выйти из программы?']
     assert calls == [True]
 
 
