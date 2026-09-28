@@ -157,6 +157,7 @@ class OperBlockArchiveSourcesMixin:
         *,
         tables: set[str] | None = None,
         admission_columns: set[str] | None = None,
+        operation_case_columns: set[str] | None = None,
         start_dt: str | None = None,
         end_dt: str | None = None,
         table_code: str | None = None,
@@ -172,6 +173,9 @@ class OperBlockArchiveSourcesMixin:
     ) -> tuple[str, tuple[Any, ...]]:
         tables = set(tables or {"operating_tables", "admissions", "patients"})
         admission_columns = set(admission_columns or {"unit_scope"})
+        operation_case_columns = None if operation_case_columns is None else set(operation_case_columns)
+        migration_status_expr = "oc.migration_status" if operation_case_columns is None or "migration_status" in operation_case_columns else "NULL"
+        migrated_at_expr = "oc.migrated_at" if operation_case_columns is None or "migrated_at" in operation_case_columns else "NULL"
         table_join = "LEFT JOIN operating_tables t ON t.code = oc.table_code" if "operating_tables" in tables else ""
         table_display_expr = (
             "COALESCE(t.display_name, CASE oc.table_code WHEN 'emergency' THEN 'Экстренная операционная' "
@@ -267,6 +271,8 @@ class OperBlockArchiveSourcesMixin:
                 oc.admission_id,
                 oc.table_code,
                 oc.status AS case_status,
+                {migration_status_expr} AS migration_status,
+                {migrated_at_expr} AS migrated_at,
                 oc.started_at,
                 oc.ended_at,
                 {table_display_expr} AS table_display_name,
@@ -319,6 +325,8 @@ class OperBlockArchiveSourcesMixin:
             "started_at": (data or {}).get("started_at"),
             "ended_at": (data or {}).get("ended_at"),
             "status": (data or {}).get("case_status") or "closed",
+            "migration_status": (data or {}).get("migration_status") or "",
+            "migrated_at": (data or {}).get("migrated_at"),
             "source_db_path": source_path,
             "source_db_name": os.path.basename(source_path) if source_path else "",
             "is_external_archive": bool(is_external),
@@ -354,7 +362,7 @@ class OperBlockArchiveSourcesMixin:
             schema = get_archive_schema(
                 conn,
                 db_path,
-                inspect_tables=("admissions",),
+                inspect_tables=("admissions", "operation_cases"),
             )
             tables = schema.tables
             if not {"operation_cases", "admissions", "patients"}.issubset(tables):
@@ -368,6 +376,7 @@ class OperBlockArchiveSourcesMixin:
             query, params = OperBlockService._build_archive_cases_query(
                 tables=tables,
                 admission_columns=admission_columns,
+                operation_case_columns=schema.columns.get("operation_cases", frozenset()),
                 start_dt=start_dt,
                 end_dt=end_dt,
                 table_code=table_code,
@@ -411,7 +420,7 @@ class OperBlockArchiveSourcesMixin:
             schema = get_archive_schema(
                 conn,
                 db_path,
-                inspect_tables=("admissions",),
+                inspect_tables=("admissions", "operation_cases"),
             )
             tables = schema.tables
             if not {"operation_cases", "admissions", "patients"}.issubset(tables):
@@ -425,6 +434,7 @@ class OperBlockArchiveSourcesMixin:
             query, params = OperBlockService._build_archive_cases_query(
                 tables=tables,
                 admission_columns=admission_columns,
+                operation_case_columns=schema.columns.get("operation_cases", frozenset()),
                 start_dt=start_dt,
                 end_dt=end_dt,
                 table_code=table_code,
@@ -471,7 +481,7 @@ class OperBlockArchiveSourcesMixin:
             schema = get_archive_schema(
                 conn,
                 db_path,
-                inspect_tables=("admissions",),
+                inspect_tables=("admissions", "operation_cases"),
             )
             tables = schema.tables
             if not {"operation_cases", "admissions", "patients"}.issubset(tables):
@@ -484,6 +494,7 @@ class OperBlockArchiveSourcesMixin:
             query_args = {
                 "tables": tables,
                 "admission_columns": schema.columns.get("admissions", frozenset()),
+                "operation_case_columns": schema.columns.get("operation_cases", frozenset()),
                 "start_dt": start_dt,
                 "end_dt": end_dt,
                 "table_code": table_code,

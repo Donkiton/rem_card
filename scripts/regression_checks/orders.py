@@ -2443,6 +2443,10 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     metrics: list[tuple[str, object, dict]] = []
     created_backups: list[tuple[str, str]] = []
+    phase_sync_timeout_sec = 5.0
+    stall_metric_entered = threading.Event()
+    allow_stall_watchdog_to_continue = threading.Event()
+    poison_metric_recorded = threading.Event()
 
     original_rc_metric = read_coordinator.record_metric
     original_dbm_metric = dbm.record_metric
@@ -2454,6 +2458,14 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
 
     def capture_metric(name, value=None, **fields):
         metrics.append((str(name), value, dict(fields)))
+        if str(name) == "orders_load_stalled":
+            # Hold the watchdog after it marks the active request stalled.  The
+            # foreground thread can now exercise duplicate coalescing without
+            # racing a tiny wall-clock poison deadline under CI contention.
+            stall_metric_entered.set()
+            allow_stall_watchdog_to_continue.wait()
+        elif str(name) == "orders_refresh_poisoned":
+            poison_metric_recorded.set()
 
     manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
     manager._closed = False
@@ -2502,7 +2514,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             if self.block:
                 self._notify_step("start", "get_latest_change_id")
                 self.entered.set()
-                self.release.wait(1.0)
+                self.release.wait()
                 self._notify_step("end", "get_latest_change_id", status="ok")
             snapshot = {
                 "admission_id": admission_id,
@@ -2526,7 +2538,10 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     dbm.record_metric = capture_metric
     widget_patches.append(_patch_doctor_orders_global("record_metric", capture_metric))
     read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = 0.05
-    read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = 0.12
+    # Keep the incoming duplicate safely below the poison boundary.  Once its
+    # coalescing assertions pass, the test lowers this boundary and releases
+    # the blocked watchdog explicitly.
+    read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = float("inf")
     read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = 0.01
     widget_patches.append(_patch_doctor_orders_global("ORDERS_POST_FINALIZE_WATCHDOG_MS", 50))
     foreground_activity._reset_foreground_activity_for_tests()
@@ -2567,7 +2582,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
 
         monitor_thread = threading.Thread(target=load_monitor, daemon=True)
         monitor_thread.start()
-        if not service.entered.wait(1.0):
+        if not service.entered.wait(phase_sync_timeout_sec):
             return False, "monitor refresh did not enter slow snapshot build"
         service.entered.clear()
 
@@ -2585,9 +2600,10 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
 
         thread = threading.Thread(target=load_post_finalize, daemon=True)
         thread.start()
-        if not service.entered.wait(1.0):
+        if not service.entered.wait(phase_sync_timeout_sec):
             return False, "post_finalize refresh did not enter slow snapshot build"
-        time.sleep(0.08)
+        if not stall_metric_entered.wait(phase_sync_timeout_sec):
+            return False, "post_finalize watchdog did not mark the refresh stalled"
 
         duplicate = coordinator.load_orders_tab(
             context,
@@ -2605,7 +2621,10 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
         if service.quickcheck_idle_during_read is not False:
             return False, "background quick_check was not deferred during active foreground read"
 
-        time.sleep(0.12)
+        read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC
+        allow_stall_watchdog_to_continue.set()
+        if not poison_metric_recorded.wait(phase_sync_timeout_sec):
+            return False, "post_finalize watchdog did not poison the stalled refresh"
         metric_names = {name for name, _value, _fields in metrics}
         if "orders_refresh_poisoned" not in metric_names:
             return False, f"poison metric was not recorded; got {sorted(metric_names)}"
@@ -2640,8 +2659,8 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             return False, f"fresh retry did not load new version: {retry.get('version')}"
 
         service.release.set()
-        thread.join(timeout=2.0)
-        monitor_thread.join(timeout=2.0)
+        thread.join(timeout=phase_sync_timeout_sec)
+        monitor_thread.join(timeout=phase_sync_timeout_sec)
         if thread.is_alive():
             return False, "post_finalize refresh thread did not finish after release"
         if monitor_thread.is_alive():
@@ -2732,6 +2751,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             widget.close()
         return True, "ok"
     finally:
+        allow_stall_watchdog_to_continue.set()
         service.release.set()
         read_coordinator.record_metric = original_rc_metric
         dbm.record_metric = original_dbm_metric

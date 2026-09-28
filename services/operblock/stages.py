@@ -793,13 +793,16 @@ class OperBlockStagesMixin:
                 and _is_rao_transfer_department(clean_transfer_department)
                 and case.get("source_rao_admission_id") is None
             ):
-                if self._is_opblock_offline_runtime():
-                    logger.info(
-                        "operblock_offline_rao_transfer_archival_only case_id=%s",
-                        case.get("operation_case_id"),
-                    )
-                else:
-                    self._maybe_create_rao_recovery_admission(cursor, case, event_dt)
+                # A post-operative RAO move is now an explicit doctor decision.
+                # The local export worker creates a central invitation only after
+                # this final case is released and only while the clinical transfer
+                # is fresh.  Never occupy a recovery bed or create an admission at
+                # the moment anaesthesia ends.
+                logger.info(
+                    "operblock_rao_transfer_waits_for_central_doctor_acceptance case_id=%s runtime=%s",
+                    case.get("operation_case_id"),
+                    getattr(getattr(self.db, "runtime_context", None), "mode", ""),
+                )
             return event_id
 
         return int(self.db.run_write_operation(operation, source=f"operblock_stage_{clean_kind}"))

@@ -56,7 +56,13 @@ class OperBlockArchiveMixin:
             initial_destination=1,
         )
         page.operblock_case_selected.connect(self._open_case_from_unified_archive)
+        page.operblock_edit_requested.connect(lambda case: self._open_archived_case_edit(case))
         page.patient_selected.connect(self._on_rao_case_selected_in_operblock_archive)
+        common_button = QPushButton("Общий архив")
+        common_button.setMinimumHeight(34)
+        set_widget_style(common_button, STYLE_SECTOR8_BUTTON)
+        common_button.clicked.connect(lambda: self._open_common_operblock_archive())
+        page.layout().addWidget(common_button)
         operblock_startup_metrics.record_since("build_archive_page_ms", metric_started, source="operblock_widget")
         if getattr(self, "_creating_lazy_archive_page", False):
             operblock_startup_metrics.record_since(
@@ -65,6 +71,170 @@ class OperBlockArchiveMixin:
                 source="operblock_widget",
             )
         return page
+
+    def _open_common_operblock_archive(self):
+        """Open a deliberately narrow central archive surface on user request."""
+        from pathlib import Path
+        from rem_card.app.operblock_local_destination import get_operblock_destination
+        from rem_card.services.operblock.central_archive_facade import ExplicitCentralOperBlockService
+        from rem_card.ui.doctor_view.archive_widget import ARCHIVE_MODE_OPERBLOCK, ArchiveWidget
+
+        root = get_operblock_destination()
+        if not root:
+            CustomMessageBox.warning(self, "Общий архив", "Основная база для оперблока ещё не настроена.")
+            return
+        db_path = str(Path(root) / "archiv" / "rao_journal.db")
+        if not getattr(self, "_common_archive_page", None):
+            facade = ExplicitCentralOperBlockService(central_root=root)
+            page = QWidget(self.stack)
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(8, 8, 8, 8)
+            toolbar = QHBoxLayout()
+            title = QLabel("Общий архив оперблока")
+            set_widget_style(title, f"font-size: 18px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
+            back_button = QPushButton("К локальному архиву")
+            back_button.setMinimumHeight(34)
+            set_widget_style(back_button, STYLE_SECTOR8_BUTTON)
+            back_button.clicked.connect(lambda: self.stack.setCurrentWidget(self.archive_page))
+            toolbar.addWidget(title)
+            toolbar.addStretch(1)
+            toolbar.addWidget(back_button)
+            layout.addLayout(toolbar)
+            archive = ArchiveWidget(
+                self.patient_service,
+                remcard_service=self.remcard_service,
+                parent=page,
+                allow_edit=not self.is_view_only_mode(),
+                operblock_service=facade,
+                fixed_source_mode=ARCHIVE_MODE_OPERBLOCK,
+                embedded=False,
+            )
+            # This surface must never expose destructive central archive actions.
+            for button in (archive.btn_delete_last, archive.btn_delete, archive.btn_report_stats):
+                button.setEnabled(False)
+                button.hide()
+            archive.operblock_case_selected.connect(
+                lambda case, path=db_path: self._open_external_archive_case({
+                    **dict(case or {}),
+                    "source_db_path": str(dict(case or {}).get("source_db_path") or path),
+                    "is_external_archive": True,
+                })
+            )
+            archive.operblock_edit_requested.connect(lambda case: self._open_common_archived_case_edit(case))
+            layout.addWidget(archive, 1)
+            self._common_archive_page = page
+            self._common_archive_widget = archive
+            self._common_archive_service = facade
+            self.stack.addWidget(page)
+        self.stack.setCurrentWidget(self._common_archive_page)
+        self._common_archive_widget.load_data(reset_page=False)
+
+    def _open_common_archived_case_edit(self, case):
+        """Load and update central archive metadata through one gateway per worker.
+
+        The central connection is never retained by the local clinical shell:
+        both read and write call the explicit facade from ``AsyncCallThread``.
+        """
+        if self.is_view_only_mode() or getattr(self, "_is_closing", False):
+            return
+        case = dict(case or {}) if isinstance(case, dict) else {}
+        case_id = _safe_int(case.get("source_operation_case_id") or case.get("operation_case_id"))
+        if not case_id:
+            CustomMessageBox.warning(self, "Общий архив", "Не удалось определить запись оперблока.")
+            return
+        service = getattr(self, "_common_archive_service", None)
+        if service is None:
+            CustomMessageBox.warning(self, "Общий архив", "Подключение к общему архиву не создано.")
+            return
+        from rem_card.ui.shared.async_call import AsyncCallThread
+
+        worker = AsyncCallThread(
+            lambda: service.get_operation_case_form_data(int(case_id)), parent=self,
+        )
+        self._common_archive_read_worker = worker
+        worker.succeeded.connect(
+            lambda initial_data, target_id=case_id: self._show_common_archive_edit_dialog(target_id, initial_data)
+        )
+        worker.failed.connect(
+            lambda exc: CustomMessageBox.warning(self, "Общий архив", f"Не удалось открыть карту для редактирования:\n{exc}")
+        )
+        worker.finished.connect(
+            lambda: setattr(self, "_common_archive_read_worker", None)
+        )
+        worker.start()
+
+    def _show_common_archive_edit_dialog(self, operation_case_id: int, initial_data):
+        if self.is_view_only_mode() or getattr(self, "_is_closing", False):
+            return
+        initial_data = dict(initial_data or {})
+        if str(initial_data.get("case_status") or "") != "closed":
+            CustomMessageBox.warning(self, "Общий архив", "Редактировать можно только завершённую карту.")
+            return
+        from rem_card.ui.operblock_view.operblock_admission_dialogs import OccupyTableDialog
+        from rem_card.ui.operblock_view.operblock_helpers import _operblock_table_display_name
+        import weakref
+
+        table_code = str(initial_data.get("table_code") or "")
+        table_name = str(initial_data.get("table_name") or "") or _operblock_table_display_name(table_code)
+        dialog = OccupyTableDialog(
+            table_code, table_name, self, mode="edit", initial_data=initial_data,
+            operation_case_id=int(operation_case_id),
+        )
+        dialog_ref = weakref.ref(dialog)
+        expected_case_revision = initial_data.get("operation_case_revision")
+        expected_admission_revision = initial_data.get("admission_revision")
+
+        def save():
+            form = dialog_ref()
+            if form is None:
+                return
+            try:
+                payload = form.get_data()
+            except Exception as exc:
+                CustomMessageBox.warning(form, "Ошибка", str(exc))
+                return
+            form.set_saving(True)
+            service = getattr(self, "_common_archive_service", None)
+            if service is None:
+                form.set_saving(False)
+                CustomMessageBox.warning(form, "Общий архив", "Подключение к общему архиву недоступно.")
+                return
+            from rem_card.ui.shared.async_call import AsyncCallThread
+            worker = AsyncCallThread(
+                lambda: service.update_archived_operation_case_form_data(
+                    int(operation_case_id), payload,
+                    expected_operation_case_revision=expected_case_revision,
+                    expected_admission_revision=expected_admission_revision,
+                ),
+                parent=self,
+            )
+            self._common_archive_write_worker = worker
+
+            def saved(_result):
+                current = dialog_ref()
+                if current is not None:
+                    current.set_saving(False)
+                    current.accept()
+                archive = getattr(self, "_common_archive_widget", None)
+                if archive is not None:
+                    archive.load_data(reset_page=False)
+
+            def save_failed(exc):
+                current = dialog_ref()
+                if current is not None:
+                    current.set_saving(False)
+                from rem_card.services.concurrency import DataConflictError
+                from rem_card.services.operblock_service import OperBlockConflictError
+                title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Ошибка сохранения"
+                CustomMessageBox.warning(self, title, str(exc))
+
+            worker.succeeded.connect(saved)
+            worker.failed.connect(save_failed)
+            worker.finished.connect(lambda: setattr(self, "_common_archive_write_worker", None))
+            worker.start()
+
+        dialog.save_button.clicked.connect(save)
+        dialog.exec()
 
     def _build_legacy_archive_page(self) -> QWidget:
         metric_started = operblock_startup_metrics.timer_start()
@@ -243,6 +413,22 @@ class OperBlockArchiveMixin:
             "Архив реанимации",
             "Просмотр карт реанимации доступен в рабочих местах врача и медсестры.",
         )
+
+    def _open_archived_case_edit(self, case):
+        case = dict(case or {}) if isinstance(case, dict) else {}
+        if case.get("is_external_archive"):
+            CustomMessageBox.information(self, "Архив оперблока", "Записи прошлых циклов доступны только для просмотра.")
+            return
+        db = getattr(self.operblock_service, "db", None)
+        runtime_mode = str(getattr(getattr(db, "runtime_context", None), "mode", "") or "")
+        if runtime_mode == "opblock_offline" and (
+            str(case.get("migration_status") or "").strip().lower() == "verified" or case.get("migrated_at")
+        ):
+            CustomMessageBox.information(self, "Архив оперблока", "Подтверждённая карта редактируется в общем архиве.")
+            return
+        case_id = _safe_int(case.get("source_operation_case_id") or case.get("operation_case_id"))
+        if case_id:
+            self._open_edit_patient_dialog(case_id)
 
     def _filtered_archive_cases(self) -> list[dict]:
         query = str(getattr(self, "archive_search_input", None).text() if hasattr(self, "archive_search_input") else "").strip().casefold()

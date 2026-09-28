@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
-import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -19,6 +19,16 @@ from rem_card.app.operblock_offline_store import (
     read_operblock_offline_metadata,
 )
 from rem_card.app.sqlite_shared import backup_connection, configure_connection, run_integrity_check, run_quick_check
+from rem_card.app.operblock_offline_transfer import (
+    build_case_payload,
+    destination_uuid,
+    ensure_local_destination_binding,
+    ensure_transfer_schema,
+    local_installation_origin_id,
+    read_local_installation_origin_id,
+    now_text as _transfer_now_text,
+    payload_hash,
+)
 
 
 @dataclass
@@ -36,7 +46,7 @@ class OperBlockOfflineMigrationResult:
 
 
 def _now_text() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return _transfer_now_text()
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -133,33 +143,9 @@ def _protocol_for_network(
     protocol_number: Any,
     target_case_id: int | None,
 ) -> tuple[Any, Any, Any]:
-    if not protocol_number or not protocol_date:
-        return protocol_number, protocol_date, None
-    conflict = cursor.execute(
-        """
-        SELECT id
-        FROM operation_cases
-        WHERE table_code = ?
-          AND anesthesia_protocol_date = ?
-          AND anesthesia_protocol_number = ?
-          AND (? IS NULL OR id <> ?)
-        LIMIT 1
-        """,
-        (table_code, protocol_date, protocol_number, target_case_id, target_case_id),
-    ).fetchone()
-    if not conflict:
-        return protocol_number, protocol_date, None
-    row = cursor.execute(
-        """
-        SELECT MAX(anesthesia_protocol_number)
-        FROM operation_cases
-        WHERE table_code = ?
-          AND anesthesia_protocol_date = ?
-        """,
-        (table_code, protocol_date),
-    ).fetchone()
-    next_number = int((row[0] if row else 0) or 0) + 1
-    return next_number, protocol_date, int(protocol_number)
+    # Printed protocols are generated independently on each workstation.
+    # They are clinical source facts, not a central identity or sequence.
+    return protocol_number, protocol_date, None
 
 
 def _remote_case_by_uuid(cursor: sqlite3.Cursor, offline_case_uuid: str) -> sqlite3.Row | None:
@@ -184,8 +170,6 @@ def _active_table_conflict(cursor: sqlite3.Cursor, *, table_code: str, offline_c
     ).fetchone()
     if not row:
         return False, None
-    if str(row["offline_case_uuid"] or "") == str(offline_case_uuid or ""):
-        return False, int(row["id"])
     return True, int(row["id"])
 
 
@@ -261,102 +245,123 @@ def _clear_existing_remote_case_details(cursor: sqlite3.Cursor, *, remote_case_i
             cursor.execute(f'DELETE FROM "{table_name}" WHERE admission_id = ?', (int(remote_admission_id),))
 
 
+def _assert_exportable_frozen_case(
+    snapshot_conn: sqlite3.Connection,
+    local_case: dict[str, Any],
+) -> None:
+    """Reject a case that changed state before its immutable export snapshot.
+
+    The initial candidate list is intentionally only an optimization.  A
+    clinician can restore a case between that query and ``backup()``; the
+    snapshot itself is therefore the sole authority for network export.
+    """
+    if str(local_case.get("status") or "") != "closed":
+        raise RuntimeError("Локальный случай больше не завершён; перенос отменён.")
+    if local_case.get("migrated_at"):
+        raise RuntimeError("Локальный случай уже имеет отметку переноса; требуется сверка квитанции.")
+    migration_status = str(local_case.get("migration_status") or "").strip().lower()
+    if migration_status in {"verified", "discarded", "shadow"}:
+        raise RuntimeError("Локальный случай не ожидает переноса.")
+    if _table_exists(snapshot_conn, "operation_table_assignments"):
+        assignment_columns = set(_columns(snapshot_conn, "operation_table_assignments"))
+        where = ["operation_case_id=?"]
+        if "status" in assignment_columns:
+            where.append("status='active'")
+        if "released_at" in assignment_columns:
+            where.append("released_at IS NULL")
+        if snapshot_conn.execute(
+            f'SELECT 1 FROM "operation_table_assignments" WHERE {" AND ".join(where)} LIMIT 1',
+            (int(local_case["id"]),),
+        ).fetchone():
+            raise RuntimeError("Завершённый случай всё ещё занимает операционный стол; перенос отменён.")
+
+
 def _migrate_one_case(
     cursor: sqlite3.Cursor,
     local_conn: sqlite3.Connection,
     *,
     local_case: dict[str, Any],
     session_id: str | None,
+    installation_origin_id: str,
+    expected_content_hash: str,
 ) -> tuple[str, int]:
+    _assert_exportable_frozen_case(local_conn, local_case)
     offline_case_uuid = str(local_case.get("offline_case_uuid") or "").strip()
     if not offline_case_uuid:
-        offline_case_uuid = f"opblock:{local_case.get('id')}:{int(time.time())}"
+        raise RuntimeError("Завершённый локальный случай не имеет постоянного UUID.")
     table_code = str(local_case.get("table_code") or "")
-    conflict, same_case_remote_id = _active_table_conflict(
-        cursor,
-        table_code=table_code,
-        offline_case_uuid=offline_case_uuid,
+    ensure_transfer_schema(cursor)
+    source_payload = build_case_payload(
+        local_conn, local_case, installation_origin_id=installation_origin_id
     )
-    if conflict:
-        raise RuntimeError(f"Операционный стол {table_code} занят другим активным случаем.")
-
+    content_hash = payload_hash(source_payload)
+    if content_hash != expected_content_hash:
+        raise RuntimeError("Локальный случай изменён до начала переноса; требуется повторная сверка.")
     existing = _remote_case_by_uuid(cursor, offline_case_uuid)
-    if existing and str(existing["status"] or "") == "closed":
+    if existing:
+        if str(existing["status"] or "") != "closed":
+            raise RuntimeError("В центральной базе найден одноимённый незавершённый случай; архив не изменён.")
+        receipt = cursor.execute(
+            """
+            SELECT remote_operation_case_id, content_hash, source_installation_id
+            FROM opblock_offline_case_map WHERE offline_case_uuid=?
+            """,
+            (offline_case_uuid,),
+        ).fetchone()
+        if not receipt or int(receipt["remote_operation_case_id"] or 0) != int(existing["id"]):
+            raise RuntimeError("В центральном архиве есть случай без подтверждённой квитанции переноса.")
+        if str(receipt["content_hash"] or "") != content_hash:
+            raise RuntimeError("Содержимое локального случая отличается от подтверждённой архивной квитанции.")
+        if str(receipt["source_installation_id"] or "") != str(installation_origin_id):
+            raise RuntimeError("UUID случая уже принадлежит другой установке; архив не изменён.")
+        remote_payload = build_case_payload(
+            cursor.connection, existing, installation_origin_id=installation_origin_id
+        )
+        if payload_hash(remote_payload) != content_hash:
+            raise RuntimeError("Архивный случай был изменён после переноса; локальная копия не будет его перезаписывать.")
+        _publish_imported_handoff(
+            cursor, local_case, int(existing["id"]), int(existing["patient_id"]),
+            int(existing["admission_id"]), source_payload,
+        )
         return offline_case_uuid, int(existing["id"])
+    prior_receipt = cursor.execute(
+        "SELECT 1 FROM opblock_offline_case_map WHERE offline_case_uuid=?", (offline_case_uuid,)
+    ).fetchone()
+    if prior_receipt:
+        raise RuntimeError("Для UUID случая уже есть квитанция без архивной записи; автоматическое создание запрещено.")
 
     local_patient = local_conn.execute("SELECT * FROM patients WHERE id = ?", (int(local_case["patient_id"]),)).fetchone()
     local_admission = local_conn.execute("SELECT * FROM admissions WHERE id = ?", (int(local_case["admission_id"]),)).fetchone()
     if not local_patient or not local_admission:
         raise RuntimeError(f"Локальный случай {offline_case_uuid} повреждён: пациент или госпитализация не найдены.")
 
-    target_case_id = same_case_remote_id or (int(existing["id"]) if existing else None)
     protocol_number, protocol_date, original_protocol = _protocol_for_network(
         cursor,
         table_code=table_code,
         protocol_date=local_case.get("anesthesia_protocol_date"),
         protocol_number=local_case.get("anesthesia_protocol_number"),
-        target_case_id=target_case_id,
+        target_case_id=None,
     )
 
-    if target_case_id:
-        remote_case = cursor.execute("SELECT * FROM operation_cases WHERE id = ?", (target_case_id,)).fetchone()
-        remote_patient_id = int(remote_case["patient_id"])
-        remote_admission_id = int(remote_case["admission_id"])
-        _update_row(cursor, "patients", remote_patient_id, _row_dict(local_patient))
-        _update_row(
-            cursor,
-            "admissions",
-            remote_admission_id,
-            _row_dict(local_admission),
-            overrides={"patient_id": remote_patient_id, "unit_scope": "operblock", "admission_type": "operblock", "is_active": 0},
-        )
-        _clear_existing_remote_case_details(cursor, remote_case_id=target_case_id, remote_admission_id=remote_admission_id)
-        remote_case_id = target_case_id
-        _update_row(
-            cursor,
-            "operation_cases",
-            remote_case_id,
-            local_case,
-            overrides={
-                "patient_id": remote_patient_id,
-                "admission_id": remote_admission_id,
-                "status": "closed",
-                "offline_case_uuid": offline_case_uuid,
-                "offline_session_id": session_id,
-                "anesthesia_protocol_number": protocol_number,
-                "anesthesia_protocol_date": protocol_date,
-                "original_protocol_number": original_protocol,
-                "future_rao_admission_id": None,
-                "migration_status": "verified",
-                "migrated_at": _now_text(),
-            },
-        )
-    else:
-        remote_patient_id = _insert_row(cursor, "patients", _row_dict(local_patient))
-        remote_admission_id = _insert_row(
-            cursor,
-            "admissions",
-            _row_dict(local_admission),
-            overrides={"patient_id": remote_patient_id, "unit_scope": "operblock", "admission_type": "operblock", "is_active": 0},
-        )
-        remote_case_id = _insert_row(
-            cursor,
-            "operation_cases",
-            local_case,
-            overrides={
-                "patient_id": remote_patient_id,
-                "admission_id": remote_admission_id,
-                "status": "closed",
-                "offline_case_uuid": offline_case_uuid,
-                "offline_session_id": session_id,
-                "anesthesia_protocol_number": protocol_number,
-                "anesthesia_protocol_date": protocol_date,
-                "original_protocol_number": original_protocol,
-                "future_rao_admission_id": None,
-                "migration_status": "verified",
-                "migrated_at": _now_text(),
-            },
-        )
+    remote_patient_id = _insert_row(cursor, "patients", _row_dict(local_patient))
+    remote_admission_id = _insert_row(
+        cursor,
+        "admissions",
+        _row_dict(local_admission),
+        overrides={"patient_id": remote_patient_id, "unit_scope": "operblock", "admission_type": "operblock", "is_active": 0},
+    )
+    remote_case_id = _insert_row(
+        cursor,
+        "operation_cases",
+        local_case,
+        overrides={
+            "patient_id": remote_patient_id, "admission_id": remote_admission_id,
+            "status": "closed", "offline_case_uuid": offline_case_uuid,
+            "offline_session_id": local_case.get("offline_session_id") or session_id, "anesthesia_protocol_number": protocol_number,
+            "anesthesia_protocol_date": protocol_date, "original_protocol_number": local_case.get("original_protocol_number"),
+            "future_rao_admission_id": None, "migration_status": "verified", "migrated_at": _now_text(),
+        },
+    )
 
     order_map = _copy_admission_rows(
         cursor,
@@ -395,20 +400,28 @@ def _migrate_one_case(
         remote_admission_id=remote_admission_id,
         order_map=order_map,
     )
+    _copy_case_rows(
+        cursor,
+        local_conn,
+        table_name="operblock_archive_edit_history",
+        local_case_id=int(local_case["id"]),
+        remote_case_id=remote_case_id,
+        remote_admission_id=remote_admission_id,
+    )
+    remote_case = cursor.execute("SELECT * FROM operation_cases WHERE id=?", (remote_case_id,)).fetchone()
+    if payload_hash(build_case_payload(
+        cursor.connection, remote_case, installation_origin_id=installation_origin_id
+    )) != expected_content_hash:
+        raise RuntimeError("Центральная архивная копия не совпала с локальным снимком; перенос отменён.")
     cursor.execute(
         """
         INSERT INTO opblock_offline_case_map (
             offline_case_uuid, offline_session_id, local_operation_case_id,
             remote_operation_case_id, original_protocol_number, network_protocol_number,
             content_hash, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'verified')
-        ON CONFLICT(offline_case_uuid) DO UPDATE SET
-            remote_operation_case_id = excluded.remote_operation_case_id,
-            original_protocol_number = excluded.original_protocol_number,
-            network_protocol_number = excluded.network_protocol_number,
-            content_hash = excluded.content_hash,
-            status = 'verified',
-            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            , source_installation_id, local_revision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?)
+        ON CONFLICT(offline_case_uuid) DO NOTHING
         """,
         (
             offline_case_uuid,
@@ -417,10 +430,310 @@ def _migrate_one_case(
             remote_case_id,
             original_protocol,
             protocol_number,
-            _stable_hash(local_case),
+            content_hash,
+            installation_origin_id,
+            int(local_case.get("revision") or 0),
         ),
     )
+    _publish_imported_handoff(
+        cursor, local_case, remote_case_id, remote_patient_id, remote_admission_id, source_payload,
+    )
     return offline_case_uuid, remote_case_id
+
+
+def _publish_imported_handoff(
+    cursor: sqlite3.Cursor,
+    local_case: dict[str, Any],
+    remote_case_id: int,
+    remote_patient_id: int,
+    remote_admission_id: int,
+    source_payload: dict[str, Any],
+) -> None:
+    """Optional RAO invitation hook; errors deliberately abort this case txn."""
+    from rem_card.app.operblock_local_handoffs import publish_imported_handoff
+
+    publish_imported_handoff(
+        cursor,
+        local_case=local_case,
+        remote_case_id=int(remote_case_id),
+        remote_patient_id=int(remote_patient_id),
+        remote_admission_id=int(remote_admission_id),
+        source_payload=source_payload,
+    )
+
+
+def verify_local_case_receipt(
+    local_conn: sqlite3.Connection,
+    network_db_manager,
+    local_case_id: int,
+) -> bool:
+    """Return true only when the local verified revision still equals central content.
+
+    Retention code uses this before pruning a local case.  It is intentionally
+    read-only and regards an unavailable/malformed central archive as false.
+    """
+    try:
+        row = local_conn.execute("SELECT * FROM operation_cases WHERE id=?", (int(local_case_id),)).fetchone()
+        if row is None:
+            return False
+        local_case = _row_dict(row)
+        if str(local_case.get("migration_status") or "") != "verified":
+            return False
+        installation_origin_id = read_local_installation_origin_id(local_conn)
+        if not installation_origin_id:
+            return False
+        expected_hash = payload_hash(build_case_payload(
+            local_conn, local_case, installation_origin_id=installation_origin_id
+        ))
+
+        def read(cursor: sqlite3.Cursor) -> bool:
+            receipt = cursor.execute(
+                """
+                SELECT remote_operation_case_id, content_hash, source_installation_id
+                FROM opblock_offline_case_map WHERE offline_case_uuid=?
+                """,
+                (str(local_case.get("offline_case_uuid") or ""),),
+            ).fetchone()
+            if not receipt or str(receipt["content_hash"] or "") != expected_hash:
+                return False
+            if str(receipt["source_installation_id"] or "") != installation_origin_id:
+                return False
+            remote = cursor.execute(
+                "SELECT * FROM operation_cases WHERE id=? AND status='closed'",
+                (int(receipt["remote_operation_case_id"] or 0),),
+            ).fetchone()
+            return bool(remote and payload_hash(build_case_payload(
+                cursor.connection, remote, installation_origin_id=installation_origin_id
+            )) == expected_hash)
+
+        run_read = getattr(network_db_manager, "run_read_operation", None)
+        if callable(run_read):
+            return bool(run_read(read, source="opblock_offline_receipt_verify"))
+        conn = getattr(network_db_manager, "_remcard_conn", None)
+        return bool(conn is not None and read(conn.cursor()))
+    except Exception:
+        return False
+
+
+def ensure_operblock_offline_transfer_schema(network_db_manager) -> None:
+    """Prepare receipt-only transfer objects through the explicit archive gateway."""
+    network_db_manager.run_write_operation(
+        ensure_transfer_schema, source="opblock_offline_transfer_schema"
+    )
+
+
+def _run_local_immediate(local_conn: sqlite3.Connection, operation):
+    local_conn.execute("BEGIN IMMEDIATE")
+    try:
+        value = operation()
+        local_conn.execute("COMMIT")
+        return value
+    except Exception:
+        if local_conn.in_transaction:
+            local_conn.execute("ROLLBACK")
+        raise
+
+
+def _assign_missing_offline_case_uuids(local_conn: sqlite3.Connection) -> None:
+    """Persist retry identity before any snapshot or central transaction."""
+    def assign() -> None:
+        rows = local_conn.execute(
+            """
+            SELECT id FROM operation_cases
+            WHERE status='closed' AND COALESCE(migration_status, '') NOT IN ('verified', 'discarded')
+              AND COALESCE(excluded_from_migration, 0)=0
+              AND COALESCE(offline_case_uuid, '')=''
+            """
+        ).fetchall()
+        for row in rows:
+            local_conn.execute(
+                "UPDATE operation_cases SET offline_case_uuid=? WHERE id=? AND COALESCE(offline_case_uuid, '')=''",
+                (str(uuid.uuid4()), int(row[0])),
+            )
+    _run_local_immediate(local_conn, assign)
+
+
+def _prepare_local_export(
+    local_conn: sqlite3.Connection,
+    network_db_manager,
+    *,
+    root: str | None,
+) -> tuple[Any, str, str, str]:
+    ok, reason = run_quick_check(local_conn)
+    if not ok:
+        raise RuntimeError(f"local_quick_check_failed:{reason}")
+    _assign_missing_offline_case_uuids(local_conn)
+    installation_origin_id = _run_local_immediate(
+        local_conn, lambda: local_installation_origin_id(local_conn),
+    )
+    destination: list[str] = []
+    network_db_manager.run_write_operation(
+        lambda cursor: destination.append(destination_uuid(cursor)),
+        source="opblock_offline_destination_identity",
+    )
+    if len(destination) != 1 or not destination[0]:
+        raise RuntimeError("Не удалось подтвердить идентичность центрального архива оперблока.")
+    _run_local_immediate(
+        local_conn, lambda: ensure_local_destination_binding(local_conn, destination[0]),
+    )
+    network_backup_path = str(network_db_manager.create_validated_backup(
+        prefix="opblock_offline_pre_migration", source="opblock_offline_migration",
+    ) or "")
+    if not network_backup_path:
+        raise RuntimeError("network_backup_failed")
+    return (
+        read_operblock_offline_metadata(root),
+        str(installation_origin_id),
+        network_backup_path,
+        _create_local_backup(local_conn, root=root),
+    )
+
+
+def _pending_closed_local_cases(local_conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = local_conn.execute(
+        """
+        SELECT * FROM operation_cases
+        WHERE status = 'closed'
+          AND COALESCE(migration_status, '') NOT IN ('verified', 'discarded', 'shadow')
+          AND migrated_at IS NULL
+          AND COALESCE(excluded_from_migration, 0) = 0
+        ORDER BY ended_at, id
+        """
+    ).fetchall()
+    return [_row_dict(row) for row in rows]
+
+
+def _frozen_case_matches_current(
+    local_conn: sqlite3.Connection,
+    current_case: dict[str, Any],
+    frozen_case: dict[str, Any],
+    *,
+    installation_origin_id: str,
+    frozen_content_hash: str,
+) -> bool:
+    return not (
+        str(current_case.get("status") or "") != "closed"
+        or current_case.get("migrated_at")
+        or str(current_case.get("migration_status") or "").strip().lower() in {"verified", "discarded", "shadow"}
+        or int(current_case.get("revision") or 0) != int(frozen_case.get("revision") or 0)
+        or payload_hash(build_case_payload(
+            local_conn, current_case, installation_origin_id=installation_origin_id,
+        )) != frozen_content_hash
+    )
+
+
+def _acknowledge_frozen_case(
+    local_conn: sqlite3.Connection,
+    *,
+    frozen_case: dict[str, Any],
+    remote_case_id: int,
+    installation_origin_id: str,
+    frozen_content_hash: str,
+) -> None:
+    def acknowledge() -> None:
+        current = local_conn.execute(
+            "SELECT * FROM operation_cases WHERE id=?", (int(frozen_case["id"]),),
+        ).fetchone()
+        current_case = _row_dict(current)
+        if not current or not _frozen_case_matches_current(
+            local_conn, current_case, frozen_case,
+            installation_origin_id=installation_origin_id,
+            frozen_content_hash=frozen_content_hash,
+        ):
+            raise RuntimeError("Локальный случай изменён во время переноса; требуется сверка архива.")
+        local_conn.execute(
+            """
+            UPDATE operation_cases SET migration_status='verified', migrated_at=?, migrated_remote_id=?
+            WHERE id=? AND status='closed' AND migrated_at IS NULL AND revision=?
+            """,
+            (_now_text(), remote_case_id, int(frozen_case["id"]), int(frozen_case.get("revision") or 0)),
+        )
+        if local_conn.execute("SELECT changes()").fetchone()[0] != 1:
+            raise RuntimeError("Локальный случай изменён до подтверждения переноса.")
+    _run_local_immediate(local_conn, acknowledge)
+
+
+def _migrate_frozen_local_case(
+    local_conn: sqlite3.Connection,
+    network_db_manager,
+    *,
+    local_case_id: int,
+    session_id: str | None,
+    installation_origin_id: str,
+) -> tuple[str, int]:
+    """Copy a coherent in-memory snapshot, then acknowledge only that snapshot."""
+    snapshot_conn = sqlite3.connect(":memory:", isolation_level=None)
+    snapshot_conn.row_factory = sqlite3.Row
+    try:
+        local_conn.backup(snapshot_conn)
+        row = snapshot_conn.execute(
+            "SELECT * FROM operation_cases WHERE id=?", (int(local_case_id),),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Локальный случай исчез до снимка переноса.")
+        frozen_case = _row_dict(row)
+        _assert_exportable_frozen_case(snapshot_conn, frozen_case)
+        frozen_content_hash = payload_hash(build_case_payload(
+            snapshot_conn, frozen_case, installation_origin_id=installation_origin_id,
+        ))
+        remote_result: list[tuple[str, int]] = []
+        network_db_manager.run_write_operation(
+            lambda cursor: remote_result.append(_migrate_one_case(
+                cursor, snapshot_conn, local_case=frozen_case, session_id=session_id,
+                installation_origin_id=installation_origin_id,
+                expected_content_hash=frozen_content_hash,
+            )),
+            source="opblock_offline_migration_case",
+        )
+        if not remote_result:
+            raise RuntimeError("Центральный архив не вернул подтверждение переноса.")
+    finally:
+        snapshot_conn.close()
+    case_uuid, remote_case_id = remote_result[0]
+    _acknowledge_frozen_case(
+        local_conn,
+        frozen_case=frozen_case,
+        remote_case_id=remote_case_id,
+        installation_origin_id=installation_origin_id,
+        frozen_content_hash=frozen_content_hash,
+    )
+    return case_uuid, remote_case_id
+
+
+def _migrate_pending_local_cases(
+    local_conn: sqlite3.Connection,
+    network_db_manager,
+    *,
+    session_id: str | None,
+    installation_origin_id: str,
+) -> tuple[list[tuple[str, int, int]], list[str]]:
+    migrated: list[tuple[str, int, int]] = []
+    failures: list[str] = []
+    for local_case in _pending_closed_local_cases(local_conn):
+        try:
+            case_uuid, remote_case_id = _migrate_frozen_local_case(
+                local_conn, network_db_manager,
+                local_case_id=int(local_case["id"]), session_id=session_id,
+                installation_origin_id=installation_origin_id,
+            )
+            migrated.append((case_uuid, int(local_case["id"]), remote_case_id))
+        except Exception as exc:
+            failures.append(str(exc))
+            logger.warning("Operblock offline case migration failed local_case_id=%s: %s", local_case.get("id"), exc)
+    return migrated, failures
+
+
+def _check_network_after_export(network_db_manager) -> str:
+    conn = getattr(network_db_manager, "_remcard_conn", None)
+    if conn is None:
+        return ""
+    quick_ok, quick_result = run_quick_check(conn)
+    if not quick_ok:
+        return f"network_quick_check_failed:{quick_result}"
+    integrity_ok, integrity_result = run_integrity_check(conn)
+    if not integrity_ok:
+        return f"network_integrity_check_failed:{integrity_result}"
+    return ""
 
 
 def run_pending_operblock_offline_migration(
@@ -428,124 +741,52 @@ def run_pending_operblock_offline_migration(
     *,
     root: str | None = None,
 ) -> OperBlockOfflineMigrationResult:
-    if has_active_local_operblock_case(root):
-        return OperBlockOfflineMigrationResult(
-            ok=True,
-            attempted=False,
-            blocked=True,
-            reason="active_local_case",
-            user_message="Есть незавершённый локальный случай оперблока. Перенос не выполнялся.",
-        )
     if pending_completed_local_cases_count(root) <= 0:
         return OperBlockOfflineMigrationResult(ok=True, attempted=False, reason="no_pending_cases")
-
     metadata = read_operblock_offline_metadata(root)
-    local_db_path = str(getattr(metadata, "local_db_path", "") or os.path.join(get_operblock_offline_active_dir(root), "operblock_local.db"))
+    local_db_path = str(getattr(metadata, "local_db_path", "") or os.path.join(
+        get_operblock_offline_active_dir(root), "operblock_local.db",
+    ))
     if not os.path.isfile(local_db_path):
         return OperBlockOfflineMigrationResult(ok=True, attempted=False, reason="local_db_missing")
-
     network_backup_path = ""
     local_backup_path = ""
     local_conn = sqlite3.connect(local_db_path, isolation_level=None, timeout=5.0)
     local_conn.row_factory = sqlite3.Row
     configure_connection(local_conn, profile="network")
     try:
-        ok, reason = run_quick_check(local_conn)
-        if not ok:
-            return OperBlockOfflineMigrationResult(ok=False, attempted=False, reason=f"local_quick_check_failed:{reason}")
-        network_backup_path = str(
-            network_db_manager.create_validated_backup(
-                prefix="opblock_offline_pre_migration",
-                source="opblock_offline_migration",
+        metadata, origin_id, network_backup_path, local_backup_path = _prepare_local_export(
+            local_conn, network_db_manager, root=root,
+        )
+        migrated, failures = _migrate_pending_local_cases(
+            local_conn, network_db_manager,
+            session_id=getattr(metadata, "offline_session_id", "active") if metadata else "active",
+            installation_origin_id=origin_id,
+        )
+        check_failure = _check_network_after_export(network_db_manager)
+        if check_failure:
+            return OperBlockOfflineMigrationResult(
+                ok=False, attempted=True, reason=check_failure,
+                network_backup_path=network_backup_path, local_backup_path=local_backup_path,
             )
-            or ""
-        )
-        if not network_backup_path:
-            return OperBlockOfflineMigrationResult(ok=False, attempted=False, reason="network_backup_failed")
-        local_backup_path = _create_local_backup(local_conn, root=root)
-
-        local_cases = [
-            _row_dict(row)
-            for row in local_conn.execute(
-                """
-                SELECT *
-                FROM operation_cases
-                WHERE status = 'closed'
-                  AND COALESCE(migration_status, '') NOT IN ('verified', 'discarded')
-                  AND migrated_at IS NULL
-                  AND COALESCE(excluded_from_migration, 0) = 0
-                ORDER BY ended_at, id
-                """
-            ).fetchall()
-        ]
-        skipped_cancelled = int(
-            local_conn.execute(
-                "SELECT COUNT(*) FROM operation_cases WHERE status = 'cancelled' AND COALESCE(migration_status, '') <> 'verified'"
-            ).fetchone()[0]
-            or 0
-        )
-        migrated: list[tuple[str, int, int]] = []
-
-        def operation(cursor: sqlite3.Cursor):
-            for local_case in local_cases:
-                case_uuid, remote_case_id = _migrate_one_case(
-                    cursor,
-                    local_conn,
-                    local_case=local_case,
-                    session_id=getattr(metadata, "offline_session_id", "active") if metadata else "active",
-                )
-                migrated.append((case_uuid, int(local_case["id"]), remote_case_id))
-
-        network_db_manager.run_write_operation(operation, source="opblock_offline_migration")
-        conn = getattr(network_db_manager, "_remcard_conn", None)
-        if conn is not None:
-            quick_ok, quick_result = run_quick_check(conn)
-            if not quick_ok:
-                return OperBlockOfflineMigrationResult(ok=False, attempted=True, reason=f"network_quick_check_failed:{quick_result}")
-            integrity_ok, integrity_result = run_integrity_check(conn)
-            if not integrity_ok:
-                return OperBlockOfflineMigrationResult(ok=False, attempted=True, reason=f"network_integrity_check_failed:{integrity_result}")
-
-        local_conn.execute("BEGIN IMMEDIATE")
-        try:
-            for case_uuid, local_case_id, remote_case_id in migrated:
-                local_conn.execute(
-                    """
-                    UPDATE operation_cases
-                    SET migration_status = 'verified',
-                        migrated_at = ?,
-                        migrated_remote_id = ?
-                    WHERE id = ?
-                    """,
-                    (_now_text(), remote_case_id, local_case_id),
-                )
-            local_conn.execute("COMMIT")
-        except Exception:
-            if local_conn.in_transaction:
-                local_conn.execute("ROLLBACK")
-            raise
-
-        if migrated:
+        if migrated and pending_completed_local_cases_count(root) <= 0 and not has_active_local_operblock_case(root):
             mark_operblock_offline_session_verified(root)
+        skipped_cancelled = int(local_conn.execute(
+            "SELECT COUNT(*) FROM operation_cases WHERE status='cancelled' AND COALESCE(migration_status, '') <> 'verified'",
+        ).fetchone()[0] or 0)
         return OperBlockOfflineMigrationResult(
-            ok=True,
-            attempted=True,
-            migrated_cases=len(migrated),
-            skipped_cancelled=skipped_cancelled,
-            network_backup_path=network_backup_path,
-            local_backup_path=local_backup_path,
+            ok=not failures, attempted=True, migrated_cases=len(migrated),
+            skipped_cancelled=skipped_cancelled, reason="; ".join(failures),
+            user_message="" if not failures else "Часть завершённых случаев не перенесена. Локальные данные сохранены.",
+            network_backup_path=network_backup_path, local_backup_path=local_backup_path,
             migrated_case_uuids=[item[0] for item in migrated],
         )
     except Exception as exc:
         logger.warning("Operblock offline migration failed: %s", exc, exc_info=True)
         return OperBlockOfflineMigrationResult(
-            ok=False,
-            attempted=True,
-            blocked="занят другим активным случаем" in str(exc).lower(),
-            reason=str(exc),
-            user_message="Перенос не выполнен. Локальные данные сохранены. Повторите позже.",
-            network_backup_path=network_backup_path,
-            local_backup_path=local_backup_path,
+            ok=False, attempted=True, blocked="занят другим активным случаем" in str(exc).lower(),
+            reason=str(exc), user_message="Перенос не выполнен. Локальные данные сохранены. Повторите позже.",
+            network_backup_path=network_backup_path, local_backup_path=local_backup_path,
         )
     finally:
         local_conn.close()

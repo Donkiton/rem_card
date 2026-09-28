@@ -15,7 +15,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1012
+OPERBLOCK_SCHEMA_VERSION = 1013
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -41,6 +41,13 @@ def _index_exists(conn: sqlite3.Connection, index_name: str) -> bool:
         (index_name,),
     ).fetchone()
     return bool(row)
+
+
+def _index_is_unique(conn: sqlite3.Connection, index_name: str) -> bool:
+    for row in conn.execute("PRAGMA index_list(operation_cases)").fetchall():
+        if str(row[1]) == index_name:
+            return bool(row[2])
+    return False
 
 
 def _schema_objects_exist(
@@ -105,6 +112,8 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         conn,
         {"table": required_tables, "index": required_indexes},
     ):
+        return False
+    if _index_is_unique(conn, "idx_operation_cases_protocol_sequence"):
         return False
     admission_columns = _columns(conn, "admissions")
     if not {"unit_scope", "admission_type", "merged_into_admission_id", "merged_at"}.issubset(admission_columns):
@@ -468,9 +477,13 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         "ON operation_cases(started_at, id DESC)"
     )
     _backfill_anesthesia_protocol_numbers(cursor)
+    # A printed anaesthesia protocol is issued locally.  Several workstations
+    # can legitimately produce the same visible number, so it cannot be a
+    # central uniqueness key for archive imports.
+    cursor.execute("DROP INDEX IF EXISTS idx_operation_cases_protocol_sequence")
     cursor.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_cases_protocol_sequence
+        CREATE INDEX IF NOT EXISTS idx_operation_cases_protocol_sequence
         ON operation_cases(table_code, anesthesia_protocol_date, anesthesia_protocol_number)
         WHERE anesthesia_protocol_number IS NOT NULL
           AND anesthesia_protocol_date IS NOT NULL
@@ -627,6 +640,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     )
     _create_updated_at_trigger(conn, "opblock_offline_case_map")
     _mark_schema_migration(conn, 1010, "operblock archive started-at index")
+    _mark_schema_migration(conn, 1013, "operblock offline archive receipt and non-unique printed protocols")
     _mark_schema_migration(
         conn,
         OPERBLOCK_SCHEMA_VERSION,

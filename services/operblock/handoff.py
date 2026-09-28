@@ -134,6 +134,18 @@ class OperBlockHandoffMixin:
         case: dict[str, Any],
         event_dt: datetime,
     ) -> Optional[int]:
+        # Kept as a compatibility seam for older callers.  RAO admission and
+        # recovery-bed occupancy require an explicit central doctor action now;
+        # local completion publishes a short-lived invitation during import.
+        logger.info(
+            "operblock_rao_auto_admission_disabled case_id=%s",
+            case.get("operation_case_id"),
+        )
+        return None
+
+        # Historical implementation below is intentionally unreachable.  It is
+        # retained for the one-release migration window because its helpers are
+        # still useful for old archive readers.
         savepoint = "operblock_rao_auto_admission"
         cursor.execute(f"SAVEPOINT {savepoint}")
         try:

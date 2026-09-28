@@ -100,6 +100,8 @@ def test_compiled_main_window_still_acquires_role_lock(monkeypatch):
 
 
 def test_dev_and_compiled_single_instance_namespaces_are_separate(monkeypatch):
+    # Check production names independently of the CI process isolation suffix.
+    monkeypatch.delenv("REMCARD_TEST_INSTANCE_NAMESPACE", raising=False)
     monkeypatch.setattr(app_main, "is_compiled", lambda: False)
     assert app_main._single_instance_server_name("doctor").endswith("_dev_doctor")
 

@@ -269,6 +269,45 @@ def test_public_patient_page_opens_external_archive_once(tmp_path, monkeypatch):
     assert payload["total_count"] == 2
 
 
+def test_operblock_archive_merges_current_and_legacy_rotated_db_without_transfer_columns(tmp_path):
+    archiv = tmp_path / "archiv"
+    archiv.mkdir()
+    current_path = archiv / "rao_journal.db"
+    old_path = archiv / "rao_journal_archived_20260101_000000.db"
+    _create_mixed_archive(current_path)
+    _create_mixed_archive(old_path)
+    for path, history_number in ((current_path, "CUR"), (old_path, "OLD")):
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("UPDATE admissions SET history_number=? WHERE id=3", (history_number,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    class Manager:
+        def __init__(self, db_path):
+            self.db_path = str(db_path)
+            self.runtime_context = SimpleNamespace(mode="network")
+            self._conn = sqlite3.connect(db_path)
+            self._conn.row_factory = sqlite3.Row
+
+        def fetch_all_remcard(self, query, params=()):
+            return self._conn.execute(query, params).fetchall()
+
+        def close(self):
+            self._conn.close()
+
+    manager = Manager(current_path)
+    try:
+        records = OperBlockService(manager).list_archived_operation_cases()
+    finally:
+        manager.close()
+    histories = {item["history_number"]: item for item in records}
+    assert {"CUR", "OLD"}.issubset(histories)
+    assert not histories["CUR"]["is_external_archive"]
+    assert histories["OLD"]["is_external_archive"]
+
+
 def test_operblock_archive_page_uses_one_connection_casefold_and_half_open_end(tmp_path, monkeypatch):
     db_path = tmp_path / "archive.db"
     _create_mixed_archive(db_path)

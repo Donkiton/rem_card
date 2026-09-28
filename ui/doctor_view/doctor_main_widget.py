@@ -82,8 +82,23 @@ class DoctorMainWidget(QWidget):
         self._is_closing = False
         self._initial_beds_refresh_requested = False
         self._initial_w1a_refresh_requested = False
+        self._operblock_handoff_notifier = None
+        self._operblock_handoff_timer = QTimer(self)
+        self._operblock_handoff_timer.setInterval(15_000)
+        self._operblock_handoff_timer.timeout.connect(self._check_operblock_handoffs)
         
         self.init_ui()
+
+        # The notification is intentionally independent of change_log: local
+        # OperBlock import writes its additive invitation in the central DB and
+        # a doctor must still make an explicit placement decision.
+        try:
+            from .operblock_handoff_notification import OperBlockRaoHandoffNotifier
+            self._operblock_handoff_notifier = OperBlockRaoHandoffNotifier(self.remcard_service, self)
+        except Exception:
+            # A partially upgraded workstation must keep the doctor UI usable.
+            from rem_card.app.logger import logger
+            logger.exception("Unable to initialize OperBlock RAO handoff notification")
 
     def start_auto_refresh(self, *, wake_monitor: bool = True):
         if self._is_closing or _app_is_closing():
@@ -98,6 +113,9 @@ class DoctorMainWidget(QWidget):
             self._initial_beds_refresh_requested = True
             self._refresh_beds_if_available(queue_if_running=False, allow_hidden=True)
         self._schedule_initial_w1a_refresh()
+        if not self._operblock_handoff_timer.isActive():
+            self._operblock_handoff_timer.start()
+        QTimer.singleShot(0, self._check_operblock_handoffs)
         if data_service and wake_monitor:
             data_service.request_immediate_refresh(force_emit=False)
 
@@ -121,6 +139,7 @@ class DoctorMainWidget(QWidget):
             )
 
     def stop_auto_refresh(self):
+        self._operblock_handoff_timer.stop()
         data_service = self._get_data_service()
         if data_service and self._monitor_connected:
             try:
@@ -132,6 +151,9 @@ class DoctorMainWidget(QWidget):
     def shutdown(self):
         self._is_closing = True
         self.stop_auto_refresh()
+        notifier = getattr(self, "_operblock_handoff_notifier", None)
+        if notifier is not None:
+            notifier.close()
         if hasattr(self, "remcard_widget") and hasattr(self.remcard_widget, "shutdown"):
             self.remcard_widget.shutdown()
 
@@ -141,6 +163,13 @@ class DoctorMainWidget(QWidget):
 
     def _get_data_service(self):
         return getattr(self.remcard_service, "data_service", None)
+
+    def _check_operblock_handoffs(self):
+        if self._is_closing or _app_is_closing() or not self.isVisible():
+            return
+        notifier = getattr(self, "_operblock_handoff_notifier", None)
+        if notifier is not None:
+            notifier.check()
 
     def show_beds_mode(self):
         remcard_widget = getattr(self, "remcard_widget", None)

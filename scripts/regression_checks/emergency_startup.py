@@ -467,18 +467,47 @@ def _check_emergency_startup_no_sqlite_profile_changes(temp_root: str) -> tuple[
 
 def _check_emergency_startup_doctor_nurse_network_mode_unchanged(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
+    from rem_card.app.main import _bootstrap_container_with_emergency_fallback
+
+    # A normal doctor/nurse admission must still call bootstrap without a local
+    # runtime override.  This keeps the existing central runtime selection and
+    # only uses an explicit context after an actual emergency decision.
+    for role in ("doctor", "nurse"):
+        calls = []
+
+        def bootstrap_probe(*, role, **kwargs):
+            calls.append((role, dict(kwargs)))
+            return object()
+
+        _container, selected_context, _role_lock = _bootstrap_container_with_emergency_fallback(
+            bootstrap_probe,
+            role=role,
+            emergency_runtime_context=None,
+        )
+        if calls != [(role, {})]:
+            return False, f"normal {role} startup received a local runtime override: {calls}"
+        if selected_context is not None:
+            return False, f"normal {role} startup unexpectedly selected a local runtime"
+
     main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
     bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
-    required = (
-        "return bootstrap_func(role=role)",
-        "runtime_context is None",
-        "ensure_directories()",
-        "get_settings_service()",
+    main_required = (
+        "return bootstrap_func(role=role), emergency_runtime_context, role_lock",
+        "if emergency_runtime_context is not None:",
     )
-    combined = "\n".join((main_text, bootstrap_text))
-    missing = [token for token in required if token not in combined]
+    bootstrap_required = (
+        "if runtime_context is None:",
+        "ensure_directories()",
+        "medical_db_path = JOURNAL_DB_PATH",
+        "remcard_db_path = REMCARD_DB_PATH",
+        'effective_context = runtime_context or getattr(db_manager, "runtime_context", None)',
+        "settings_service = configure_settings_service(",
+        "runtime_context=effective_context",
+    )
+    missing = [token for token in main_required if token not in main_text]
+    missing.extend(token for token in bootstrap_required if token not in bootstrap_text)
     if missing:
-        return False, f"normal network startup tokens missing: {missing}"
+        return False, f"normal network startup/runtime settings contract missing: {missing}"
     return True, "ok"
 
 

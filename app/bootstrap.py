@@ -411,15 +411,17 @@ def _finish_bootstrap(
     runtime_mode: str,
     medical_db_path: str,
 ) -> Container:
-    from rem_card.services.settings.settings_service import configure_settings_service, get_settings_service
+    from rem_card.services.settings.settings_service import configure_settings_service
 
-    if runtime_context is not None:
-        settings_service = configure_settings_service(
-            runtime_context=runtime_context,
-            readonly=bool(getattr(runtime_context, "settings_readonly", False)),
-        )
-    else:
-        settings_service = get_settings_service()
+    # Every admitted runtime owns an explicitly addressed settings service.
+    # Reusing the module singleton here can retain a local operblock settings
+    # path after returning to doctor/nurse, or retain the central path when the
+    # operblock runtime is intentionally local.
+    effective_context = runtime_context or getattr(db_manager, "runtime_context", None)
+    settings_service = configure_settings_service(
+        runtime_context=effective_context,
+        readonly=bool(getattr(effective_context, "settings_readonly", False)),
+    )
     from rem_card.app import operblock_startup_metrics
 
     with operblock_startup_metrics.measure("settings_ensure_ready_ms", source="bootstrap"):

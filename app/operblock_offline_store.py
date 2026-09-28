@@ -27,7 +27,7 @@ OPERBLOCK_RUNTIME_DROP_WARNING = "Пропал доступ к сетевой б
 OPERBLOCK_MIGRATION_TITLE = "Перенос данных оперблока"
 OPERBLOCK_MIGRATION_MESSAGE = "Не выключайте ПК. Идёт перенос данных оперблока."
 OPERBLOCK_OFFLINE_ROOT_ENV = "REMCARD_OPERBLOCK_OFFLINE_ROOT"
-RETENTION_DAYS = 30
+RETENTION_DAYS = 90
 SHADOW_MIRROR_MIGRATION_STATUS = "shadow"
 _OPBLOCK_SHADOW_CASE_TABLES = ("operation_table_assignments", "operblock_timeline_events")
 _OPBLOCK_SHADOW_ADMISSION_TABLES = ("vitals", "orders", "patient_status_events")
@@ -65,6 +65,8 @@ def _atomic_json_write(path: str, payload: dict[str, Any]) -> None:
     tmp_path = f"{path}.{os.getpid()}.{int(time.time() * 1000)}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp_path, path)
 
 
@@ -206,6 +208,8 @@ def start_or_resume_operblock_offline_session(
 ) -> OperBlockOfflineStartupSession:
     paths = ensure_operblock_offline_dirs(root)
     runtime_context = build_operblock_offline_runtime(root)
+    if reason in {"unified_per_workstation_local", "per_workstation_local_startup"}:
+        _retire_legacy_shadow_occupancy(runtime_context.medical_db_path)
     metadata = read_operblock_offline_metadata(root)
     now = _now_text()
     if metadata is None:
@@ -245,6 +249,31 @@ def start_or_resume_operblock_offline_session(
         reason,
     )
     return OperBlockOfflineStartupSession(metadata=metadata, runtime_context=runtime_context)
+
+
+def _retire_legacy_shadow_occupancy(db_path: str) -> None:
+    """Retain old mirrored records but release tables not owned by this PC."""
+    if not os.path.isfile(db_path):
+        return
+    conn = sqlite3.connect(db_path, isolation_level=None, timeout=1.0)
+    try:
+        if not _table_exists(conn, "operation_cases"):
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        # Only untouched mirror state is eligible. Real local cases, including
+        # shadow cases with locally added rows, are retained by the helper.
+        keep = {str(row[0]) for row in conn.execute("""
+            SELECT offline_case_uuid FROM operation_cases
+            WHERE COALESCE(migration_status,'') <> 'shadow'
+        """) if row[0]}
+        _discard_stale_shadow_active_cases(conn, keep)
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
 
 
 def append_shadow_journal(payload: dict[str, Any], root: str | None = None) -> None:
@@ -449,71 +478,9 @@ def mark_operblock_offline_session_verified(root: str | None = None) -> None:
 
 
 def cleanup_verified_operblock_offline_session(network_db_manager, *, root: str | None = None) -> bool:
-    metadata = read_operblock_offline_metadata(root)
-    if metadata is None or metadata.migration_status != "verified" or not metadata.retain_until:
-        return False
-    try:
-        retain_until = datetime.fromisoformat(str(metadata.retain_until).replace("Z", "+00:00"))
-    except Exception:
-        return False
-    if datetime.now().astimezone() < retain_until:
-        return False
-    db_path = str(metadata.local_db_path or os.path.join(get_operblock_offline_active_dir(root), "operblock_local.db"))
-    if not os.path.isfile(db_path):
-        return False
-    conn = None
-    try:
-        conn = _connect_local_readonly(db_path)
-        active_or_pending = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM operation_cases
-            WHERE status = 'active'
-               OR COALESCE(migration_status, '') NOT IN ('verified', 'discarded')
-            """
-        ).fetchone()
-        if int(active_or_pending[0] or 0) > 0:
-            return False
-        rows = conn.execute(
-            """
-            SELECT offline_case_uuid
-            FROM operation_cases
-            WHERE COALESCE(offline_case_uuid, '') <> ''
-              AND migration_status = 'verified'
-            """
-        ).fetchall()
-        uuids = [str(row[0] or "") for row in rows if row and row[0]]
-    except Exception:
-        return False
-    finally:
-        if conn is not None:
-            conn.close()
-    for case_uuid in uuids:
-        row = network_db_manager.fetch_one_remcard(
-            "SELECT id FROM operation_cases WHERE offline_case_uuid = ? AND status = 'closed' LIMIT 1",
-            (case_uuid,),
-        )
-        if not row:
-            return False
-    removed = False
-    for path in (
-        db_path,
-        f"{db_path}-wal",
-        f"{db_path}-shm",
-        f"{db_path}-journal",
-        get_operblock_shadow_journal_path(root),
-        get_operblock_offline_metadata_path(root),
-    ):
-        try:
-            if os.path.isfile(path):
-                os.remove(path)
-                removed = True
-        except Exception as exc:
-            logger.warning("Не удалось удалить verified локальную opblock-сессию %s: %s", path, exc)
-            return False
-    if removed:
-        logger.info("Verified operblock offline session removed after retention root=%s", root or get_operblock_offline_root())
-    return removed
+    # Continuous local operation must never delete the database/session bundle.
+    from rem_card.app.operblock_local_storage import prune_verified_local_cases
+    return bool(prune_verified_local_cases(network_db_manager, root))
 
 
 def local_quick_check_ok(root: str | None = None) -> bool:
@@ -1395,7 +1362,11 @@ def mirror_active_operblock_cases_from_network_db(db_manager, *, reason: str = "
     try:
         _ensure_shadow_map_table(local_conn)
         local_conn.execute("BEGIN IMMEDIATE")
-        active_case_uuids: set[str] = set()
+        active_case_uuids = {
+            _remote_case_uuid(remote_db_path, int(case["id"]), case.get("offline_case_uuid"))
+            for case in active_cases
+        }
+        discarded = _discard_stale_shadow_active_cases(local_conn, active_case_uuids)
         for case in active_cases:
             case_uuid = _mirror_active_case(
                 local_conn,
@@ -1405,13 +1376,11 @@ def mirror_active_operblock_cases_from_network_db(db_manager, *, reason: str = "
                 offline_session_id=getattr(metadata, "offline_session_id", "active") if metadata else "active",
                 reason=str(reason or ""),
             )
-            active_case_uuids.add(case_uuid)
             if metadata is not None:
                 metadata.active_case_uuid = case_uuid
                 if _pending_completed_local_cases_count_on_conn(local_conn) <= 0:
                     metadata.migration_status = SHADOW_MIRROR_MIGRATION_STATUS
             mirrored += 1
-        discarded = _discard_stale_shadow_active_cases(local_conn, active_case_uuids)
         local_conn.execute("COMMIT")
         if metadata is not None:
             write_operblock_offline_metadata(metadata, root)

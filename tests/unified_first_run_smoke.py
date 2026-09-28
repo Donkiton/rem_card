@@ -89,6 +89,18 @@ def main() -> None:
     wait_until(app, lambda: errors or first.stack.currentWidget() is first.welcome)
     if errors:
         raise RuntimeError(f"First-run failed: {errors}")
+    if first.root:
+        raise RuntimeError("First-run chooser unexpectedly required a central database")
+    if not all(
+        first.welcome.role_buttons[role].isEnabled()
+        for role in ("operblock_planned", "operblock_emergency")
+    ):
+        raise RuntimeError("First-run chooser did not keep local operblock available")
+    # A central role requests configuration only when the user selects it.
+    first.enter_role("doctor")
+    wait_until(app, lambda: errors or bool(first.root))
+    if errors:
+        raise RuntimeError(f"First-run central configuration failed: {errors}")
     if first.root != str(selected):
         raise RuntimeError("First-run callback did not publish the created root")
     # Enter on the SAME instance with real background initialization.

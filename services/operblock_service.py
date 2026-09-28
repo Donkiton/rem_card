@@ -19,6 +19,7 @@ from rem_card.services.operblock.common import (
 from rem_card.services.operblock.core import OperBlockCoreMixin
 from rem_card.services.operblock.archive_sources import OperBlockArchiveSourcesMixin
 from rem_card.services.operblock.archive import OperBlockArchiveLifecycleMixin
+from rem_card.services.operblock.archive_edit import OperBlockArchiveEditMixin
 from rem_card.services.operblock.board import OperBlockBoardMixin
 from rem_card.services.operblock.snapshots import OperBlockSnapshotsMixin
 from rem_card.services.operblock.reporting import OperBlockReportingMixin
@@ -38,6 +39,7 @@ class OperBlockService(
     OperBlockCoreMixin,
     OperBlockArchiveSourcesMixin,
     OperBlockArchiveLifecycleMixin,
+    OperBlockArchiveEditMixin,
     OperBlockBoardMixin,
     OperBlockSnapshotsMixin,
     OperBlockReportingMixin,

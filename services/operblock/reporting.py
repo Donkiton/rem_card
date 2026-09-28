@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
-from rem_card.app.logger import logger
-from rem_card.app.paths import REPORT_DIR
+from rem_card.app.operblock_offline_store import get_operblock_offline_root
 from rem_card.services.operblock_medication_presets import (
     load_operblock_medication_presets,
     operblock_medication_preset_display_name,
@@ -15,7 +14,6 @@ from rem_card.services.operblock_medication_presets import (
 from rem_card.services.operblock_anesthesia_types import normalize_operblock_anesthesia_type_label
 from rem_card.services.operblock_timeline import OPERBLOCK_STAGE_KIND_LABELS, operation_stage_kind_from_payload
 from .common import (
-    OPERBLOCK_REPORT_RETENTION_DAYS,
     _now_text,
     _parse_dt,
     _minute_floor,
@@ -577,7 +575,7 @@ class OperBlockReportingMixin:
         )
         protocol_slug = self._safe_report_filename(protocol_display or f"case_{int(operation_case_id)}")
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_dir = Path(REPORT_DIR) / "operblock"
+        report_dir = Path(get_operblock_offline_root()) / "reports"
         return report_dir / f"{patient_name}_protocol_{protocol_slug}_{stamp}.pdf"
 
     def build_operation_report_pdf(self, operation_case_id: int, pdf_path) -> Path:
@@ -591,18 +589,10 @@ class OperBlockReportingMixin:
 
     @staticmethod
     def cleanup_operation_report_dir() -> None:
-        report_dir = Path(REPORT_DIR) / "operblock"
+        report_dir = Path(get_operblock_offline_root()) / "reports"
         report_dir.mkdir(parents=True, exist_ok=True)
-        cutoff = datetime.now() - timedelta(days=OPERBLOCK_REPORT_RETENTION_DAYS)
-        for path in report_dir.glob("*.pdf"):
-            try:
-                if not path.is_file():
-                    continue
-                modified_at = datetime.fromtimestamp(path.stat().st_mtime)
-                if modified_at < cutoff:
-                    path.unlink()
-            except Exception as exc:
-                logger.warning("Не удалось удалить старый отчет оперблока path=%s error=%s", path, exc)
+        # PDFs may belong to cases still awaiting delivery. Age alone never
+        # proves they are safe to delete; the local archive owns retention.
 
     @staticmethod
     def _safe_report_filename(value: Any) -> str:

@@ -43,7 +43,7 @@ OPERBLOCK_BLOOD_RH_OPTIONS = (
     "Rh(-) отрицательный",
 )
 OPERBLOCK_TRANSFER_DEPARTMENT_OPTIONS = ("РАО",) + PROFILE_DEPARTMENTS
-OPERBLOCK_REPORT_RETENTION_DAYS = 7
+OPERBLOCK_REPORT_RETENTION_DAYS = 90
 OPERBLOCK_REPORT_READ_RETRIES = 3
 OPERBLOCK_REPORT_READ_RETRY_DELAY_SEC = 0.25
 OPERBLOCK_MKB_CODE_RE = re.compile(r"^[A-Z]\d{2}(?:\.\d{1,2})?$")
@@ -119,6 +119,7 @@ class OperBlockPatientInput:
     preop_spo2: Optional[int] = None
     handoff_id: Optional[int] = None
     source_rao_admission_id: Optional[int] = None
+    remote_handoff_claim_uuid: str = ""
 
 
 def normalize_operblock_history_number(value: str) -> str:
@@ -763,6 +764,7 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
             1,
             2_147_483_647,
         ),
+        remote_handoff_claim_uuid=str(payload.get("remote_handoff_claim_uuid") or "").strip(),
     )
 
 

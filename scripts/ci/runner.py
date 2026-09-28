@@ -74,13 +74,29 @@ def main(argv: list[str] | None = None) -> int:
             command.append(f"--ci-group={args.suite}")
         commands = [("pytest", command)]
     with tempfile.TemporaryDirectory(prefix="rc_ci_", dir=temp_parent) as temp:
-        env = dict(os.environ)
+        # Local-first OpBlock also persists under ProgramData. Isolate the OS
+        # profile, not just the central database, so local runs cannot touch an
+        # installed workstation's pending operations or connection settings.
+        profile_keys = {"LOCALAPPDATA", "APPDATA", "PROGRAMDATA", "USERPROFILE", "HOME", "TEMP", "TMP"}
+        env = {key: value for key, value in os.environ.items()
+               if key.upper() not in profile_keys and not key.startswith("REMCARD_")}
+        if "REMCARD_RUN_ANTV_SMOKE" in os.environ:
+            env["REMCARD_RUN_ANTV_SMOKE"] = os.environ["REMCARD_RUN_ANTV_SMOKE"]
+        for key in profile_keys:
+            folder_name = {"HOME": "userprofile", "TMP": "temp"}.get(key, key.lower())
+            folder = Path(temp) / "profile" / folder_name
+            folder.mkdir(parents=True, exist_ok=True)
+            env[key] = str(folder)
         env.update({
             "PYTHONUTF8": "1", "QT_QPA_PLATFORM": "offscreen",
             "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             "REMCARD_BAZA_DIR": str(Path(temp) / "baza"),
             "REMCARD_CI_SETTINGS_DIR": str(Path(temp) / "settings"),
             "REMCARD_STYLE_SETTINGS_PATH": str(Path(temp) / "appearance" / "style_settings.json"),
+            "REMCARD_DEV_DATABASE_CONFIG": str(Path(temp) / "dev.json"),
+            "REMCARD_DATA_PATH_CONFIG": str(Path(temp) / "data.json"),
+            "REMCARD_LOCAL_LOGS_DIR": str(Path(temp) / "logs"),
+            "REMCARD_TEST_INSTANCE_NAMESPACE": str(Path(temp)),
         })
         results = [
             run_command(command, log=report_dir / f"{name}.log", env=env, timeout=args.timeout_s)

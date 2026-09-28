@@ -6,7 +6,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -31,6 +31,7 @@ from rem_card.ui.rem_card_sectors import sector_7vit_b as notice_module  # noqa:
 from rem_card.ui.rem_card_sectors.sector_7vit_b import Sector7vit_b  # noqa: E402
 from rem_card.ui.rem_card_sectors.s_print.full_report_data import FullReportDataCollector  # noqa: E402
 from rem_card.ui.shared.patient_archive_dialog import CardListWidget  # noqa: E402
+from rem_card.ui.shared.remcard_layout import RemCardLayoutManager  # noqa: E402
 
 
 class _DeferredNoticeWorker(QObject):
@@ -916,6 +917,71 @@ class PlanCardTest(unittest.TestCase):
 
         widget._card_snapshot_cache = {}
         self.assertTrue(checker())
+
+    def test_w1_first_create_preserves_known_empty_status_for_new_admission(self):
+        outcome = SimpleNamespace(status=SimpleNamespace(is_outcome=lambda: True))
+        for previous_status in (None, outcome):
+            with self.subTest(previous_status=previous_status):
+                widget = self._w1_create_context(previous_status)
+                patient = SimpleNamespace(id=22, _w1_runtime_snapshot={"status": None})
+                with patch.object(doctor_module.CustomMessageBox, "information") as info:
+                    DoctorRemCardWidget.on_patient_selected_from_list(widget, patient, "create")
+                widget.service.enqueue_write.assert_called_once()
+                operation = widget.service.enqueue_write.call_args.args[1]
+                operation()
+                self.assertEqual(widget.service.add_vital.call_args.args[0].admission_id, 22)
+                info.assert_not_called()
+
+    def _w1_create_context(self, previous_status=None):
+        service = _PlanCardServiceStub(datetime(2026, 9, 28, 12), set())
+        service.enqueue_write = Mock()
+        service.add_vital = Mock()
+        layout = SimpleNamespace(
+            current_admission_id=11, _current_status_admission_id=11,
+            _current_status_dto=previous_status,
+            sector_4b=SimpleNamespace(update_status=Mock()),
+            set_patient_selection_mode=Mock(),
+        )
+        layout.set_current_status_dto = MethodType(RemCardLayoutManager.set_current_status_dto, layout)
+        widget = SimpleNamespace(
+            admission_id=11, service=service, layout_manager=layout,
+            _archive_read_only_mode=False, _card_snapshot_cache=None,
+            _create_card_write_pending=False, _snapshot_worker=None,
+            _begin_create_card_pending=Mock(), _apply_archive_read_only_state=Mock(),
+            _exit_archive_read_only_mode=Mock(), _apply_burn_calculator_button_state=Mock(),
+            _update_sector_4b_patient_info=Mock(),
+        )
+        for name in ("on_create_card_clicked", "_current_status_is_outcome", "_prime_patient_header_from_w1"):
+            setattr(widget, name, MethodType(getattr(DoctorRemCardWidget, name), widget))
+
+        def load(admission_id, date, *, request_snapshot):
+            self.assertFalse(request_snapshot)
+            widget.admission_id = admission_id
+            layout.current_admission_id = admission_id
+            widget._card_snapshot_cache = None
+
+        widget.load_patient_card = load
+        return widget
+
+    def test_w1_first_create_still_blocks_actual_outcome(self):
+        widget = self._w1_create_context()
+        outcome = SimpleNamespace(status=SimpleNamespace(is_outcome=lambda: True))
+        patient = SimpleNamespace(id=22, _w1_runtime_snapshot={"status": outcome})
+        with patch.object(doctor_module.CustomMessageBox, "information") as info:
+            DoctorRemCardWidget.on_patient_selected_from_list(widget, patient, "create")
+        widget.service.enqueue_write.assert_not_called()
+        self.assertIn("не отменен исход", info.call_args.args[2])
+
+    def test_previous_admission_status_does_not_make_new_context_known(self):
+        for previous_status in (None, SimpleNamespace(status=SimpleNamespace(is_outcome=lambda: False))):
+            with self.subTest(previous_status=previous_status):
+                widget = self._w1_create_context(previous_status)
+                widget.admission_id = 22
+                widget.layout_manager.current_admission_id = 22
+                # The new patient's status has not arrived, so controls remain blocked.
+                self.assertTrue(widget._current_status_is_outcome())
+                widget.layout_manager.set_current_status_dto(None)
+                self.assertFalse(widget._current_status_is_outcome())
 
 
 if __name__ == "__main__":

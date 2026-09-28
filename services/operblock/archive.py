@@ -29,6 +29,7 @@ class OperBlockArchiveLifecycleMixin:
             try:
                 if is_current:
                     query, params = self._build_archive_cases_query(
+                        operation_case_columns=self._current_archive_table_columns("operation_cases"),
                         start_dt=start_dt,
                         end_dt=end_dt,
                     )
@@ -113,9 +114,11 @@ class OperBlockArchiveLifecycleMixin:
                     with read_scope:
                         tables = self._current_archive_table_names()
                         admission_columns = self._current_archive_table_columns("admissions")
+                        operation_case_columns = self._current_archive_table_columns("operation_cases")
                         count_query, count_params = self._build_archive_cases_query(
                             tables=tables,
                             admission_columns=admission_columns,
+                            operation_case_columns=operation_case_columns,
                             start_dt=start_dt,
                             end_dt=end_dt,
                             table_code=clean_table_code,
@@ -130,6 +133,7 @@ class OperBlockArchiveLifecycleMixin:
                         query, params = self._build_archive_cases_query(
                             tables=tables,
                             admission_columns=admission_columns,
+                            operation_case_columns=operation_case_columns,
                             start_dt=start_dt,
                             end_dt=end_dt,
                             table_code=clean_table_code,
@@ -211,12 +215,15 @@ class OperBlockArchiveLifecycleMixin:
         return result
 
     def _current_archive_table_columns(self, table_name: str) -> set[str]:
-        if table_name != "admissions":
+        # The archive reader supports older rotated files.  Inspect each
+        # requested table rather than assuming operation_cases evolved with
+        # admissions, so optional transfer fields can be projected as NULL.
+        if table_name not in {"admissions", "operation_cases"}:
             return set()
         try:
-            rows = self.db.fetch_all_remcard("PRAGMA table_info(admissions)")
+            rows = self.db.fetch_all_remcard(f"PRAGMA table_info({table_name})")
         except Exception:
-            return {"unit_scope"}
+            return {"unit_scope"} if table_name == "admissions" else set()
         result: set[str] = set()
         for row in rows or []:
             try:

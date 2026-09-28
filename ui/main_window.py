@@ -220,7 +220,7 @@ class MainWindow(QMainWindow):
             if runtime_mode == "opblock_offline":
                 banner_text = (
                     "Локальный режим оперблока: работа ведется на этом ПК. "
-                    "Завершённые случаи будут перенесены после восстановления связи."
+                    "После освобождения стола завершённые случаи отправляются в общий архив при доступной сети."
                 )
             else:
                 banner_text = (
@@ -741,12 +741,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "_emergency_banner", None) is not None:
             self._emergency_banner.setText(
                 "Локальный режим оперблока: работа ведется на этом ПК. "
-                "Завершённые случаи будут перенесены после восстановления связи."
+                "После освобождения стола завершённые случаи отправляются в общий архив при доступной сети."
             )
             return
         self._emergency_banner = QLabel(
             "Локальный режим оперблока: работа ведется на этом ПК. "
-            "Завершённые случаи будут перенесены после восстановления связи."
+            "После освобождения стола завершённые случаи отправляются в общий архив при доступной сети."
         )
         self._emergency_banner.setObjectName("EmergencyModeBanner")
         self._emergency_banner.setWordWrap(True)
@@ -790,60 +790,10 @@ class MainWindow(QMainWindow):
             pass
 
     def _maybe_migrate_operblock_offline_after_release(self) -> None:
-        runtime_context = getattr(getattr(self.container, "db_manager", None), "runtime_context", None)
-        if getattr(runtime_context, "mode", "") != "opblock_offline":
-            return
-        try:
-            from rem_card.app.operblock_offline_migration import run_pending_operblock_offline_migration
-            from rem_card.app.operblock_offline_store import (
-                has_active_local_operblock_case,
-                pending_completed_local_cases_count,
-            )
-
-            if has_active_local_operblock_case() or pending_completed_local_cases_count() <= 0:
-                return
-            from rem_card.app.db_runtime_context import build_network_runtime_context
-            from rem_card.app.operblock_schema import ensure_operblock_schema
-            from rem_card.data.dao.db_manager import DatabaseManager
-        except Exception as exc:
-            logger.warning("Operblock offline post-release migration precheck failed: %s", exc, exc_info=True)
-            return
-
-        dialog = None
-        network_manager = None
-        try:
-            dialog = self._show_operblock_migration_dialog()
-            network_context = build_network_runtime_context()
-            network_manager = DatabaseManager(
-                network_context.medical_db_path,
-                network_context.medical_db_path,
-                runtime_context=network_context,
-            )
-            ensure_operblock_schema(network_manager)
-            result = run_pending_operblock_offline_migration(network_manager)
-            if result.ok:
-                from rem_card.app.operblock_offline_store import cleanup_verified_operblock_offline_session
-
-                cleanup_verified_operblock_offline_session(network_manager)
-        except Exception as exc:
-            logger.info("Operblock offline post-release migration skipped: %s", exc)
-            return
-        finally:
-            if network_manager is not None:
-                try:
-                    network_manager.close(timeout_sec=1.0)
-                except Exception:
-                    pass
-            self._close_operblock_migration_dialog(dialog)
-
-        if not result.ok:
-            from rem_card.ui.shared.custom_message_box import CustomMessageBox
-
-            CustomMessageBox.warning(
-                self,
-                "Перенос данных оперблока",
-                result.user_message or "Перенос не выполнен. Локальные данные сохранены. Повторите позже.",
-            )
+        shell = self.window()
+        scheduler = getattr(shell, "_opblock_sync", None)
+        if scheduler is not None:
+            scheduler.request_sync()
 
     def _launch_runtime_emergency_restart(self, marker_path: str) -> bool:
         from rem_card.app.runtime_outage import launch_emergency_restart

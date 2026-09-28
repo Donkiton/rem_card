@@ -1,5 +1,11 @@
 {
   "core": [
+    "tests/test_local_operblock_startup.py",
+    "tests/test_operblock_local_sync.py",
+    "tests/test_operblock_archive_edit.py",
+    "tests/test_operblock_local_storage.py",
+    "tests/test_operblock_local_handoffs.py",
+    "tests/test_operblock_offline_migration.py",
     "tests/test_exit_watchdog.py",
     "tests/test_shutdown_safety_guard.py",
     "tests/test_no_database_upgrades.py",
@@ -161,6 +167,7 @@
     "tests/test_operblock_sector8_chrome.py",
     "tests/test_operblock_started_at.py",
     "tests/test_operblock_static_theme.py",
+    "tests/test_operblock_chart_routes.py",
     "tests/test_operblock_ui_latency.py",
     "tests/test_oral_balance_widget_state.py",
     "tests/test_oral_nutrition_refresh_layout.py",

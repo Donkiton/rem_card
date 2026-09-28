@@ -72,6 +72,26 @@ class OperBlockCaseLifecycleMixin:
             case_started_text = started_text
             case_age = age
             handoff = None
+            remote_claim_source_admission_id = None
+            if data.remote_handoff_claim_uuid:
+                claim = cursor.execute(
+                    """
+                    SELECT remote_source_admission_id, local_operation_case_id
+                    FROM operblock_local_rao_claim_snapshots WHERE claim_uuid = ?
+                    """,
+                    (data.remote_handoff_claim_uuid,),
+                ).fetchone()
+                if not claim:
+                    raise OperBlockConflictError("Локальный снимок очереди РАО не найден. Обновите очередь.")
+                if claim["local_operation_case_id"] is not None:
+                    existing_case_id = int(claim["local_operation_case_id"])
+                    existing = cursor.execute(
+                        "SELECT id, admission_id FROM operation_cases WHERE id = ?", (existing_case_id,)
+                    ).fetchone()
+                    if existing:
+                        return {"operation_case_id": existing_case_id, "admission_id": int(existing["admission_id"]), "reused_claim": True}
+                    raise OperBlockConflictError("Квитанция очереди ссылается на отсутствующий локальный случай.")
+                remote_claim_source_admission_id = int(claim["remote_source_admission_id"])
             if data.handoff_id is not None:
                 handoff = cursor.execute(
                     """
@@ -208,6 +228,26 @@ class OperBlockCaseLifecycleMixin:
                 ),
             )
             operation_case_id = int(cursor.lastrowid)
+            if data.remote_handoff_claim_uuid:
+                cursor.execute(
+                    """
+                    UPDATE operation_cases
+                    SET source_rao_admission_id = ?, last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                    """,
+                    (remote_claim_source_admission_id, operation_case_id),
+                )
+                cursor.execute(
+                    """
+                    UPDATE operblock_local_rao_claim_snapshots
+                    SET local_operation_case_id = ?, consumed_at = ?
+                    WHERE claim_uuid = ? AND local_operation_case_id IS NULL
+                    """,
+                    (operation_case_id, now, data.remote_handoff_claim_uuid),
+                )
+                if cursor.rowcount != 1:
+                    raise OperBlockConflictError("Квитанция очереди уже использована другим локальным случаем.")
             if handoff is not None:
                 cursor.execute(
                     """
@@ -415,6 +455,7 @@ class OperBlockCaseLifecycleMixin:
                     )
             return {
                 "operation_case_id": int(data.get("operation_case_id") or 0),
+                "case_status": data.get("case_status") or "",
                 "operation_case_revision": int(data.get("operation_case_revision") or 0),
                 "admission_revision": int(data.get("admission_revision") or 0),
                 "table_code": data.get("table_code") or "",

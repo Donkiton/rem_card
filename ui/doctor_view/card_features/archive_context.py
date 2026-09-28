@@ -101,7 +101,12 @@ class DoctorArchiveContextMixin:
         status_value = getattr(status_dto, "status", None)
         if status_dto and getattr(status_value, "is_outcome", lambda: False)():
             return True
-        layout_status = getattr(getattr(self, "layout_manager", None), "_current_status_dto", None)
+        layout = getattr(self, "layout_manager", None)
+        layout_status = getattr(layout, "_current_status_dto", None)
+        layout_status_owner = getattr(layout, "_current_status_admission_id", None)
+        layout_status_known = bool(self.admission_id and layout_status_owner == self.admission_id)
+        if layout_status_owner is not None and not layout_status_known:
+            layout_status = None
         layout_status_value = getattr(layout_status, "status", None)
         if layout_status and getattr(layout_status_value, "is_outcome", lambda: False)():
             return True
@@ -112,7 +117,7 @@ class DoctorArchiveContextMixin:
             or getattr(patient, "outcome", None)
         ):
             return True
-        if self.admission_id and "status" not in snapshot and layout_status is None:
+        if self.admission_id and "status" not in snapshot and layout_status is None and not layout_status_known:
             # A fresh card context has no authoritative status until its
             # snapshot arrives.  Keep creation controls blocked instead of
             # presenting the unknown state as "no outcome".

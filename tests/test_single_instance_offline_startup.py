@@ -152,7 +152,9 @@ def test_single_instance_server_is_acquired_before_database_guard(monkeypatch):
     with pytest.raises(GuardReached):
         app_main._main_impl(forced_role="operblock_planned")
 
-    assert events == ["remove_stale", "listen", "update", "guard"]
+    # Per-workstation operblock starts locally and does not probe the central
+    # update share, but still owns the single-instance server before preflight.
+    assert events == ["remove_stale", "listen", "guard"]
 
 
 def test_unresponsive_probe_does_not_replace_existing_server(monkeypatch):

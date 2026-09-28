@@ -92,6 +92,7 @@ class UnifiedWindow(QMainWindow):
         self._compatibility_error = ""
         self._central_unavailable = False
         self._local_only = False
+        self._local_operblock = False
         self._requires_fresh_runtime = False
         self._local_runtime_roles = frozenset()
         self._role_exit_dialog = None
@@ -102,6 +103,9 @@ class UnifiedWindow(QMainWindow):
         self._institution = {"full_name": "", "short_name": ""}
         self._role_environment = None
         self._control_page = None
+        self._opblock_sync = None
+        self._opblock_sync_close_pending = False
+        self._opblock_pending_delivery = 0
         self._restore_geometry("shell")
         self.statusBar().hide()
         self._watcher = QFileSystemWatcher(self)
@@ -149,7 +153,7 @@ class UnifiedWindow(QMainWindow):
             self._entry_cancel = None
         self.loading.set_error(str(exc))
         local_allowed = self._central_unavailable and not self._compatibility_error
-        self.welcome.set_access_state(str(exc), not local_allowed)
+        self._set_welcome_access_state(str(exc), not local_allowed)
         self.stack.setCurrentWidget(self.welcome)
         lifecycle_event("unified_operation_failed", session_id=self.session_id, role=self.role,
                         error_class=type(exc).__name__)
@@ -164,7 +168,7 @@ class UnifiedWindow(QMainWindow):
         self.loading.set_stage(0)
         try:
             if is_compiled() and not read_configured_baza_dir():
-                self.change_database(first_run=True)
+                self._ready_without_central()
                 return
             self.root = resolve_baza_dir()
         except Exception as exc:
@@ -175,6 +179,43 @@ class UnifiedWindow(QMainWindow):
         self._configure_store()
         self.loading.set_stage(1)
         self._async(lambda: check_client_compatibility(self.root, APP_VERSION), self._initial_compatible, self._initial_incompatible)
+
+    def _ready_without_central(self):
+        """Show the chooser on a clean PC before central configuration."""
+
+        self.root = ""
+        self.store = None
+        self._central_unavailable = True
+        for stage in range(5):
+            self.loading.complete_stage(stage)
+        self.stack.setCurrentWidget(self.welcome)
+        startup_diagnostics.event("chooser_ready")
+        self._set_welcome_access_state(
+            "Основная база ещё не настроена. Оперблок доступен локально; "
+            "для врача, медсестры и настроек укажите общую базу.",
+            True,
+        )
+        self._dispatch_startup_role()
+
+    def _set_welcome_access_state(self, message="", blocked=False):
+        """Apply central access state without disabling local operblock roles."""
+
+        self.welcome.set_access_state(message, blocked)
+        if (
+            self.welcome._preparing_role
+            or self._busy
+            or self._leaving
+            or self._closing
+            or self._pending_exit
+            or self.container is not None
+        ):
+            return
+        from rem_card.app.roles import ROLE_OPERBLOCK_EMERGENCY, ROLE_OPERBLOCK_PLANNED
+
+        for role in (ROLE_OPERBLOCK_PLANNED, ROLE_OPERBLOCK_EMERGENCY):
+            card = self.welcome.role_buttons.get(role)
+            if card is not None:
+                card.setEnabled(True)
 
     def _initial_incompatible(self, exc):
         self._error(exc)
@@ -192,6 +233,83 @@ class UnifiedWindow(QMainWindow):
             self._watcher.removePaths(self._watcher.directories())
         self._watcher.addPath(self.root)
         self._status_timer.start()
+        self._configure_opblock_sync()
+
+    def _configure_opblock_sync(self):
+        """Attach the shell-lifetime completed-case delivery scheduler."""
+
+        if self._closing:
+            return
+        try:
+            from rem_card.app.operblock_offline_store import (
+                get_operblock_offline_metadata_path,
+                get_operblock_offline_root,
+            )
+            local_root = get_operblock_offline_root()
+            local_exists = Path(get_operblock_offline_metadata_path(local_root)).is_file()
+            if not local_exists:
+                local_exists = (Path(local_root) / "active" / "operblock_local.db").is_file()
+            if not local_exists:
+                return
+            from rem_card.app.operblock_local_sync import OperBlockLocalSyncScheduler
+
+            if self._opblock_sync is None:
+                self._opblock_sync = OperBlockLocalSyncScheduler(
+                    self.root,
+                    parent=self,
+                    local_root=local_root,
+                )
+                self._opblock_sync.status_changed.connect(self._on_opblock_sync_status)
+            else:
+                setter = getattr(self._opblock_sync, "set_central_root", None)
+                if callable(setter):
+                    setter(self.root)
+                else:
+                    self._opblock_sync.central_root = str(self.root)
+            self._opblock_sync.request_sync()
+        except Exception as exc:
+            lifecycle_event(
+                "operblock_local_sync_attach_failed",
+                error_class=type(exc).__name__,
+            )
+
+    def _request_opblock_sync(self):
+        scheduler = self._opblock_sync
+        if scheduler is not None and not self._opblock_sync_close_pending:
+            scheduler.request_sync()
+
+    def _pause_opblock_sync_for_local_admission(self):
+        """Release backup/export file handles before local recovery/bootstrap."""
+
+        scheduler = self._opblock_sync
+        if scheduler is None:
+            return
+        scheduler.stop()
+        scheduler.deleteLater()
+        self._opblock_sync = None
+
+    def _on_opblock_sync_status(self, payload):
+        if self._pending_exit:
+            return
+        state = str((payload or {}).get("state") or "")
+        if "pending" in (payload or {}):
+            self._opblock_pending_delivery = int((payload or {}).get("pending") or 0)
+        elif bool((payload or {}).get("ok")) and state == "idle":
+            self._opblock_pending_delivery = 0
+        pending = self._opblock_pending_delivery
+        if state == "sending":
+            self.statusBar().show()
+            self.statusBar().showMessage(
+                f"Оперблок: отправка завершённых карт ({pending})…"
+            )
+        elif pending:
+            self.statusBar().show()
+            self.statusBar().showMessage(
+                f"Оперблок: локально сохранено {pending}; ожидает отправки в общую базу."
+            )
+        elif not self._maintenance_deadline:
+            self.statusBar().clearMessage()
+            self.statusBar().hide()
 
     def _initial_compatible(self, _):
         self._compatibility_error = ""
@@ -285,8 +403,8 @@ class UnifiedWindow(QMainWindow):
         self.settings.setValue("institution/" + self.root, self._institution)
 
     def enter_role(self, role):
-        from rem_card.app.roles import ROLE_KEYS
-        if role not in (*ROLE_KEYS, "settings") or not self.root:
+        from rem_card.app.roles import ROLE_KEYS, is_operblock_role
+        if role not in (*ROLE_KEYS, "settings"):
             return
         if self._closing or self._pending_exit or self._busy or self._leaving or self.container is not None:
             self._entry_rejections += 1
@@ -294,8 +412,11 @@ class UnifiedWindow(QMainWindow):
                 lifecycle_event("role_entry_rejected", session_id=self.session_id, role=role,
                                 reason="transition_busy", count=self._entry_rejections)
             return
+        if not self.root and not is_operblock_role(role):
+            self.change_database(first_run=True)
+            return
         reuse_local = self._requires_fresh_runtime and role in self._local_runtime_roles
-        if self._requires_fresh_runtime and not reuse_local:
+        if self._requires_fresh_runtime and not (reuse_local or is_operblock_role(role)):
             self._restart_resume_role = role if role in {"doctor", "nurse"} else None
             self._restart_for_storage_boundary()
             return
@@ -313,6 +434,9 @@ class UnifiedWindow(QMainWindow):
         startup_diagnostics.role_requested(role, self.session_id)
         self.stack.setCurrentWidget(self.welcome)
         self.welcome.set_preparing(role, "Проверка доступа к рабочему месту…")
+        if is_operblock_role(role):
+            self._start_local_operblock_admission(session)
+            return
         if reuse_local:
             self._admission_failed(CentralUnavailable("Продолжение локальной аварийной сессии"))
             return
@@ -345,6 +469,49 @@ class UnifiedWindow(QMainWindow):
                 self._async(admission, self._admitted, self._admission_failed)
         start_admission()
 
+    def _start_local_operblock_admission(self, session):
+        """Admit planned/emergency operblock only against this PC's store."""
+
+        def start():
+            if session != self.session_id or self._entry_cancel is None:
+                return
+            if self._entry_cancel.is_set():
+                self._finish_cancelled_entry()
+                return
+            if self._workers:
+                QTimer.singleShot(100, start)
+                return
+            self._entry_setup_active = True
+            self._local_only = True
+            self._local_operblock = True
+            try:
+                self._pause_opblock_sync_for_local_admission()
+                from rem_card.app.unified_preflight import (
+                    bootstrap_local_only,
+                    prepare_local_operblock_runtime_context,
+                )
+
+                admission = prepare_local_operblock_runtime_context(
+                    role=self.role,
+                    central_root=self.root,
+                )
+                self.lease = admission.local_lease
+                self._configure_role_environment()
+                self.container = bootstrap_local_only(admission=admission, shell=self)
+                self._local_runtime_roles = frozenset()
+                from rem_card.app.main import _apply_app_theme
+
+                _apply_app_theme(QApplication.instance(), self.role)
+                self._finish_admission()
+                self._configure_opblock_sync()
+            except (Exception, SystemExit) as failure:
+                self._entry_setup_active = False
+                self._admitted_failed(failure)
+            finally:
+                self._finish_entry_setup()
+
+        start()
+
     def cancel_role_entry(self):
         if self._entry_cancel is None:
             return
@@ -364,7 +531,12 @@ class UnifiedWindow(QMainWindow):
         if self.lease:
             self._release_session_lease(self._finish_cancelled_entry)
             return
+        resume_local_sync = self._local_operblock
         self._restore_role_environment()
+        self._local_operblock = False
+        self._local_only = False
+        self._local_only_runtime_state = None
+        self.setProperty("remcard_local_only_runtime", None)
         self._entry_cancel = None
         self._busy = False
         self.welcome.set_preparing()
@@ -373,6 +545,8 @@ class UnifiedWindow(QMainWindow):
         if self._pending_exit:
             QTimer.singleShot(0, self.close)
         else:
+            if resume_local_sync:
+                self._configure_opblock_sync()
             self.refresh_access()
 
     def _configure_role_environment(self):
@@ -399,6 +573,7 @@ class UnifiedWindow(QMainWindow):
             return
         self._central_unavailable = True
         self._local_only = True
+        self._local_operblock = False
         self._entry_setup_active = True
         try:
             from rem_card.app.unified_preflight import prepare_local_only_runtime_context, bootstrap_local_only, CENTRAL_FAILURE_UNREACHABLE
@@ -431,6 +606,7 @@ class UnifiedWindow(QMainWindow):
             return
         self._central_unavailable = False
         self._local_only = False
+        self._local_operblock = False
         self._entry_setup_active = True
         try:
             self._configure_role_environment()
@@ -517,9 +693,11 @@ class UnifiedWindow(QMainWindow):
 
     def _finish_failed_admission(self, restart_required):
         if self.container is None and self.lease is None:
+            resume_local_sync = self._local_operblock
             self._busy = False
             self._entry_cancel = None
             self._local_only = False
+            self._local_operblock = False
             self._local_only_runtime_state = None
             self.setProperty("remcard_local_only_runtime", None)
             self._restore_role_environment()
@@ -528,6 +706,8 @@ class UnifiedWindow(QMainWindow):
             elif restart_required:
                 self._restart_resume_role = self.role if self.role in {"doctor", "nurse"} else None
                 self._restart_for_storage_boundary()
+            elif resume_local_sync:
+                self._configure_opblock_sync()
 
     def _restart_for_storage_boundary(self):
         self._requires_fresh_runtime = True
@@ -557,9 +737,7 @@ class UnifiedWindow(QMainWindow):
                 return
 
             def _maybe_migrate_operblock_offline_after_release(self):
-                if shell._local_only:
-                    return
-                return super()._maybe_migrate_operblock_offline_after_release()
+                shell._request_opblock_sync()
 
             def _request_shared_emergency_finish(self, *args, **kwargs):
                 if shell._local_only:
@@ -743,6 +921,8 @@ class UnifiedWindow(QMainWindow):
             return
         self._leaving = True
         self._busy = True
+        if self._local_operblock:
+            self._request_opblock_sync()
         self.welcome.set_preparing()
         if not interrupted_transition:
             self._save_geometry(self.role)
@@ -882,6 +1062,8 @@ class UnifiedWindow(QMainWindow):
                         error_class=type(exc).__name__, winerror=getattr(exc, "winerror", None))
 
     def _finish_drained(self):
+        local_runtime_state = dict(getattr(self, "_local_only_runtime_state", None) or {})
+        leaving_local_operblock = self._local_operblock
         failures = []
         for container in self._shutdown.containers:
             data = getattr(container, "data_service", None)
@@ -902,16 +1084,23 @@ class UnifiedWindow(QMainWindow):
         self._role_threads.clear()
         self.container = None
         self._entry_cancel = None
-        if self._local_only:
+        fresh_runtime_required = local_runtime_state.get(
+            "fresh_runtime_required_after_drain",
+            self._local_only and not leaving_local_operblock,
+        )
+        if self._local_only and fresh_runtime_required:
             self._suppress_exit_update = True
             self._requires_fresh_runtime = True
         self._local_only = False
+        self._local_operblock = False
         self._local_only_runtime_state = None
         self.setProperty("remcard_local_only_runtime", None)
         self._restore_role_environment()
         self.role = ""
         self._shutdown = None
         self._leaving = self._busy = False
+        if leaving_local_operblock:
+            self._request_opblock_sync()
         if self._pending_exit:
             self.close()
         elif self._return_to_control and self._control_page is not None:
@@ -921,7 +1110,7 @@ class UnifiedWindow(QMainWindow):
             self.show_roles()
             if self._requires_fresh_runtime:
                 self.welcome.set_access_state(
-                    self._leave_notice or "Аварийная сессия сохранена. Выберите роль для продолжения.", False)
+                    self._leave_notice or "Локальная сессия сохранена. Для перехода к основной базе требуется перезапуск.", False)
 
     def _retry_drain(self):
         if self._shutdown:
@@ -948,7 +1137,7 @@ class UnifiedWindow(QMainWindow):
         self._last_state_request = True
         def failure(exc):
             self._last_state_request = False
-            self.welcome.set_access_state("Состояние доступа неизвестно. Проверьте соединение.", True)
+            self._set_welcome_access_state("Состояние доступа неизвестно. Проверьте соединение.", True)
             self._central_unavailable = True
             if self._entry_cancel is not None:
                 self.cancel_role_entry()
@@ -961,7 +1150,7 @@ class UnifiedWindow(QMainWindow):
             if self._entry_cancel is not None:
                 self.cancel_role_entry()
             self._central_unavailable = True
-            self.welcome.set_access_state(
+            self._set_welcome_access_state(
                 self._compatibility_error or "Общая база недоступна. Выберите роль для продолжения.",
                 bool(self._compatibility_error),
             )
@@ -985,7 +1174,7 @@ class UnifiedWindow(QMainWindow):
         if self._central_unavailable and state.get("state") not in {"draining", "maintenance"} and not self._compatibility_error:
             message = "Общая база недоступна. Выберите роль для локального аварийного режима."
             entry_blocked = False
-        self.welcome.set_access_state(message, entry_blocked)
+        self._set_welcome_access_state(message, entry_blocked)
 
     def _access_received(self, state):
         self._last_state_request = False
@@ -1201,7 +1390,7 @@ class UnifiedWindow(QMainWindow):
         self._access_received(state)
 
     def change_database(self, first_run=False):
-        if self._local_only or self._requires_fresh_runtime:
+        if self._local_only or (self._requires_fresh_runtime and self.container is not None):
             QMessageBox.information(self, "Локальный режим", "Завершите локальную роль перед изменением пути к общей базе.")
             return
         from rem_card.ui.shared.unified_settings_dialogs import DatabasePathDialog
@@ -1217,7 +1406,11 @@ class UnifiedWindow(QMainWindow):
             dialog.deleteLater()
         if not accepted:
             if first_run:
-                self.welcome.set_access_state("Для начала работы выберите папку базы в настройках.", True)
+                self._set_welcome_access_state(
+                    "Для врача, медсестры и настроек выберите папку общей базы. "
+                    "Оперблок продолжает работать локально.",
+                    True,
+                )
                 self.stack.setCurrentWidget(self.welcome)
             return
         if not raw_path:
@@ -1238,6 +1431,12 @@ class UnifiedWindow(QMainWindow):
         def saved(path):
             if first_run:
                 self.root = path
+                if self._requires_fresh_runtime:
+                    self._restart = True
+                    self._restart_resume_role = None
+                    self._suppress_exit_update = True
+                    self.close()
+                    return
                 self.stack.setCurrentWidget(self.loading)
                 self.loading.complete_stage(0)
                 os.environ["REMCARD_BAZA_DIR"] = path
@@ -1483,6 +1682,17 @@ class UnifiedWindow(QMainWindow):
         if self.exclusive:
             self._release_exclusive_for_exit()
             event.ignore()
+            return
+        if self._opblock_sync is not None and not self._opblock_sync_close_pending:
+            event.ignore()
+            self._opblock_sync_close_pending = True
+
+            def sync_closed():
+                self._opblock_sync = None
+                self._opblock_sync_close_pending = False
+                self.close()
+
+            self._opblock_sync.begin_close(lambda: QTimer.singleShot(0, self, sync_closed))
             return
         if self._restart:
             from rem_card.app.main import _launch_requested_restart

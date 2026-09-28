@@ -565,7 +565,7 @@ def get_checks() -> list[RegressionCheck]:
         RegressionCheck('operblock_runtime_settings_from_settings_db', settings._check_operblock_runtime_settings_from_settings_db),
         RegressionCheck('operblock_medication_aliases_quick_search', operblock._check_operblock_medication_aliases_quick_search),
         RegressionCheck('operblock_operation_stages_custom_events', operblock._check_operblock_operation_stages_custom_events),
-        RegressionCheck('operblock_rao_auto_transfer_recovery_beds_and_vitals', operblock._check_operblock_rao_auto_transfer_recovery_beds_and_vitals),
+        RegressionCheck('operblock_rao_explicit_invitation_recovery_beds_and_vitals', operblock._check_operblock_rao_explicit_invitation_recovery_beds_and_vitals),
         RegressionCheck('recovery_bed_transfer_order_10_11_12', emergency_merge._check_recovery_bed_transfer_order_10_11_12),
         RegressionCheck('operblock_occupy_dialog_manual_birth_date_and_plain_groups', operblock._check_operblock_occupy_dialog_manual_birth_date_and_plain_groups),
         RegressionCheck('operblock_operation_stage_chart_grouping', operblock._check_operblock_operation_stage_chart_grouping),
