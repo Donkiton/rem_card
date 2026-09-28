@@ -17,6 +17,52 @@ from scripts.regression_checks.registry import RegressionCheck
 from scripts.regression_checks.scheduling import partition_checks
 
 
+def test_static_widget_inspection_follows_only_connected_mixins(tmp_path):
+    from scripts.regression_checks.source_inspection import read_widget_source
+
+    root = tmp_path / "doctor_view"
+    features = root / "card_features"
+    features.mkdir(parents=True)
+    widget = root / "doctor_remcard_widget.py"
+    widget.write_text(
+        "from rem_card.ui.doctor_view.card_features.balance import BalanceMixin\n"
+        "class DoctorRemCardWidget(BalanceMixin, QWidget):\n"
+        "    def own(self):\n        return 1\n", encoding="utf-8",
+    )
+    body = "    @staticmethod\n    def inherited():\n        return 'write_guard'\n"
+    (features / "balance.py").write_text(
+        "from module import diagnostic_guard\nclass BalanceMixin:\n" + body, encoding="utf-8",
+    )
+    (features / "detached.py").write_text("this is not connected or valid python", encoding="utf-8")
+    source = read_widget_source(widget)
+    cls = next(n for n in ast.parse(source).body if isinstance(n, ast.ClassDef))
+    assert [n.name for n in cls.body] == ["own", "inherited"]
+    assert body in source
+    assert "diagnostic_guard" in source
+    (features / "balance.py").unlink()
+    with pytest.raises(FileNotFoundError):
+        read_widget_source(widget)
+
+
+def test_static_widget_inspection_rejects_shadowed_methods(tmp_path):
+    from scripts.regression_checks.source_inspection import read_widget_source
+
+    root = tmp_path / "doctor_view"
+    features = root / "order_features"
+    features.mkdir(parents=True)
+    widget = root / "orders_widget.py"
+    widget.write_text(
+        "from .order_features.draft import DraftMixin\n"
+        "class OrdersWidget(DraftMixin, QWidget):\n    def save(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    (features / "draft.py").write_text(
+        "class DraftMixin:\n    def save(self):\n        pass\n", encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Overridden method"):
+        read_widget_source(widget)
+
+
 def _child_report_command(check_names: list[str], *, exit_code: int = 0) -> list[str]:
     checks = [
         {"check": name, "ok": True, "details": "ok", "duration_sec": 0.001}

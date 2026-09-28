@@ -15,7 +15,7 @@
 {
   "generated_at": "2026-09-23T09:52:30Z",
   "generated_from_commit": "c4f7f3e520048e70bce21422d5e67fe2638922e3",
-  "maintenance_note": "2026-09-28: точки входа и реализации операционного блока актуализированы для rework (этапы 2–3); остальная карта отражает исходный коммит генерации.",
+  "maintenance_note": "2026-09-28: точки входа, оперблок, карта врача и назначения актуализированы для rework (этапы 2–3); остальная карта отражает исходный коммит генерации.",
   "scope": [
     "run_*.py",
     "app/",
@@ -176,7 +176,8 @@
         "tests/test_orders_close_guard.py"
       ],
       "constraints": [
-        "Интерфейс обновляется по сообщениям DataService только для затронутых госпитализаций."
+        "Интерфейс обновляется по сообщениям DataService только для затронутых госпитализаций.",
+        "Карта и назначения собираются из функциональных примесей; подтверждённые назначения передают основу баланса через committedOrdersBalanceReady."
       ],
       "evidence": [
         {
@@ -190,6 +191,14 @@
         {
           "path": "ui/doctor_view/doctor_remcard_widget.py",
           "symbol": "DoctorRemCardWidget"
+        },
+        {
+          "path": "ui/doctor_view/card_features/live_sync.py",
+          "symbol": "_accept_committed_orders_balance_baseline"
+        },
+        {
+          "path": "ui/doctor_view/order_features/draft_management.py",
+          "symbol": "finalize_card"
         }
       ]
     },

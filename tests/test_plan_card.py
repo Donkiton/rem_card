@@ -19,7 +19,8 @@ if str(PACKAGE_PARENT) not in sys.path:
 from PySide6.QtCore import QObject, Signal  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from rem_card.ui.doctor_view import doctor_remcard_widget as doctor_module  # noqa: E402
+from rem_card.ui.doctor_view.card_features import card_actions as doctor_module
+from rem_card.ui.doctor_view.card_features import archive_context as archive_module  # noqa: E402
 from rem_card.services.remcard_facade import RemCardService  # noqa: E402
 from rem_card.services.shift_service import ShiftService  # noqa: E402
 from rem_card.ui.doctor_view.components.beds_selection_widget import BedsSelectionWidget  # noqa: E402
@@ -162,15 +163,23 @@ def _bind_plan_methods(widget):
 
 
 def _freeze_doctor_datetime(now: datetime):
-    original_datetime = doctor_module.datetime
+    modules = {sys.modules[base.__module__] for base in DoctorRemCardWidget.__mro__
+               if base.__module__.startswith("rem_card.ui.doctor_view")}
+    original_datetime = [(module, module.datetime) for module in modules if hasattr(module, "datetime")]
 
     class FrozenDateTime(datetime):
         @classmethod
         def now(cls):
             return now
 
-    doctor_module.datetime = FrozenDateTime
+    for module, _ in original_datetime:
+        module.datetime = FrozenDateTime
     return original_datetime
+
+
+def _restore_doctor_datetime(originals):
+    for module, value in originals:
+        module.datetime = value
 
 
 class _ButtonStub:
@@ -357,7 +366,7 @@ class PlanCardTest(unittest.TestCase):
             widget._set_create_card_controls_enabled(True)
             report_date = widget.daily_report_reference_date()
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertTrue(card_exists)
         self.assertFalse(yest_exists)
@@ -394,7 +403,7 @@ class PlanCardTest(unittest.TestCase):
             )
             target_date = widget._resolve_current_or_latest_card_date(1)
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertFalse(current_exists)
         self.assertTrue(open_available)
@@ -418,7 +427,7 @@ class PlanCardTest(unittest.TestCase):
         try:
             target_date = widget._resolve_current_or_latest_card_date(1)
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertEqual(target_date, historical_shift_start)
 
@@ -443,7 +452,7 @@ class PlanCardTest(unittest.TestCase):
         try:
             widget.on_show_card_clicked()
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertEqual(opened, [(now, {"balance_patient_period_manual_mode": False})])
 
@@ -475,7 +484,7 @@ class PlanCardTest(unittest.TestCase):
                 widget._card_snapshot_cache
             )
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertTrue(current_exists)
         self.assertTrue(open_available)
@@ -498,7 +507,7 @@ class PlanCardTest(unittest.TestCase):
         try:
             widget.on_show_card_clicked()
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertEqual(opened, [(historical_date, {"balance_patient_period_manual_mode": True})])
 
@@ -562,7 +571,7 @@ class PlanCardTest(unittest.TestCase):
         try:
             widget.on_create_current_card_clicked()
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertEqual(widget.loaded, {"request_snapshot": False})
         self.assertEqual(selection_modes, ["card"])
@@ -592,7 +601,7 @@ class PlanCardTest(unittest.TestCase):
             with patch.object(doctor_module.CustomMessageBox, "warning") as warning:
                 widget.on_create_current_card_clicked()
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertEqual(calls, [])
         warning.assert_called_once()
@@ -695,7 +704,7 @@ class PlanCardTest(unittest.TestCase):
             with patch.object(doctor_module.CustomMessageBox, "information") as information:
                 widget.on_create_current_card_clicked()
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
             sector.deleteLater()
 
         self.assertEqual(writes, [(1, current_shift_start, True)])
@@ -734,7 +743,7 @@ class PlanCardTest(unittest.TestCase):
             widget.on_yest_card_clicked()
         finally:
             doctor_module.QTimer = original_qtimer
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
         self.assertEqual(opened_dates, [current_shift_start - timedelta(days=1)])
 
@@ -830,7 +839,7 @@ class PlanCardTest(unittest.TestCase):
         try:
             self.assertEqual(widget._sector_4v_action_state(snapshot), (True, False, True, True))
         finally:
-            doctor_module.datetime = original_datetime
+            _restore_doctor_datetime(original_datetime)
 
     def test_plan_card_snapshot_expires_at_medical_day_boundary_and_queues_refresh(self):
         before_boundary = datetime(2026, 6, 22, 7, 30)
@@ -867,8 +876,8 @@ class PlanCardTest(unittest.TestCase):
         ):
             setattr(widget, name, MethodType(getattr(DoctorRemCardWidget, name), widget))
         original_datetime = _freeze_doctor_datetime(after_boundary)
-        original_qtimer = doctor_module.QTimer
-        doctor_module.QTimer = SimpleNamespace(singleShot=lambda _delay_ms, callback: callback())
+        original_qtimer = archive_module.QTimer
+        archive_module.QTimer = SimpleNamespace(singleShot=lambda _delay_ms, callback: callback())
         try:
             state = widget._plan_card_state_for_admission(1)
             self.assertFalse(state["plan_card_window_active"])
@@ -876,8 +885,8 @@ class PlanCardTest(unittest.TestCase):
             self.assertEqual(state["plan_card_target_date"], new_plan_start)
             self.assertTrue(widget._sync_plan_card_ui_state())
         finally:
-            doctor_module.QTimer = original_qtimer
-            doctor_module.datetime = original_datetime
+            archive_module.QTimer = original_qtimer
+            _restore_doctor_datetime(original_datetime)
         self.assertEqual(refreshes, [{"show_empty_message": False, "load_scope": "patient_open_card"}])
 
     def test_notice_worker_completion_after_widget_shutdown_is_ignored(self):

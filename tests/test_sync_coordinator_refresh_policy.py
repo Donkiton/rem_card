@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from rem_card.services.sync_coordinator import SyncCoordinator
-from rem_card.ui.doctor_view.doctor_remcard_widget import LOCAL_ORDER_FORCE_PREFIXES
+from rem_card.ui.doctor_view.card_features.constants import LOCAL_ORDER_FORCE_PREFIXES
 from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 from rem_card.ui.main_window import MainWindow
 

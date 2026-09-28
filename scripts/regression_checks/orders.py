@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .source_inspection import read_widget_source
+
 from .common import PROJECT_ROOT
 import hashlib
 import json
@@ -10,6 +12,24 @@ import sqlite3
 import threading
 import time
 
+
+
+def _patch_doctor_orders_global(name, value):
+    """Подменяет прежнюю общую зависимость во всех частях виджета и восстанавливает её."""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+    import sys
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
+
+    modules = {sys.modules[base.__module__] for base in OrdersWidget.__mro__
+               if base.__module__.startswith("rem_card.ui.doctor_view")}
+    targets = [module for module in modules if hasattr(module, name)]
+    if not targets:
+        raise AssertionError(f"OrdersWidget dependency not found: {name}")
+    stack = ExitStack()
+    for module in targets:
+        stack.enter_context(patch.object(module, name, value))
+    return stack
 
 def _check_cvc_auto_closes_on_outcome(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
@@ -1798,7 +1818,7 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
         ],
     }
     for rel_path, tokens in required_tokens.items():
-        text = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+        text = read_widget_source(PROJECT_ROOT / rel_path)
         missing = [token for token in tokens if token not in text]
         if missing:
             return False, f"{rel_path} missing diagnostics tokens: {missing}"
@@ -2131,7 +2151,7 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
     import rem_card.app.foreground_activity as foreground_activity
     import rem_card.data.dao.db_manager as dbm
     import rem_card.services.read_coordinator as read_coordinator
-    import rem_card.ui.doctor_view.orders_widget as orders_widget_module
+    import rem_card.ui.doctor_view.order_features.refresh_coordination as orders_widget_module
     import rem_card.ui.nurse_view.components.nurse_orders_widget as nurse_orders_widget_module
     from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
@@ -2143,10 +2163,8 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
     sync_events: list[tuple[str, dict]] = []
     warnings: list[tuple[object, tuple[object, ...]]] = []
 
-    original_widget_metric = orders_widget_module.record_metric
-    original_widget_sync_event = orders_widget_module.record_orders_sync_event
+    widget_patches = []
     original_widget_warning = orders_widget_module.logger.warning
-    original_widget_async = orders_widget_module.AsyncCallThread
     original_nurse_metric = nurse_orders_widget_module.record_metric
     original_nurse_sync_event = nurse_orders_widget_module.record_orders_sync_event
     original_nurse_warning = nurse_orders_widget_module.logger.warning
@@ -2246,10 +2264,10 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
         widget._defer_snapshot_request = lambda **kwargs: deferred_calls.append(dict(kwargs))
         return widget, deferred_calls
 
-    orders_widget_module.record_metric = capture_metric
-    orders_widget_module.record_orders_sync_event = capture_sync_event
+    widget_patches.append(_patch_doctor_orders_global("record_metric", capture_metric))
+    widget_patches.append(_patch_doctor_orders_global("record_orders_sync_event", capture_sync_event))
     orders_widget_module.logger.warning = capture_warning
-    orders_widget_module.AsyncCallThread = FakeAsyncCallThread
+    widget_patches.append(_patch_doctor_orders_global("AsyncCallThread", FakeAsyncCallThread))
     nurse_orders_widget_module.record_metric = capture_metric
     nurse_orders_widget_module.record_orders_sync_event = capture_sync_event
     nurse_orders_widget_module.logger.warning = capture_warning
@@ -2397,10 +2415,9 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
             widget._snapshot_worker = None
             widget.close()
         foreground_activity._reset_foreground_activity_for_tests()
-        orders_widget_module.record_metric = original_widget_metric
-        orders_widget_module.record_orders_sync_event = original_widget_sync_event
+        for patch_group in reversed(widget_patches):
+            patch_group.close()
         orders_widget_module.logger.warning = original_widget_warning
-        orders_widget_module.AsyncCallThread = original_widget_async
         nurse_orders_widget_module.record_metric = original_nurse_metric
         nurse_orders_widget_module.record_orders_sync_event = original_nurse_sync_event
         nurse_orders_widget_module.logger.warning = original_nurse_warning
@@ -2420,7 +2437,6 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     import rem_card.data.dao.db_manager as dbm
     import rem_card.services.remcard_facade as remcard_facade
     import rem_card.services.read_coordinator as read_coordinator
-    import rem_card.ui.doctor_view.orders_widget as orders_widget_module
     from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
@@ -2433,8 +2449,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     original_stall_threshold = read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC
     original_poison_threshold = read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC
     original_coalesce_wait = read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC
-    original_widget_metric = orders_widget_module.record_metric
-    original_widget_watchdog_ms = orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS
+    widget_patches = []
     original_runtime_auto_backups = dbm.RUNTIME_AUTO_BACKUPS_ENABLED
 
     def capture_metric(name, value=None, **fields):
@@ -2509,11 +2524,11 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     dbm.RUNTIME_AUTO_BACKUPS_ENABLED = True
     read_coordinator.record_metric = capture_metric
     dbm.record_metric = capture_metric
-    orders_widget_module.record_metric = capture_metric
+    widget_patches.append(_patch_doctor_orders_global("record_metric", capture_metric))
     read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = 0.05
     read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = 0.12
     read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = 0.01
-    orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS = 50
+    widget_patches.append(_patch_doctor_orders_global("ORDERS_POST_FINALIZE_WATCHDOG_MS", 50))
     foreground_activity._reset_foreground_activity_for_tests()
     service = SlowOrdersService()
     coordinator = ReadCoordinator(service)
@@ -2720,11 +2735,11 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
         service.release.set()
         read_coordinator.record_metric = original_rc_metric
         dbm.record_metric = original_dbm_metric
-        orders_widget_module.record_metric = original_widget_metric
+        for patch_group in reversed(widget_patches):
+            patch_group.close()
         read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = original_stall_threshold
         read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = original_poison_threshold
         read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = original_coalesce_wait
-        orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS = original_widget_watchdog_ms
         dbm.RUNTIME_AUTO_BACKUPS_ENABLED = original_runtime_auto_backups
         foreground_activity._reset_foreground_activity_for_tests()
 
@@ -2791,13 +2806,12 @@ def _check_orders_widget_post_finalize_supersedes_hung_worker(temp_root: str) ->
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
-    import rem_card.ui.doctor_view.orders_widget as orders_widget_module
     from rem_card.services.read_coordinator import ReadCoordinator
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
     _ = temp_root
     metrics: list[tuple[str, object, dict]] = []
-    original_widget_metric = orders_widget_module.record_metric
+    widget_patches = []
 
     def capture_metric(name, value=None, **fields):
         metrics.append((str(name), value, dict(fields)))
@@ -2847,7 +2861,7 @@ def _check_orders_widget_post_finalize_supersedes_hung_worker(temp_root: str) ->
         def quit(self):
             self.quit_called = True
 
-    orders_widget_module.record_metric = capture_metric
+    widget_patches.append(_patch_doctor_orders_global("record_metric", capture_metric))
     app = QApplication.instance() or QApplication([])
     service = WidgetOrdersService()
     coordinator = ReadCoordinator(service)
@@ -2964,7 +2978,8 @@ def _check_orders_widget_post_finalize_supersedes_hung_worker(temp_root: str) ->
     finally:
         release_new_load.set()
         coordinator.load_orders_tab = original_load_orders_tab
-        orders_widget_module.record_metric = original_widget_metric
+        for patch_group in reversed(widget_patches):
+            patch_group.close()
         widget.shutdown()
         widget.close()
 

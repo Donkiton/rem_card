@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .source_inspection import read_widget_source
+
 from .common import PROJECT_ROOT
 from pathlib import Path
 from .common import _cached_source_segment
@@ -33,7 +35,7 @@ def _check_lazy_full_card_role_contract(
     class_name: str,
     full_layout_name: str,
 ) -> tuple[bool, str]:
-    source = source_path.read_text(encoding="utf-8")
+    source = read_widget_source(source_path)
     methods = _class_methods_from_source(source, class_name)
     if methods is None:
         return False, f"{role}: {class_name} not found"
@@ -392,7 +394,7 @@ def _check_w1c_source_markers(root: Path, layout_cases: list[tuple[str, Path]]) 
         return False, f"W1c placeholder sector missing marker: {missing_w1c_markers[0]}"
 
     for role, path in layout_cases:
-        source = path.read_text(encoding="utf-8")
+        source = read_widget_source(path)
         missing_layout_markers = [
             marker
             for marker in (
@@ -428,7 +430,7 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         ("nurse", root / "ui" / "nurse_view" / "nurse_remcard_layout.py"),
     ]
     for role, path in layout_cases:
-        source = path.read_text(encoding="utf-8")
+        source = read_widget_source(path)
         if "CurrentPageStack" not in source:
             return False, f"{role}: W1 stacks must use CurrentPageStack"
         if "self.sector_1b_stack = CurrentPageStack()" not in source:
@@ -694,7 +696,7 @@ def _check_w1_outcome_timer_ticks_without_beds_refresh(temp_root: str) -> tuple[
 def _check_beds_mode_reentry_does_not_warn(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source_path = PROJECT_ROOT / "ui" / "shared" / "remcard_layout.py"
-    source_text = source_path.read_text(encoding="utf-8")
+    source_text = read_widget_source(source_path)
     tree = ast.parse(source_text)
     methods = {
         node.name: _cached_source_segment(source_text, node) or ""
@@ -1508,7 +1510,7 @@ def _check_read_coordinator_partial_snapshots(temp_root: str) -> tuple[bool, str
         PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
         PROJECT_ROOT / "ui" / "nurse_view" / "nurse_main_widget.py",
     ):
-        widget_source = widget_path.read_text(encoding="utf-8")
+        widget_source = read_widget_source(widget_path)
         tree = ast.parse(widget_source)
         apply_snapshot = ""
         for node in ast.walk(tree):
@@ -2373,7 +2375,7 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
         PROJECT_ROOT / "ui" / "nurse_view" / "nurse_main_widget.py",
     ]
     for path in widget_paths:
-        source_text = path.read_text(encoding="utf-8")
+        source_text = read_widget_source(path)
         tree = ast.parse(source_text)
         methods = {
             node.name: _cached_source_segment(source_text, node) or ""

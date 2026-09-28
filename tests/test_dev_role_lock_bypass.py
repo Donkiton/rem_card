@@ -209,17 +209,18 @@ def test_add_patient_mutex_exposes_owner_role(monkeypatch, tmp_path):
 def test_emergency_patient_mutex_uses_same_local_runtime_for_both_roles(monkeypatch, tmp_path, compiled):
     from types import SimpleNamespace
     from rem_card.ui.doctor_view import doctor_remcard_widget as doctor
+    from rem_card.ui.doctor_view.card_features import infrastructure as doctor_locks
     from rem_card.ui.nurse_view import nurse_main_widget as nurse
 
     monkeypatch.setattr(runtime_paths, 'is_compiled', lambda: compiled)
     monkeypatch.setenv('LOCALAPPDATA', str(tmp_path / 'appdata'))
-    for module in (doctor, nurse):
+    for module in (doctor_locks, nurse):
         monkeypatch.setattr(module, 'get_role_lock_path', lambda key: str(tmp_path / 'central' / (key + '.lock')))
     runtime = SimpleNamespace(mode='emergency', session_locks_dir=str(tmp_path / 'active' / 'locks'))
     widget = SimpleNamespace(patient_service=SimpleNamespace(data_service=SimpleNamespace(db=SimpleNamespace(runtime_context=runtime))))
     first = doctor.DoctorRemCardWidget._build_add_patient_lock(widget)
     second = nurse.NurseMainWidget._build_add_patient_lock(widget)
-    expected = os.path.join(runtime.session_locks_dir, doctor.ADD_PATIENT_LOCK_KEY + '.lock')
+    expected = os.path.join(runtime.session_locks_dir, doctor_locks.ADD_PATIENT_LOCK_KEY + '.lock')
     assert first.lock_path == second.lock_path == expected
     try:
         assert first.acquire()
