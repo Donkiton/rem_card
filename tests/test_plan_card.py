@@ -1031,3 +1031,91 @@ class PlanCardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_outcome_release_monitor_checks_only_visible_due_rows(monkeypatch):
+    from PySide6.QtWidgets import QWidget
+    from rem_card.ui.shared import outcome_bed_release as module
+    from rem_card.data.dto.remcard_dto import PatientStatus
+    app = QApplication.instance() or QApplication([])
+    beds = QWidget()
+    beds._is_closing = False
+    beds.patient_service = SimpleNamespace(
+        maybe_release_due_outcome_beds_async=Mock(),
+        data_service=SimpleNamespace(is_network_outage_detected=Mock(return_value=False)),
+    )
+    beds.refresh_admissions = Mock()
+    status = SimpleNamespace(status=PatientStatus.TRANSFERRED, start_time=datetime.now())
+    sector = SimpleNamespace(_outcome_timer_status_dto=status, _outcome_timer_delay_minutes=30)
+    beds._rows_by_admission_id = {7: SimpleNamespace(sector_4b=sector)}
+    monitor = module.OutcomeBedReleaseMonitor(beds)
+    monitor.stop()
+    clock = [100.0]
+    monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
+    try:
+        beds.show()
+        app.processEvents()
+        monitor.check()
+        beds.refresh_admissions.assert_not_called()
+        status.start_time -= timedelta(minutes=31)
+        beds.hide()
+        monitor.check()
+        beds.refresh_admissions.assert_not_called()
+        beds.show()
+        monitor.check()
+        beds.patient_service.maybe_release_due_outcome_beds_async.assert_called_once()
+        beds.refresh_admissions.assert_called_once_with([7], queue_if_running=False)
+        monitor.check()
+        assert beds.refresh_admissions.call_count == 1
+        clock[0] += 15
+        monitor.check()
+        assert beds.refresh_admissions.call_count == 2
+        sector._outcome_timer_status_dto = None  # outcome cancelled by another PC
+        clock[0] += 15
+        monitor.check()
+        assert beds.refresh_admissions.call_count == 2
+        sector._outcome_timer_status_dto = status
+        beds.patient_service.data_service.is_network_outage_detected.return_value = True
+        monitor.check()
+        assert beds.refresh_admissions.call_count == 2
+        beds.patient_service.data_service.is_network_outage_detected.return_value = False
+        beds._is_closing = True
+        monitor.check()
+        assert beds.refresh_admissions.call_count == 2
+    finally:
+        beds.close()
+        beds.deleteLater()
+
+
+def test_partial_bed_release_preserves_other_patient_widgets():
+    from PySide6.QtWidgets import QWidget, QVBoxLayout
+    from rem_card.ui.nurse_view.components.nurse_beds_selection_widget import NurseBedsSelectionWidget
+    app = QApplication.instance() or QApplication([])
+    for widget_type in (BedsSelectionWidget, NurseBedsSelectionWidget):
+        beds = widget_type(SimpleNamespace(), auto_initial_refresh=False)
+        beds._outcome_release_monitor.stop()
+        rows = {1: QWidget(), 2: QWidget()}
+        for row in rows.values():
+            row._w1_row_signature = 'unchanged'
+            QVBoxLayout(row)
+            beds.list_layout.addWidget(row)
+        beds._rows_by_admission_id = dict(rows)
+        beds._last_ordered_row_ids = (1, 2)
+        beds._apply_runtime_state = Mock()
+        try:
+            beds._apply_beds_partial_snapshot({
+                'partial': True, 'requested_admission_ids': [1], 'patients': [],
+            })
+            assert list(beds._rows_by_admission_id) == [2]
+            assert beds._rows_by_admission_id[2] is rows[2]
+            assert beds.list_layout.indexOf(rows[1]) == -1
+            assert beds._last_ordered_row_ids == (2,)
+            assert beds._last_ordered_row_signatures == ((2, 'unchanged'),)
+            assert not beds._refresh_pending
+            beds._apply_runtime_state.assert_not_called()
+            beds._on_partial_refresh_failed(RuntimeError('network unavailable'))
+            assert beds._rows_by_admission_id[2] is rows[2]
+        finally:
+            beds.shutdown()
+            beds.deleteLater()
+            app.processEvents()

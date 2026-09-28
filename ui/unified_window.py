@@ -61,7 +61,6 @@ class UnifiedWindow(QMainWindow):
         self._leaving = False
         self._shutdown = None
         self._pending_exit = False
-        self._exit_page = None
         # The application entry point installs the process guard. Embedded/test
         # windows do not own the lifetime of the hosting Python process.
         self._exit_guard = None
@@ -961,8 +960,7 @@ class UnifiedWindow(QMainWindow):
             if isinstance(widget, QDialog) and widget is not self:
                 widget.reject()
         if self._pending_exit:
-            # Keep the title bar reachable while accepted writes drain.
-            self.entry_chrome.set_role_mode(False)
+            # The hidden runtime remains alive while accepted writes drain.
             self.stack.setEnabled(False)
             self._set_exit_stage("draining", "Завершение сохранений и освобождение базы…")
         else:
@@ -1586,9 +1584,6 @@ class UnifiedWindow(QMainWindow):
     def _set_exit_stage(self, stage, message):
         if self._exit_guard is not None:
             self._exit_guard.set_stage(stage)
-        if self._pending_exit:
-            self.statusBar().show()
-            self.statusBar().showMessage(message + " Повторный крестик — принудительный выход. Лимит завершения — 30 с.")
 
     def _begin_application_exit(self):
         self._pending_exit = True
@@ -1599,22 +1594,12 @@ class UnifiedWindow(QMainWindow):
         if self._exit_guard is not None:
             self._exit_guard.arm("shutdown")
         self._status_timer.stop()
-        # Keep a dedicated page selected throughout drain, role disposal and
-        # the exit update check. Removing the role must not reveal the chooser.
+        # Hide immediately, but keep the event loop and runtime alive until
+        # accepted writes, leases and background workers finish. The process
+        # watchdog still bounds shutdown without requiring a visible window.
         self._transition.cancel()
-        if self._exit_page is None:
-            from PySide6.QtWidgets import QLabel, QVBoxLayout
-            self._exit_page = QWidget()
-            layout = QVBoxLayout(self._exit_page)
-            label = QLabel("Завершение работы…")
-            label.setAlignment(Qt.AlignCenter)
-            layout.addWidget(label)
-            self.stack.addWidget(self._exit_page)
-        self.stack.setCurrentWidget(self._exit_page)
+        self.hide()
         self.stack.setEnabled(False)
-        # A role exit can already be waiting for a worker/lease when the user
-        # first clicks close. Keep the independent shell title bar accessible.
-        self.entry_chrome.set_role_mode(False)
         self._set_exit_stage("shutdown", "Закрытие RemCard…")
 
     def _cancel_exit_deadline(self):
@@ -1735,6 +1720,7 @@ class UnifiedWindow(QMainWindow):
             self._cancel_exit_deadline()
             self._closing = self._restart = self._update_requested = self._pending_exit = False
             self.stack.setEnabled(True)
+            self.entry_chrome.set_role_mode(False)
             self._status_timer.start()
             self.show_roles()
             self.show()

@@ -254,7 +254,7 @@ def test_confirmed_application_exit_does_not_ask_to_return_to_roles(shell, monke
 
 
 @pytest.mark.parametrize('exit_action', ['button', 'native_close'])
-def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monkeypatch, exit_action):
+def test_application_exit_hides_window_and_keeps_runtime_until_drain(shell, monkeypatch, exit_action):
     from PySide6.QtWidgets import QWidget
     from PySide6.QtGui import QCloseEvent
     from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -269,7 +269,7 @@ def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monk
     shell.container, shell.role_window, shell.role = container, role, 'doctor'
     shell.show()
     pages = []
-    shell.stack.currentChanged.connect(lambda _: pages.append(shell.stack.currentWidget()))
+    shell.stack.currentChanged.connect(lambda _: pages.append((shell.stack.currentWidget(), shell.isVisible())))
     waits = []
     monkeypatch.setattr(shell, '_wait_before_drain', lambda: waits.append(True))
     if exit_action == 'button':
@@ -278,11 +278,10 @@ def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monk
         event = QCloseEvent()
         shell.closeEvent(event)
         assert not event.isAccepted()
-    assert shell.isVisible()
+    assert not shell.isVisible()
     assert not shell.stack.isEnabled()
-    assert shell.stack.currentWidget() is shell._exit_page
-    assert not shell.entry_chrome.title_bar.isHidden()
-    assert shell.loading not in pages
+    assert shell.stack.currentWidget() is role
+    assert pages == []
     assert shell.container is container and shell._shutdown is not None
     assert shell._leaving and waits == [True]
     # Simulate a delayed update check after runtime disposal: neither phase
@@ -293,8 +292,8 @@ def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monk
     shell.show_roles()
     QApplication.processEvents()
     assert closed == [True]
-    assert shell.stack.currentWidget() is shell._exit_page
-    assert shell.welcome not in pages
+    assert not shell.isVisible()
+    assert not any(visible for _, visible in pages)
 
 
 def test_application_exit_during_return_to_roles_cancels_transition(shell, monkeypatch):
@@ -304,7 +303,7 @@ def test_application_exit_during_return_to_roles_cancels_transition(shell, monke
     shell._transition = transition
     shell.request_application_exit(confirmed=True)
     transition.cancel.assert_called_once()
-    assert shell.stack.currentWidget() is shell._exit_page
+    assert not shell.isVisible()
     assert not shell.stack.isEnabled()
 
 
@@ -1142,7 +1141,7 @@ def test_network_unlock_error_finishes_exit_instead_of_trapping_close(shell, mon
     shell.enter_role('doctor')
 
 
-def test_hung_release_keeps_gui_responsive_and_second_cross_can_force(shell, monkeypatch):
+def test_hung_release_keeps_hidden_event_loop_and_exit_guard_active(shell, monkeypatch):
     import threading
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtTest import QTest
@@ -1172,9 +1171,11 @@ def test_hung_release_keeps_gui_responsive_and_second_cross_can_force(shell, mon
         button = next(b for b in shell.entry_chrome.title_bar.findChildren(_WindowButton) if b.kind == 'close')
         QTest.mouseClick(button, Qt.LeftButton)
         assert shell._pending_exit and guard.arms == ['shutdown']
-        assert shell.isVisible() and shell.lease is not None
-        QTest.mouseClick(button, Qt.LeftButton)
-        assert guard.forced == 1 and calls == ['release']
+        assert not shell.isVisible() and shell.lease is not None
+        assert guard.armed and calls == ['release']
+        heartbeats.clear()
+        QTimer.singleShot(0, lambda: heartbeats.append(True))
+        _wait_for(lambda: bool(heartbeats))
     finally:
         unblock.set()
         _wait_for(lambda: not shell._workers)
