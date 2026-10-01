@@ -242,9 +242,8 @@ class DoctorArchiveContextMixin:
             return left == right
 
     def _plan_card_state_for_admission(self, admission_id: int, now: datetime | None = None):
-        if int(admission_id or 0) != int(self.admission_id or 0):
-            return {}
-        snapshot = self._card_snapshot_cache or {}
+        same_admission = int(admission_id or 0) == int(self.admission_id or 0)
+        snapshot = (self._card_snapshot_cache or {}) if same_admission else {}
         reference_dt = now or datetime.now()
         current_start = self._card_shift_start(reference_dt)
         if current_start is None:
@@ -258,7 +257,7 @@ class DoctorArchiveContextMixin:
         window_active = ShiftService.is_plan_card_window(reference_dt)
         current_card_exists = bool(snapshot.get("current_card_exists")) if current_card_known else None
         return {
-            "plan_card_available": bool(window_active and current_card_known and current_card_exists),
+            "plan_card_available": bool(window_active),
             "plan_card_window_active": bool(window_active),
             "plan_card_exists": bool(snapshot.get("plan_card_exists")) if plan_exists_known else False,
             "plan_card_target_date": target_date,

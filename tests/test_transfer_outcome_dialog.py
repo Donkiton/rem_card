@@ -21,8 +21,8 @@ def dialog_factory(monkeypatch):
 
     monkeypatch.setattr(dialogs, "datetime", Clock)
 
-    def make(context=None):
-        dialog = dialogs.TransferOutcomeDialog(context or {}, datetime(2026, 9, 23, 8))
+    def make(context=None, shift_date=None):
+        dialog = dialogs.TransferOutcomeDialog(context or {}, shift_date or datetime(2026, 9, 23, 8))
         windows.append(dialog)
         return dialog
 
@@ -35,6 +35,7 @@ def dialog_factory(monkeypatch):
 
 def test_previous_evening_is_saved_without_calendar_rollover(dialog_factory):
     dialog = dialog_factory()
+    dialog.date_edit.setDate(QDate(2026, 9, 23))
     dialog.time_picker.set_time("19:00")
     dialog._on_accept()
     assert dialog.result_data["event_time"] == datetime(2026, 9, 23, 19)
@@ -47,14 +48,56 @@ def test_date_and_time_controls_are_independent(dialog_factory):
     dialog.time_picker._minute_buttons[30].click()
     assert dialog._transfer_datetime() == datetime(2026, 9, 24, 0, 30)
     dialog.card_date_button.click()
-    assert dialog._transfer_datetime() == datetime(2026, 9, 23, 0, 30)
+    assert dialog._transfer_datetime() == datetime(2026, 9, 24, 0, 30)
+    dialog.date_edit.setDate(QDate(2026, 9, 23))
     dialog.now_button.click()
     assert dialog._transfer_datetime() == datetime(2026, 9, 23, 7)
+
+
+def test_initial_morning_transfer_uses_next_calendar_day(dialog_factory):
+    dialog = dialog_factory(shift_date=datetime(2026, 9, 23, 8))
+    assert dialog._transfer_datetime() == datetime(2026, 9, 24, 7)
+    dialog._on_accept()
+    assert dialog.result_data["event_time"] == datetime(2026, 9, 24, 7)
+
+
+@pytest.mark.parametrize("time, expected", [
+    ("23:59", datetime(2026, 9, 30, 23, 59)),
+    ("00:00", datetime(2026, 10, 1, 0)),
+    ("07:00", datetime(2026, 10, 1, 7)),
+    ("07:59", datetime(2026, 10, 1, 7, 59)),
+    ("08:00", datetime(2026, 9, 30, 8)),
+])
+def test_card_date_uses_selected_time_within_medical_day(dialog_factory, time, expected):
+    dialog = dialog_factory(shift_date=datetime(2026, 9, 30, 8))
+    dialog.date_edit.setDate(QDate(2026, 9, 28))
+    dialog.time_picker.set_time(time)
+    dialog.card_date_button.click()
+    assert dialog._transfer_datetime() == expected
+    dialog._on_accept()
+    assert dialog.result_data["event_time"] == expected
+
+
+def test_card_date_uses_uncommitted_time_input_at_year_boundary(dialog_factory):
+    dialog = dialog_factory(shift_date=datetime(2026, 12, 31, 8))
+    dialog.time_picker.input.setText("07:00")
+    dialog.card_date_button.click()
+    assert dialog._transfer_datetime() == datetime(2027, 1, 1, 7)
+
+
+def test_card_date_does_not_use_invalid_time(dialog_factory):
+    dialog = dialog_factory()
+    dialog.date_edit.setDate(QDate(2026, 9, 25))
+    dialog.time_picker.input.setText("99:99")
+    dialog.card_date_button.click()
+    assert dialog.date_edit.date() == QDate(2026, 9, 25)
+    assert dialog.time_picker.input.property("invalid")
 
 
 @pytest.mark.parametrize("key", ["latest_activity_datetime", "admission_datetime", "current_status_start_time"])
 def test_conflict_does_not_silently_change_date(dialog_factory, monkeypatch, key):
     dialog = dialog_factory({key: "2026-09-23T22:00:00"})
+    dialog.date_edit.setDate(QDate(2026, 9, 23))
     warnings = []
     monkeypatch.setattr(dialogs.CustomMessageBox, "warning", lambda *args: warnings.append(args))
     dialog.time_picker.set_time("19:00")

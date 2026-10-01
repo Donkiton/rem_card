@@ -20,6 +20,7 @@ from ..data.dto.remcard_dto import (
     OralIntakeEventDTO,
     OrderDTO,
     OrderStatus,
+    PatientStatus,
     VentilationCaseDTO,
     VentilationEventDTO,
 )
@@ -421,13 +422,11 @@ class RemCardService(QObject):
         target_date = current_end
         window_active = self._shifts.is_plan_card_window(reference_dt)
 
-        if current_card_exists is None:
-            current_card_exists = self.has_card(int(admission_id), reference_dt)
         if planned_card_exists is None:
             planned_card_exists = self.has_card(int(admission_id), target_date)
 
         return {
-            "plan_card_available": bool(window_active and current_card_exists),
+            "plan_card_available": bool(window_active),
             "plan_card_window_active": bool(window_active),
             "plan_card_exists": bool(planned_card_exists),
             "plan_card_target_date": target_date,
@@ -478,7 +477,7 @@ class RemCardService(QObject):
                 "card_exists": bool(card_now_map.get(adm_id, False)),
                 "has_any_card": bool(any_card_map.get(adm_id, False)),
                 "yest_exists": bool(card_yest_map.get(adm_id, False)),
-                "plan_card_available": bool(plan_window_active and card_now_map.get(adm_id, False)),
+                "plan_card_available": bool(plan_window_active),
                 "plan_card_window_active": bool(plan_window_active),
                 "plan_card_exists": bool(plan_card_map.get(adm_id, False)),
                 "plan_card_target_date": plan_target_date,
@@ -486,6 +485,74 @@ class RemCardService(QObject):
                 "settings": dict(settings_map.get(adm_id, default_settings)),
             }
         return snapshot
+
+    def create_plan_card(self, admission_id: int, target_date: datetime, *, requested_at: datetime):
+        """Создаёт план-карту и переносит новое поступление одной транзакцией."""
+        start, _ = self.get_day_period(target_date)
+        if not self._shifts.is_plan_card_window(requested_at) or start != self.get_day_period(requested_at)[1]:
+            raise ValueError("Плановая карта доступна только в последний час смены.")
+        admission_id = int(admission_id)
+        with self.orders_dao.db.remcard_transaction(source="doctor_create_plan_card") as cursor:
+            cursor.execute("SELECT * FROM admissions WHERE id = ?", (admission_id,))
+            row = cursor.fetchone()
+            if row is None:
+                raise ValueError("Пациент не найден.")
+            admission = dict(row)
+            if not admission.get("is_active", True) or any(
+                admission.get(field) for field in ("outcome", "transfer_datetime", "death_datetime")
+            ):
+                raise ValueError("Плановая карта недоступна, пока у пациента не отменен исход.")
+            cursor.execute(
+                "SELECT * FROM patient_status_events WHERE admission_id = ? ORDER BY datetime(start_time), id",
+                (admission_id,),
+            )
+            events = [dict(event) for event in cursor.fetchall()]
+            if any(event["status"] in (PatientStatus.TRANSFERRED.value, PatientStatus.DEAD.value) for event in events):
+                raise ValueError("Плановая карта недоступна, пока у пациента не отменен исход.")
+            # Повторное нажатие и создание с другого ПК не меняют существующую карту.
+            if self.has_card(admission_id, start):
+                return {"admission_shifted": False, "card_created": False}
+            raw_admission_dt = admission.get("admission_datetime")
+            admission_dt = datetime.fromisoformat(raw_admission_dt) if raw_admission_dt else None
+            first_card = not self.has_any_cards_bulk([admission_id]).get(admission_id, False)
+            shift_admission = bool(
+                first_card and admission_dt and start - timedelta(hours=1) <= admission_dt < start
+            )
+            if shift_admission:
+                # Разрешён перенос только начального поступления, без уже оформленных перемещений.
+                if events and not (
+                    len(events) == 1 and events[0]["status"] == PatientStatus.ACTIVE.value
+                    and not events[0].get("end_time")
+                    and datetime.fromisoformat(events[0]["start_time"]).replace(second=0, microsecond=0)
+                    == admission_dt.replace(second=0, microsecond=0)
+                ):
+                    raise ValueError("Нельзя перенести поступление на 08:00: у пациента уже оформлено движение.")
+                stamp = start.isoformat()
+                cursor.execute(
+                    """UPDATE admissions SET admission_datetime = ?,
+                       updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                       revision = COALESCE(revision, 0) + 1 WHERE id = ?""",
+                    (stamp, admission_id),
+                )
+                if events:
+                    cursor.execute(
+                        """UPDATE patient_status_events SET start_time = ?,
+                           updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                           last_modified_by = 'doctor', revision = COALESCE(revision, 0) + 1 WHERE id = ?""",
+                        (stamp, events[0]["id"]),
+                    )
+                else:
+                    cursor.execute(
+                        """INSERT INTO patient_status_events
+                           (admission_id, status, start_time, created_by, created_at, updated_at)
+                           VALUES (?, ?, ?, 'doctor', ?, ?)""",
+                        (admission_id, PatientStatus.ACTIVE.value, stamp, stamp, stamp),
+                    )
+                admission_dt = start
+            vital_time = max(start, admission_dt) if admission_dt else start
+            self.add_vital(VitalDTO(id=None, admission_id=admission_id, timestamp=vital_time),
+                           shift_date=start, force=True)
+        return {"admission_shifted": shift_admission, "card_created": True}
 
     @read_scoped_snapshot
     def build_beds_snapshot(

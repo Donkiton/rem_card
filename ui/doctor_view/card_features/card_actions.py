@@ -55,16 +55,15 @@ class DoctorCardActionsMixin:
         self.on_create_card_clicked(target_date=target_date)
 
     def _admission_status_is_outcome(self, admission_id: int) -> bool:
-        if self.admission_id and int(self.admission_id) == int(admission_id) and self._current_status_is_outcome():
-            return True
-        if not self.service or not hasattr(self.service, "get_current_status"):
+        if int(self.admission_id or 0) != int(admission_id):
             return False
-        try:
-            status_dto = self.service.get_current_status(int(admission_id))
-        except Exception:
-            status_dto = None
-        status_value = getattr(status_dto, "status", None)
-        return bool(status_dto and getattr(status_value, "is_outcome", lambda: False)())
+        snapshot = self._card_snapshot_cache or {}
+        layout = getattr(self, "layout_manager", None)
+        statuses = [snapshot.get("status")]
+        if getattr(layout, "_current_status_admission_id", None) == admission_id:
+            statuses.append(getattr(layout, "_current_status_dto", None))
+        return any(getattr(getattr(status, "status", None), "is_outcome", lambda: False)()
+                   for status in statuses)
 
     def on_plan_card_clicked(self):
         if not self.admission_id:
@@ -75,7 +74,10 @@ class DoctorCardActionsMixin:
         if self._archive_read_only_mode:
             self._show_read_only_hint()
             return False
-        if self._admission_status_is_outcome(admission_id):
+        patient_status = (getattr(patient, "_w1_runtime_snapshot", None) or {}).get("status")
+        if self._admission_status_is_outcome(admission_id) or (
+            getattr(getattr(patient_status, "status", None), "is_outcome", lambda: False)()
+        ):
             CustomMessageBox.information(
                 self,
                 "Плановая карта",
@@ -88,7 +90,7 @@ class DoctorCardActionsMixin:
             CustomMessageBox.information(
                 self,
                 "Плановая карта",
-                "Плановая карта доступна только при созданной текущей карте в последний час смены.",
+                "Плановая карта доступна только в последний час смены.",
             )
             return False
 
@@ -97,11 +99,6 @@ class DoctorCardActionsMixin:
             target_date = self.service.get_day_period(datetime.now())[1]
 
         plan_exists = bool(state.get("plan_card_exists"))
-        if not plan_exists:
-            try:
-                plan_exists = bool(self.service.has_card(admission_id, target_date))
-            except Exception:
-                plan_exists = False
 
         self.load_patient_card(
             admission_id,
@@ -122,7 +119,7 @@ class DoctorCardActionsMixin:
         if self._archive_read_only_mode:
             self._show_read_only_hint()
             return
-        if self._current_status_is_outcome():
+        if not planned and self._current_status_is_outcome():
             CustomMessageBox.information(
                 self,
                 "Создание карты",
@@ -147,7 +144,7 @@ class DoctorCardActionsMixin:
 
         target_date = target_date or datetime.now()
         start, _ = self.service.get_day_period(target_date)
-        patient = self.service.get_patient(self.admission_id)
+        patient = self.service.get_patient(self.admission_id) if not planned else None
         adm_dt = patient.admission_datetime if patient else None
         vital_time = start
         if patient and patient.admission_datetime and start < patient.admission_datetime:
@@ -160,8 +157,11 @@ class DoctorCardActionsMixin:
         service = self.service
         ensure_guard = getattr(self, "_should_ensure_initial_status_for_date", None)
         should_ensure_initial_status = bool(ensure_guard(target_date)) if callable(ensure_guard) else True
+        requested_at = datetime.now()
 
         def operation():
+            if planned:
+                return service.create_plan_card(admission_id, target_date, requested_at=requested_at)
             if admission_id and service.status_service and should_ensure_initial_status:
                 service.status_service.ensure_initial_status(admission_id, start, adm_dt)
             service.add_vital(dto, shift_date=target_date, force=True)
@@ -182,9 +182,13 @@ class DoctorCardActionsMixin:
             schedule_balance_update = getattr(self, "_schedule_balance_update", None)
             if callable(schedule_balance_update):
                 schedule_balance_update()
+            if planned:
+                # Заново загружаем поступление/таймлайн после атомарного переноса.
+                self.refresh_data()
             self.update_patient_info()
             message = (
-                "Плановая карта успешно создана. Вы можете заполнить её заранее."
+                ("Плановая карта успешно создана. Вы можете заполнить её заранее."
+                 if _result.get("card_created", True) else "Плановая карта открыта.")
                 if planned
                 else "Карта успешно создана. Вы можете приступить к её заполнению."
             )

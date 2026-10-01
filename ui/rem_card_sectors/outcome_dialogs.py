@@ -570,7 +570,7 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
         self.date_edit.setAccessibleName("Дата перевода")
         self.date_edit.setMinimumWidth(150)
         self.card_date_button = QPushButton("По карте")
-        self.card_date_button.setToolTip("Вернуть дату открытой карты")
+        self.card_date_button.setToolTip("Определить дату по времени перевода в сутках карты 08:00–08:00")
         self.card_date_button.clicked.connect(self._reset_transfer_date)
         self.now_button = QPushButton("Сейчас")
         self.now_button.setToolTip("Установить текущее время, не меняя дату")
@@ -713,8 +713,12 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
         self._restore_last_position()
 
     def _reset_transfer_date(self):
-        card_start, _ = ShiftService.get_day_period(self.shift_date)
-        self.date_edit.setDate(QDate(card_start.year, card_start.month, card_start.day))
+        if self.time_picker.input.text() != self.time_picker.value_str():
+            self.time_picker._commit_input()
+        if self.time_picker.input.property("invalid"):
+            return
+        transfer_dt = ShiftService.resolve_datetime(self.time_picker.value_str(), self.shift_date)
+        self.date_edit.setDate(QDate(transfer_dt.year, transfer_dt.month, transfer_dt.day))
 
     def _set_transfer_now(self):
         self.time_picker.set_time(datetime.now().strftime("%H:%M"))

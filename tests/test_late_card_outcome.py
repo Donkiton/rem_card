@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QDate, QEvent
 from PySide6.QtWidgets import QApplication
 
 from rem_card.data.dao.patient_status_dao import PatientStatusDAO
@@ -186,6 +186,7 @@ def test_explicit_previous_evening_transfer_releases_bed_at_morning_check(monkey
 
     db.run_write_operation = write
     try:
+        dialog.date_edit.setDate(QDate(2026, 9, 23))
         dialog.time_picker.set_time("19:00")
         dialog._on_accept()
         payload = dialog.result_data

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
+
+import pytest
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -19,7 +23,7 @@ if str(PACKAGE_PARENT) not in sys.path:
 from PySide6.QtCore import QObject, Signal  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from rem_card.ui.doctor_view.card_features import card_actions as doctor_module
+from rem_card.ui.doctor_view.card_features import card_actions as doctor_module  # noqa: E402
 from rem_card.ui.doctor_view.card_features import archive_context as archive_module  # noqa: E402
 from rem_card.services.remcard_facade import RemCardService  # noqa: E402
 from rem_card.services.shift_service import ShiftService  # noqa: E402
@@ -102,10 +106,7 @@ class _PlanCardServiceStub:
         reference_dt = now or self.now
         _current_start, target_date = self.get_day_period(reference_dt)
         return {
-            "plan_card_available": bool(
-                ShiftService.is_plan_card_window(reference_dt)
-                and self.has_card(admission_id, reference_dt)
-            ),
+            "plan_card_available": ShiftService.is_plan_card_window(reference_dt),
             "plan_card_window_active": ShiftService.is_plan_card_window(reference_dt),
             "plan_card_exists": self.has_card(admission_id, target_date),
             "plan_card_target_date": target_date,
@@ -202,7 +203,50 @@ class PlanCardTest(unittest.TestCase):
         self.assertTrue(ShiftService.is_plan_card_window(datetime(2026, 6, 22, 7, 59, 59)))
         self.assertFalse(ShiftService.is_plan_card_window(datetime(2026, 6, 22, 8, 0)))
 
-    def test_beds_snapshot_enables_plan_card_only_with_current_card_in_window(self):
+    def test_plan_action_from_list_does_not_use_previous_patient_snapshot(self):
+        now = datetime(2026, 10, 2, 7, 30)
+        target = datetime(2026, 10, 2, 8)
+        patient = SimpleNamespace(id=22, _w1_runtime_snapshot={"status": None})
+        widget = SimpleNamespace(
+            admission_id=11, _archive_read_only_mode=False,
+            _card_snapshot_cache={"status": SimpleNamespace(status=SimpleNamespace(is_outcome=lambda: True))},
+            service=SimpleNamespace(get_day_period=ShiftService.get_day_period),
+            layout_manager=SimpleNamespace(set_patient_selection_mode=Mock()),
+            _exit_archive_read_only_mode=Mock(), load_patient_card=Mock(),
+            _prime_patient_header_from_w1=Mock(), on_create_card_clicked=Mock(),
+        )
+        for name in ("_open_or_create_plan_card", "_admission_status_is_outcome",
+                     "_plan_card_state_for_admission", "_card_shift_start"):
+            setattr(widget, name, MethodType(getattr(DoctorRemCardWidget, name), widget))
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            DoctorRemCardWidget.on_patient_selected_from_list(widget, patient, "plan")
+        finally:
+            _restore_doctor_datetime(original_datetime)
+        widget.load_patient_card.assert_called_once_with(
+            22, target, request_snapshot=False, ensure_initial_status=False,
+        )
+        widget.on_create_card_clicked.assert_called_once_with(target_date=target, planned=True)
+
+    def test_first_plan_action_from_open_card_allows_unknown_snapshot_status(self):
+        now = datetime(2026, 10, 2, 7, 30)
+        widget = SimpleNamespace(
+            admission_id=22, _archive_read_only_mode=False, _card_snapshot_cache=None,
+            service=SimpleNamespace(get_day_period=ShiftService.get_day_period),
+            layout_manager=SimpleNamespace(set_patient_selection_mode=Mock()),
+            load_patient_card=Mock(), on_create_card_clicked=Mock(),
+        )
+        for name in ("_open_or_create_plan_card", "_admission_status_is_outcome",
+                     "_plan_card_state_for_admission", "_card_shift_start"):
+            setattr(widget, name, MethodType(getattr(DoctorRemCardWidget, name), widget))
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            DoctorRemCardWidget.on_plan_card_clicked(widget)
+        finally:
+            _restore_doctor_datetime(original_datetime)
+        widget.on_create_card_clicked.assert_called_once_with(target_date=datetime(2026, 10, 2, 8), planned=True)
+
+    def test_beds_snapshot_enables_plan_card_with_current_card_in_window(self):
         now = datetime(2026, 6, 22, 7, 30)
         current_shift_start, next_shift_start = ShiftService.get_day_period(now)
         service = _service_with_card_map({current_shift_start})
@@ -214,14 +258,22 @@ class PlanCardTest(unittest.TestCase):
         self.assertFalse(row["plan_card_exists"])
         self.assertEqual(row["plan_card_target_date"], next_shift_start)
 
-    def test_beds_snapshot_disables_plan_card_without_current_card(self):
+    def test_beds_snapshot_enables_first_plan_card_without_current_card(self):
         now = datetime(2026, 6, 22, 7, 30)
         service = _service_with_card_map(set())
 
         row = service.get_beds_runtime_snapshot([1], now, now - timedelta(days=1))[1]
 
         self.assertFalse(row["card_exists"])
-        self.assertFalse(row["plan_card_available"])
+        self.assertTrue(row["plan_card_available"])
+
+    def test_service_plan_state_allows_first_card_without_reading_current_card(self):
+        now = datetime(2026, 10, 2, 7, 30)
+        service = _service_with_card_map(set())
+        service.has_card = Mock(return_value=False)
+        state = service.build_plan_card_state(1, now)
+        self.assertTrue(state["plan_card_available"])
+        service.has_card.assert_called_once_with(1, datetime(2026, 10, 2, 8))
 
     def test_planned_card_becomes_current_after_shift_boundary(self):
         before_boundary = datetime(2026, 6, 22, 7, 30)
@@ -1031,6 +1083,188 @@ class PlanCardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _PlanMemoryDb:
+    """Настоящая схема и DAO; соединение существует только в оперативной памяти."""
+
+    def __init__(self):
+        from rem_card.app.unified_db_schema import ensure_unified_schema
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        ensure_unified_schema(self.conn)
+
+    @contextmanager
+    def remcard_transaction(self, source="test"):
+        outer = not self.conn.in_transaction
+        if outer:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield self.conn.cursor()
+            if outer:
+                self.conn.commit()
+        except Exception:
+            if outer:
+                self.conn.rollback()
+            raise
+
+    def fetch_one_remcard(self, query, params=()):
+        return self.conn.execute(query, params).fetchone()
+
+    def fetch_all_remcard(self, query, params=()):
+        return self.conn.execute(query, params).fetchall()
+
+    def execute_remcard(self, query, params=()):
+        return self.conn.execute(query, params)
+
+
+@pytest.fixture
+def first_plan_context():
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
+    from rem_card.services.patient_service import PatientService
+    from rem_card.services.vital_service import VitalService
+    from rem_card.services.lab_orders_service import LabOrdersService
+    from rem_card.services.patient_bed_management.service import PatientBedManagementService
+    db = _PlanMemoryDb()
+    arrival = datetime(2026, 10, 2, 7, 30)
+    db.conn.execute("INSERT INTO patients(id, full_name) VALUES (1, 'Тестовый пациент')")
+    db.conn.execute(
+        """INSERT INTO admissions(id, patient_id, bed_number, history_number, admission_datetime)
+           VALUES (1, 1, 1, 'test', ?)""", (arrival.isoformat(),),
+    )
+    db.conn.execute("INSERT OR REPLACE INTO beds(bed_number, status, current_admission_id) VALUES (1, 'OCCUPIED', 1)")
+    db.conn.execute(
+        "INSERT INTO patient_status_events(admission_id, status, start_time) VALUES (1, 'ACTIVE', ?)",
+        (arrival.isoformat(),),
+    )
+    db.conn.commit()
+    patients = PatientDAO(db)
+    service = RemCardService.__new__(RemCardService)
+    QObject.__init__(service)
+    service.orders_dao = SimpleNamespace(db=db)
+    service._shifts = ShiftService()
+    service._patients = PatientService(patients)
+    service._vitals = VitalService(VitalsDAO(db), patients)
+    service._lab_orders = SimpleNamespace(card_day_id_from_shift_start=LabOrdersService.card_day_id_from_shift_start)
+    yield SimpleNamespace(db=db, service=service, management=PatientBedManagementService(db),
+                          now=arrival, target=arrival.replace(hour=8, minute=0))
+    db.conn.close()
+
+
+@pytest.mark.parametrize("initial_status", [True, False])
+def test_first_plan_card_moves_arrival_and_movement_to_08(first_plan_context, initial_status):
+    ctx = first_plan_context
+    if not initial_status:
+        ctx.db.conn.execute("DELETE FROM patient_status_events")
+        ctx.db.conn.commit()
+    result = ctx.service.create_plan_card(1, ctx.target, requested_at=ctx.now)
+    assert result == {"admission_shifted": True, "card_created": True}
+    assert ctx.service.get_patient(1).admission_datetime == ctx.target
+    _, admission = ctx.management.get_patient_with_current_admission(1)
+    assert admission.admission_datetime == ctx.target
+    rows = ctx.db.fetch_all_remcard("SELECT status, start_time FROM patient_status_events WHERE admission_id=1")
+    assert [(r['status'], datetime.fromisoformat(r['start_time'])) for r in rows] == [('ACTIVE', ctx.target)]
+    assert ctx.service.get_all_card_dates(1) == [ctx.target]
+    assert not ctx.service.has_card(1, ctx.now)
+    assert ctx.service.has_card(1, ctx.target)
+    # В 08:00 эти же сутки становятся текущей картой, без второй записи.
+    assert ctx.service.has_card(1, ctx.target + timedelta(minutes=1))
+
+
+def test_repeated_first_plan_creation_preserves_existing_vital(first_plan_context):
+    ctx = first_plan_context
+    ctx.service.create_plan_card(1, ctx.target, requested_at=ctx.now)
+    ctx.db.conn.execute("UPDATE vitals SET pulse=85 WHERE admission_id=1")
+    ctx.db.conn.commit()
+    result = ctx.service.create_plan_card(1, ctx.target, requested_at=ctx.now)
+    assert result == {"admission_shifted": False, "card_created": False}
+    rows = ctx.db.fetch_all_remcard("SELECT pulse FROM vitals WHERE admission_id=1")
+    assert [r['pulse'] for r in rows] == [85]
+
+
+def test_ui_queues_first_plan_creation_without_blocking_patient_read(first_plan_context):
+    ctx = first_plan_context
+    ctx.service.enqueue_write = Mock()
+    ctx.service.status_service = None
+    widget = SimpleNamespace(
+        admission_id=1, service=ctx.service, _archive_read_only_mode=False,
+        _current_status_is_outcome=lambda: True,  # новый контекст ещё не получил snapshot
+        _create_card_write_pending=False, _snapshot_worker=None,
+        _begin_create_card_pending=Mock(), _finish_create_card_pending=Mock(),
+        update_patient_info=Mock(), refresh_data=Mock(), layout_manager=SimpleNamespace(),
+    )
+    originals = _freeze_doctor_datetime(ctx.now)
+    try:
+        with patch.object(ctx.service, 'get_patient', side_effect=AssertionError('UI read')):
+            DoctorRemCardWidget.on_create_card_clicked(widget, target_date=ctx.target, planned=True)
+        ctx.service.enqueue_write.assert_called_once()
+        call = ctx.service.enqueue_write.call_args
+        result = call.args[1]()
+        with patch.object(doctor_module.CustomMessageBox, 'information'):
+            call.kwargs['on_success'](result)
+    finally:
+        _restore_doctor_datetime(originals)
+    assert ctx.service.get_patient(1).admission_datetime == ctx.target
+    widget.refresh_data.assert_called_once()
+
+
+def test_plan_creation_failure_rolls_back_arrival_and_movement(first_plan_context):
+    ctx = first_plan_context
+    ctx.db.conn.execute("CREATE TRIGGER fail_vital BEFORE INSERT ON vitals BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='test failure'):
+        ctx.service.create_plan_card(1, ctx.target, requested_at=ctx.now)
+    assert ctx.service.get_patient(1).admission_datetime == ctx.now
+    row = ctx.db.fetch_one_remcard("SELECT start_time FROM patient_status_events WHERE admission_id=1")
+    assert datetime.fromisoformat(row['start_time']) == ctx.now
+    assert ctx.service.get_all_card_dates(1) == []
+
+
+@pytest.mark.parametrize("card_source", ['vitals', 'fluids', 'orders', 'diet_plan', 'oral_intake_events', 'lab_orders'])
+def test_existing_card_prevents_arrival_shift(first_plan_context, card_source):
+    ctx = first_plan_context
+    queries = {
+        'vitals': "INSERT INTO vitals(admission_id, datetime) VALUES (1, ?)",
+        'fluids': "INSERT INTO fluids(admission_id, datetime) VALUES (1, ?)",
+        'orders': "INSERT INTO orders(admission_id, datetime, text, status) VALUES (1, ?, 'Тест', 'active')",
+        'diet_plan': "INSERT INTO diet_plan(admission_id, shift_start) VALUES (1, ?)",
+        'oral_intake_events': "INSERT INTO oral_intake_events(admission_id, event_time, shift_start, amount_ml) VALUES (1, ?, '2026-10-01T08:00:00', 0)",
+        'lab_orders': "INSERT INTO lab_orders(patient_id, admission_id, created_at, scheduled_at, analysis_code, analysis_name, material) VALUES (1, 1, ?, '2026-10-02T07:30:00', 'test', 'Тест', 'blood')",
+    }
+    ctx.db.conn.execute(queries[card_source], (ctx.now.isoformat(),))
+    ctx.db.conn.commit()
+    ctx.service.create_plan_card(1, ctx.target, requested_at=ctx.now)
+    assert ctx.service.get_patient(1).admission_datetime == ctx.now
+    assert ctx.service.get_all_card_dates(1) == [ctx.target - timedelta(days=1), ctx.target]
+
+
+@pytest.mark.parametrize("arrival", [datetime(2026, 10, 2, 6, 59), datetime(2026, 10, 1, 7, 30)])
+def test_plan_card_without_current_card_keeps_earlier_arrival(first_plan_context, arrival):
+    ctx = first_plan_context
+    ctx.db.conn.execute("UPDATE admissions SET admission_datetime=? WHERE id=1", (arrival.isoformat(),))
+    ctx.db.conn.commit()
+    result = ctx.service.create_plan_card(1, ctx.target, requested_at=ctx.now)
+    assert not result['admission_shifted']
+    assert ctx.service.get_patient(1).admission_datetime == arrival
+
+
+@pytest.mark.parametrize("requested_at", [datetime(2026, 10, 2, 6, 59), datetime(2026, 10, 2, 8)])
+def test_plan_creation_outside_last_hour_is_rejected(first_plan_context, requested_at):
+    ctx = first_plan_context
+    with pytest.raises(ValueError, match='последний час'):
+        ctx.service.create_plan_card(1, ctx.target, requested_at=requested_at)
+    assert ctx.service.get_all_card_dates(1) == []
+
+
+@pytest.mark.parametrize("status", ['TRANSFERRED', 'DEAD', 'OUT'])
+def test_plan_creation_rechecks_outcome_and_preserves_real_movement(first_plan_context, status):
+    ctx = first_plan_context
+    ctx.db.conn.execute("UPDATE patient_status_events SET status=? WHERE admission_id=1", (status,))
+    ctx.db.conn.commit()
+    with pytest.raises(ValueError):
+        ctx.service.create_plan_card(1, ctx.target, requested_at=ctx.now)
+    assert ctx.service.get_patient(1).admission_datetime == ctx.now
+    assert ctx.service.get_all_card_dates(1) == []
 
 
 def test_outcome_release_monitor_checks_only_visible_due_rows(monkeypatch):
