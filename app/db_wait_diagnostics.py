@@ -13,6 +13,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from importlib import import_module
 
 THRESHOLD_SEC = 5.0
 SNAPSHOT_INTERVAL_SEC = 60.0
@@ -39,8 +40,7 @@ def _emit(event, payload):
         if not logging.getLogger('RemCard.DBWait').hasHandlers():
             # Spawned DB workers also need persistent local logs. Configure
             # the existing logger lazily, only when there is an event to save.
-            from rem_card.app.logger import logger as runtime_logger
-            del runtime_logger
+            import_module('rem_card.app.logger')
         logging.getLogger('RemCard.DBWait').warning(
             '%s %s', event, json.dumps(payload, ensure_ascii=True, separators=(',', ':'))
         )
