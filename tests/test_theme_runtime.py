@@ -47,6 +47,50 @@ class _PaletteApplication:
         self._palette = value
 
 
+@pytest.mark.parametrize("value, enabled", [
+    (None, True), ("1", True), ("", True), ("yes", True),
+    ("0", False), (" false ", False), ("NO", False), (" Off ", False),
+])
+def test_theme_flag_agrees_in_startup_manager_and_switch(monkeypatch, value, enabled):
+    from rem_card.app import main
+    from rem_card.ui.shared.theme_switch import runtime_theme_enabled
+    from rem_card.ui.styles import context_menu_style
+    from rem_card.ui.styles.theme_policy import FULL_RUNTIME_THEME_ENV
+
+    if value is None:
+        monkeypatch.delenv(FULL_RUNTIME_THEME_ENV, raising=False)
+    else:
+        monkeypatch.setenv(FULL_RUNTIME_THEME_ENV, value)
+    assert theme_manager_module.full_runtime_theme_enabled() is enabled
+    assert runtime_theme_enabled() is enabled
+
+    app, manager, basic = Mock(), Mock(), Mock()
+    monkeypatch.setattr(main, "_install_no_button_focus_rect_style", Mock())
+    monkeypatch.setattr(main, "_apply_basic_app_theme", basic)
+    monkeypatch.setattr(theme_manager_module, "get_theme_manager", lambda: manager)
+    monkeypatch.setattr(context_menu_style, "install_global_text_edit_context_menus", Mock())
+    main._apply_app_theme(app, "doctor")
+    if enabled:
+        manager.load.assert_called_once_with("doctor")
+        manager.apply_to_app.assert_called_once_with(app, "doctor")
+        basic.assert_not_called()
+    else:
+        manager.load.assert_not_called()
+        manager.apply_to_app.assert_not_called()
+        basic.assert_called_once_with(app)
+
+
+def test_theme_policy_import_does_not_load_qt_or_storage():
+    subprocess.run([
+        sys.executable, "-c",
+        "import sys; from rem_card.ui.styles.theme_policy import full_runtime_theme_enabled; "
+        "full_runtime_theme_enabled(); "
+        "assert not any(n.startswith('PySide6') for n in sys.modules); "
+        "assert 'rem_card.ui.styles.theme_manager' not in sys.modules; "
+        "assert 'rem_card.ui.styles.theme_storage' not in sys.modules",
+    ], cwd=Path(__file__).resolve().parents[2], check=True)
+
+
 def test_storage_defaults_to_local_app_data(monkeypatch, tmp_path):
     monkeypatch.delenv(STYLE_SETTINGS_ENV, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))

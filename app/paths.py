@@ -1,18 +1,18 @@
 import os
-import shutil
 import sys
 
 from rem_card.app.runtime_paths import (
     DEV_EXISTING_BAZA_ONLY_ENV,
     get_dev_baza_dir,
     get_required_baza_paths,
-    get_executable_dir,
     get_writable_runtime_logs_dir,
     get_project_root,
     is_compiled as _runtime_is_compiled,
     resolve_baza_dir,
     startup_baza_paths_recently_validated,
 )
+# Публичный экспорт для SettingsService: исключение устаревших внешних словарей.
+from rem_card.app.runtime_paths import get_executable_dir  # noqa: F401
 
 def is_compiled() -> bool:
     """Проверяет, запущено ли приложение в скомпилированном виде (PyInstaller/Nuitka)."""
@@ -60,27 +60,8 @@ def get_base_dir() -> str:
 def _project_dictionaries_dir() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "dictionaries"))
 
-def _compiled_external_dictionaries_dir() -> str:
-    return os.path.join(get_executable_dir(), "rem_card", "data", "dictionaries")
-
 def _compiled_bundled_dictionaries_dir() -> str:
     return os.path.join(get_resources_dir(), "rem_card", "data", "dictionaries")
-
-def _copy_missing_json_files(source_dir: str, target_dir: str):
-    if not os.path.isdir(source_dir):
-        return
-
-    os.makedirs(target_dir, exist_ok=True)
-    for name in sorted(os.listdir(source_dir)):
-        source_path = os.path.join(source_dir, name)
-        if not os.path.isfile(source_path) or not name.lower().endswith(".json"):
-            continue
-
-        target_path = os.path.join(target_dir, name)
-        if os.path.exists(target_path):
-            continue
-
-        shutil.copy2(source_path, target_path)
 
 def ensure_external_dictionaries_initialized() -> str:
     """
@@ -129,7 +110,6 @@ else:
 BAZA_LOGS_DIR = os.path.join(BAZA_DIR, "logs")
 LOGS_DIR = get_writable_runtime_logs_dir()
 ARCHIV_DIR = os.path.join(BAZA_DIR, "archiv")
-REM_CARD_DIR = os.path.join(BAZA_DIR, "rem_card")
 REPORT_DIR = os.path.join(BAZA_DIR, "report")
 BACKUPS_RC_DIR = os.path.join(BAZA_DIR, "backups")
 BACKUPS_VALID_DIR = os.path.join(BACKUPS_RC_DIR, "valid")
@@ -158,7 +138,6 @@ PATIENT_ASSETS_DIR = get_patient_assets_dir()
 # Пути к базам данных и координации записи
 JOURNAL_DB_PATH = os.path.join(ARCHIV_DIR, "rao_journal.db")
 REMCARD_DB_PATH = JOURNAL_DB_PATH
-LEGACY_REMCARD_DB_PATH = os.path.join(REM_CARD_DIR, "rem_cards_data.db")
 DB_LOCK_PATH = os.path.join(ARCHIV_DIR, "db.lock")
 DB_ROTATION_LOCK_PATH = os.path.join(ARCHIV_DIR, "db_rotation.lock")
 RECOVERY_LOCK_PATH = os.path.join(LOCKS_DIR, "recovery.lock")
@@ -172,7 +151,6 @@ LOCAL_CACHE_SUFFIX = str(
 LOCAL_REMCARD_REPLICA_PATH = os.path.join(LOCAL_CACHE_DIR, f"rao_journal_local_replica_{LOCAL_CACHE_SUFFIX}.db")
 LOCAL_JOURNAL_REPLICA_PATH = os.path.join(LOCAL_CACHE_DIR, f"rao_journal_local_replica_journal_{LOCAL_CACHE_SUFFIX}.db")
 LOCAL_REMCARD_OUTBOX_PATH = os.path.join(LOCAL_CACHE_DIR, f"remcard_outbox_{LOCAL_CACHE_SUFFIX}.db")
-LOCAL_JOURNAL_OUTBOX_PATH = os.path.join(LOCAL_CACHE_DIR, f"journal_outbox_{LOCAL_CACHE_SUFFIX}.db")
 
 def get_role_lock_path(role: str) -> str:
     safe_role = str(role or "unknown").lower()

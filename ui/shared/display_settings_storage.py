@@ -4,11 +4,10 @@ from copy import deepcopy
 from pathlib import Path
 import json
 import os
-import sys
-import time
 from typing import Any
 
 from rem_card.ui.styles.theme_storage import get_style_settings_path
+from rem_card.ui.shared.settings_file_io import quarantine_broken_settings_file, save_settings_json
 
 
 DISPLAY_SETTINGS_ENV = "REMCARD_DISPLAY_SETTINGS_PATH"
@@ -607,15 +606,7 @@ class DisplaySettingsStorage:
                 operation="update",
             )
             return
-        directory = os.path.dirname(self.path)
-        os.makedirs(directory, exist_ok=True)
-        tmp_path = f"{self.path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as fh:
-            json.dump(normalized, fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, self.path)
+        save_settings_json(self.path, normalized)
 
     def save_role_settings(self, role: str | None, settings: dict[str, Any]) -> None:
         role_key = normalize_display_role(role)
@@ -673,16 +664,11 @@ class DisplaySettingsStorage:
 
     def _bundled_path(self) -> str | None:
         try:
-            from rem_card.app.runtime_paths import is_compiled
+            from rem_card.app.runtime_paths import get_resources_dir, is_compiled
 
             if not is_compiled():
                 return None
-            if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-                resources_dir = str(sys._MEIPASS)
-            else:
-                executable_dir = os.path.dirname(os.path.abspath(sys.executable))
-                internal_dir = os.path.join(executable_dir, "_internal")
-                resources_dir = internal_dir if os.path.isdir(internal_dir) else executable_dir
+            resources_dir = get_resources_dir()
             return os.path.join(resources_dir, "rem_card", DISPLAY_SETTINGS_RELATIVE_PATH)
         except Exception:
             return None
@@ -702,11 +688,4 @@ class DisplaySettingsStorage:
         return current_as_schema == schema_normalized
 
     def _quarantine_broken_file(self) -> None:
-        if not os.path.exists(self.path):
-            return
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        broken_path = f"{self.path}.{stamp}.broken"
-        try:
-            os.replace(self.path, broken_path)
-        except Exception:
-            pass
+        quarantine_broken_settings_file(self.path)

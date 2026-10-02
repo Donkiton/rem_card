@@ -3,11 +3,12 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Dict
 
 from ..data.dto.remcard_dto import OrderDTO, AdministrationDTO
 from ..data.dao.db_manager import DatabaseManager
 from rem_card.app.logger import logger
+from rem_card.services.shift_service import ShiftService
 from rem_card.app.local_metrics import record_metric
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 
@@ -1001,7 +1002,7 @@ class OrderDomainService:
         # В read-поллинге не запускаем write-maintenance, чтобы не блокировать UI.
         self._sanitize_legacy_statuses_once(allow_write=False)
 
-        start_dt, end_dt = self._get_day_period_local(shift_date)
+        start_dt, end_dt = ShiftService.get_day_period(shift_date)
 
         query = """
             SELECT a.*, o.latin, o.drug_key, o.dose_value, o.dose_unit, o.comment as order_comment,
@@ -1087,7 +1088,7 @@ class OrderDomainService:
         """Lightweight W1a read model for active-bed upcoming orders."""
         self._sanitize_legacy_statuses_once(allow_write=False)
 
-        start_dt, end_dt = self._get_day_period_local(shift_date)
+        start_dt, end_dt = ShiftService.get_day_period(shift_date)
         query = """
             SELECT
                 p.id AS patient_id,
@@ -1183,12 +1184,6 @@ class OrderDomainService:
             rd["signal_state"] = self._signal_state_for_time(rd.get("planned_time"))
             result.append(rd)
         return result
-
-    def _get_day_period_local(self, date: datetime) -> Tuple[datetime, datetime]:
-        start = date.replace(hour=8, minute=0, second=0, microsecond=0)
-        if date.hour < 8:
-            start -= timedelta(days=1)
-        return start, start + timedelta(days=1)
 
     def _load_groups_priority(self) -> Dict[str, int]:
         from rem_card.services.settings.settings_service import get_settings_service

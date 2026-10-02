@@ -3,12 +3,14 @@ import ast
 from pathlib import Path
 from types import SimpleNamespace
 
+from scripts.regression_checks.source_inspection import read_widget_source
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_doctor_passive_button_refresh_never_checks_diagnosis():
-    source = ast.parse((ROOT / "ui/doctor_view/doctor_remcard_widget.py").read_text(encoding="utf-8-sig"))
+    source = ast.parse(read_widget_source(ROOT / "ui/doctor_view/doctor_remcard_widget.py"))
     method = next(node for node in ast.walk(source)
                   if isinstance(node, ast.FunctionDef) and node.name == "_apply_burn_calculator_button_state")
     namespace = {}
@@ -25,7 +27,7 @@ def test_doctor_passive_button_refresh_never_checks_diagnosis():
 
 def test_both_roles_build_burn_context_only_in_explicit_burn_action():
     for relative in ("ui/doctor_view/doctor_remcard_widget.py", "ui/nurse_view/nurse_main_widget.py"):
-        source = ast.parse((ROOT / relative).read_text(encoding="utf-8-sig"))
+        source = ast.parse(read_widget_source(ROOT / relative))
         callers = []
         for method in ast.walk(source):
             if not isinstance(method, ast.FunctionDef):

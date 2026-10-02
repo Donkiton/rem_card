@@ -109,14 +109,22 @@ def test_command_runner_reports_real_failure_and_hard_timeout(tmp_path):
 
 def test_pytest_command_selects_tests_directory_before_custom_options(tmp_path, monkeypatch):
     commands = []
+    environments = []
     def capture(command, **kwargs):
         commands.append(command)
+        environments.append(kwargs["env"])
         return {"ok": True, "duration_sec": 0}
     monkeypatch.setattr(runner, "run_command", capture)
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setenv("REMCARD_OPERBLOCK_OFFLINE_ROOT", "C:/production/operations")
     assert runner.main(["ui", "--report-dir", str(tmp_path)]) == 0
     assert commands[0][3] == "tests"
     assert "--ci-group=ui" in commands[0]
+    env = environments[0]
+    assert "REMCARD_OPERBLOCK_OFFLINE_ROOT" not in env
+    assert "rc_ci_" in env["PROGRAMDATA"]
+    assert env["HOME"] == env["USERPROFILE"]
+    assert "rc_ci_" in env["REMCARD_DATA_PATH_CONFIG"]
 
 
 def test_group_inventory_of_repository_is_complete():

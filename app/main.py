@@ -39,12 +39,12 @@ from rem_card.app.roles import (
     role_display_name,
 )
 from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
+from rem_card.ui.styles.theme_policy import full_runtime_theme_enabled
 
 
 STARTUP_TRACE_ENV = "REMCARD_STARTUP_TRACE"
 STARTUP_W1_WAIT_MS_ENV = "REMCARD_STARTUP_W1_WAIT_MS"
 STARTUP_W1_WAIT_DEFAULT_MS = 300
-FULL_RUNTIME_THEME_ENV = "REMCARD_FULL_RUNTIME_THEME"
 STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
 EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT = "Войти в программу"
 EMERGENCY_STARTUP_PASSWORD_TEXT = "Ввести аварийный пароль"
@@ -352,8 +352,7 @@ def _reset_runtime_theme_to_light(app):
 
 def _apply_app_theme(app, role: Optional[str] = None):
     _install_no_button_focus_rect_style(app)
-    feature_value = str(os.environ.get(FULL_RUNTIME_THEME_ENV, "1")).strip().lower()
-    if feature_value in {"0", "false", "no", "off"}:
+    if not full_runtime_theme_enabled():
         _apply_basic_app_theme(app)
         return
     manager = None
@@ -1831,13 +1830,16 @@ def _start_preselected_operblock_offline_context(
     *,
     active_local_case: bool,
 ) -> tuple[object | None, str]:
-    if not is_operblock_role(role) or not active_local_case:
+    if not is_operblock_role(role):
         return None, ""
     try:
         from rem_card.app.operblock_offline_store import start_or_resume_operblock_offline_session
 
-        session = start_or_resume_operblock_offline_session(reason="active_local_case_blocks_network_probe")
-        return session.runtime_context, "active_local_case"
+        session = start_or_resume_operblock_offline_session(
+            reason="per_workstation_local_startup",
+            network_db_path=None,
+        )
+        return session.runtime_context, "per_workstation_local"
     except Exception:
         return None, ""
 
@@ -1845,10 +1847,10 @@ def _start_preselected_operblock_offline_context(
 def _schedule_operblock_offline_notice_after_window(runtime_context, reason: str, QTimer) -> None:
     if getattr(runtime_context, "mode", "") != "opblock_offline":
         return
-    if reason == "active_local_case":
+    if reason in {"active_local_case", "per_workstation_local"}:
         message = (
-            "На этом ПК есть незавершённый локальный случай оперблока. "
-            "Оперблок открыт в локальном режиме без проверки сетевой базы."
+            "Оперблок работает в локальной базе этого ПК. "
+            "Завершённые карты будут отправлены в общую базу в фоне."
         )
     else:
         from rem_card.app.operblock_offline_store import OPERBLOCK_OFFLINE_WARNING
@@ -2177,6 +2179,51 @@ def _run_pending_operblock_offline_migration_before_window(
     )
 
 
+def _attach_standalone_operblock_sync(window, role: Optional[str], runtime_context) -> None:
+    """Keep the legacy role entrypoint on the same local delivery contract."""
+
+    if not is_operblock_role(role) or getattr(runtime_context, "mode", "") != "opblock_offline":
+        return
+    try:
+        central_root = str(read_configured_baza_dir() or "")
+    except Exception:
+        central_root = ""
+    try:
+        from rem_card.app.operblock_local_sync import OperBlockLocalSyncScheduler
+
+        scheduler = OperBlockLocalSyncScheduler(central_root, parent=window)
+        window._opblock_sync = scheduler
+        scheduler.request_sync()
+    except Exception as exc:
+        setattr(window, "_opblock_sync", None)
+        _write_startup_local_log(
+            f"operblock local sync attach failed: {type(exc).__name__}: {exc}"
+        )
+
+
+def _close_standalone_operblock_sync(window) -> None:
+    scheduler = getattr(window, "_opblock_sync", None) if window is not None else None
+    if scheduler is None:
+        return
+    try:
+        from PySide6.QtCore import QEventLoop, QTimer
+
+        loop = QEventLoop()
+        completed = {"value": False}
+
+        def finished():
+            completed["value"] = True
+            loop.quit()
+
+        scheduler.begin_close(finished)
+        if not completed["value"]:
+            QTimer.singleShot(3500, loop.quit)
+            loop.exec()
+    finally:
+        scheduler.stop()
+        window._opblock_sync = None
+
+
 def main(forced_role: Optional[str] = None, path_setup: bool = False):
     try:
         compiled_role = _infer_compiled_role_from_executable()
@@ -2246,7 +2293,7 @@ def _parse_startup_arguments(
         return
     args.role = _resolve_startup_role(args.role, forced_role)
     path_setup = bool(path_setup or args.path_setup)
-    if not path_setup and not _ensure_compiled_data_path_configured():
+    if not path_setup and not is_operblock_role(args.role) and not _ensure_compiled_data_path_configured():
         return None
     return args, path_setup
 
@@ -2257,16 +2304,26 @@ def _prepare_startup_before_qt(
     startup_started_at: float,
 ) -> bool:
     _opblock_startup_metrics_reset(args.role, startup_started_at)
-    if not path_setup:
+    local_operblock = is_operblock_role(args.role)
+    if not path_setup and not local_operblock:
         try:
             _configure_dev_runtime_baza_pin()
         except DataPathConfigurationError as exc:
             _show_native_warning("Dev-база недоступна", str(exc))
             sys.exit(1)
     os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
-    path_setup = _configure_operblock_startup_path(args.role, path_setup)
-    active_local_operblock_case = _has_active_local_operblock_case_before_network_probe(args.role)
-    _sync_release_settings_if_needed()
+    if local_operblock:
+        from rem_card.app.operblock_offline_store import get_operblock_offline_active_dir
+
+        os.environ["REMCARD_UI_ROLE"] = str(args.role).strip().lower()
+        os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
+        os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
+        os.environ["REMCARD_BAZA_DIR"] = get_operblock_offline_active_dir()
+        active_local_operblock_case = True
+    else:
+        path_setup = _configure_operblock_startup_path(args.role, path_setup)
+        active_local_operblock_case = False
+        _sync_release_settings_if_needed()
 
     if path_setup:
         sys.exit(_run_path_setup())
@@ -2630,20 +2687,17 @@ def _run_startup_application(
             write_startup_log=True,
         )
 
-    _run_pending_operblock_offline_migration_before_window(
-        role=args.role,
-        container=container,
-        app=app,
-        close_startup_splash=splash_controller.close,
-        logger=state.logger,
-    )
-
     main_window_started = _opblock_startup_timer_start(args.role)
     state.window = MainWindow(
         container=container,
         role=args.role,
         role_session_lock=state.role_lock,
         role_key=args.role if state.role_lock else None,
+    )
+    _attach_standalone_operblock_sync(
+        state.window,
+        args.role,
+        state.emergency_runtime_context,
     )
     _opblock_startup_record_since(
         args.role,
@@ -2771,6 +2825,7 @@ def _finalize_startup_application(
             state.window,
             state.logger,
         )
+        _close_standalone_operblock_sync(state.window)
     try:
         if server is not None and server_listening:
             server.close()

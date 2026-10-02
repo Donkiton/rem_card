@@ -149,26 +149,6 @@ class LabAnalysisCatalogSnapshot(SettingsSnapshot):
     materials: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
 
-@dataclass(frozen=True)
-class DietTemplatesSnapshot(SettingsSnapshot):
-    pass
-
-
-@dataclass(frozen=True)
-class DoctorsCatalogSnapshot(SettingsSnapshot):
-    pass
-
-
-@dataclass(frozen=True)
-class PrintSettingsSnapshot(SettingsSnapshot):
-    payload: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class DisplaySettingsSnapshot(SettingsSnapshot):
-    payload: dict[str, Any] = field(default_factory=dict)
-
-
 CATALOG_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     DRUG_CATALOG_KEY: (
         ("drug_groups", "code"),

@@ -7,12 +7,35 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import pytest
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+@pytest.mark.parametrize("role", ("doctor", "nurse"))
+def test_source_emergency_restart_falls_back_to_unified_entrypoint(monkeypatch, tmp_path, role):
+    from rem_card.app import runtime_outage
+
+    marker = tmp_path / "emergency-startup-request.json"
+    missing_script = tmp_path / "missing-entrypoint.py"
+    monkeypatch.setattr(runtime_outage.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(runtime_outage.sys, "argv", [str(missing_script)])
+    monkeypatch.setattr(runtime_outage.sys, "executable", str(tmp_path / "python.exe"))
+
+    command = runtime_outage._runtime_restart_args(str(marker), role=role)
+
+    assert command == [
+        str(tmp_path / "python.exe"),
+        str(Path(runtime_outage.__file__).resolve().parents[1] / "run_remcard.py"),
+        "--role",
+        role,
+        "--emergency-startup-request",
+        str(marker.resolve()),
+    ]
 
 
 @pytest.fixture

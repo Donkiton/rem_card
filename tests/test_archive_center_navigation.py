@@ -17,7 +17,7 @@ from PySide6.QtCore import QEvent, QObject  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QStackedWidget, QWidget  # noqa: E402
 
 from rem_card.ui.archive_center.archive_main_widget import ArchiveMainWidget  # noqa: E402
-from rem_card.ui.analytics.graphs_catalog import GRAPH_GROUPS  # noqa: E402
+from rem_card.services.analytics.graph_catalog import GRAPH_GROUPS  # noqa: E402
 from rem_card.ui.archive_center.statistics_page import ArchiveStatisticsPage  # noqa: E402
 from rem_card.ui.doctor_view.archive_widget import ARCHIVE_MODE_OPERBLOCK, ARCHIVE_MODE_RAO, ArchiveWidget  # noqa: E402
 from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget  # noqa: E402
@@ -188,6 +188,123 @@ def test_both_operating_room_roles_build_the_common_unfiltered_archive_center():
             center.close()
         for host in hosts:
             host.stack.close()
+
+
+def test_operblock_archive_payload_carries_transfer_state_for_local_edit_guard():
+    from rem_card.services.operblock.archive_sources import OperBlockArchiveSourcesMixin
+
+    payload = OperBlockArchiveSourcesMixin._archive_case_payload(
+        {"operation_case_id": 7, "case_status": "closed", "migration_status": "verified", "migrated_at": "2026-09-28T08:00:00"},
+        db_path="C:/archive/rao_journal.db", is_external=False,
+    )
+    assert payload["migration_status"] == "verified"
+    assert payload["migrated_at"] == "2026-09-28T08:00:00"
+
+
+def test_verified_offline_archive_case_is_not_editable_but_central_case_is():
+    application()
+    case = {
+        "operation_case_id": 7, "status": "closed", "migration_status": "verified",
+        "migrated_at": "2026-09-28T08:00:00",
+    }
+
+    offline_service = _OperblockService()
+    offline_service.db = SimpleNamespace(runtime_context=SimpleNamespace(mode="opblock_offline"))
+    offline = ArchiveWidget(
+        _PatientService(), operblock_service=offline_service,
+        fixed_source_mode=ARCHIVE_MODE_OPERBLOCK, allow_edit=True, embedded=True,
+    )
+    online_service = _OperblockService()
+    online_service.db = SimpleNamespace(runtime_context=SimpleNamespace(mode="network"))
+    central = ArchiveWidget(
+        _PatientService(), operblock_service=online_service,
+        fixed_source_mode=ARCHIVE_MODE_OPERBLOCK, allow_edit=True, embedded=True,
+    )
+    try:
+        offline._apply_action_buttons_state(case)
+        central._apply_action_buttons_state(case)
+        assert not offline.btn_edit.isEnabled()
+        assert central.btn_edit.isEnabled()
+    finally:
+        offline.close()
+        central.close()
+
+
+def test_central_archive_facade_pins_destination_before_each_worker_call(monkeypatch):
+    from contextlib import contextmanager
+    import rem_card.app.operblock_local_destination as destination
+    import rem_card.services.operblock_service as service_module
+    from rem_card.services.operblock.central_archive_facade import ExplicitCentralOperBlockService
+
+    roots = []
+
+    @contextmanager
+    def fake_open(central_root=None, *, local_root=None):
+        roots.append((central_root, local_root))
+        yield object()
+
+    class FakeService:
+        def __init__(self, _gateway):
+            pass
+
+        @staticmethod
+        def list_archived_operation_cases_page(**_kwargs):
+            return {"records": [], "total_count": 0, "page": 1, "page_size": 50}
+
+    monkeypatch.setattr(destination, "get_operblock_destination", lambda _root=None: "C:/central-before")
+    monkeypatch.setattr(destination, "open_central_for_operblock", fake_open)
+    monkeypatch.setattr(service_module, "OperBlockService", FakeService)
+    facade = ExplicitCentralOperBlockService(local_root="C:/local")
+    monkeypatch.setattr(destination, "get_operblock_destination", lambda _root=None: "C:/central-after")
+
+    facade.list_archived_operation_cases_page(page=1)
+
+    assert roots == [("C:/central-before", "C:/local")]
+
+
+def test_central_archive_facade_forbids_lifecycle_and_delete_operations():
+    from rem_card.services.operblock.central_archive_facade import ExplicitCentralOperBlockService
+
+    facade = ExplicitCentralOperBlockService()
+    assert callable(facade.list_archived_operation_cases_page)
+    for forbidden in ("delete_archived_operation_case", "restore_archived_operation_case", "create_operation_case", "db"):
+        try:
+            getattr(facade, forbidden)
+        except AttributeError:
+            continue
+        raise AssertionError(f"{forbidden} must not be exposed by the central archive facade")
+
+
+def test_operblock_common_archive_is_explicit_and_hides_destructive_actions(monkeypatch, tmp_path):
+    application()
+    import rem_card.app.operblock_local_destination as destination
+
+    class Host:
+        def __init__(self):
+            self.patient_service = _PatientService()
+            self.remcard_service = SimpleNamespace(data_service=None)
+            self.stack = QStackedWidget()
+            self.archive_page = QWidget()
+            self.stack.addWidget(self.archive_page)
+
+        @staticmethod
+        def is_view_only_mode():
+            return False
+
+    monkeypatch.setattr(destination, "get_operblock_destination", lambda: str(tmp_path))
+    monkeypatch.setattr(ArchiveWidget, "load_data", lambda self, **_kwargs: None)
+    host = Host()
+    try:
+        OperBlockMainWidget._open_common_operblock_archive(host)
+        archive = host._common_archive_widget
+        assert host.stack.currentWidget() is host._common_archive_page
+        assert archive.archive_source_mode == ARCHIVE_MODE_OPERBLOCK
+        assert not archive.btn_delete_last.isVisible()
+        assert not archive.btn_delete.isVisible()
+        assert not archive.btn_report_stats.isVisible()
+        assert not archive.btn_edit.isHidden()
+    finally:
+        host.stack.close()
 
 
 def test_operblock_archive_case_returns_to_the_common_center_on_back():

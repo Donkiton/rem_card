@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .source_inspection import read_widget_source
+
 from .common import PROJECT_ROOT
 import hashlib
 import json
@@ -10,6 +12,24 @@ import sqlite3
 import threading
 import time
 
+
+
+def _patch_doctor_orders_global(name, value):
+    """Подменяет прежнюю общую зависимость во всех частях виджета и восстанавливает её."""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+    import sys
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
+
+    modules = {sys.modules[base.__module__] for base in OrdersWidget.__mro__
+               if base.__module__.startswith("rem_card.ui.doctor_view")}
+    targets = [module for module in modules if hasattr(module, name)]
+    if not targets:
+        raise AssertionError(f"OrdersWidget dependency not found: {name}")
+    stack = ExitStack()
+    for module in targets:
+        stack.enter_context(patch.object(module, name, value))
+    return stack
 
 def _check_cvc_auto_closes_on_outcome(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
@@ -1798,7 +1818,7 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
         ],
     }
     for rel_path, tokens in required_tokens.items():
-        text = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+        text = read_widget_source(PROJECT_ROOT / rel_path)
         missing = [token for token in tokens if token not in text]
         if missing:
             return False, f"{rel_path} missing diagnostics tokens: {missing}"
@@ -2131,7 +2151,7 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
     import rem_card.app.foreground_activity as foreground_activity
     import rem_card.data.dao.db_manager as dbm
     import rem_card.services.read_coordinator as read_coordinator
-    import rem_card.ui.doctor_view.orders_widget as orders_widget_module
+    import rem_card.ui.doctor_view.order_features.refresh_coordination as orders_widget_module
     import rem_card.ui.nurse_view.components.nurse_orders_widget as nurse_orders_widget_module
     from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
@@ -2143,10 +2163,8 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
     sync_events: list[tuple[str, dict]] = []
     warnings: list[tuple[object, tuple[object, ...]]] = []
 
-    original_widget_metric = orders_widget_module.record_metric
-    original_widget_sync_event = orders_widget_module.record_orders_sync_event
+    widget_patches = []
     original_widget_warning = orders_widget_module.logger.warning
-    original_widget_async = orders_widget_module.AsyncCallThread
     original_nurse_metric = nurse_orders_widget_module.record_metric
     original_nurse_sync_event = nurse_orders_widget_module.record_orders_sync_event
     original_nurse_warning = nurse_orders_widget_module.logger.warning
@@ -2246,10 +2264,10 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
         widget._defer_snapshot_request = lambda **kwargs: deferred_calls.append(dict(kwargs))
         return widget, deferred_calls
 
-    orders_widget_module.record_metric = capture_metric
-    orders_widget_module.record_orders_sync_event = capture_sync_event
+    widget_patches.append(_patch_doctor_orders_global("record_metric", capture_metric))
+    widget_patches.append(_patch_doctor_orders_global("record_orders_sync_event", capture_sync_event))
     orders_widget_module.logger.warning = capture_warning
-    orders_widget_module.AsyncCallThread = FakeAsyncCallThread
+    widget_patches.append(_patch_doctor_orders_global("AsyncCallThread", FakeAsyncCallThread))
     nurse_orders_widget_module.record_metric = capture_metric
     nurse_orders_widget_module.record_orders_sync_event = capture_sync_event
     nurse_orders_widget_module.logger.warning = capture_warning
@@ -2397,10 +2415,9 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
             widget._snapshot_worker = None
             widget.close()
         foreground_activity._reset_foreground_activity_for_tests()
-        orders_widget_module.record_metric = original_widget_metric
-        orders_widget_module.record_orders_sync_event = original_widget_sync_event
+        for patch_group in reversed(widget_patches):
+            patch_group.close()
         orders_widget_module.logger.warning = original_widget_warning
-        orders_widget_module.AsyncCallThread = original_widget_async
         nurse_orders_widget_module.record_metric = original_nurse_metric
         nurse_orders_widget_module.record_orders_sync_event = original_nurse_sync_event
         nurse_orders_widget_module.logger.warning = original_nurse_warning
@@ -2410,35 +2427,117 @@ def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bo
         app.processEvents()
 
 
+def _check_post_finalize_ui_retry(service, shift_date, context, metrics) -> tuple[bool, str]:
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.services.read_coordinator import OrdersRefreshCancelled
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
+
+    class FakeSignal:
+        def disconnect(self, _slot):
+            return None
+
+    class FakeWorker:
+        succeeded = FakeSignal()
+        failed = FakeSignal()
+        finished = FakeSignal()
+
+        @staticmethod
+        def isRunning():
+            return True
+
+    app = QApplication.instance() or QApplication([])
+    app.processEvents()
+    widget = OrdersWidget(service=service, admission_id=26, shift_date=shift_date, defer_ui=True)
+    try:
+        widget._snapshot_worker = FakeWorker()
+        widget._active_request_source = "post_finalize"
+        widget._active_request_seq = 10
+        widget._active_request_id = "orders-ui-current"
+        widget._active_request_generation = 10
+        widget._active_request_started_monotonic = time.monotonic() - 1.0
+        widget._on_post_finalize_snapshot_watchdog()
+        metric_names = {name for name, _value, _fields in metrics}
+        if "orders_post_finalize_retry_scheduled" not in metric_names:
+            return False, "post_finalize watchdog did not schedule guaranteed retry"
+
+        retry_metric_count = sum(1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled")
+        widget._snapshot_worker = FakeWorker()
+        widget._active_request_source = "post_finalize"
+        widget._active_request_seq = 11
+        widget._active_request_id = "orders-ui-cancelled"
+        widget._active_request_generation = 11
+        widget._active_request_started_monotonic = time.monotonic() - 1.0
+        widget._on_snapshot_failed(OrdersRefreshCancelled("regression post_finalize sql step timeout"))
+        widget._on_snapshot_finished()
+        retry_metric_count_after_cancel = sum(
+            1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled"
+        )
+        if retry_metric_count_after_cancel <= retry_metric_count:
+            return False, "post_finalize controlled cancel did not schedule retry"
+
+        widget._snapshot_seq = 12
+        widget._active_request_id = "orders-ui-new"
+        widget._active_request_generation = 12
+        widget._apply_snapshot(
+            {
+                "seq": 11,
+                "admission_id": 26,
+                "shift_date": shift_date,
+                "context_key": context.cache_key(),
+                "context_hash": context.hash(),
+                "source": "post_finalize",
+                "request_id": "orders-ui-old",
+                "generation": 11,
+                "snapshot": {"load_trace_id": "orders-old", "admission_id": 26},
+            }
+        )
+        metric_names = {name for name, _value, _fields in metrics}
+        if "orders_refresh_late_result_ignored" not in metric_names:
+            return False, "late UI result was not ignored/logged"
+    finally:
+        widget.shutdown()
+        widget.close()
+    return True, "ok"
+
+
 def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication
 
     import rem_card.app.foreground_activity as foreground_activity
     import rem_card.data.dao.db_manager as dbm
     import rem_card.services.remcard_facade as remcard_facade
     import rem_card.services.read_coordinator as read_coordinator
-    import rem_card.ui.doctor_view.orders_widget as orders_widget_module
     from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
-    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
     _ = temp_root
     metrics: list[tuple[str, object, dict]] = []
     created_backups: list[tuple[str, str]] = []
+    phase_sync_timeout_sec = 5.0
+    stall_metric_entered = threading.Event()
+    allow_stall_watchdog_to_continue = threading.Event()
+    poison_metric_recorded = threading.Event()
 
     original_rc_metric = read_coordinator.record_metric
     original_dbm_metric = dbm.record_metric
     original_stall_threshold = read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC
     original_poison_threshold = read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC
     original_coalesce_wait = read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC
-    original_widget_metric = orders_widget_module.record_metric
-    original_widget_watchdog_ms = orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS
+    widget_patches = []
     original_runtime_auto_backups = dbm.RUNTIME_AUTO_BACKUPS_ENABLED
 
     def capture_metric(name, value=None, **fields):
         metrics.append((str(name), value, dict(fields)))
+        if str(name) == "orders_load_stalled":
+            # Hold the watchdog after it marks the active request stalled.  The
+            # foreground thread can now exercise duplicate coalescing without
+            # racing a tiny wall-clock poison deadline under CI contention.
+            stall_metric_entered.set()
+            allow_stall_watchdog_to_continue.wait()
+        elif str(name) == "orders_refresh_poisoned":
+            poison_metric_recorded.set()
 
     manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
     manager._closed = False
@@ -2487,7 +2586,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             if self.block:
                 self._notify_step("start", "get_latest_change_id")
                 self.entered.set()
-                self.release.wait(1.0)
+                self.release.wait()
                 self._notify_step("end", "get_latest_change_id", status="ok")
             snapshot = {
                 "admission_id": admission_id,
@@ -2509,11 +2608,14 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     dbm.RUNTIME_AUTO_BACKUPS_ENABLED = True
     read_coordinator.record_metric = capture_metric
     dbm.record_metric = capture_metric
-    orders_widget_module.record_metric = capture_metric
+    widget_patches.append(_patch_doctor_orders_global("record_metric", capture_metric))
     read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = 0.05
-    read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = 0.12
+    # Keep the incoming duplicate safely below the poison boundary.  Once its
+    # coalescing assertions pass, the test lowers this boundary and releases
+    # the blocked watchdog explicitly.
+    read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = float("inf")
     read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = 0.01
-    orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS = 50
+    widget_patches.append(_patch_doctor_orders_global("ORDERS_POST_FINALIZE_WATCHDOG_MS", 50))
     foreground_activity._reset_foreground_activity_for_tests()
     service = SlowOrdersService()
     coordinator = ReadCoordinator(service)
@@ -2552,7 +2654,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
 
         monitor_thread = threading.Thread(target=load_monitor, daemon=True)
         monitor_thread.start()
-        if not service.entered.wait(1.0):
+        if not service.entered.wait(phase_sync_timeout_sec):
             return False, "monitor refresh did not enter slow snapshot build"
         service.entered.clear()
 
@@ -2570,9 +2672,10 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
 
         thread = threading.Thread(target=load_post_finalize, daemon=True)
         thread.start()
-        if not service.entered.wait(1.0):
+        if not service.entered.wait(phase_sync_timeout_sec):
             return False, "post_finalize refresh did not enter slow snapshot build"
-        time.sleep(0.08)
+        if not stall_metric_entered.wait(phase_sync_timeout_sec):
+            return False, "post_finalize watchdog did not mark the refresh stalled"
 
         duplicate = coordinator.load_orders_tab(
             context,
@@ -2590,7 +2693,10 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
         if service.quickcheck_idle_during_read is not False:
             return False, "background quick_check was not deferred during active foreground read"
 
-        time.sleep(0.12)
+        read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC
+        allow_stall_watchdog_to_continue.set()
+        if not poison_metric_recorded.wait(phase_sync_timeout_sec):
+            return False, "post_finalize watchdog did not poison the stalled refresh"
         metric_names = {name for name, _value, _fields in metrics}
         if "orders_refresh_poisoned" not in metric_names:
             return False, f"poison metric was not recorded; got {sorted(metric_names)}"
@@ -2625,8 +2731,8 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             return False, f"fresh retry did not load new version: {retry.get('version')}"
 
         service.release.set()
-        thread.join(timeout=2.0)
-        monitor_thread.join(timeout=2.0)
+        thread.join(timeout=phase_sync_timeout_sec)
+        monitor_thread.join(timeout=phase_sync_timeout_sec)
         if thread.is_alive():
             return False, "post_finalize refresh thread did not finish after release"
         if monitor_thread.is_alive():
@@ -2650,81 +2756,17 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             if required not in metric_names:
                 return False, f"missing metric {required}; got {sorted(metric_names)}"
 
-        class FakeSignal:
-            def disconnect(self, _slot):
-                return None
-
-        class FakeWorker:
-            succeeded = FakeSignal()
-            failed = FakeSignal()
-            finished = FakeSignal()
-
-            @staticmethod
-            def isRunning():
-                return True
-
-        app = QApplication.instance() or QApplication([])
-        app.processEvents()
-        widget = OrdersWidget(service=service, admission_id=26, shift_date=shift_date, defer_ui=True)
-        try:
-            widget._snapshot_worker = FakeWorker()
-            widget._active_request_source = "post_finalize"
-            widget._active_request_seq = 10
-            widget._active_request_id = "orders-ui-current"
-            widget._active_request_generation = 10
-            widget._active_request_started_monotonic = time.monotonic() - 1.0
-            widget._on_post_finalize_snapshot_watchdog()
-            metric_names = {name for name, _value, _fields in metrics}
-            if "orders_post_finalize_retry_scheduled" not in metric_names:
-                return False, "post_finalize watchdog did not schedule guaranteed retry"
-
-            retry_metric_count = sum(1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled")
-            widget._snapshot_worker = FakeWorker()
-            widget._active_request_source = "post_finalize"
-            widget._active_request_seq = 11
-            widget._active_request_id = "orders-ui-cancelled"
-            widget._active_request_generation = 11
-            widget._active_request_started_monotonic = time.monotonic() - 1.0
-            widget._on_snapshot_failed(OrdersRefreshCancelled("regression post_finalize sql step timeout"))
-            widget._on_snapshot_finished()
-            retry_metric_count_after_cancel = sum(
-                1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled"
-            )
-            if retry_metric_count_after_cancel <= retry_metric_count:
-                return False, "post_finalize controlled cancel did not schedule retry"
-
-            widget._snapshot_seq = 12
-            widget._active_request_id = "orders-ui-new"
-            widget._active_request_generation = 12
-            widget._apply_snapshot(
-                {
-                    "seq": 11,
-                    "admission_id": 26,
-                    "shift_date": shift_date,
-                    "context_key": context.cache_key(),
-                    "context_hash": context.hash(),
-                    "source": "post_finalize",
-                    "request_id": "orders-ui-old",
-                    "generation": 11,
-                    "snapshot": {"load_trace_id": "orders-old", "admission_id": 26},
-                }
-            )
-            metric_names = {name for name, _value, _fields in metrics}
-            if "orders_refresh_late_result_ignored" not in metric_names:
-                return False, "late UI result was not ignored/logged"
-        finally:
-            widget.shutdown()
-            widget.close()
-        return True, "ok"
+        return _check_post_finalize_ui_retry(service, shift_date, context, metrics)
     finally:
+        allow_stall_watchdog_to_continue.set()
         service.release.set()
         read_coordinator.record_metric = original_rc_metric
         dbm.record_metric = original_dbm_metric
-        orders_widget_module.record_metric = original_widget_metric
+        for patch_group in reversed(widget_patches):
+            patch_group.close()
         read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = original_stall_threshold
         read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = original_poison_threshold
         read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = original_coalesce_wait
-        orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS = original_widget_watchdog_ms
         dbm.RUNTIME_AUTO_BACKUPS_ENABLED = original_runtime_auto_backups
         foreground_activity._reset_foreground_activity_for_tests()
 
@@ -2791,13 +2833,12 @@ def _check_orders_widget_post_finalize_supersedes_hung_worker(temp_root: str) ->
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
-    import rem_card.ui.doctor_view.orders_widget as orders_widget_module
     from rem_card.services.read_coordinator import ReadCoordinator
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
     _ = temp_root
     metrics: list[tuple[str, object, dict]] = []
-    original_widget_metric = orders_widget_module.record_metric
+    widget_patches = []
 
     def capture_metric(name, value=None, **fields):
         metrics.append((str(name), value, dict(fields)))
@@ -2847,7 +2888,7 @@ def _check_orders_widget_post_finalize_supersedes_hung_worker(temp_root: str) ->
         def quit(self):
             self.quit_called = True
 
-    orders_widget_module.record_metric = capture_metric
+    widget_patches.append(_patch_doctor_orders_global("record_metric", capture_metric))
     app = QApplication.instance() or QApplication([])
     service = WidgetOrdersService()
     coordinator = ReadCoordinator(service)
@@ -2964,7 +3005,8 @@ def _check_orders_widget_post_finalize_supersedes_hung_worker(temp_root: str) ->
     finally:
         release_new_load.set()
         coordinator.load_orders_tab = original_load_orders_tab
-        orders_widget_module.record_metric = original_widget_metric
+        for patch_group in reversed(widget_patches):
+            patch_group.close()
         widget.shutdown()
         widget.close()
 
@@ -3022,7 +3064,7 @@ def _check_orders_finish_after_content_hash_guard(temp_root: str) -> tuple[bool,
 
     def slow_finalize_snapshot(*args, **kwargs):
         entered_finalize.set()
-        release_finalize.wait(1.0)
+        release_finalize.wait(5.0)
         return original_finalize(*args, **kwargs)
 
     coordinator._finalize_snapshot = slow_finalize_snapshot
@@ -3044,8 +3086,14 @@ def _check_orders_finish_after_content_hash_guard(temp_root: str) -> tuple[bool,
         thread.start()
         if not entered_finalize.wait(1.0):
             return False, "snapshot did not reach content_hash_finalize"
-        time.sleep(0.16)
-        retired = coordinator._is_orders_refresh_retired("orders-000001-" + context.hash()[:6])
+        # Watchdog runs in another thread: a fixed 160 ms sleep left only
+        # ~40 ms for scheduling/logging and flaked under parallel CI load.
+        request_id = "orders-000001-" + context.hash()[:6]
+        deadline = time.monotonic() + 2.0
+        retired = coordinator._is_orders_refresh_retired(request_id)
+        while not retired and time.monotonic() < deadline:
+            time.sleep(0.01)
+            retired = coordinator._is_orders_refresh_retired(request_id)
         if not retired:
             return False, "hung content_hash_finalize request was not retired by watchdog"
         if retired.get("status") == "finished":
@@ -3070,6 +3118,7 @@ def _check_orders_finish_after_content_hash_guard(temp_root: str) -> tuple[bool,
         return True, "ok"
     finally:
         release_finalize.set()
+        thread.join(timeout=2.0)
         coordinator._finalize_snapshot = original_finalize
         read_coordinator.record_metric = original_metric
         read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = original_stall_threshold

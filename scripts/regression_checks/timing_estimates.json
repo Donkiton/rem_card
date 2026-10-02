@@ -528,7 +528,7 @@
     "operblock_runtime_settings_from_settings_db": 2.775,
     "operblock_medication_aliases_quick_search": 0.333,
     "operblock_operation_stages_custom_events": 4.762,
-    "operblock_rao_auto_transfer_recovery_beds_and_vitals": 10.202,
+    "operblock_rao_explicit_invitation_recovery_beds_and_vitals": 10.202,
     "recovery_bed_transfer_order_10_11_12": 0.01,
     "operblock_occupy_dialog_manual_birth_date_and_plain_groups": 0.155,
     "operblock_operation_stage_chart_grouping": 0.587,

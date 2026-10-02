@@ -42,13 +42,12 @@ UNIFIED_REQUIRED_RELEASE_EXES = (
     "RemCard.exe",
     "RemCardUpdater.exe",
 )
-LEGACY_REQUIRED_RELEASE_EXES = (
+RETIRED_ROLE_EXES = (
     "RemCardDoctor.exe",
     "RemCardNurse.exe",
     "RemCardOperBlockEmergency.exe",
     "RemCardOperBlockPlanned.exe",
     "RemCardPathSetup.exe",
-    "RemCardUpdater.exe",
 )
 REQUIRED_RELEASE_EXES = UNIFIED_REQUIRED_RELEASE_EXES
 SETTINGS_RELEASE_DIR = Path("_internal") / "rem_card" / "settings_release"
@@ -69,8 +68,8 @@ def _detect_executable_layout(source: Path) -> str:
     if all((source / name).is_file() for name in UNIFIED_REQUIRED_RELEASE_EXES):
         legacy_role_exes = [
             name
-            for name in LEGACY_REQUIRED_RELEASE_EXES
-            if name != "RemCardUpdater.exe" and (source / name).is_file()
+            for name in RETIRED_ROLE_EXES
+            if (source / name).is_file()
         ]
         if legacy_role_exes:
             raise PublishError(
@@ -78,10 +77,8 @@ def _detect_executable_layout(source: Path) -> str:
                 + ", ".join(legacy_role_exes)
             )
         return "unified"
-    if all((source / name).is_file() for name in LEGACY_REQUIRED_RELEASE_EXES):
-        return "legacy"
     raise PublishError(
-        "Full-релиз не содержит полный единый или прежний набор EXE."
+        "Full-релиз не содержит полный единый набор EXE."
     )
 
 

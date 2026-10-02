@@ -772,13 +772,6 @@ def _draw_graphs_pdf_background(canvas, doc) -> None:
         canvas.restoreState()
 
 
-def _configure_plot_style(chart_colors: Sequence[str]):
-    try:
-        configure_chart_style(chart_colors)
-    except Exception as exc:
-        raise RuntimeError("Библиотеки pandas или matplotlib не установлены.") from exc
-
-
 def _load_generators():
     try:
         import pandas  # noqa: F401

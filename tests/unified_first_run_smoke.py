@@ -89,6 +89,18 @@ def main() -> None:
     wait_until(app, lambda: errors or first.stack.currentWidget() is first.welcome)
     if errors:
         raise RuntimeError(f"First-run failed: {errors}")
+    if first.root:
+        raise RuntimeError("First-run chooser unexpectedly required a central database")
+    if not all(
+        first.welcome.role_buttons[role].isEnabled()
+        for role in ("operblock_planned", "operblock_emergency")
+    ):
+        raise RuntimeError("First-run chooser did not keep local operblock available")
+    # A central role requests configuration only when the user selects it.
+    first.enter_role("doctor")
+    wait_until(app, lambda: errors or bool(first.root))
+    if errors:
+        raise RuntimeError(f"First-run central configuration failed: {errors}")
     if first.root != str(selected):
         raise RuntimeError("First-run callback did not publish the created root")
     # Enter on the SAME instance with real background initialization.
@@ -149,15 +161,15 @@ def main() -> None:
     pages = []
     reopened.stack.currentChanged.connect(lambda _: pages.append((reopened.stack.currentWidget(), reopened.isVisible())))
     reopened.request_application_exit(confirmed=True)
-    if not reopened.isVisible() or reopened.entry_chrome.title_bar.isHidden():
-        raise RuntimeError("Application exit must keep the close button visible until resources drain")
+    if reopened.isVisible():
+        raise RuntimeError("Application exit must hide the window before resources drain")
     if reopened.stack.isEnabled():
         raise RuntimeError("Application exit must disable clinical editing while resources drain")
     wait_until(app, lambda: reopened.container is None and reopened._closing, timeout=60.0)
     if reopened.lease is not None:
         raise RuntimeError("Application exit retained the database lease")
-    if any(page is reopened.loading and visible for page, visible in pages):
-        raise RuntimeError("Exit displayed the startup page")
+    if reopened.isVisible() or any(visible for page, visible in pages):
+        raise RuntimeError("Exit displayed a page while draining resources")
     dispose(reopened, app)
     os.environ.pop("REMCARD_BAZA_DIR", None)
     attached = UnifiedWindow()

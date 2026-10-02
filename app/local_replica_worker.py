@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
+from rem_card.app.db_wait_diagnostics import observe, observed_call, mark_stage, current_operation, bind_connection
 from rem_card.app.sqlite_shared import FileWriteLock, configure_connection, describe_sqlite_lock_holder
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
@@ -196,6 +197,8 @@ def _sync_snapshot(
     _remove_with_sidecars(temp_db_path)
     try:
         central_conn = _open_central_readonly(central_db_path)
+        bind_connection(central_conn)
+        mark_stage("replica_state_read")
         central_state = _read_database_state(central_conn)
         if _states_match(central_state, expected_state):
             return {
@@ -213,6 +216,8 @@ def _sync_snapshot(
             raise LocalReplicaWriterBusy()
 
         central_conn = _open_central_readonly(central_db_path)
+        bind_connection(central_conn)
+        mark_stage("replica_state_read")
         central_state = _read_database_state(central_conn)
         if _states_match(central_state, expected_state):
             return {
@@ -227,12 +232,14 @@ def _sync_snapshot(
             if writer_lock_path and os.path.exists(writer_lock_path):
                 raise LocalReplicaWriterBusy()
 
+        mark_stage("replica_backup")
         central_conn.backup(
             temp_conn,
             pages=LOCAL_REPLICA_BACKUP_PAGES,
             progress=yield_to_writer,
             sleep=0.01,
         )
+        mark_stage("replica_validate")
         checkpoint_row = temp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if checkpoint_row and int(checkpoint_row[0] or 0) not in (0,):
             raise sqlite3.OperationalError(
@@ -276,6 +283,13 @@ def _sync_snapshot_with_network_lease(
     message: dict[str, Any],
     *,
     progress_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
+    with observe("replica_snapshot", resource=message.get("central_db_path"), stage="replica_lease_wait"):
+        return _sync_snapshot_with_network_lease_observed(message, progress_callback=progress_callback)
+
+
+def _sync_snapshot_with_network_lease_observed(
+    message: dict[str, Any], *, progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Run every potentially blocking network operation inside the worker.
 
@@ -568,6 +582,7 @@ class LocalReplicaWorkerClient:
                     worker_pid, source, exc_info=True,
                 )
 
+    @observed_call("replica_worker_mutex_wait")
     def sync(
         self,
         *,
@@ -584,8 +599,13 @@ class LocalReplicaWorkerClient:
         deadline = time.monotonic() + effective_timeout
         with self._mutex:
             last_stage = "worker_start"
+            mark_stage(last_stage)
             try:
                 self._ensure_started()
+                diagnostic = current_operation()
+                if diagnostic is not None:
+                    diagnostic.worker(self._process.pid)
+                mark_stage("replica_worker_wait")
                 self._pipe.send(
                     {
                         "cmd": "sync",
@@ -619,6 +639,7 @@ class LocalReplicaWorkerClient:
                     progress = str(response.get("progress") or "")
                     if progress:
                         last_stage = progress
+                        mark_stage(f"replica_{progress}")
                         continue
                     break
             except LocalReplicaWorkerTimeout:

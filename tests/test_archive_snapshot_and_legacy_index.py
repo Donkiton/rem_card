@@ -306,7 +306,7 @@ def test_legacy_operblock_uses_local_technical_index_without_mutating_source(
     before_hash = _sha256(source_path)
     before_stat = source_path.stat()
 
-    from rem_card.services import operblock_service as operblock_service_module
+    from rem_card.services.operblock import archive_sources as operblock_archive_module
 
     original_connect = sqlite3.connect
     source_open_count = 0
@@ -318,7 +318,7 @@ def test_legacy_operblock_uses_local_technical_index_without_mutating_source(
             source_open_count += 1
         return original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(operblock_service_module.sqlite3, "connect", counted_connect)
+    monkeypatch.setattr(operblock_archive_module.sqlite3, "connect", counted_connect)
     total, rows = OperBlockService._fetch_archive_case_page_from_db(
         str(source_path),
         start_dt="2026-07-12 00:00:00",
@@ -446,17 +446,17 @@ def test_modern_operblock_period_preselector_uses_native_started_at_index(
         cache_dir,
     )
 
-    from rem_card.services import operblock_service as operblock_service_module
+    from rem_card.services.operblock import archive_sources as operblock_archive_module
 
     traced_statements: list[str] = []
-    original_configure = operblock_service_module.configure_connection
+    original_configure = operblock_archive_module.configure_connection
 
     def configure_with_trace(conn, *, readonly):
         original_configure(conn, readonly=readonly)
         conn.set_trace_callback(traced_statements.append)
 
     monkeypatch.setattr(
-        operblock_service_module,
+        operblock_archive_module,
         "configure_connection",
         configure_with_trace,
     )

@@ -77,6 +77,7 @@ class RemCardLayoutManager(QWidget):
         self._events_patient_context = None
         self._events_shift_context = None
         self._current_status_dto = None
+        self._current_status_admission_id = None
         self._plan_card_mode = False
         
         # Единый таймер для стабилизации размеров (предотвращает вылеты)
@@ -1014,6 +1015,9 @@ class RemCardLayoutManager(QWidget):
 
     def set_current_status_dto(self, status_dto):
         self._current_status_dto = status_dto
+        # None is a valid loaded result for a newly admitted patient.
+        # Keep its owner so switching patients cannot reuse another status.
+        self._current_status_admission_id = self.current_admission_id
         if hasattr(self, "sector_4b"):
             self.sector_4b.update_status(status_dto)
 

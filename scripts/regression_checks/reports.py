@@ -586,8 +586,12 @@ def _check_report_night_admission_shift_dates(temp_root: str) -> tuple[bool, str
     from datetime import datetime
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
+    from rem_card.services.remcard_facade import RemCardService
     from rem_card.services.shift_service import ShiftService
     from rem_card.ui.rem_card_sectors.sector_print import DataCollectorWorker
 

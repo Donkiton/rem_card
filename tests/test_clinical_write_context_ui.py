@@ -134,7 +134,7 @@ def test_vital_undo_is_disabled_for_foreign_rows(widget):
 
 
 def test_operblock_queued_writer_retains_original_operation_context():
-    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockVitalsServiceAdapter
+    from rem_card.ui.operblock_view.operblock_vitals_adapter import OperBlockVitalsServiceAdapter
     from rem_card.data.dto.remcard_dto import VitalDTO
     calls = []
     def add(dto, **kwargs):
@@ -153,7 +153,7 @@ def test_order_panels_send_displayed_version_to_captured_service(panel):
     from rem_card.ui.shared.components.current_orders_widget import CurrentNurseOrdersWidget
     from rem_card.ui.rem_card_sectors.sector_w1a import SectorW1a
     requests, written = [], []
-    service = SimpleNamespace(set_nurse_status=lambda *args, **kwargs: written.append((args, kwargs)))
+    service = SimpleNamespace(set_nurse_order_mark=lambda *args, **kwargs: written.append((args, kwargs)))
     harness = SimpleNamespace(
         _display_enabled=True, _pending_marks={}, _all_data=[{"id": 17, "version": 7, "expected_revision": 7}], service=service,
         _is_lab_order_card_id=lambda _: False, _get_pending_mark=lambda _: None,

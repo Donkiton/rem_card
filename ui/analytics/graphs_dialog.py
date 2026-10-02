@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor
 
 from rem_card.services.analytics.graphs_service import build_graphs_html, build_graphs_pdf
 from rem_card.ui.analytics.chart_renderer import fit_chart_images_to_width
-from rem_card.ui.analytics.graphs_catalog import GRAPH_GROUPS, TOP_GRAPHS
+from rem_card.services.analytics.graph_catalog import GRAPH_GROUPS, TOP_GRAPHS
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
 from rem_card.ui.shared.themed_html import set_themed_html
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin

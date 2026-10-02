@@ -1171,7 +1171,7 @@ def _check_doctor_create_card_enqueue_error_refreshes(temp_root: str) -> tuple[b
 
     from PySide6.QtWidgets import QApplication
 
-    from rem_card.ui.doctor_view import doctor_remcard_widget as doctor_module
+    from rem_card.ui.doctor_view.card_features import card_actions as doctor_module
     from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
 
     _ = temp_root
@@ -1528,7 +1528,7 @@ def _assert_orders_same_cell_fast_click_guard(
 ) -> tuple[bool, str]:
     import time
 
-    from rem_card.ui.doctor_view.orders_widget import ORDERS_CELL_REPEAT_GUARD_SEC
+    from rem_card.ui.doctor_view.order_features.constants import ORDERS_CELL_REPEAT_GUARD_SEC
 
     class DeferredOrdersService(base_service_cls):
         def __init__(self):

@@ -23,11 +23,7 @@ import time
 def _write_fake_update_package(path: str, version: str = "9.9.9") -> None:
     os.makedirs(os.path.join(path, "_internal"), exist_ok=True)
     for exe_name in (
-        "RemCardDoctor.exe",
-        "RemCardNurse.exe",
-        "RemCardOperBlockEmergency.exe",
-        "RemCardOperBlockPlanned.exe",
-        "RemCardPathSetup.exe",
+        "RemCard.exe",
         "RemCardUpdater.exe",
     ):
         Path(path, exe_name).write_text("stub", encoding="utf-8")
@@ -44,13 +40,13 @@ def _write_fake_update_package(path: str, version: str = "9.9.9") -> None:
 def _check_full_without_package_type_still_detected(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.update_checker import find_available_updates
 
-    update_root = os.path.join(temp_root, "UPD_full_legacy")
+    update_root = os.path.join(temp_root, "UPD_full_without_package_type")
     _write_fake_update_package(update_root, version="1.0.1")
     candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
     if len(candidates) != 1:
-        return False, f"legacy full package was not detected: {candidates}"
+        return False, f"full package without package_type was not detected: {candidates}"
     if candidates[0].package_type != "full":
-        return False, f"legacy full package type mismatch: {candidates[0].package_type}"
+        return False, f"full package type mismatch: {candidates[0].package_type}"
     return True, "ok"
 
 
@@ -59,16 +55,16 @@ def _check_full_update_manifest_schema_versions_are_fail_closed(temp_root: str) 
     from rem_card.app.full_update_manifest import build_file_inventory
     from rem_card.app.update_checker import find_available_updates
 
-    legacy_root = Path(temp_root, "UPD_schema_legacy")
-    _write_fake_update_package(str(legacy_root), version="2.0.0")
-    legacy_manifest = json.loads((legacy_root / "manifest.json").read_text(encoding="utf-8"))
-    legacy_manifest.pop("schema_version", None)
-    (legacy_root / "manifest.json").write_text(json.dumps(legacy_manifest), encoding="utf-8")
-    if len(find_available_updates(current_version="1.0.0", update_root=str(legacy_root))) != 1:
-        return False, "legacy schema1 manifest without schema_version was rejected"
-    updater_main._validate_source(str(legacy_root))
-    if updater_main._load_direct_release(str(legacy_root)) is None:
-        return False, "direct updater rejected legacy schema1"
+    schema1_root = Path(temp_root, "UPD_schema_1")
+    _write_fake_update_package(str(schema1_root), version="2.0.0")
+    schema1_manifest = json.loads((schema1_root / "manifest.json").read_text(encoding="utf-8"))
+    schema1_manifest.pop("schema_version", None)
+    (schema1_root / "manifest.json").write_text(json.dumps(schema1_manifest), encoding="utf-8")
+    if len(find_available_updates(current_version="1.0.0", update_root=str(schema1_root))) != 1:
+        return False, "schema1 manifest without schema_version was rejected"
+    updater_main._validate_source(str(schema1_root))
+    if updater_main._load_direct_release(str(schema1_root)) is None:
+        return False, "direct updater rejected schema1"
 
     schema2_root = Path(temp_root, "UPD_schema_2")
     _write_fake_update_package(str(schema2_root), version="2.0.0")
@@ -347,7 +343,7 @@ def _check_full_update_inventory_rejects_tamper_missing_and_extra(temp_root: str
     payload = package / "_internal" / "payload.bin"
     payload.parent.mkdir(parents=True, exist_ok=True)
     payload.write_bytes(b"original")
-    (package / "RemCardDoctor.exe").write_bytes(b"doctor")
+    (package / "RemCard.exe").write_bytes(b"application")
     (package / "manifest.json").write_text("{}\n", encoding="utf-8")
     (package / "ready.ok").write_text("ok\n", encoding="utf-8")
 
@@ -1139,17 +1135,17 @@ def _check_updater_target_uses_executable_dir(temp_root: str) -> tuple[bool, str
         return False, f"launcher source mismatch: {args[source_index]}"
     if "--runner-dir" in args:
         return False, "full updater unexpectedly uses the removed patch runner"
-    legacy_args = parse_updater_args(
+    compatibility_args = parse_updater_args(
         [
             "--source", update_root,
             "--target", target_dir,
             "--baza-dir", os.path.dirname(update_root),
-            "--lock", os.path.join(temp_root, "legacy.lock"),
+            "--lock", os.path.join(temp_root, "compatibility.lock"),
             "--current-version", "1.0.0",
         ]
     )
-    if legacy_args.current_version != "1.0.0":
-        return False, "legacy --current-version compatibility argument was removed"
+    if compatibility_args.current_version != "1.0.0":
+        return False, "--current-version compatibility argument was removed"
     return True, "ok"
 
 
@@ -1478,7 +1474,8 @@ def _check_updater_releases_lock_before_restart(temp_root: str) -> tuple[bool, s
     source_dir.mkdir(parents=True, exist_ok=True)
     target_dir.mkdir(parents=True, exist_ok=True)
     baza_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / "RemCardDoctor.exe").write_bytes(b"restart target")
+    restart_path = target_dir / "RemCard.exe"
+    restart_path.write_bytes(b"restart target")
 
     order: list[str] = []
     state = {"released": False, "completed": False}
@@ -1500,9 +1497,12 @@ def _check_updater_releases_lock_before_restart(temp_root: str) -> tuple[bool, s
         order.append("replace")
         return "", ""
 
-    def fake_restart(_args, **_kwargs):
+    restart_commands: list[list[str]] = []
+
+    def fake_restart(restart_args, **_kwargs):
         if not state["released"]:
             raise AssertionError("restart started while update lock was still active")
+        restart_commands.append([str(value) for value in restart_args])
         order.append("restart")
 
     originals = {
@@ -1538,7 +1538,7 @@ def _check_updater_releases_lock_before_restart(temp_root: str) -> tuple[bool, s
             starting_lock="",
             local_starting_lock="",
             parent_pid="0",
-            restart_exe="RemCardDoctor.exe",
+            restart_exe="RemCard.exe",
         )
         worker = updater_main.UpdateWorker(args)
         worker.failed.connect(failures.append)
@@ -1556,6 +1556,8 @@ def _check_updater_releases_lock_before_restart(temp_root: str) -> tuple[bool, s
         return False, "worker released the lock without a completed replacement marker"
     if order != ["acquire", "replace", "release", "restart"]:
         return False, f"update lock/restart order is unsafe: {order}"
+    if restart_commands != [[str(restart_path)]]:
+        return False, f"updater restarted an unexpected executable: {restart_commands}"
     return True, "ok"
 
 
@@ -1568,7 +1570,8 @@ def _check_restart_failure_after_success_is_warning(temp_root: str) -> tuple[boo
     source_dir.mkdir(parents=True, exist_ok=True)
     target_dir.mkdir(parents=True, exist_ok=True)
     baza_dir.mkdir(parents=True, exist_ok=True)
-    (target_dir / "RemCardDoctor.exe").write_bytes(b"installed new executable")
+    restart_path = target_dir / "RemCard.exe"
+    restart_path.write_bytes(b"installed new executable")
 
     order: list[str] = []
     state = {"released": False, "completed": False}
@@ -1590,7 +1593,10 @@ def _check_restart_failure_after_success_is_warning(temp_root: str) -> tuple[boo
         order.append("replace")
         return "", ""
 
-    def failed_restart(_args, **_kwargs):
+    restart_commands: list[list[str]] = []
+
+    def failed_restart(restart_args, **_kwargs):
+        restart_commands.append([str(value) for value in restart_args])
         order.append("restart")
         raise OSError("simulated automatic restart failure")
 
@@ -1629,7 +1635,7 @@ def _check_restart_failure_after_success_is_warning(temp_root: str) -> tuple[boo
             starting_lock="",
             local_starting_lock="",
             parent_pid="0",
-            restart_exe="RemCardDoctor.exe",
+            restart_exe="RemCard.exe",
         )
         worker = updater_main.UpdateWorker(args)
         worker.failed.connect(failures.append)
@@ -1648,6 +1654,8 @@ def _check_restart_failure_after_success_is_warning(temp_root: str) -> tuple[boo
         return False, f"restart failure warning is missing or unclear: {warnings}"
     if not state["completed"] or order != ["acquire", "replace", "release", "restart"]:
         return False, f"restart failure changed the safe update order: order={order}; state={state}"
+    if restart_commands != [[str(restart_path)]]:
+        return False, f"restart failure used an unexpected executable: {restart_commands}"
     if not any("update restart failed" in message for message in logs):
         return False, f"restart failure was not logged separately: {logs}"
     if any("update failed" in message for message in logs):

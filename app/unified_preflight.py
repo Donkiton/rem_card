@@ -6,14 +6,16 @@ That lease is the maintenance admission proof and replaces the legacy
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import threading
 from types import SimpleNamespace
 from typing import Any, Callable
+import uuid
 
 
 _STARTUP_REQUEST_ATTRIBUTE = "_remcard_unified_startup_request"
@@ -51,6 +53,7 @@ class LocalOnlyRuntimeAdmission:
     local_root: str
     runtime_context: Any
     local_lease: Any
+    fresh_runtime_required_after_drain: bool = False
 
     @property
     def mode(self) -> str:
@@ -58,6 +61,7 @@ class LocalOnlyRuntimeAdmission:
 
     @property
     def runtime_state(self) -> dict[str, Any]:
+        emergency_runtime = self.mode == "emergency"
         return {
             "active": True,
             "mode": self.mode,
@@ -65,11 +69,15 @@ class LocalOnlyRuntimeAdmission:
             "central_root": self.central_root,
             "local_root": self.local_root,
             "central_access_allowed": False,
-            "central_reacquire_required": True,
+            "central_reacquire_required": emergency_runtime,
             "restore_probe_enabled": False,
             "pending_merge_enabled": False,
-            "process_restart_required_before_central": True,
-            "fresh_runtime_required_after_drain": True,
+            "process_restart_required_before_central": bool(
+                emergency_runtime or self.fresh_runtime_required_after_drain
+            ),
+            "fresh_runtime_required_after_drain": bool(
+                emergency_runtime or self.fresh_runtime_required_after_drain
+            ),
         }
 
 
@@ -511,6 +519,181 @@ def _acquire_local_only_lease(local_root: str, role: str):
     return lease
 
 
+def _default_local_operblock_recovery_confirmation(message: str, backup_path: str) -> bool:
+    from datetime import datetime
+    from PySide6.QtWidgets import QMessageBox
+
+    try:
+        backup_time = datetime.fromtimestamp(os.path.getmtime(backup_path)).strftime("%d.%m.%Y %H:%M:%S")
+    except OSError:
+        backup_time = "не удалось определить"
+    return QMessageBox.question(
+        None,
+        "Восстановление локальной базы оперблока",
+        f"{message}\n\nРезервная копия от {backup_time}:\n{backup_path}"
+        "\n\nИзменения после этого времени могут отсутствовать в копии. Восстановить локальную базу?",
+        QMessageBox.Yes | QMessageBox.No,
+        QMessageBox.Yes,
+    ) == QMessageBox.Yes
+
+
+def _recover_local_operblock_database_if_needed(
+    local_root: str,
+    *,
+    confirm_recovery: Callable[[str, str], bool] | None = None,
+) -> str | None:
+    """Restore a corrupt closed local DB from a validated SQLite backup."""
+
+    database_path = Path(local_root) / "active" / "operblock_local.db"
+    if not database_path.is_file():
+        return None
+    try:
+        with closing(sqlite3.connect(
+            database_path.absolute().as_uri() + "?mode=ro", uri=True, timeout=1.0,
+        )) as connection:
+            rows = connection.execute("PRAGMA integrity_check").fetchall()
+        if rows == [("ok",)]:
+            return None
+    except sqlite3.Error:
+        rows = []
+
+    from rem_card.app.operblock_local_storage import latest_valid_local_backup
+
+    backup_path = latest_valid_local_backup(local_root)
+    if not backup_path:
+        raise LocalOnlyStartupError(
+            "Локальная база оперблока повреждена. Исправная резервная копия не найдена; "
+            "исходный файл сохранён без изменений.",
+            status="local_operblock_corrupt_no_backup",
+        )
+    ask = confirm_recovery or _default_local_operblock_recovery_confirmation
+    if not ask(
+        "Проверка целостности локальной базы оперблока завершилась ошибкой. "
+        "Повреждённый файл будет сохранён в карантине.",
+        backup_path,
+    ):
+        raise LocalOnlyStartupCancelled(
+            "Восстановление локальной базы оперблока отменено.",
+            status="local_operblock_recovery_cancelled",
+        )
+
+    quarantine_dir = Path(local_root) / "quarantine"
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for source in (
+            database_path,
+            Path(str(database_path) + "-wal"),
+            Path(str(database_path) + "-shm"),
+            Path(str(database_path) + "-journal"),
+        ):
+            if not source.exists():
+                continue
+            quarantined = quarantine_dir / f"{source.name}.corrupt.{token}"
+            os.replace(source, quarantined)
+            moved.append((source, quarantined))
+
+        from rem_card.app.sqlite_shared import backup_connection
+
+        with closing(sqlite3.connect(
+            Path(backup_path).absolute().as_uri() + "?mode=ro", uri=True, timeout=1.0,
+        )) as source_connection:
+            backup_connection(
+                source_connection,
+                str(database_path),
+                validate=True,
+                invalid_dir=str(quarantine_dir),
+                lock_wait_sec=1.0,
+                source="operblock_local_recovery",
+            )
+    except BaseException as exc:
+        if database_path.exists():
+            failed_target = quarantine_dir / f"{database_path.name}.failed_recovery.{token}"
+            os.replace(database_path, failed_target)
+        for original, quarantined in reversed(moved):
+            if quarantined.exists() and not original.exists():
+                os.replace(quarantined, original)
+        raise LocalOnlyStartupError(
+            f"Не удалось восстановить локальную базу оперблока: {exc}",
+            status="local_operblock_recovery_failed",
+        ) from exc
+    return str(database_path)
+
+
+def prepare_local_operblock_runtime_context(
+    *,
+    role: str,
+    central_root: str = "",
+    confirm_recovery: Callable[[str, str], bool] | None = None,
+) -> LocalOnlyRuntimeAdmission:
+    """Prepare the per-workstation operblock runtime without central I/O.
+
+    Planned and emergency operblock are permanently local.  The configured
+    central root is retained only as inert destination identity for the shell's
+    separate completed-case delivery worker.  No central path is opened here.
+    """
+
+    role_key = str(role or "").strip().casefold()
+    if role_key not in _OPERBLOCK_ROLES:
+        raise LocalOnlyStartupError(
+            "Локальная база оперблока не соответствует выбранной роли.",
+            status="local_runtime_role_mismatch",
+        )
+
+    loaded_roots_before = _loaded_static_baza_roots()
+    from rem_card.app.operblock_offline_store import (
+        get_operblock_offline_root,
+        start_or_resume_operblock_offline_session,
+    )
+
+    local_root = _require_local_fixed_root(get_operblock_offline_root())
+    central_text = str(central_root or "").strip()
+    central_identity = _normalized_path(central_text) if central_text else ""
+    if central_identity and _same_path(local_root, central_identity):
+        raise LocalOnlyStartupError(
+            "Локальный каталог оперблока совпадает с основной базой.",
+            status="local_root_matches_central",
+        )
+
+    # If no path module exists yet, bootstrap must temporarily see the local
+    # root so legacy import-time fallbacks can be created.  A later central
+    # configuration then needs one clean restart.  If doctor/nurse imports are
+    # already bound to central, the explicit local context is sufficient and
+    # those bindings must remain untouched.
+    fresh_runtime_required = not bool(loaded_roots_before)
+    os.makedirs(local_root, exist_ok=True)
+    lease = _acquire_local_only_lease(local_root, role_key)
+    try:
+        _recover_local_operblock_database_if_needed(
+            local_root,
+            confirm_recovery=confirm_recovery,
+        )
+        session = start_or_resume_operblock_offline_session(
+            reason="unified_per_workstation_local",
+            network_db_path=None,
+            root=local_root,
+        )
+        runtime_context = session.runtime_context
+        _validate_local_runtime_context(
+            role=role_key,
+            runtime_context=runtime_context,
+            local_root=local_root,
+        )
+    except BaseException:
+        lease.release()
+        raise
+
+    return LocalOnlyRuntimeAdmission(
+        role=role_key,
+        central_root=central_identity,
+        local_root=local_root,
+        runtime_context=runtime_context,
+        local_lease=lease,
+        fresh_runtime_required_after_drain=fresh_runtime_required,
+    )
+
+
 def prepare_local_only_runtime_context(
     *,
     role: str,
@@ -655,10 +838,14 @@ def configure_local_only_environment(admission: LocalOnlyRuntimeAdmission) -> di
     values = {
         LOCAL_ONLY_ENV: "1",
         "REMCARD_UI_ROLE": admission.role,
-        "REMCARD_BAZA_DIR": admission.local_root,
         "REMCARD_LOCAL_FIRST_SYNC": "0",
         "REMCARD_LOCAL_OUTBOX_SYNC": "0",
     }
+    # Preserve central bindings when this process already admitted a network
+    # role.  A pristine first-install process needs the temporary fallback only
+    # until explicit local bootstrap has finished.
+    if admission.mode != "opblock_offline" or not _loaded_static_baza_roots():
+        values["REMCARD_BAZA_DIR"] = admission.local_root
     os.environ.update(values)
     return values
 
@@ -771,7 +958,8 @@ def bootstrap_local_only(
         runtime_context=admission.runtime_context,
         local_root=admission.local_root,
     )
-    require_fresh_local_only_import_state(role=role_key, local_root=admission.local_root)
+    if admission.mode != "opblock_offline":
+        require_fresh_local_only_import_state(role=role_key, local_root=admission.local_root)
     state = admission.runtime_state
     configure_local_only_environment(admission)
     _set_shell_local_only_state(shell, state)
@@ -810,6 +998,7 @@ __all__ = [
     "bootstrap_local_only",
     "local_only_reconnect_advice",
     "prepare_admitted_runtime_context",
+    "prepare_local_operblock_runtime_context",
     "prepare_local_only_runtime_context",
     "require_fresh_local_only_import_state",
     "take_emergency_role_after_chooser_ready",

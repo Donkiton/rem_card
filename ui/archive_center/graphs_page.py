@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from rem_card.app.paths import REPORT_DIR
 from rem_card.services.analytics.graphs_service import build_graphs_html, build_graphs_pdf, build_graphs_snapshot
 from rem_card.ui.analytics.chart_renderer import fit_chart_images_to_width
-from rem_card.ui.analytics.graphs_catalog import GRAPH_GROUPS, TOP_GRAPHS
+from rem_card.services.analytics.graph_catalog import GRAPH_GROUPS, TOP_GRAPHS
 from rem_card.ui.shared.analytics_integration import (
     get_analytics_base_manager,
     resolve_readonly_analytics_manager,

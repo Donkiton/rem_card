@@ -36,6 +36,7 @@ STYLE_ARCHIVE_MODE_BUTTON = STYLE_SMALL_NEUTRAL_BUTTON + """
 class ArchiveWidget(QWidget):
     patient_selected = Signal(object) # передает PatientDTO
     operblock_case_selected = Signal(object) # передает dict с operation_case_id
+    operblock_edit_requested = Signal(object)
     edit_requested = Signal(object) # передает PatientDTO
     delete_requested = Signal(object) # передает PatientDTO
     back_requested = Signal()
@@ -483,8 +484,27 @@ class ArchiveWidget(QWidget):
                 return
             self.patient_selected.emit(patient)
 
+    def _is_verified_local_operblock_case(self, case) -> bool:
+        """A transferred local row is view-only; the central copy remains editable."""
+        if not isinstance(case, dict):
+            return False
+        db = getattr(self.operblock_service, "db", None)
+        mode = str(getattr(getattr(db, "runtime_context", None), "mode", "") or "")
+        return mode == "opblock_offline" and (
+            str(case.get("migration_status") or "").strip().lower() == "verified"
+            or bool(case.get("migrated_at"))
+        )
+
     def on_edit_clicked(self):
         if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            case = self._patient_from_row(self.table.currentRow())
+            if (
+                self.allow_edit and isinstance(case, dict)
+                and not case.get("is_external_archive")
+                and not self._is_verified_local_operblock_case(case)
+                and str(case.get("status") or "") == "closed"
+            ):
+                self.operblock_edit_requested.emit(dict(case))
             return
         if not self.allow_edit:
             return
@@ -865,7 +885,11 @@ class ArchiveWidget(QWidget):
             self.btn_report_stats.setEnabled(self.operblock_service is not None and not self._delete_pending and has_period_data)
             self.btn_graphs.setEnabled(False)
             self.btn_open.setEnabled(has_selected_case and not self._delete_pending)
-            self.btn_edit.setEnabled(False)
+            self.btn_edit.setEnabled(
+                self.allow_edit and has_selected_case and not selected_external
+                and not self._is_verified_local_operblock_case(patient)
+                and str(patient.get("status") or "") == "closed" and not self._delete_pending
+            )
             self.btn_delete_last.setEnabled(has_selected_case and not selected_external and not self._delete_pending)
             self.btn_delete.setEnabled(self.operblock_service is not None and has_current_closed_cases and not self._delete_pending)
             return

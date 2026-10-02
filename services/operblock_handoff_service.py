@@ -21,6 +21,310 @@ HANDOFF_COMPLETED_NON_RAO = "completed_non_rao"
 HANDOFF_CANCELLED = "cancelled"
 
 
+def _handoff_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _table_exists_in_db(db_manager, table_name: str) -> bool:
+    try:
+        return bool(db_manager.fetch_one_remcard(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table_name,),
+        ))
+    except Exception:
+        return False
+
+
+class OperBlockLocalRaoHandoffService:
+    """Doctor-side actions for invitations created after a local OpBlock export.
+
+    There is intentionally no background queue claim here.  A doctor explicitly
+    chooses a free bed, an existing RAO admission, or durable dismissal.
+    """
+
+    _TABLE = "operblock_rao_handoff_invitations"
+    _WINDOW = timedelta(minutes=30)
+    _SNOOZE = timedelta(minutes=15)
+
+    def __init__(self, db_manager):
+        self.db = db_manager
+
+    def available(self) -> bool:
+        return _table_exists_in_db(self.db, self._TABLE)
+
+    def list_pending(self, *, include_snoozed: bool = False) -> list[dict[str, Any]]:
+        if not self.available():
+            return []
+        where = "status = 'pending'"
+        params: tuple[Any, ...] = ()
+        if not include_snoozed:
+            where += " AND (notification_snoozed_until IS NULL OR DATETIME(notification_snoozed_until) <= DATETIME('now', 'localtime'))"
+        # Stale imported cases remain in the OperBlock archive but must never
+        # surface as a doctor admission invitation after their clinical window.
+        where += " AND DATETIME(transfer_datetime) >= DATETIME('now', 'localtime', '-30 minutes')"
+        rows = self.db.fetch_all_remcard(
+            f"""
+            SELECT * FROM {self._TABLE}
+            WHERE {where}
+            ORDER BY DATETIME(transfer_datetime) ASC, id ASC
+            """,
+            params,
+        )
+        result = []
+        for row in rows or []:
+            data = dict(row)
+            data["payload"] = _json_dict(data.pop("payload_json", None))
+            result.append(data)
+        return result
+
+    def list_free_beds(self) -> list[int]:
+        rows = self.db.fetch_all_remcard(
+            """
+            SELECT bed_number FROM beds
+            WHERE status = 'FREE' AND current_admission_id IS NULL
+            ORDER BY CAST(bed_number AS INTEGER), bed_number
+            """
+        )
+        return [int(row["bed_number"]) for row in rows or []]
+
+    def list_active_admissions(self) -> list[dict[str, Any]]:
+        rows = self.db.fetch_all_remcard(
+            """
+            SELECT a.id, a.bed_number, a.history_number, p.full_name
+            FROM admissions a
+            JOIN patients p ON p.id = a.patient_id
+            WHERE COALESCE(a.is_active, 1) = 1
+            ORDER BY CAST(a.bed_number AS INTEGER), a.id
+            """
+        )
+        return [dict(row) for row in rows or []]
+
+    def mark_seen(self, invitation_id: int, *, defer: bool = True) -> bool:
+        """Persist a closed notification as pending-but-snoozed, never rejected."""
+        if not self.available():
+            return False
+        now = datetime.now().replace(microsecond=0)
+        snooze = (now + self._SNOOZE).isoformat(timespec="seconds") if defer else None
+
+        def operation(cursor: sqlite3.Cursor):
+            cursor.execute(
+                f"""
+                UPDATE {self._TABLE}
+                SET notification_seen_at = ?, notification_snoozed_until = ?,
+                    updated_at = ?, revision = COALESCE(revision, 0) + 1
+                WHERE id = ? AND status = 'pending'
+                """,
+                (now.isoformat(timespec="seconds"), snooze, now.isoformat(timespec="seconds"), int(invitation_id)),
+            )
+            return bool(cursor.rowcount)
+        return bool(self.db.run_write_operation(operation, source="operblock_local_rao_handoff_seen"))
+
+    def dismiss(self, invitation_id: int, *, actor: str = "doctor") -> bool:
+        if not self.available():
+            return False
+        now_text = datetime.now().replace(microsecond=0).isoformat(timespec="seconds")
+
+        def operation(cursor: sqlite3.Cursor):
+            cursor.execute(
+                f"""
+                UPDATE {self._TABLE}
+                SET status = 'dismissed', dismissed_at = ?, dismissed_by = ?,
+                    notification_snoozed_until = NULL, updated_at = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ? AND status = 'pending'
+                """,
+                (now_text, str(actor or "doctor"), now_text, int(invitation_id)),
+            )
+            return bool(cursor.rowcount)
+        return bool(self.db.run_write_operation(operation, source="operblock_local_rao_handoff_dismiss"))
+
+    def accept_to_existing_admission(
+        self,
+        invitation_id: int,
+        admission_id: int,
+        *,
+        actor: str = "doctor",
+    ) -> dict[str, Any]:
+        return self._accept(int(invitation_id), existing_admission_id=int(admission_id), actor=actor)
+
+    def accept_to_bed(
+        self,
+        invitation_id: int,
+        bed_number: int,
+        *,
+        actor: str = "doctor",
+    ) -> dict[str, Any]:
+        return self._accept(int(invitation_id), bed_number=int(bed_number), actor=actor)
+
+    def _accept(
+        self,
+        invitation_id: int,
+        *,
+        actor: str,
+        existing_admission_id: int | None = None,
+        bed_number: int | None = None,
+    ) -> dict[str, Any]:
+        if not self.available():
+            raise RuntimeError("Приглашение из оперблока ещё не опубликовано в центральной базе.")
+        if (existing_admission_id is None) == (bed_number is None):
+            raise ValueError("Выберите койку или существующую карту РАО.")
+
+        def operation(cursor: sqlite3.Cursor):
+            row = cursor.execute(
+                f"SELECT * FROM {self._TABLE} WHERE id = ? LIMIT 1", (int(invitation_id),)
+            ).fetchone()
+            if not row:
+                raise RuntimeError("Приглашение уже недоступно.")
+            invitation = dict(row)
+            if str(invitation.get("status") or "") != "pending":
+                raise RuntimeError("Приглашение уже обработано другим врачом.")
+            now = datetime.now().replace(microsecond=0)
+            transfer_dt = _handoff_datetime(invitation.get("transfer_datetime"))
+            if transfer_dt is None or now - transfer_dt > self._WINDOW or transfer_dt > now + timedelta(minutes=5):
+                cursor.execute(
+                    f"""
+                    UPDATE {self._TABLE}
+                    SET status = 'expired', updated_at = ?, revision = COALESCE(revision, 0) + 1
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (now.isoformat(timespec="seconds"), int(invitation_id)),
+                )
+                # Return normally so the write transaction commits the durable
+                # expiry; the user-facing error is raised after that commit.
+                return {"expired": True}
+
+            accepted_admission_id: int
+            accepted_bed_number: int | None = None
+            if existing_admission_id is not None:
+                target = cursor.execute(
+                    "SELECT id FROM admissions WHERE id = ? LIMIT 1", (int(existing_admission_id),)
+                ).fetchone()
+                if not target:
+                    raise RuntimeError("Выбранная карта РАО больше не существует.")
+                accepted_admission_id = int(target["id"])
+            elif invitation.get("source_rao_admission_id") not in (None, ""):
+                # Return to an original RAO card is a link only: do not overwrite a
+                # newer movement or claim its bed.
+                source = cursor.execute(
+                    """
+                    SELECT a.id, a.history_number, p.full_name, p.birth_date,
+                           pse.status AS current_status
+                    FROM admissions a
+                    JOIN patients p ON p.id = a.patient_id
+                    JOIN patient_status_events pse
+                      ON pse.admission_id = a.id AND pse.end_time IS NULL
+                    WHERE a.id = ? LIMIT 1
+                    """,
+                    (int(invitation["source_rao_admission_id"]),),
+                ).fetchone()
+                if source:
+                    original = cursor.execute(
+                        """
+                        SELECT a.history_number, p.full_name, p.birth_date
+                        FROM admissions a JOIN patients p ON p.id = a.patient_id
+                        WHERE a.id = ? LIMIT 1
+                        """,
+                        (int(invitation["remote_admission_id"]),),
+                    ).fetchone()
+                    same_identity = bool(
+                        original
+                        and normalize_handoff_history_number(source["history_number"])
+                        == normalize_handoff_history_number(original["history_number"])
+                        and normalize_handoff_full_name(source["full_name"])
+                        == normalize_handoff_full_name(original["full_name"])
+                        and str(source["birth_date"] or "") == str(original["birth_date"] or "")
+                    )
+                    if not same_identity or str(source["current_status"] or "") != PatientStatus.OR.value:
+                        raise RuntimeError(
+                            "Исходная карта РАО уже изменилась; выберите существующую карту вручную."
+                        )
+                    accepted_admission_id = int(source["id"])
+                else:
+                    raise RuntimeError("Исходная карта РАО не найдена; выберите существующую карту вручную.")
+            else:
+                accepted_admission_id, accepted_bed_number = self._create_admission_on_free_bed(
+                    cursor, invitation, int(bed_number)
+                )
+
+            now_text = now.isoformat(timespec="seconds")
+            cursor.execute(
+                f"""
+                UPDATE {self._TABLE}
+                SET status = 'accepted', accepted_admission_id = ?, accepted_bed_number = ?,
+                    accepted_at = ?, accepted_by = ?, notification_snoozed_until = NULL,
+                    updated_at = ?, revision = COALESCE(revision, 0) + 1
+                WHERE id = ? AND status = 'pending'
+                """,
+                (accepted_admission_id, accepted_bed_number, now_text, str(actor or "doctor"), now_text, int(invitation_id)),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Приглашение уже обработано другим врачом.")
+            return {
+                "invitation_id": int(invitation_id),
+                "admission_id": accepted_admission_id,
+                "bed_number": accepted_bed_number,
+            }
+        result = dict(self.db.run_write_operation(operation, source="operblock_local_rao_handoff_accept"))
+        if result.get("expired"):
+            raise RuntimeError("С момента клинического перевода прошло более 30 минут; случай оставлен только в архиве.")
+        return result
+
+    @staticmethod
+    def _create_admission_on_free_bed(cursor: sqlite3.Cursor, invitation: dict[str, Any], bed_number: int) -> tuple[int, int]:
+        bed = cursor.execute(
+            "SELECT bed_number FROM beds WHERE bed_number = ? AND status = 'FREE' AND current_admission_id IS NULL",
+            (int(bed_number),),
+        ).fetchone()
+        if not bed:
+            raise RuntimeError("Выбранная койка уже занята. Обновите список коек.")
+        source = cursor.execute(
+            """
+            SELECT patient_id, history_number, patient_gender, diagnosis_code, diagnosis_text,
+                   department_profile
+            FROM admissions WHERE id = ? LIMIT 1
+            """,
+            (int(invitation["remote_admission_id"]),),
+        ).fetchone()
+        if not source:
+            raise RuntimeError("Импортированная операционная карта не найдена.")
+        now_text = datetime.now().replace(microsecond=0).isoformat(timespec="seconds")
+        cursor.execute(
+            """
+            INSERT INTO admissions (
+                patient_id, bed_number, history_number, admission_datetime,
+                patient_gender, diagnosis_code, diagnosis_text, department_profile,
+                source_department, recovery_bed_stay, created_at, updated_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Оперблок', 0, ?, ?, 1)
+            """,
+            (
+                int(source["patient_id"]), int(bed_number), str(source["history_number"] or ""),
+                str(invitation["transfer_datetime"]), source["patient_gender"],
+                source["diagnosis_code"], source["diagnosis_text"], source["department_profile"],
+                now_text, now_text,
+            ),
+        )
+        admission_id = int(cursor.lastrowid)
+        cursor.execute(
+            """
+            UPDATE beds SET status = 'OCCUPIED', current_admission_id = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE bed_number = ? AND status = 'FREE' AND current_admission_id IS NULL
+            """,
+            (admission_id, int(bed_number)),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("Выбранная койка уже занята. Обновите список коек.")
+        return admission_id, int(bed_number)
+
+
 def normalize_handoff_history_number(value: Any) -> str:
     text = re.sub(r"\s+", "", str(value or "").strip()).replace("\\", "/")
     return text.upper().replace("Ё", "Е")

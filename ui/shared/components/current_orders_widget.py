@@ -699,7 +699,7 @@ class CurrentNurseOrdersWidget(QWidget):
                 return
             version = int(row.get("version") or 0)
             service = self.service
-            operation = lambda aid=admin_id, m=mark: service.set_nurse_status(aid, m, expected_version=version)
+            operation = lambda aid=admin_id, m=mark: service.set_nurse_order_mark(aid, m, expected_version=version)
             description = f"nurse_order_panel_mark:{admin_id}"
 
         self._set_pending_mark(admin_id, mark)

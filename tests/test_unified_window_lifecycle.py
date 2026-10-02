@@ -35,6 +35,62 @@ def state(mode, generation, operation=None):
     return dict(state=mode, generation=generation, operation_id=operation, owner_token='token')
 
 
+@pytest.mark.parametrize('active,pending,expected', [(False, 0, False), (False, 2, True), (True, 0, True)])
+def test_opblock_scheduler_is_created_only_for_role_or_pending_queue(tmp_path, monkeypatch, active, pending, expected):
+    from unittest.mock import Mock
+    from rem_card.app import operblock_local_sync as sync, operblock_offline_store as store
+    (tmp_path / 'active').mkdir()
+    (tmp_path / 'active' / 'operblock_local.db').touch()
+    monkeypatch.setattr(store, 'get_operblock_offline_root', lambda: str(tmp_path))
+    monkeypatch.setattr(sync, 'completed_pending_count', lambda root: pending)
+    factory = Mock()
+    monkeypatch.setattr(sync, 'OperBlockLocalSyncScheduler', factory)
+    host = SimpleNamespace(_closing=False, _local_operblock=active, _leaving=False,
+                           _opblock_sync=None, root='test-central', _on_opblock_sync_status=lambda p: None)
+    UnifiedWindow._configure_opblock_sync(host)
+    assert factory.called == expected
+    if expected:
+        assert factory.call_args.kwargs['maintenance_enabled'] == active
+        host._leaving = True
+        host._opblock_sync_close_pending = False
+        UnifiedWindow._request_opblock_sync(host)
+        host._opblock_sync.set_maintenance_enabled.assert_called_with(False)
+
+
+@pytest.mark.parametrize('role', ['doctor', 'nurse'])
+def test_empty_opblock_background_cycle_does_not_resize_clinical_page(role):
+    from PySide6.QtWidgets import QMainWindow, QWidget, QStatusBar
+    app = QApplication.instance() or QApplication([])
+    window = QMainWindow()
+    window.role = role
+    window._pending_exit = False
+    window._maintenance_deadline = None
+    window._opblock_pending_delivery = 0
+    page = QWidget()
+    window.setCentralWidget(page)
+    window.resize(1000, 700)
+    window.show()
+    app.processEvents()
+    before = page.geometry()
+    try:
+        for payload in ({'state': 'sending', 'pending': 0, 'ok': True},
+                        {'state': 'maintenance', 'pending': 0, 'ok': True},
+                        {'state': 'idle', 'pending': 0, 'ok': True}):
+            UnifiedWindow._on_opblock_sync_status(window, payload)
+            app.processEvents()
+            assert page.geometry() == before
+            bar = window.findChild(QStatusBar)
+            assert bar is None or not bar.isVisible()
+        UnifiedWindow._on_opblock_sync_status(window, {'state': 'sending', 'pending': 2})
+        app.processEvents()
+        assert window.statusBar().isVisible()
+        assert '(2)' in window.statusBar().currentMessage()
+    finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
 def test_random_clicks_cancelled_admission_releases_before_next_role(shell, monkeypatch, tmp_path):
     shell.root = str(tmp_path)
     calls = []
@@ -197,8 +253,12 @@ def test_confirmed_application_exit_does_not_ask_to_return_to_roles(shell, monke
     assert calls == [True]
 
 
-def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monkeypatch):
+@pytest.mark.parametrize('exit_action', ['button', 'native_close'])
+def test_application_exit_hides_window_and_keeps_runtime_until_drain(shell, monkeypatch, exit_action):
     from PySide6.QtWidgets import QWidget
+    from PySide6.QtGui import QCloseEvent
+    from rem_card.ui.shared.custom_message_box import CustomMessageBox
+    monkeypatch.setattr(CustomMessageBox, 'question', lambda *a, **k: QMessageBox.Yes)
     data = SimpleNamespace(set_shutting_down=lambda: None)
     container = SimpleNamespace(data_service=data)
     role = QWidget()
@@ -209,17 +269,53 @@ def test_application_exit_keeps_close_button_and_runtime_until_drain(shell, monk
     shell.container, shell.role_window, shell.role = container, role, 'doctor'
     shell.show()
     pages = []
-    shell.stack.currentChanged.connect(lambda _: pages.append(shell.stack.currentWidget()))
+    shell.stack.currentChanged.connect(lambda _: pages.append((shell.stack.currentWidget(), shell.isVisible())))
     waits = []
     monkeypatch.setattr(shell, '_wait_before_drain', lambda: waits.append(True))
-    shell.request_application_exit(confirmed=True)
-    assert shell.isVisible()
+    if exit_action == 'button':
+        shell.request_application_exit()
+    else:
+        event = QCloseEvent()
+        shell.closeEvent(event)
+        assert not event.isAccepted()
+    assert not shell.isVisible()
     assert not shell.stack.isEnabled()
-    assert shell.stack.currentWidget() is shell.welcome
-    assert not shell.entry_chrome.title_bar.isHidden()
-    assert shell.loading not in pages
+    assert shell.stack.currentWidget() is role
+    assert pages == []
     assert shell.container is container and shell._shutdown is not None
     assert shell._leaving and waits == [True]
+    # Simulate a delayed update check after runtime disposal: neither phase
+    # may expose the role chooser, even for one currentChanged signal.
+    closed = []
+    monkeypatch.setattr(shell, 'close', lambda: closed.append(True))
+    shell._finish_drained()
+    shell.show_roles()
+    QApplication.processEvents()
+    assert closed == [True]
+    assert not shell.isVisible()
+    assert not any(visible for _, visible in pages)
+
+
+def test_application_exit_during_return_to_roles_cancels_transition(shell, monkeypatch):
+    from unittest.mock import Mock
+    shell._leaving = True
+    transition = Mock()
+    shell._transition = transition
+    shell.request_application_exit(confirmed=True)
+    transition.cancel.assert_called_once()
+    assert not shell.isVisible()
+    assert not shell.stack.isEnabled()
+
+
+def test_role_button_still_returns_to_chooser_after_drain(shell, monkeypatch):
+    shell.container = SimpleNamespace(data_service=SimpleNamespace(set_shutting_down=lambda: None))
+    monkeypatch.setattr(shell, '_wait_before_drain', lambda: None)
+    monkeypatch.setattr(shell, '_animate_page', lambda page, *args: shell.stack.setCurrentWidget(page))
+    monkeypatch.setattr(shell, 'refresh_access', lambda: None)
+    shell.request_role_exit(force=True)
+    shell._finish_drained()
+    assert not shell._pending_exit
+    assert shell.stack.currentWidget() is shell.welcome
 
 
 @pytest.mark.parametrize('index,result', [(0, QMessageBox.Yes), (1, QMessageBox.No)])
@@ -1045,7 +1141,7 @@ def test_network_unlock_error_finishes_exit_instead_of_trapping_close(shell, mon
     shell.enter_role('doctor')
 
 
-def test_hung_release_keeps_gui_responsive_and_second_cross_can_force(shell, monkeypatch):
+def test_hung_release_keeps_hidden_event_loop_and_exit_guard_active(shell, monkeypatch):
     import threading
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtTest import QTest
@@ -1075,9 +1171,11 @@ def test_hung_release_keeps_gui_responsive_and_second_cross_can_force(shell, mon
         button = next(b for b in shell.entry_chrome.title_bar.findChildren(_WindowButton) if b.kind == 'close')
         QTest.mouseClick(button, Qt.LeftButton)
         assert shell._pending_exit and guard.arms == ['shutdown']
-        assert shell.isVisible() and shell.lease is not None
-        QTest.mouseClick(button, Qt.LeftButton)
-        assert guard.forced == 1 and calls == ['release']
+        assert not shell.isVisible() and shell.lease is not None
+        assert guard.armed and calls == ['release']
+        heartbeats.clear()
+        QTimer.singleShot(0, lambda: heartbeats.append(True))
+        _wait_for(lambda: bool(heartbeats))
     finally:
         unblock.set()
         _wait_for(lambda: not shell._workers)

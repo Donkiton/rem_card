@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from rem_card.app.db_wait_diagnostics import observe, mark_stage
+from rem_card.app.db_wait_diagnostics import observe, mark_stage, mark_retry, current_context
 from rem_card.app.startup_diagnostics import measured
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.db_availability import DatabaseClosedError
@@ -117,6 +117,8 @@ def describe_sqlite_lock_holder(lock_path: str) -> dict[str, Any]:
             "holder_source": str(payload.get("source") or ""),
             "holder_created_at": _payload_created_at(payload),
             "holder_age_ms": _payload_age_ms(payload),
+            **{f"holder_{key}": payload.get(key) for key in
+               ("role", "thread_id", "session_id", "connection_id", "operation_id")},
         }
     )
     return base
@@ -129,6 +131,11 @@ def _lock_holder_metric_fields(holder: dict[str, Any] | None) -> dict[str, Any]:
         "lock_holder_host": data.get("holder_host"),
         "lock_holder_source": data.get("holder_source"),
         "lock_holder_age_ms": data.get("holder_age_ms"),
+        "lock_holder_read_reason": data.get("reason", "unknown"),
+        "lock_holder_kind": "file_lock",
+        "lock_holder_confidence": "reported" if data.get("readable") and data.get("holder_pid") and data.get("holder_host") else "unknown",
+        **{f"lock_holder_{key}": data.get(f"holder_{key}") for key in
+           ("role", "thread_id", "session_id", "connection_id", "operation_id")},
     }
 
 
@@ -900,6 +907,7 @@ class FileWriteLock:
             "source": source,
             "thread_id": threading.get_ident(),
             "lock_token": uuid.uuid4().hex,
+            **current_context(),
         }
         if self.lease_duration_sec is not None:
             payload["lease_expires_at"] = timestamp + self.lease_duration_sec
@@ -1750,6 +1758,7 @@ class _WriteTransactionState:
     last_exc: Exception | None = None
     lock_acquired: bool = False
     lock_held_started: float | None = None
+    released_file_lock_owner: dict[str, Any] = field(default_factory=dict)
 
 
 class SQLiteWriteController:
@@ -1793,16 +1802,19 @@ class SQLiteWriteController:
         if conn is None:
             raise DatabaseClosedError("SQLite connection is closed")
         lock = self._get_conn_lock(conn)
-        with observe("connection_guard", resource=f"{self.db_path}:{id(conn)}", stage="connection_guard_wait") as diagnostic:
+        with observe("connection_guard", resource=f"{self.db_path}:{id(conn)}", database=self.db_path,
+                     connection=conn, mutex=lock, stage="connection_guard_wait") as diagnostic:
             with lock:
                 diagnostic.stage("connection_guard_held")
                 yield
 
     @staticmethod
     def _write_metric_context(options: dict[str, Any], *, interactive: bool) -> dict[str, Any]:
+        diagnostic = current_context()
         return {
+            **{f"diagnostic_{key}": value for key, value in diagnostic.items()},
             "request_id": str(options.get("request_id") or ""),
-            "role": str(options.get("role") or ""),
+            "role": str(options.get("role") or diagnostic["role"]),
             "idle_before_action_ms": options.get("idle_before_action_ms"),
             "foreground_lease_id": str(options.get("foreground_lease_id") or ""),
             "admission_id": options.get("admission_id"),
@@ -1856,6 +1868,7 @@ class SQLiteWriteController:
             total_wait_ms=total_wait_ms,
             timeout_ms=timeout_ms,
             phase=phase,
+            sqlite_holder_confidence="unknown" if phase.startswith("begin_immediate") else None,
             sqlite_error_class=sqlite_error_class,
             sqlite_error_message_sanitized=sqlite_error_message_sanitized,
             timestamp_ms=_timestamp_ms(),
@@ -2076,6 +2089,7 @@ class SQLiteWriteController:
 
         holder = describe_sqlite_lock_holder(self.lock_path)
         active_payload["lock_holder"] = holder
+        mark_retry()
         _set_active_sqlite_operation(state.thread_id, active_payload)
         record_metric(
             "sqlite_write_lock_wait_retry",
@@ -2114,6 +2128,14 @@ class SQLiteWriteController:
         conn: sqlite3.Connection,
         state: _WriteTransactionState,
     ) -> None:
+        # This is our own service lock, not the owner of SQLite's native lock.
+        # Capture its in-memory signature before release; no extra SMB read.
+        with self.lock._mutex:
+            token = dict(self.lock._owner_token or {})
+        state.released_file_lock_owner = {
+            key: token.get(key) for key in
+            ("pid", "host", "role", "thread_id", "session_id", "connection_id", "operation_id")
+        }
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         record_metric(
@@ -2143,6 +2165,7 @@ class SQLiteWriteController:
         exc: sqlite3.OperationalError,
     ) -> dict[str, Any]:
         holder = describe_sqlite_lock_holder(self.lock_path)
+        mark_retry()
         record_metric(
             "sqlite_write_lock_wait_retry",
             1,
@@ -2156,6 +2179,8 @@ class SQLiteWriteController:
             ),
             timeout_ms=state.timeout_ms,
             phase="begin_immediate",
+            sqlite_holder_confidence="unknown",
+            released_file_lock_owner=state.released_file_lock_owner,
             sqlite_error_class=type(exc).__name__,
             sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
             **state.metric_context,
@@ -2256,6 +2281,9 @@ class SQLiteWriteController:
                     3,
                 ),
                 timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+                sqlite_holder_confidence="unknown",
+                released_file_lock_owner=state.released_file_lock_owner,
+                **state.metric_context,
                 sqlite_error_class=type(exc).__name__,
                 sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
                 **_lock_holder_metric_fields(None),
@@ -2430,12 +2458,14 @@ class SQLiteWriteController:
                     raise
                 last_exc = exc
                 retry_count += 1
+                mark_retry()
                 remaining_ms = self._remaining_ms(state.deadline)
                 record_metric(
                     "sqlite_write_commit_retry",
                     1,
                     source=state.source,
                     attempt=retry_count,
+                    sqlite_holder_confidence="unknown",
                     wait_ms=round(
                         min(self.retry_delay_sec * 1000.0, remaining_ms),
                         3,
@@ -2479,7 +2509,8 @@ class SQLiteWriteController:
             raise DatabaseClosedError(f"SQLite connection is closed for {source}")
         started = time.perf_counter()
         status = "error"
-        with observe(source, resource=f"{self.db_path}:{id(conn)}", stage="connection_guard_wait") as diagnostic, self.connection_guard(conn):
+        with observe(source, resource=f"{self.db_path}:{id(conn)}", database=self.db_path,
+                     connection=conn, stage="connection_guard_wait") as diagnostic, self.connection_guard(conn):
             diagnostic.stage("connection_guard_acquired")
             if conn.in_transaction:
                 cursor = conn.cursor()

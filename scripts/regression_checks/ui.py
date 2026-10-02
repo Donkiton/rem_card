@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .source_inspection import read_widget_source
+
 from .common import PROJECT_ROOT
 from pathlib import Path
 from .common import _cached_source_segment
@@ -224,9 +226,13 @@ def _check_order_row_delete_without_times_marks_draft(temp_root: str) -> tuple[b
     from datetime import datetime
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.remcard_facade import RemCardService
 
     db_path = os.path.join(temp_root, "orders_no_times_delete.db")
     manager = DatabaseManager(db_path, db_path)
@@ -309,11 +315,15 @@ def _check_orders_cell_delete_draft_and_noop_toggle(temp_root: str) -> tuple[boo
     from PySide6.QtCore import Qt
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
     from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
     from rem_card.services.read_coordinator import ReadCoordinator
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.remcard_facade import RemCardService
     from rem_card.ui.shared.orders_model import OrdersModel
 
     db_path = os.path.join(temp_root, "orders_cell_delete_draft.db")
@@ -459,10 +469,14 @@ def _check_order_row_edit_updates_existing_order(temp_root: str) -> tuple[bool, 
     from datetime import datetime
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
     from rem_card.services.order_service import OrderConflictError
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.remcard_facade import RemCardService
 
     db_path = os.path.join(temp_root, "orders_row_edit.db")
     manager = DatabaseManager(db_path, db_path)
@@ -588,7 +602,7 @@ def _check_order_row_edit_updates_existing_order(temp_root: str) -> tuple[bool, 
         if nurse_row.get("latin") != "Regression Updated" or float(nurse_row.get("dose_value") or 0) != 2.5:
             return False, f"nurse read model did not get edited order fields: {nurse_row}"
 
-        source = (PROJECT_ROOT / "ui" / "doctor_view" / "orders_widget.py").read_text(encoding="utf-8")
+        source = read_widget_source(PROJECT_ROOT / "ui" / "doctor_view" / "orders_widget.py")
         if "index.column() == 0 and event.button() == Qt.RightButton" not in source:
             return False, "doctor order column right click branch is missing"
         if "_open_order_edit_dialog(index)" not in source:
@@ -603,10 +617,14 @@ def _check_orders_optimistic_lock_conflicts(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
     from rem_card.data.dao.db_manager import DatabaseManager
-    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.orders_dao import OrdersDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
     from rem_card.services.order_service import ORDER_CONFLICT_MESSAGE, OrderConflictError
-    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.remcard_facade import RemCardService
 
     db_path = os.path.join(temp_root, "orders_optimistic_lock.db")
     manager = DatabaseManager(db_path, db_path)
@@ -1172,7 +1190,7 @@ def _check_lab_orders_are_scoped_to_card_day(temp_root: str) -> tuple[bool, str]
 def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source_path = PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py"
-    source_text = source_path.read_text(encoding="utf-8")
+    source_text = read_widget_source(source_path)
     tree = ast.parse(source_text)
 
     class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DoctorRemCardWidget"]
@@ -1235,7 +1253,7 @@ def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple
 def _check_doctor_load_patient_card_refactor_path(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source_path = PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py"
-    source_text = source_path.read_text(encoding="utf-8")
+    source_text = read_widget_source(source_path)
     tree = ast.parse(source_text)
     class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DoctorRemCardWidget"]
     if not class_defs:
@@ -1352,7 +1370,7 @@ def _check_orders_widgets_defer_snapshot_reload_thread_creation(temp_root: str) 
     root = PROJECT_ROOT
     for role, relative_path, class_name in cases:
         source_path = root / relative_path
-        source_text = source_path.read_text(encoding="utf-8")
+        source_text = read_widget_source(source_path)
         tree = ast.parse(source_text)
         class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
         if not class_defs:
@@ -1449,7 +1467,7 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
         return False
 
     for role, path, class_name, request_method_name, guarded_method_names in cases:
-        source_text = path.read_text(encoding="utf-8")
+        source_text = read_widget_source(path)
         tree = ast.parse(source_text)
         class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
         if not class_defs:
@@ -1498,7 +1516,7 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
 def _check_async_call_worker_avoids_qthread(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     path = PROJECT_ROOT / "ui" / "shared" / "async_call.py"
-    source_text = path.read_text(encoding="utf-8")
+    source_text = read_widget_source(path)
     if "QThread" in source_text:
         return False, "AsyncCallThread must not use Qt QThread for snapshot workers"
     if "threading.Thread" not in source_text:
@@ -1535,7 +1553,7 @@ def _check_patient_open_cache_snapshot_bypasses_worker_request_id(temp_root: str
         ),
     ]
     for role, path, class_name in cases:
-        source_text = path.read_text(encoding="utf-8")
+        source_text = read_widget_source(path)
         tree = ast.parse(source_text)
         class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
         if not class_defs:
@@ -1559,7 +1577,7 @@ def _check_patient_open_cache_snapshot_bypasses_worker_request_id(temp_root: str
 def _check_patient_form_open_is_deferred_from_callback(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     path = PROJECT_ROOT / "ui" / "patient_bed_management" / "management_widget.py"
-    source_text = path.read_text(encoding="utf-8")
+    source_text = read_widget_source(path)
     tree = ast.parse(source_text)
     class_defs = [
         node
@@ -1674,7 +1692,7 @@ def _regression_class_methods(
     class_name: str,
 ) -> tuple[str, dict[str, ast.FunctionDef]]:
     source_path = root / relative_path
-    source_text = source_path.read_text(encoding="utf-8")
+    source_text = read_widget_source(source_path)
     tree = ast.parse(source_text)
     class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
     if not class_defs:
@@ -1910,7 +1928,7 @@ def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool,
     root = PROJECT_ROOT
     for role, relative_path, class_name in cases:
         source_path = root / relative_path
-        source_text = source_path.read_text(encoding="utf-8")
+        source_text = read_widget_source(source_path)
         tree = ast.parse(source_text)
         class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
         if not class_defs:
@@ -2004,7 +2022,7 @@ def _check_pdf_build_runs_in_worker(temp_root: str) -> tuple[bool, str]:
     }
     for relative_path, method_names in checked_methods.items():
         source_path = PROJECT_ROOT / relative_path
-        source_text = source_path.read_text(encoding="utf-8")
+        source_text = read_widget_source(source_path)
         if "PdfBuildWorker" not in source_text or "pdf_worker" not in source_text:
             return False, f"{relative_path}: PdfBuildWorker is not retained by the widget"
         tree = ast.parse(source_text)
@@ -2116,7 +2134,7 @@ def _w1_archive_defers_initial_status_write(archive_method: ast.FunctionDef) -> 
 def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source_path = PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py"
-    source_text = source_path.read_text(encoding="utf-8")
+    source_text = read_widget_source(source_path)
     tree = ast.parse(source_text)
 
     class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DoctorRemCardWidget"]
@@ -2185,7 +2203,7 @@ def _check_chart_clears_on_card_context_change(temp_root: str) -> tuple[bool, st
     ]
     for role, relative_path, class_name in cases:
         source_path = root / relative_path
-        source_text = source_path.read_text(encoding="utf-8")
+        source_text = read_widget_source(source_path)
         tree = ast.parse(source_text)
         class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
         if not class_defs:
@@ -2517,10 +2535,14 @@ def _check_journal_prewarm_is_opt_in(temp_root: str) -> tuple[bool, str]:
         ("nurse", root / "ui" / "nurse_view" / "nurse_main_widget.py"),
     ]
     for role, source_path in cases:
-        source = source_path.read_text(encoding="utf-8")
-        if 'JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"' not in source:
+        source = read_widget_source(source_path)
+        settings_source = (
+            (source_path.parent / "card_features" / "constants.py").read_text(encoding="utf-8")
+            if role == "doctor" else source
+        )
+        if 'JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"' not in settings_source:
             return False, f"{role}: journal prewarm must be disabled by default"
-        if 'JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"' not in source:
+        if 'JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"' not in settings_source:
             return False, f"{role}: journal widget prewarm must be disabled by default"
         if "if JOURNAL_PREWARM_ENABLED:" not in source:
             return False, f"{role}: startup journal prewarm timer must be gated"
@@ -2544,7 +2566,7 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
         "administrations",
     }
     for role, source_path in cases:
-        source = source_path.read_text(encoding="utf-8")
+        source = read_widget_source(source_path)
         if "W1_REFRESH_ENTITIES" not in source:
             return False, f"{role}: W1 refresh entity set not found"
         if "queue_if_running=False" not in source:
@@ -2569,7 +2591,7 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
         ("nurse", root / "ui" / "nurse_view" / "components" / "nurse_beds_selection_widget.py"),
     ]
     for role, source_path in widget_cases:
-        source = source_path.read_text(encoding="utf-8")
+        source = read_widget_source(source_path)
         if "def refresh(self, *, queue_if_running: bool = True)" not in source:
             return False, f"{role}: W1 refresh must support non-queued startup refresh"
         if "if queue_if_running:" not in source:

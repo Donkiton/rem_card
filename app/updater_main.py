@@ -119,16 +119,7 @@ UNIFIED_REQUIRED_EXES = (
     "RemCard.exe",
     "RemCardUpdater.exe",
 )
-LEGACY_REQUIRED_EXES = (
-    "RemCardDoctor.exe",
-    "RemCardNurse.exe",
-    "RemCardOperBlockEmergency.exe",
-    "RemCardOperBlockPlanned.exe",
-    "RemCardPathSetup.exe",
-    "RemCardUpdater.exe",
-)
-# Kept as the primary package contract for callers/tests that imported the old
-# name. Legacy packages are accepted explicitly by _detect_package_layout().
+# Минимальная установленная версия — 5.1.2; новые пакеты используют единый EXE.
 REQUIRED_EXES = UNIFIED_REQUIRED_EXES
 MANAGED_ROOT_FILES = (
     "RemCard.exe",
@@ -673,27 +664,17 @@ def _validate_source(source_dir: str) -> dict[str, Any]:
 
 
 def _detect_package_layout(directory: str) -> str:
-    """Accept the final unified package and the previously shipped layout."""
+    """Validate the unified package used by clients from version 5.1.2."""
     root = os.path.abspath(directory)
     if all(os.path.isfile(os.path.join(root, name)) for name in UNIFIED_REQUIRED_EXES):
         return "unified"
-    if all(os.path.isfile(os.path.join(root, name)) for name in LEGACY_REQUIRED_EXES):
-        return "legacy"
-
     unified_missing = [
         name for name in UNIFIED_REQUIRED_EXES
         if not os.path.isfile(os.path.join(root, name))
     ]
-    legacy_missing = [
-        name for name in LEGACY_REQUIRED_EXES
-        if not os.path.isfile(os.path.join(root, name))
-    ]
     raise RuntimeError(
-        "Пакет обновления не соответствует ни единой, ни прежней структуре EXE. "
-        "Для единой структуры отсутствуют: "
+        "Пакет обновления не соответствует единой структуре EXE. Отсутствуют: "
         + ", ".join(unified_missing)
-        + "; для прежней структуры отсутствуют: "
-        + ", ".join(legacy_missing)
         + "."
     )
 

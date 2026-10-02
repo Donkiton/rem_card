@@ -5,10 +5,13 @@ from __future__ import annotations
 from typing import Any
 from pathlib import Path
 from datetime import datetime
+import ast
 import json
 import os
 import re
 import time
+
+from .common import _cached_source_segment
 
 
 def _check_operblock_medication_aliases_quick_search(temp_root: str) -> tuple[bool, str]:
@@ -22,7 +25,7 @@ def _check_operblock_medication_aliases_quick_search(temp_root: str) -> tuple[bo
         load_operblock_medication_presets,
         save_operblock_medication_presets,
     )
-    import rem_card.ui.operblock_view.operblock_main_widget as operblock_widget_module
+    import rem_card.ui.operblock_view.features.quick_orders as operblock_widget_module
     from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
 
     seed_dir = os.path.join(temp_root, "seed")
@@ -615,13 +618,9 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
     from rem_card.data.dao.db_manager import DatabaseManager
     from rem_card.data.dto.remcard_dto import VitalDTO
     from rem_card.services.operblock_service import OperBlockService
-    from rem_card.ui.operblock_view.operblock_main_widget import (
-        OperBlockMainWidget,
-        OperationStageTimeEditDialog,
-        StartAnesthesiaDialog,
-        StartSurgeryDialog,
-        OperationStagesDialog,
-    )
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+    from rem_card.ui.operblock_view.operblock_medication_edit_dialogs import OperationStageTimeEditDialog
+    from rem_card.ui.operblock_view.operblock_stage_dialogs import StartAnesthesiaDialog, StartSurgeryDialog, OperationStagesDialog
     from PySide6.QtWidgets import QApplication
 
     db_path = os.path.join(temp_root, "operblock_operation_stages.db")
@@ -699,13 +698,15 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         manager.close()
 
 
-def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) -> tuple[bool, str]:
+def _check_operblock_rao_explicit_invitation_recovery_beds_and_vitals(temp_root: str) -> tuple[bool, str]:
     from datetime import date, timedelta
 
     from rem_card.app.operblock_schema import _apply_operblock_schema
+    from rem_card.app.operblock_local_handoffs import publish_imported_handoff
     from rem_card.data.dao.db_manager import DatabaseManager
     from rem_card.data.dao.vitals_dao import VitalsDAO
     from rem_card.data.dto.remcard_dto import VitalDTO
+    from rem_card.services.operblock_handoff_service import OperBlockLocalRaoHandoffService
     from rem_card.services.operblock_service import OperBlockService
 
     def _occupy_recovery_beds(manager: DatabaseManager, bed_numbers: tuple[int, ...]) -> None:
@@ -837,23 +838,54 @@ def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) 
             )
             if not case_row or case_row["transfer_department"] != "РАО":
                 return False, f"{name}: transfer_department was not saved as RAO"
-            future_rao_admission_id = case_row["future_rao_admission_id"]
-            if expected_bed is None:
-                if future_rao_admission_id is not None:
-                    return False, f"{name}: RAO admission was created unexpectedly: {future_rao_admission_id}"
-                created = manager.fetch_one_remcard(
-                    """
-                    SELECT COUNT(*) AS count
-                    FROM admissions
-                    WHERE intake_extra_json LIKE '%operblock_rao_transfer%'
-                    """
+            if case_row["future_rao_admission_id"] is not None:
+                return False, f"{name}: RAO admission was created before doctor acceptance"
+
+            source_case = manager.fetch_one_remcard(
+                "SELECT patient_id, admission_id, transfer_department FROM operation_cases WHERE id = ?",
+                (case_id,),
+            )
+            if not source_case:
+                return False, f"{name}: completed OperBlock case was not found"
+            transfer_at = datetime.now().replace(microsecond=0)
+
+            def publish(cursor):
+                publish_imported_handoff(
+                    cursor,
+                    local_case=dict(source_case),
+                    remote_case_id=case_id,
+                    remote_patient_id=int(source_case["patient_id"]),
+                    remote_admission_id=int(source_case["admission_id"]),
+                    source_payload={
+                        "transfer_department": "РАО",
+                        "transfer_datetime": transfer_at.isoformat(timespec="seconds"),
+                    },
                 )
-                if int(created["count"] or 0) != 0:
-                    return False, f"{name}: RAO transfer admission exists despite blocked creation"
+
+            manager.run_write_operation(publish, source="regression_publish_operblock_rao_invitation")
+            invitations = OperBlockLocalRaoHandoffService(manager)
+            pending = invitations.list_pending(include_snoozed=True)
+            if len(pending) != 1:
+                return False, f"{name}: expected one explicit RAO invitation, got {len(pending)}"
+            invitation_id = int(pending[0]["id"])
+
+            # Import produces only an invitation.  Before the doctor chooses a
+            # bed, no RAO card, occupancy, or copied vitals may appear.
+            if expected_bed is not None:
+                before_bed = manager.fetch_one_remcard(
+                    "SELECT status, current_admission_id FROM beds WHERE bed_number = ?", (expected_bed,)
+                )
+                if not before_bed or before_bed["status"] != "FREE" or before_bed["current_admission_id"] is not None:
+                    return False, f"{name}: free recovery bed changed before explicit acceptance"
+            if expected_bed is None:
+                if invitations.list_free_beds():
+                    return False, f"{name}: all occupied recovery beds became available without a decision"
                 return True, "ok"
 
-            if future_rao_admission_id is None:
-                return False, f"{name}: RAO admission was not linked to operation case"
+            accepted = invitations.accept_to_bed(invitation_id, expected_bed, actor="regression")
+            future_rao_admission_id = int(accepted["admission_id"])
+            if accepted.get("bed_number") != expected_bed:
+                return False, f"{name}: doctor-selected bed was not retained"
             admission_row = manager.fetch_one_remcard(
                 """
                 SELECT a.*, p.full_name, p.birth_date
@@ -867,17 +899,20 @@ def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) 
                 return False, f"{name}: linked RAO admission was not found"
             if int(admission_row["bed_number"]) != expected_bed:
                 return False, f"{name}: expected bed {expected_bed}, got {admission_row['bed_number']}"
-            expected_admission_dt = (anesthesia_end + timedelta(minutes=10)).isoformat(timespec="seconds")
+            expected_admission_dt = transfer_at.isoformat(timespec="seconds")
             if str(admission_row["admission_datetime"]) != expected_admission_dt:
                 return False, f"{name}: wrong RAO admission time: {admission_row['admission_datetime']!r}"
-            if admission_row["source_department"] != "Профильное отделение":
+            if admission_row["source_department"] != "Оперблок":
                 return False, f"{name}: wrong source department: {admission_row['source_department']!r}"
             if admission_row["department_profile"] != "Хирургия":
                 return False, f"{name}: wrong department profile: {admission_row['department_profile']!r}"
-            if admission_row["diagnosis_text"] != "Острый аппендицит":
+            if clear_source_diagnosis:
+                if admission_row["diagnosis_text"] is not None:
+                    return False, f"{name}: absent diagnosis was replaced during acceptance"
+            elif admission_row["diagnosis_text"] != "Острый аппендицит":
                 return False, f"{name}: diagnosis was not copied"
-            if int(admission_row["recovery_bed_stay"] or 0) != 1:
-                return False, f"{name}: recovery_bed_stay was not set"
+            if int(admission_row["recovery_bed_stay"] or 0) != 0:
+                return False, f"{name}: recovery_bed_stay was changed without an explicit clinical fact"
 
             bed_row = manager.fetch_one_remcard(
                 "SELECT status, current_admission_id FROM beds WHERE bed_number = ?",
@@ -888,10 +923,27 @@ def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) 
 
             if check_vitals:
                 vitals_dao = VitalsDAO(manager)
+                source_preview = vitals_dao.get_latest_vital_values_bulk([source_admission_id]).get(source_admission_id)
+                if not source_preview or source_preview.get("sys") != 123 or source_preview.get("spo2") != 99:
+                    return False, f"{name}: OperBlock source vitals changed during invitation acceptance"
+                vitals_dao.add_vital(
+                    VitalDTO(
+                        id=None,
+                        admission_id=future_rao_admission_id,
+                        timestamp=transfer_at + timedelta(minutes=5),
+                        sys=123,
+                        dia=77,
+                        pulse=88,
+                        temp=36.7,
+                        spo2=99,
+                        rr=15,
+                        cvp=4,
+                    )
+                )
                 preview = vitals_dao.get_latest_vital_values_bulk([int(future_rao_admission_id)]).get(int(future_rao_admission_id))
                 expected_preview = {"sys": 123, "dia": 77, "pulse": 88, "temp": 36.7, "spo2": 99, "rr": 15, "cvp": 4}
                 if preview != expected_preview:
-                    return False, f"{name}: copied vitals are not visible in preview: {preview!r}"
+                    return False, f"{name}: explicit RAO vitals are not visible in preview: {preview!r}"
                 vitals_dao.add_vital(
                     VitalDTO(
                         id=None,
@@ -907,17 +959,12 @@ def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) 
                 if updated_preview.get("dia") != 77 or updated_preview.get("spo2") != 99:
                     return False, f"{name}: old copied non-null vitals were lost after partial update: {updated_preview!r}"
 
-            source_link = manager.fetch_one_remcard(
-                """
-                SELECT COUNT(*) AS count
-                FROM admissions
-                WHERE id = ?
-                  AND intake_extra_json LIKE ?
-                """,
-                (int(future_rao_admission_id), f"%\"source_admission_id\": {int(source_admission_id)}%"),
+            invitation = manager.fetch_one_remcard(
+                "SELECT status, accepted_admission_id, accepted_bed_number FROM operblock_rao_handoff_invitations WHERE id = ?",
+                (invitation_id,),
             )
-            if int(source_link["count"] or 0) != 1:
-                return False, f"{name}: intake metadata does not reference source admission"
+            if not invitation or tuple(invitation) != ("accepted", future_rao_admission_id, expected_bed):
+                return False, f"{name}: explicit acceptance was not stored durably"
             return True, "ok"
         finally:
             manager.close()
@@ -947,7 +994,7 @@ def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) 
         "missing_required_diagnosis",
         len(scenarios) + 1,
         (),
-        expected_bed=None,
+        expected_bed=10,
         clear_source_diagnosis=True,
     )
     if not ok:
@@ -962,7 +1009,7 @@ def _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups(temp_root:
 
     from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QLineEdit, QPushButton, QWidget
 
-    from rem_card.ui.operblock_view.operblock_main_widget import OccupyTableDialog
+    from rem_card.ui.operblock_view.operblock_admission_dialogs import OccupyTableDialog
     from rem_card.ui.styles.theme import STYLE_PATIENT_FORM_CANCEL_BUTTON
 
     _ = temp_root
@@ -1233,7 +1280,7 @@ def _check_operblock_board_preview_action_buttons(full_card) -> tuple[bool, str]
 def _check_operblock_board_progress_stepper_centered(app, widget, base_dt: datetime) -> tuple[bool, str]:
     from PySide6.QtCore import QPoint
 
-    from rem_card.ui.operblock_view.operblock_main_widget import _OperBlockBoardProgressStepper
+    from rem_card.ui.operblock_view.operblock_visual_primitives import _OperBlockBoardProgressStepper
 
     block = widget._board_progress_block(
         {
@@ -1654,10 +1701,8 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 
     from rem_card.services.operblock_service import OperBlockService
-    from rem_card.ui.operblock_view.operblock_main_widget import (
-        OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT,
-        OperBlockMainWidget,
-    )
+    from rem_card.ui.operblock_view.operblock_visual_primitives import OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
 
     app = QApplication.instance() or QApplication([])
     widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
@@ -2543,19 +2588,72 @@ def _check_operblock_precommit_shadow_journal_contract(temp_root: str) -> tuple[
 
 
 def _check_operblock_migration_dialog_non_closable_contract(temp_root: str) -> tuple[bool, str]:
-    main_window_source = Path("ui/main_window.py").read_text(encoding="utf-8")
+    _ = temp_root
+    scheduler_source = Path("app/operblock_local_sync.py").read_text(encoding="utf-8")
+    scheduler_tree = ast.parse(scheduler_source)
+    scheduler_class = next(
+        (
+            node
+            for node in scheduler_tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "OperBlockLocalSyncScheduler"
+        ),
+        None,
+    )
+    if scheduler_class is None:
+        return False, "background operblock sync scheduler is missing"
+    methods = {
+        node.name: _cached_source_segment(scheduler_source, node) or ""
+        for node in scheduler_class.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for method_name in ("request_sync", "begin_close", "stop"):
+        if method_name not in methods:
+            return False, f"background operblock scheduler method is missing: {method_name}"
+
+    request_source = methods["request_sync"]
+    if "process.start()" not in request_source or "QTimer" in request_source:
+        return False, "request_sync must only start the child process and return to the Qt loop"
+    for blocking_token in ("process.join(", "time.sleep(", ".exec(", ".wait("):
+        if blocking_token in request_source:
+            return False, f"request_sync contains a blocking operation: {blocking_token}"
+
+    begin_close_source = methods["begin_close"]
+    if "time.monotonic() + 3.0" not in begin_close_source:
+        return False, "operblock sync close is not bounded to three seconds"
+    if "QTimer.singleShot(0, callback)" not in begin_close_source:
+        return False, "idle operblock sync close does not complete asynchronously"
+    if "process.terminate()" not in scheduler_source or "process.kill()" not in scheduler_source:
+        return False, "timed-out operblock sync worker is not forcibly bounded"
+    for modal_token in ("QMessageBox", "QDialog", ".exec("):
+        if modal_token in scheduler_source:
+            return False, f"background operblock sync must not show a modal dialog: {modal_token}"
+
     main_source = Path("app/main.py").read_text(encoding="utf-8")
-    for source_name, source in (("ui/main_window.py", main_window_source), ("app/main.py", main_source)):
-        if "Не выключайте ПК. Идёт перенос данных оперблока." not in source:
-            return False, f"migration progress text missing in {source_name}"
-        if "~Qt.WindowCloseButtonHint" not in source:
-            return False, f"migration dialog close button is not disabled in {source_name}"
-    if "_close_operblock_migration_dialog(dialog)" not in main_window_source:
-        return False, "post-release migration dialog is not closed in finally"
-    if "_close_operblock_migration_progress_dialog(dialog, app)" not in main_source:
-        return False, "pre-window migration dialog is not closed in finally"
-    if "_run_pending_operblock_offline_migration_before_window(" not in main_source:
-        return False, "pre-window migration hook is missing"
+    main_functions = {
+        node.name: _cached_source_segment(main_source, node) or ""
+        for node in ast.parse(main_source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    startup_source = main_functions.get("_run_startup_application", "")
+    finalize_source = main_functions.get("_finalize_startup_application", "")
+    if "_run_pending_operblock_offline_migration_before_window(" in startup_source:
+        return False, "startup still invokes synchronous operblock migration"
+    if "_attach_standalone_operblock_sync(" not in startup_source:
+        return False, "standalone operblock startup does not attach the background scheduler"
+    if "_close_standalone_operblock_sync(" not in finalize_source:
+        return False, "standalone operblock shutdown does not bound scheduler close"
+
+    main_window_source = Path("ui/main_window.py").read_text(encoding="utf-8")
+    main_window_tree = ast.parse(main_window_source)
+    release_source = ""
+    for node in ast.walk(main_window_tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_maybe_migrate_operblock_offline_after_release":
+            release_source = _cached_source_segment(main_window_source, node) or ""
+            break
+    if "scheduler.request_sync()" not in release_source:
+        return False, "released local case does not request background delivery"
+    if "run_pending_operblock_offline_migration" in release_source:
+        return False, "released local case still performs synchronous migration"
     return True, "ok"
 
 

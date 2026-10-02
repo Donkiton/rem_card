@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .source_inspection import read_widget_source
+
 from .common import PROJECT_ROOT
 from pathlib import Path
 from datetime import datetime
@@ -1352,7 +1354,7 @@ def _check_emergency_standby_does_not_touch_doctor_nurse_business_logic(temp_roo
     forbidden = ("EmergencyStandbyManager", "emergency_standby", "create_or_refresh_standby")
     ui_files = list((PROJECT_ROOT / "ui" / "doctor_view").rglob("*.py")) + list((PROJECT_ROOT / "ui" / "nurse_view").rglob("*.py"))
     for path in ui_files:
-        text = path.read_text(encoding="utf-8")
+        text = read_widget_source(path)
         for token in forbidden:
             if token in text:
                 return False, f"{path.relative_to(PROJECT_ROOT)} unexpectedly references standby manager"
@@ -1433,7 +1435,7 @@ def _check_emergency_standby_scheduler_not_started_for_doctor(temp_root: str) ->
         PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
     ]
     for path in doctor_sources:
-        text = path.read_text(encoding="utf-8")
+        text = read_widget_source(path)
         if "EmergencyStandbyScheduler" in text or "emergency_standby_scheduler" in text:
             return False, f"doctor UI references standby scheduler: {path.relative_to(PROJECT_ROOT)}"
     return True, "ok"
@@ -1621,7 +1623,7 @@ def _check_emergency_standby_scheduler_no_blocking_ui(temp_root: str) -> tuple[b
     ]
     forbidden = ("QMessageBox", "CustomMessageBox", "QDialog", "exec_(", ".exec()")
     for path in files:
-        text = path.read_text(encoding="utf-8")
+        text = read_widget_source(path)
         for token in forbidden:
             if token in text:
                 return False, f"blocking UI token in scheduler changes: {path.relative_to(PROJECT_ROOT)} {token}"

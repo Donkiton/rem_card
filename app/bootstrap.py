@@ -92,7 +92,7 @@ class LazyRemCardServiceProxy:
 
     @staticmethod
     def _create_service(*args, status_service=None, data_service=None):
-        from rem_card.services.remcard_service import RemCardService
+        from rem_card.services.remcard_facade import RemCardService
 
         return RemCardService(
             *args,
@@ -164,13 +164,11 @@ class Container:
         operblock_schema_prepared: bool = False,
     ):
         from rem_card.data.dao.patient_status_dao import PatientStatusDAO
-        from rem_card.data.dao.remcard_dao import (
-            FluidsDAO,
-            OrdersDAO,
-            PatientDAO,
-            VentilationDAO,
-            VitalsDAO,
-        )
+        from rem_card.data.dao.fluids_dao import FluidsDAO
+        from rem_card.data.dao.orders_dao import OrdersDAO
+        from rem_card.data.dao.patient_dao import PatientDAO
+        from rem_card.data.dao.ventilation_dao import VentilationDAO
+        from rem_card.data.dao.vitals_dao import VitalsDAO
         from rem_card.services.data_service import DataService
         from rem_card.services.patient_status_service import PatientStatusService
         from rem_card.services.patient_service import PatientService
@@ -225,7 +223,7 @@ class Container:
             self.read_coordinator = None
         else:
             from rem_card.services.read_coordinator import ReadCoordinator
-            from rem_card.services.remcard_service import RemCardService
+            from rem_card.services.remcard_facade import RemCardService
 
             self.remcard_service = RemCardService(
                 self.vitals_dao,
@@ -413,15 +411,17 @@ def _finish_bootstrap(
     runtime_mode: str,
     medical_db_path: str,
 ) -> Container:
-    from rem_card.services.settings.settings_service import configure_settings_service, get_settings_service
+    from rem_card.services.settings.settings_service import configure_settings_service
 
-    if runtime_context is not None:
-        settings_service = configure_settings_service(
-            runtime_context=runtime_context,
-            readonly=bool(getattr(runtime_context, "settings_readonly", False)),
-        )
-    else:
-        settings_service = get_settings_service()
+    # Every admitted runtime owns an explicitly addressed settings service.
+    # Reusing the module singleton here can retain a local operblock settings
+    # path after returning to doctor/nurse, or retain the central path when the
+    # operblock runtime is intentionally local.
+    effective_context = runtime_context or getattr(db_manager, "runtime_context", None)
+    settings_service = configure_settings_service(
+        runtime_context=effective_context,
+        readonly=bool(getattr(effective_context, "settings_readonly", False)),
+    )
     from rem_card.app import operblock_startup_metrics
 
     with operblock_startup_metrics.measure("settings_ensure_ready_ms", source="bootstrap"):

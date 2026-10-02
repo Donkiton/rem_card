@@ -1756,6 +1756,23 @@ class OperBlockChartWidget(ChartWidget):
             return None
         return trimmed_start, end
 
+    def _bolus_dose_label_position(self, marker_x: float, label_text: str, group: dict):
+        label_x, anchor = self._order_label_position(marker_x, label_text)
+        # A route suffix can widen the dose into the fixed drug-name column.
+        # Move only its label; keep the marker at the actual time.
+        name_x = float(group.get("name_x") or 0.0)
+        name_anchor = group.get("name_anchor") or (0.0, 0.0)
+        drug_text = str(group.get("drug_text") or "Назначение")
+        _, name_right = self._name_column_bounds(
+            name_x=name_x, name_anchor=name_anchor, drug_text=drug_text,
+        )
+        if marker_x > name_right and self._label_overlaps_name_column(
+            label_x=label_x, label_anchor=anchor, label_text=label_text,
+            name_x=name_x, name_anchor=name_anchor, drug_text=drug_text,
+        ):
+            return name_right + self._hours_for_plot_pixels(1.0), (0.0, 0.0)
+        return label_x, anchor
+
     def _bolus_dose_clusters_for_group(self, group: dict) -> list[dict]:
         dose_items: list[dict] = []
         for entry in list(group.get("entries") or []):
@@ -1765,8 +1782,7 @@ class OperBlockChartWidget(ChartWidget):
             item_row = entry.get("row") if isinstance(entry.get("row"), dict) else {}
             single_dose_text = _order_dose_text_with_route(dose_text, item_row, short=True)
             marker_x = float(entry.get("x") if entry.get("x") is not None else entry.get("dose_x") or 0.0)
-            dose_x = float(entry.get("dose_x") if entry.get("dose_x") is not None else marker_x)
-            dose_anchor = entry.get("dose_anchor") or (0.5, 0.0)
+            dose_x, dose_anchor = self._bolus_dose_label_position(marker_x, single_dose_text or dose_text, group)
             label_left, label_right = self._label_bounds(
                 dose_x,
                 dose_anchor,
@@ -1813,7 +1829,7 @@ class OperBlockChartWidget(ChartWidget):
                 summary_text = _summarize_dose_texts(dose_texts) or ", ".join(dict.fromkeys(dose_texts))
             marker_values = [float(item.get("marker_x") or 0.0) for item in items]
             marker_x = sum(marker_values) / len(marker_values)
-            dose_label_x, dose_anchor = self._order_label_position(marker_x, summary_text)
+            dose_label_x, dose_anchor = self._bolus_dose_label_position(marker_x, summary_text, group)
             label_left, label_right = self._label_bounds(
                 dose_label_x,
                 dose_anchor,

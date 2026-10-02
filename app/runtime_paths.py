@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from typing import Optional
 
 from rem_card.app.roles import (
-    OPERBLOCK_ROLE_KEYS,
     ROLE_OPERBLOCK,
     ROLE_OPERBLOCK_EMERGENCY,
     ROLE_OPERBLOCK_PLANNED,
@@ -20,7 +19,6 @@ from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
 DEFAULT_DEV_DATA_ROOT_NAME = "Baza_rao3_jurnal"
-OPERBLOCK_DB_NOT_FOUND_MESSAGE = "БД оперблока не найдена в текущей папке базы"
 DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
 DEV_DATABASE_CONFIG_ENV = "REMCARD_DEV_DATABASE_CONFIG"
 DEV_DATABASE_CONFIG_NAME = "dev_database_paths.json"
@@ -64,7 +62,6 @@ REQUIRED_BAZA_DIRS = (
     "quarantine",
     "quarantine/shared_db",
     "quarantine/snapshots",
-    "rem_card",
     "report",
     "session_locks",
     "settings",
@@ -84,20 +81,6 @@ def is_compiled() -> bool:
         return True
     exe_name = os.path.basename(sys.executable).lower()
     return exe_name not in ("python.exe", "pythonw.exe", "python", "pythonw")
-
-
-def is_operblock_executable() -> bool:
-    exe_name = os.path.basename(str(sys.executable or "")).lower()
-    argv0_name = os.path.basename(str(sys.argv[0] if sys.argv else "")).lower()
-    argv_text = " ".join(str(arg).lower() for arg in sys.argv)
-    ui_role = str(os.environ.get("REMCARD_UI_ROLE", "")).strip().lower()
-    return (
-        "remcardoperblock" in exe_name
-        or "remcardoperblock" in argv0_name
-        or "run_operblock" in argv_text
-        or any(f"--role {role}" in argv_text or f"--role={role}" in argv_text for role in OPERBLOCK_ROLE_KEYS)
-        or is_operblock_role(ui_role)
-    )
 
 
 def get_project_root() -> str:
@@ -590,35 +573,6 @@ def remove_saved_dev_baza_dir(baza_dir: str) -> str:
             if os.path.normcase(_normalize_baza_dir(str(path))) != remove_key
         ]
         return _write_dev_database_config_unlocked(active, saved)
-
-
-def get_operblock_test_baza_dir() -> str:
-    return resolve_baza_dir()
-
-
-def resolve_operblock_baza_dir(path: str | None = None) -> str:
-    if path:
-        normalized = _normalize_baza_dir(path)
-        if os.path.basename(os.path.dirname(normalized)).lower() == "archiv":
-            return os.path.dirname(os.path.dirname(normalized))
-        if os.path.basename(normalized).lower() == "archiv":
-            return os.path.dirname(normalized)
-        return normalized
-    return resolve_baza_dir()
-
-
-def is_operblock_baza_dir(path: str) -> bool:
-    return os.path.isfile(get_journal_db_path(resolve_operblock_baza_dir(path)))
-
-
-def validate_operblock_baza_dir(baza_dir: str) -> tuple[bool, str]:
-    normalized = resolve_operblock_baza_dir(baza_dir)
-    if not os.path.isdir(normalized):
-        return False, f"Папка базы недоступна: {normalized}"
-    db_path = get_journal_db_path(normalized)
-    if not os.path.isfile(db_path):
-        return False, f"{OPERBLOCK_DB_NOT_FOUND_MESSAGE}: {db_path}"
-    return True, "ok"
 
 
 def configure_operblock_runtime_path(role: str | None) -> Optional[dict[str, str]]:

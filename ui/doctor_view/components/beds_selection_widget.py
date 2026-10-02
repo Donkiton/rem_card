@@ -117,6 +117,8 @@ class BedsSelectionWidget(QWidget):
         self._last_ordered_row_ids = ()
         self._last_ordered_row_signatures = ()
         self.init_ui()
+        from rem_card.ui.shared.outcome_bed_release import OutcomeBedReleaseMonitor
+        self._outcome_release_monitor = OutcomeBedReleaseMonitor(self)
         self._last_shift_start = self._current_shift_start()
         self._last_plan_card_window_active = self._current_plan_card_window_active()
         self._shift_boundary_timer = QTimer(self)
@@ -441,9 +443,10 @@ class BedsSelectionWidget(QWidget):
         if not requested_ids or any(adm_id not in self._rows_by_admission_id for adm_id in requested_ids):
             self._refresh_pending = True
             return
-        if any(adm_id not in patients_by_id for adm_id in requested_ids):
-            self._refresh_pending = True
-            return
+        from rem_card.ui.shared.outcome_bed_release import remove_released_rows
+        released_ids = requested_ids - patients_by_id.keys()
+        remove_released_rows(self, released_ids)
+        requested_ids -= released_ids
 
         self._refresh_apply_count += 1
         now = snapshot.get("now") or datetime.datetime.now()
@@ -520,6 +523,7 @@ class BedsSelectionWidget(QWidget):
 
     def shutdown(self, timeout_ms: int = 1200):
         self._is_closing = True
+        self._outcome_release_monitor.stop()
         if hasattr(self, "_shift_boundary_timer") and self._shift_boundary_timer:
             self._shift_boundary_timer.stop()
         self._refresh_pending = False

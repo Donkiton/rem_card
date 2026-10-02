@@ -28,6 +28,7 @@ class ArchiveMainWidget(QWidget):
 
     patient_selected = Signal(object)
     operblock_case_selected = Signal(object)
+    operblock_edit_requested = Signal(object)
     edit_requested = Signal(object)
     delete_requested = Signal(object)
     back_requested = Signal()
@@ -202,6 +203,7 @@ class ArchiveMainWidget(QWidget):
             archive.operblock_case_selected.connect(self.operblock_case_selected)
             archive.edit_requested.connect(self.edit_requested)
             archive.delete_requested.connect(self.delete_requested)
+        self.operblock_archive.operblock_edit_requested.connect(self.operblock_edit_requested)
 
         tokens = style_tokens()
         set_widget_style(self, build_admin_settings_style(tokens) + build_archive_center_style(tokens))

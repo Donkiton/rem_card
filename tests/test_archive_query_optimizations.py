@@ -269,12 +269,51 @@ def test_public_patient_page_opens_external_archive_once(tmp_path, monkeypatch):
     assert payload["total_count"] == 2
 
 
+def test_operblock_archive_merges_current_and_legacy_rotated_db_without_transfer_columns(tmp_path):
+    archiv = tmp_path / "archiv"
+    archiv.mkdir()
+    current_path = archiv / "rao_journal.db"
+    old_path = archiv / "rao_journal_archived_20260101_000000.db"
+    _create_mixed_archive(current_path)
+    _create_mixed_archive(old_path)
+    for path, history_number in ((current_path, "CUR"), (old_path, "OLD")):
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("UPDATE admissions SET history_number=? WHERE id=3", (history_number,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    class Manager:
+        def __init__(self, db_path):
+            self.db_path = str(db_path)
+            self.runtime_context = SimpleNamespace(mode="network")
+            self._conn = sqlite3.connect(db_path)
+            self._conn.row_factory = sqlite3.Row
+
+        def fetch_all_remcard(self, query, params=()):
+            return self._conn.execute(query, params).fetchall()
+
+        def close(self):
+            self._conn.close()
+
+    manager = Manager(current_path)
+    try:
+        records = OperBlockService(manager).list_archived_operation_cases()
+    finally:
+        manager.close()
+    histories = {item["history_number"]: item for item in records}
+    assert {"CUR", "OLD"}.issubset(histories)
+    assert not histories["CUR"]["is_external_archive"]
+    assert histories["OLD"]["is_external_archive"]
+
+
 def test_operblock_archive_page_uses_one_connection_casefold_and_half_open_end(tmp_path, monkeypatch):
     db_path = tmp_path / "archive.db"
     _create_mixed_archive(db_path)
     clear_archive_schema_cache()
 
-    from rem_card.services import operblock_service as operblock_service_module
+    from rem_card.services.operblock import archive_sources as operblock_archive_module
 
     original_connect = sqlite3.connect
     connect_calls = 0
@@ -284,7 +323,7 @@ def test_operblock_archive_page_uses_one_connection_casefold_and_half_open_end(t
         connect_calls += 1
         return original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(operblock_service_module.sqlite3, "connect", counted_connect)
+    monkeypatch.setattr(operblock_archive_module.sqlite3, "connect", counted_connect)
     total, rows = OperBlockService._fetch_archive_case_page_from_db(
         str(db_path),
         start_dt="2026-07-12 00:00:00",
@@ -321,7 +360,7 @@ def test_public_operblock_page_opens_external_archive_once(tmp_path, monkeypatch
     current_path.touch()
     clear_archive_schema_cache()
 
-    from rem_card.services import operblock_service as operblock_service_module
+    from rem_card.services.operblock import archive_sources as operblock_archive_module
 
     original_connect = sqlite3.connect
     connect_calls = 0
@@ -331,7 +370,7 @@ def test_public_operblock_page_opens_external_archive_once(tmp_path, monkeypatch
         connect_calls += 1
         return original_connect(*args, **kwargs)
 
-    monkeypatch.setattr(operblock_service_module.sqlite3, "connect", counted_connect)
+    monkeypatch.setattr(operblock_archive_module.sqlite3, "connect", counted_connect)
     service = object.__new__(OperBlockService)
     service.db = SimpleNamespace(
         db_path=str(current_path),

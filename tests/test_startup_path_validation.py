@@ -86,6 +86,32 @@ class StartupPathValidationTest(unittest.TestCase):
 
             self.assertFalse(runtime_paths.startup_baza_paths_recently_validated(root, [required]))
 
+    def test_compiled_startup_accepts_layout_without_legacy_rem_card_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for directory in runtime_paths.get_required_baza_paths(str(root)):
+                if Path(directory) != root / "rem_card":
+                    Path(directory).mkdir(parents=True, exist_ok=True)
+            with patch.object(startup_db_guard, "is_compiled", return_value=True):
+                startup_db_guard._ensure_guard_dirs(str(root))
+
+            # Exercise the second startup check without the guard's cache token.
+            runtime_paths.clear_startup_baza_path_validation()
+            with (
+                patch.object(paths, "BAZA_DIR", str(root)),
+                patch.object(paths, "is_compiled", return_value=True),
+                patch.object(paths, "ensure_local_directories"),
+                patch.dict(os.environ, {"REMCARD_PATH_SETUP_MODE": ""}),
+            ):
+                paths.ensure_directories()
+            self.assertFalse((root / "rem_card").exists())
+
+            # Actual runtime directories must still be required.
+            (root / "archiv" / "db_cycle_archive").rmdir()
+            with patch.object(startup_db_guard, "is_compiled", return_value=True):
+                with self.assertRaises(FileNotFoundError):
+                    startup_db_guard._ensure_guard_dirs(str(root))
+
     def test_guard_hands_exact_quickcheck_fingerprint_to_database_manager(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = str(Path(tmp) / "journal.db")

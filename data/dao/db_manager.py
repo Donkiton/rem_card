@@ -1,4 +1,4 @@
-from rem_card.app.db_wait_diagnostics import observe, observed_scope
+from rem_card.app.db_wait_diagnostics import observe, observed_scope, observed_call, bind_connection, mark_stage
 import json
 import os
 import random
@@ -739,7 +739,8 @@ class DatabaseManager:
 
     @contextmanager
     def _central_io_lock_scope(self, operation: str, *, source: str = "db"):
-        with observe(operation, resource=getattr(self, "db_path", ""), stage="central_io_wait") as diagnostic:
+        with observe(operation, resource=getattr(self, "db_path", ""), mutex=self._central_io_lock,
+                     stage="central_io_wait") as diagnostic:
             started = time.perf_counter()
             lock = self._central_io_lock
             lock.acquire()
@@ -2397,6 +2398,7 @@ class DatabaseManager:
     def _readonly_db_uri(self) -> str:
         return build_sqlite_file_uri(self.db_path, mode="ro")
 
+    @observed_call("read_connection_open")
     def _open_readonly_central_connection(self) -> sqlite3.Connection:
         if self._closed or self._remcard_conn is None:
             raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
@@ -2572,6 +2574,7 @@ class DatabaseManager:
         )
 
     @contextmanager
+    @observed_scope("read_snapshot_open")
     def central_read_snapshot_scope(self, source: str = "snapshot"):
         """Route related reads through one SQLite read transaction.
 
@@ -2607,14 +2610,18 @@ class DatabaseManager:
             state.central_read_scope_conn = conn
             state.force_central_reads = True
 
+            bind_connection(conn)
             if not bool(getattr(conn, "in_transaction", False)):
                 conn.execute("BEGIN")
                 owns_transaction = True
+            mark_stage("read_snapshot_active")
             yield self
         finally:
             if owns_transaction and conn is not None:
                 try:
+                    mark_stage("read_snapshot_rollback")
                     conn.execute("ROLLBACK")
+                    mark_stage("read_snapshot_closed")
                 except sqlite3.Error as exc:
                     logger.debug("Failed to finish central read snapshot: %s", exc)
 
@@ -2766,6 +2773,7 @@ class DatabaseManager:
             notify_direct_central_success()
         return result
 
+    @observed_call("central_read_execute")
     def _fetch_all_central(self, query, params=(), *, use_write_connection: bool = False, cancel_check=None):
         # Чтения внутри текущей транзакции должны видеть незакоммиченные строки.
         # Обычные фоновые чтения открывают короткоживущее read-only connection
@@ -2781,8 +2789,10 @@ class DatabaseManager:
                         return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check))
             scoped_conn = self._scoped_central_read_connection()
             if scoped_conn is not None:
+                bind_connection(scoped_conn)
                 return self._confirmed_central_read_result(self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check))
             conn = self._open_readonly_central_connection()
+            bind_connection(conn)
             try:
                 return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check))
             finally:
@@ -2795,6 +2805,7 @@ class DatabaseManager:
                 raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             raise
 
+    @observed_call("central_read_execute")
     def _fetch_one_central(self, query, params=(), *, use_write_connection: bool = False):
         try:
             if use_write_connection or self._in_current_thread_remcard_transaction():
@@ -2806,10 +2817,12 @@ class DatabaseManager:
                         return self._confirmed_central_read_result(cursor.fetchone())
             scoped_conn = self._scoped_central_read_connection()
             if scoped_conn is not None:
+                bind_connection(scoped_conn)
                 cursor = scoped_conn.cursor()
                 cursor.execute(query, params)
                 return self._confirmed_central_read_result(cursor.fetchone())
             conn = self._open_readonly_central_connection()
+            bind_connection(conn)
             try:
                 cursor = conn.cursor()
                 cursor.execute(query, params)
@@ -3244,7 +3257,8 @@ class DatabaseManager:
         effective_write_options = dict(write_options or self._current_thread_write_metadata())
         try:
             with self._mark_write_activity():
-                with observe(source, resource=getattr(self, "db_path", ""), stage="central_io_wait") as diagnostic, self._central_io_lock:
+                with observe(source, resource=getattr(self, "db_path", ""), mutex=self._central_io_lock,
+                             stage="central_io_wait") as diagnostic, self._central_io_lock:
                     diagnostic.stage("central_io_held")
                     if self._closed or self._remcard_conn is None:
                         raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
@@ -3442,14 +3456,6 @@ class DatabaseManager:
                 status=status,
                 fallback_used=fallback_used,
             )
-
-    def fetch_all_journal(self, query, params=()):
-        """Compatibility alias for legacy journal callers."""
-        return self.fetch_all_remcard(query, params)
-
-    def fetch_one_journal(self, query, params=()):
-        """Compatibility alias for legacy journal callers."""
-        return self.fetch_one_remcard(query, params)
 
     def get_data_version(self) -> int:
         return self.get_latest_change_id()

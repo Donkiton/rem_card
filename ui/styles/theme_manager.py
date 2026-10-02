@@ -9,25 +9,11 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
-from rem_card.ui.styles.qss_builder import build_global_style
+from rem_card.ui.styles.theme_policy import full_runtime_theme_enabled
 from rem_card.ui.styles.theme_presets import build_tokens, get_preset, list_presets
 from rem_card.ui.styles.theme_storage import ThemeStorage, role_settings_from_payload
 from rem_card.ui.styles.theme_tokens import default_role_settings, default_settings_payload, normalize_mode, normalize_role
 from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
-
-
-FULL_RUNTIME_THEME_ENV = "REMCARD_FULL_RUNTIME_THEME"
-_FALSE_VALUES = {"0", "false", "no", "off"}
-
-
-def full_runtime_theme_enabled() -> bool:
-    """Runtime theming is enabled unless the feature flag explicitly disables it."""
-    return str(os.environ.get(FULL_RUNTIME_THEME_ENV, "1")).strip().lower() not in _FALSE_VALUES
-
-
-def _is_static_operblock_role(role: str | None = None) -> bool:
-    """Compatibility shim: operblock now supports the shared runtime theme."""
-    return False
 
 
 class ThemeManager(QObject):
@@ -51,9 +37,6 @@ class ThemeManager(QObject):
     def enabled(self) -> bool:
         return self._enabled
 
-    @property
-    def is_static_operblock(self) -> bool:
-        return False
 
     @property
     def active_role(self) -> str:
@@ -189,8 +172,6 @@ class ThemeManager(QObject):
             return build_tokens("remcard_light", "light", {})
         return self.tokens_for_role(self._active_role)
 
-    def build_qss(self, role: str | None = None) -> str:
-        return build_global_style(self.tokens_for_role(role))
 
     def set_mode(self, mode: str, *, save: bool = True) -> None:
         if not self._enabled:

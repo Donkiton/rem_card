@@ -12,6 +12,7 @@ from datetime import date, datetime
 from typing import Any, Callable
 
 from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
+from rem_card.app.db_wait_diagnostics import observe, observed_call, bind_connection, mark_stage, mark_retry
 
 
 DEFAULT_NETWORK_WRITE_TIMEOUT_SEC = 8.0
@@ -222,6 +223,11 @@ def _execute_sql(conn: sqlite3.Connection, message: dict[str, Any]) -> dict[str,
 
 
 def _worker_write(pipe, message: dict[str, Any]) -> None:
+    with observe(message.get("source"), resource=message.get("db_path"), stage="network_connection_open"):
+        _worker_write_observed(pipe, message)
+
+
+def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
     db_path = os.path.abspath(str(message.get("db_path") or ""))
     lock_path = os.path.abspath(str(message.get("lock_path") or ""))
     operation_id = str(message.get("operation_id") or "")
@@ -234,14 +240,18 @@ def _worker_write(pipe, message: dict[str, Any]) -> None:
     transaction_started = False
     try:
         conn = _open_network_connection(db_path)
+        bind_connection(conn)
         receipt = _lookup_receipt(conn, operation_id)
         if receipt is not None:
             pipe.send({"ok": True, "status": "already_committed", **receipt})
             return
 
+        mark_stage("file_lock_wait")
         while not lock.acquire(node_id or f"{socket.gethostname()}:{os.getpid()}", source):
+            mark_retry()
             time.sleep(0.05)
         lock_acquired = True
+        mark_stage("sqlite_begin_wait")
         while True:
             try:
                 conn.execute("BEGIN IMMEDIATE")
@@ -250,6 +260,7 @@ def _worker_write(pipe, message: dict[str, Any]) -> None:
             except sqlite3.OperationalError as exc:
                 if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
                     raise
+                mark_retry()
                 time.sleep(0.05)
 
         receipt = _lookup_receipt(conn, operation_id)
@@ -259,6 +270,7 @@ def _worker_write(pipe, message: dict[str, Any]) -> None:
             pipe.send({"ok": True, "status": "already_committed", **receipt})
             return
         before_change_id = _change_cursor(conn)
+        mark_stage("transaction_body")
         pipe.send({"ok": True, "status": "ready"})
 
         while True:
@@ -271,7 +283,9 @@ def _worker_write(pipe, message: dict[str, Any]) -> None:
                     _send_error(pipe, exc, phase="execute")
                 continue
             if name == "abort":
+                mark_stage("rollback")
                 conn.rollback()
+                mark_stage("rolled_back")
                 transaction_started = False
                 pipe.send({"ok": True, "status": "rolled_back"})
                 return
@@ -306,7 +320,9 @@ def _worker_write(pipe, message: dict[str, Any]) -> None:
                     affected_rows_json,
                 ),
             )
+            mark_stage("commit")
             conn.commit()
+            mark_stage("committed")
             transaction_started = False
             pipe.send(
                 {
@@ -542,6 +558,14 @@ class NetworkWriteWorkerClient:
         source: str,
         phase: str,
     ) -> dict[str, Any]:
+        with observe(source, resource=self.db_path, stage=f"network_worker_{phase}") as diagnostic:
+            if self._process is not None:
+                diagnostic.worker(self._process.pid)
+            return self._recv_observed(deadline=deadline, operation_id=operation_id, source=source, phase=phase)
+
+    def _recv_observed(
+        self, *, deadline: float, operation_id: str, source: str, phase: str,
+    ) -> dict[str, Any]:
         if self._pipe is None or not self._pipe.poll(self._remaining(deadline)):
             raise NetworkWriteWorkerTimeout(
                 operation_id=operation_id,
@@ -645,6 +669,7 @@ class NetworkWriteWorkerClient:
             return dict(response.get("receipt") or {})
         return {"missing": True}
 
+    @observed_call("network_worker_mutex_wait")
     def execute(
         self,
         operation: Callable[[Any], Any],
@@ -665,6 +690,7 @@ class NetworkWriteWorkerClient:
             effective_timeout / 3.0,
         )
         with self._mutex:
+            mark_stage("network_worker_start")
             self._remember_commit_info({})
             try:
                 self._ensure_started()

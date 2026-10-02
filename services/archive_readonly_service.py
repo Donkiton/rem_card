@@ -8,9 +8,12 @@ from typing import Callable, Optional, Sequence
 
 from rem_card.app.sqlite_shared import configure_connection
 from rem_card.data.dao.patient_status_dao import PatientStatusDAO
-from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VitalsDAO
+from rem_card.data.dao.fluids_dao import FluidsDAO
+from rem_card.data.dao.orders_dao import OrdersDAO
+from rem_card.data.dao.patient_dao import PatientDAO
+from rem_card.data.dao.vitals_dao import VitalsDAO
 from rem_card.services.patient_status_service import PatientStatusService
-from rem_card.services.remcard_service import RemCardService
+from rem_card.services.remcard_facade import RemCardService
 
 
 GLOBAL_CHANGELOG_ENTITIES = ("patients", "admissions", "beds", "operations")
@@ -115,14 +118,6 @@ class ArchiveReadOnlyDatabaseManager:
                 return cursor.fetchone()
             finally:
                 cursor.close()
-
-    def fetch_all_journal(self, query: str, params: Sequence = (), *, cancel_check=None):
-        """Compatibility alias for legacy journal callers."""
-        return self.fetch_all_remcard(query, params, cancel_check=cancel_check)
-
-    def fetch_one_journal(self, query: str, params: Sequence = ()):
-        """Compatibility alias for legacy journal callers."""
-        return self.fetch_one_remcard(query, params)
 
     def get_data_version(self) -> int:
         row = self.fetch_one_remcard("SELECT value FROM meta WHERE key = 'app_data_version'")
