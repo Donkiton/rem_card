@@ -551,14 +551,37 @@ class LocalReplicaSyncTest(unittest.TestCase):
                 daemon=True,
             ),
         ]
-        try:
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=5.0)
-        finally:
-            first.close()
-            second.close()
+        cleanup_finished = [threading.Event(), threading.Event()]
+
+        def observed_cleanup(client, finished):
+            original = client._cleanup_stopped_worker_locks
+
+            def cleanup(worker_pid):
+                try:
+                    original(worker_pid)
+                finally:
+                    finished.set()
+
+            return cleanup
+
+        with (
+            patch.object(first, "_cleanup_stopped_worker_locks", side_effect=observed_cleanup(first, cleanup_finished[0])),
+            patch.object(second, "_cleanup_stopped_worker_locks", side_effect=observed_cleanup(second, cleanup_finished[1])),
+        ):
+            try:
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5.0)
+            finally:
+                first.close()
+                second.close()
+
+            # close() intentionally cleans dead-worker locks asynchronously.
+            # Finish those reads before deleting the fixture's foreign gate;
+            # Windows refuses unlink while a cleanup thread has it open.
+            for finished in cleanup_finished:
+                self.assertTrue(finished.wait(5.0), "Dead-worker lock cleanup did not finish")
 
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(len(outcomes), 2)
