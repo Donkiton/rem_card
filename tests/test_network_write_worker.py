@@ -163,7 +163,14 @@ class NetworkWriteWorkerTest(unittest.TestCase):
     def test_hard_timeout_terminates_process_and_rolls_back(self):
         def slow_operation(cursor):
             cursor.execute("INSERT INTO worker_items(value) VALUES (?)", ("must-rollback",))
-            time.sleep(1.15)
+            # Stall SQL in the worker, not Python in the caller. A caller sleep
+            # lets finish/commit race process termination, and a confirmed
+            # receipt correctly returns success instead of a rollback timeout.
+            cursor.execute(
+                "WITH RECURSIVE delay(n) AS ("
+                "VALUES(0) UNION ALL SELECT n + 1 FROM delay WHERE n < 100000000"
+                ") SELECT SUM(n) FROM delay"
+            )
             return cursor.lastrowid
 
         started = time.monotonic()

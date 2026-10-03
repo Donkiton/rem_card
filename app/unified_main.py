@@ -123,6 +123,8 @@ def main(argv=None):
         if sys.stdout is not None:
             print("REMCARD_UNIFIED_SMOKE_OK")
         return
+    from rem_card.app.gui_gc import disable_automatic_gui_gc, install_gui_gc
+    disable_automatic_gui_gc()
     from rem_card.app.startup_diagnostics import start
     start()
     from PySide6.QtWidgets import QApplication
@@ -131,6 +133,7 @@ def main(argv=None):
     from rem_card.app.runtime_paths import is_compiled
 
     app = QApplication.instance() or QApplication(sys.argv)
+    install_gui_gc(app)
     app.setQuitOnLastWindowClosed(False)
     # Namespace is application-wide, independent of role, installation or selected DB.
     from rem_card.app.main import _prepare_single_instance_server, _connect_single_instance_requests

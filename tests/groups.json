@@ -110,6 +110,7 @@
     "tests/test_rework_guardrails.py"
   ],
   "ui": [
+    "tests/test_gui_gc.py",
     "tests/test_transfer_outcome_dialog.py",
     "tests/test_role_entry_preload.py",
     "tests/test_workspace_backgrounds.py",
