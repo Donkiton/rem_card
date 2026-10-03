@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -6,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from typing import Optional
 
@@ -221,6 +223,15 @@ def _normalize_baza_dir(path: str) -> str:
 def get_dev_checkout_root() -> str:
     """Return the source checkout that owns developer-only local settings."""
     return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def get_local_cache_dir() -> str:
+    """Keep source checkouts away from installed clients' replicas and snapshots."""
+    local_appdata = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    if is_compiled():
+        return os.path.join(local_appdata, "RemCard", "cache")
+    checkout_key = hashlib.sha256(os.path.normcase(get_dev_checkout_root()).encode("utf-8")).hexdigest()[:16]
+    return os.path.join(local_appdata, "RemCard", "dev", checkout_key, "cache")
 
 
 def _get_local_remcard_dir() -> str:
@@ -491,7 +502,7 @@ def read_dev_database_config() -> dict[str, object]:
 def _quarantine_broken_dev_database_config(config_path: str) -> Optional[str]:
     if not os.path.isfile(config_path):
         return None
-    quarantine_path = f"{config_path}.broken.{int(time.time())}"
+    quarantine_path = f"{config_path}.broken.{int(time.time())}.{uuid.uuid4().hex}"
     try:
         os.replace(config_path, quarantine_path)
         return quarantine_path

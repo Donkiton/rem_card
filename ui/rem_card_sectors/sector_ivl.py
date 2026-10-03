@@ -32,6 +32,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.styles.theme import COLOR_DANGER
+from rem_card.ui.rem_card_sectors.ivl_event_editor import IvlEventEditorMixin
 
 
 def _ivl_icon_qss_url(file_name: str) -> str:
@@ -183,7 +184,7 @@ class IvlHistoryTable(QTableWidget):
         )
 
 
-class SectorIvl(BaseSectorWidget):
+class SectorIvl(IvlEventEditorMixin, BaseSectorWidget):
     SNAPSHOT_CACHE_LIMIT = 10
     HISTORY_HEADER_SETTINGS_KEY = "ivl/history_header_state"
     DEFAULT_EXTUBATION_REASON = (
@@ -229,6 +230,10 @@ class SectorIvl(BaseSectorWidget):
         self._snapshot_cache = OrderedDict()
         self._input_context = (None, None)
         self._ivl_write_pending = False
+        self._ivl_write_focused = False
+        self._editing_event = None
+        self._editing_context = None
+        self._editing_case_revision = None
         self._ivl_loading_key = None
         self._refresh_generation = 0
         self._refresh_worker = None
@@ -938,7 +943,15 @@ class SectorIvl(BaseSectorWidget):
         self.btn_add_event.setFixedWidth(162)
 
         event_card, event_layout = self._make_card("Новое событие ИВЛ", "event.png")
-        event_grid = QGridLayout()
+        self.event_card_title = event_card.findChild(QLabel, "ivl_card_title")
+        self.event_o2_flow_edit = QLineEdit()
+        self.event_o2_flow_edit.setValidator(QDoubleValidator(0, 100, 3, self))
+        self.event_o2_flow_edit.setPlaceholderText("л/мин")
+        self.lbl_event_o2_flow = self._make_field_label("O₂, л/мин")
+        self.event_o2_flow_edit.setFixedWidth(78)
+        self.lbl_event_o2_flow.hide()
+        self.event_o2_flow_edit.hide()
+        event_grid = self.event_grid = QGridLayout()
         event_grid.setContentsMargins(0, 0, 0, 0)
         event_grid.setHorizontalSpacing(8)
         event_grid.setVerticalSpacing(4)
@@ -952,6 +965,8 @@ class SectorIvl(BaseSectorWidget):
         self.event_indications_edit.setMaximumWidth(360)
         event_grid.addWidget(self.event_indications_edit, 1, 3)
         event_grid.addWidget(self.btn_add_event, 1, 4)
+        event_grid.addWidget(self.lbl_event_o2_flow, 0, 5)
+        event_grid.addWidget(self.event_o2_flow_edit, 1, 5)
         event_grid.setColumnStretch(0, 0)
         event_grid.setColumnStretch(1, 0)
         event_grid.setColumnStretch(2, 0)
@@ -1024,6 +1039,7 @@ class SectorIvl(BaseSectorWidget):
         self.history_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.history_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.history_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.history_table.cellDoubleClicked.connect(self._on_history_double_clicked)
         self.history_table.setAlternatingRowColors(True)
         self.history_table.setShowGrid(True)
         self.history_table.horizontalHeader().setSectionsClickable(True)
@@ -1072,6 +1088,7 @@ class SectorIvl(BaseSectorWidget):
             or (admission_id is not None and admission_id != self.admission_id)
         )
         if context_changed:
+            self._reset_event_editor()
             self._invalidate_refresh_context()
         if remcard_service is not None:
             self.remcard_service = remcard_service
@@ -1082,11 +1099,16 @@ class SectorIvl(BaseSectorWidget):
         self.refresh()
 
     def showEvent(self, event):  # noqa: N802
+        self.cancel_event_edit()
         if self._refresh_closed and not self._shutdown_requested:
             self._refresh_closed = False
             self.refresh(force=True)
         super().showEvent(event)
         self.refresh()
+
+    def hideEvent(self, event):  # noqa: N802
+        self.cancel_event_edit()
+        super().hideEvent(event)
 
     def refresh(self, force: bool = False):
         if self._refresh_closed:
@@ -1096,6 +1118,7 @@ class SectorIvl(BaseSectorWidget):
         context_changed = input_context != self._input_context
         self._refresh_context_changed = context_changed
         if context_changed:
+            self.cancel_event_edit()
             self._invalidate_refresh_context()
             if input_context[0] is not self._input_context[0]:
                 self._snapshot_cache.clear()
@@ -1121,7 +1144,7 @@ class SectorIvl(BaseSectorWidget):
         if cached:
             if not self._ivl_write_pending:
                 cached_input_state = self._capture_input_state()
-                self._apply_snapshot(cached)
+                self._apply_snapshot(cached, preserve_inputs=not context_changed)
                 if not context_changed:
                     self._restore_input_state(cached_input_state)
         else:
@@ -1321,6 +1344,7 @@ class SectorIvl(BaseSectorWidget):
             same_context
             and (
                 request.get("preserve_existing_inputs")
+                or self._editing_event is not None
                 or current_input_state != request["input_state"]
             )
         )
@@ -1359,6 +1383,7 @@ class SectorIvl(BaseSectorWidget):
             "start_dt": self.start_dt_edit.dateTime().toPython(),
             "event_dt": self.event_time_edit.dateTime().toPython(),
             "event_indications": self.event_indications_edit.text(),
+            "event_o2_flow": self.event_o2_flow_edit.text(),
             "parameters": {name: edit.text() for name, (_label, edit) in self.param_widgets.items()},
             "extubation_reason": self.extubation_reason_edit.currentText(),
             "o2_flow": self.extubation_o2_flow_edit.text(),
@@ -1385,6 +1410,7 @@ class SectorIvl(BaseSectorWidget):
         if state.get("event_dt") is not None:
             self.event_time_edit.setDateTime(QDateTime(state["event_dt"]))
         self.event_indications_edit.setText(str(state.get("event_indications") or ""))
+        self.event_o2_flow_edit.setText(str(state.get("event_o2_flow") or ""))
         for name, value in (state.get("parameters") or {}).items():
             if name in self.param_widgets:
                 self.param_widgets[name][1].setText(str(value or ""))
@@ -1394,6 +1420,9 @@ class SectorIvl(BaseSectorWidget):
             self.extubation_dt_edit.setDateTime(QDateTime(state["extubation_dt"]))
 
     def _apply_snapshot(self, snapshot, *, preserve_inputs: bool = False):
+        previous_active_case_id = self.active_case_id
+        previous_has_history = bool(self._history_events)
+        set_text = self._set_text_if_changed
         summary = dict(snapshot.get("summary") or {})
         timeline = list(snapshot.get("timeline") or [])
         latest_case = snapshot.get("latest_case")
@@ -1404,6 +1433,11 @@ class SectorIvl(BaseSectorWidget):
         self.active_case_id = active_case.id if active_case else None
         self._active_case_revision = int(getattr(active_case, "revision", 0) or 0) if active_case else None
         self._latest_case_revision = int(getattr(latest_case, "revision", 0) or 0) if latest_case else self._active_case_revision
+        actions_changed = (
+            not preserve_inputs or previous_active_case_id != self.active_case_id
+            or previous_has_history != bool(timeline)
+            or not any(button.isEnabled() for button in (self.btn_create_case, self.btn_undo, self.btn_add_event))
+        )
         self._latest_event_revision_by_case = {}
         for event in timeline:
             case_id = getattr(event, "ivl_episode_id", None)
@@ -1411,46 +1445,59 @@ class SectorIvl(BaseSectorWidget):
                 self._latest_event_revision_by_case[int(case_id)] = int(getattr(event, "revision", 0) or 0)
 
         if active_case:
-            self.lbl_case_status.setText(f"Случай #{active_case.episode_number}. Активен с:")
-            self.lbl_case_start.setText(active_case.start_time.strftime("%d.%m.%Y %H:%M"))
-            self.lbl_case_duration.setText(
+            set_text(self.lbl_case_status, f"Случай #{active_case.episode_number}. Активен с:")
+            set_text(self.lbl_case_start, active_case.start_time.strftime("%d.%m.%Y %H:%M"))
+            set_text(self.lbl_case_duration,
                 f"Длительность случая: {self._format_duration(summary.get('case_duration_seconds', 0.0))}"
             )
             alert = bool(summary.get("tube_alert"))
             self._set_tube_duration_text(self._format_duration(summary.get("tube_duration_seconds", 0.0)), alert)
-            self._set_actions_enabled(True, has_case_history=bool(timeline))
+            if actions_changed:
+                self._set_actions_enabled(True, has_case_history=bool(timeline))
             self._reload_history(timeline)
         else:
             if latest_case and latest_case.end_time:
-                self.lbl_case_status.setText(f"Последний случай #{latest_case.episode_number}. Закрыт:")
-                self.lbl_case_start.setText(latest_case.end_time.strftime("%d.%m.%Y %H:%M"))
+                set_text(self.lbl_case_status, f"Последний случай #{latest_case.episode_number}. Закрыт:")
+                set_text(self.lbl_case_start, latest_case.end_time.strftime("%d.%m.%Y %H:%M"))
             else:
-                self.lbl_case_status.setText("Случай: не открыт")
-                self.lbl_case_start.setText("")
-            self.lbl_case_duration.setText("Длительность случая: --")
+                set_text(self.lbl_case_status, "Случай: не открыт")
+                set_text(self.lbl_case_start, "")
+            set_text(self.lbl_case_duration, "Длительность случая: --")
             self._set_tube_duration_text("--", alert=False)
-            self._set_actions_enabled(False, has_case_history=bool(timeline))
+            if actions_changed:
+                self._set_actions_enabled(False, has_case_history=bool(timeline))
             if timeline:
                 self._reload_history(timeline)
             else:
                 self._history_events = []
                 self.history_table.setRowCount(0)
 
-        self.lbl_total_duration.setText(self._format_duration(summary.get("total_duration_seconds", 0.0)))
+        set_text(self.lbl_total_duration, self._format_duration(summary.get("total_duration_seconds", 0.0)))
 
         if self.start_type_combo.currentData() == "ADMISSION":
             adm_dt = self._get_admission_datetime()
             if adm_dt:
                 self.start_dt_edit.setDateTime(QDateTime(adm_dt))
         self._apply_start_time_constraints()
-        if self.active_case_id:
+        if self.active_case_id and self._editing_event is None and not preserve_inputs:
             self.event_time_edit.setDateTime(QDateTime.currentDateTime())
         else:
             self._sync_start_event_time()
         self._apply_event_time_constraints()
-        self._apply_extubation_time_constraints(active_case, timeline)
+        if active_case or not preserve_inputs or actions_changed:
+            self._apply_extubation_time_constraints(active_case, timeline)
+
+    @staticmethod
+    def _set_text_if_changed(label, text):
+        if label.text() != text:
+            label.setText(text)
 
     def _set_actions_enabled(self, active_case_present: bool, has_case_history: bool = False):
+        if self._editing_event is not None:
+            self._configure_event_editor()
+            if self._ivl_write_pending:
+                self._set_ivl_write_controls_enabled(False)
+            return
         self.btn_replace_tube.setEnabled(active_case_present)
         self.btn_close_case.setEnabled(active_case_present)
         self.btn_add_event.setEnabled(active_case_present)
@@ -1483,11 +1530,15 @@ class SectorIvl(BaseSectorWidget):
         ):
             widget.setEnabled(bool(enabled))
 
-    def _begin_ivl_write_pending(self, status_text: str):
+    def _begin_ivl_write_pending(self, status_text: str, *, focused: bool = False):
         self._ivl_write_pending = True
+        self._ivl_write_focused = focused
+        self._set_ivl_write_controls_enabled(False)
+        if focused:
+            self.btn_add_event.setText("Сохранение…")
+            return
         self.lbl_case_status.setText(status_text)
         self.lbl_case_start.setText("")
-        self._set_ivl_write_controls_enabled(False)
         self._ivl_loading_key = show_app_loading(
             self,
             status_text,
@@ -1505,7 +1556,9 @@ class SectorIvl(BaseSectorWidget):
     def _finish_ivl_write_success(self, result, on_success=None):
         self._ivl_write_pending = False
         self._hide_ivl_write_loading()
-        self._invalidate_current_snapshot()
+        if not self._ivl_write_focused:
+            self._invalidate_current_snapshot()
+        self._ivl_write_focused = False
         try:
             if on_success:
                 on_success(result)
@@ -1515,14 +1568,18 @@ class SectorIvl(BaseSectorWidget):
     def _finish_ivl_write_error(self, exc: Exception, error_title: str):
         self._ivl_write_pending = False
         self._hide_ivl_write_loading()
-        self._invalidate_current_snapshot()
+        if not self._ivl_write_focused:
+            self._invalidate_current_snapshot()
+        self._ivl_write_focused = False
+        if self._editing_event is not None:
+            self._configure_event_editor()
         self.refresh()
         CustomMessageBox.warning(self, error_title, str(exc))
 
-    def _enqueue_ivl_write(self, description: str, operation, *, pending_text: str, error_title: str, on_success=None):
+    def _enqueue_ivl_write(self, description: str, operation, *, pending_text: str, error_title: str, on_success=None, focused: bool = False):
         if self._ivl_write_pending:
             return
-        self._begin_ivl_write_pending(pending_text)
+        self._begin_ivl_write_pending(pending_text, focused=focused)
         if hasattr(self.remcard_service, "enqueue_write"):
             self.remcard_service.enqueue_write(
                 description=description,
@@ -1585,7 +1642,10 @@ class SectorIvl(BaseSectorWidget):
         )
 
     def _populate_history_table(self, events):
-        self.history_table.setRowCount(len(events))
+        current_ids = [self.history_table.item(row, 0).data(Qt.UserRole) for row in range(self.history_table.rowCount())]
+        if current_ids != [event.id for event in events]:
+            self.history_table.setRowCount(0)
+            self.history_table.setRowCount(len(events))
         for row_idx, event in enumerate(events):
             event_type = getattr(event.event_type, "value", str(event.event_type))
             mode = getattr(event.mode, "value", "-") if event.mode else "-"
@@ -1603,11 +1663,17 @@ class SectorIvl(BaseSectorWidget):
                 reason_o2.append(self._format_o2_flow(event.o2_flow))
             timestamp = getattr(event, "timestamp", None)
             timestamp_text = timestamp.strftime("%d.%m.%Y %H:%M") if timestamp else ""
-            self.history_table.setItem(row_idx, 0, QTableWidgetItem(timestamp_text))
-            self.history_table.setItem(row_idx, 1, QTableWidgetItem(self.EVENT_LABELS.get(event_type, event_type)))
-            self.history_table.setItem(row_idx, 2, QTableWidgetItem(self.MODE_LABELS.get(mode, mode)))
-            self.history_table.setItem(row_idx, 3, QTableWidgetItem(params))
-            self.history_table.setItem(row_idx, 4, QTableWidgetItem("; ".join(reason_o2) if reason_o2 else "-"))
+            texts = (timestamp_text, self.EVENT_LABELS.get(event_type, event_type),
+                     self.MODE_LABELS.get(mode, mode), params, "; ".join(reason_o2) if reason_o2 else "-")
+            for column, text in enumerate(texts):
+                item = self.history_table.item(row_idx, column)
+                if item is None:
+                    item = QTableWidgetItem(text)
+                    if column == 0:
+                        item.setData(Qt.UserRole, event.id)
+                    self.history_table.setItem(row_idx, column, item)
+                elif item.text() != text:
+                    item.setText(text)
 
     def _apply_history_default_widths(self):
         defaults = (110, 150, 135, 280, 260)
@@ -1668,7 +1734,7 @@ class SectorIvl(BaseSectorWidget):
         self._sync_start_event_time()
 
     def _sync_start_event_time(self):
-        if self.active_case_id is None:
+        if self.active_case_id is None and self._editing_event is None:
             self.event_time_edit.setDateTime(self.start_dt_edit.dateTime())
 
     def _on_event_datetime_changed(self, _dt: QDateTime):
@@ -1709,6 +1775,9 @@ class SectorIvl(BaseSectorWidget):
         return min_dt
 
     def _apply_event_time_constraints(self):
+        if self._editing_event is not None:
+            self._apply_edit_time_constraints()
+            return
         if not self.remcard_service or not self.admission_id:
             return
 
@@ -1782,7 +1851,11 @@ class SectorIvl(BaseSectorWidget):
         else:
             self._on_mode_changed()
 
-        show_indications = event_type in ("START_VENT", "MODE_CHANGE", "TRACHEOSTOMY")
+        show_indications = event_type in ("START_VENT", "MODE_CHANGE", "TRACHEOSTOMY", "EXTUBATION")
+        show_oxygen = self._editing_event is not None and event_type == "EXTUBATION"
+        self.lbl_event_o2_flow.setVisible(show_oxygen)
+        self.event_o2_flow_edit.setVisible(show_oxygen)
+        self._apply_event_editor_layout(show_oxygen)
         self.lbl_event_indications.setVisible(show_indications)
         self.event_indications_edit.setVisible(show_indications)
         self.event_indications_edit.setEnabled(show_indications)
@@ -1883,6 +1956,9 @@ class SectorIvl(BaseSectorWidget):
         )
 
     def _on_add_event_clicked(self):
+        if self._editing_event is not None:
+            self._save_event_edit()
+            return
         if not self.remcard_service or not self.active_case_id:
             CustomMessageBox.warning(self, "ИВЛ", "Нет активного случая ИВЛ.")
             return
@@ -1997,6 +2073,9 @@ class SectorIvl(BaseSectorWidget):
         )
 
     def _on_undo_last_clicked(self):
+        if self._editing_event is not None:
+            self._cancel_event_edit()
+            return
         if not self.remcard_service or not self.admission_id:
             CustomMessageBox.warning(self, "ИВЛ", "Сначала выберите пациента.")
             return
@@ -2044,11 +2123,11 @@ class SectorIvl(BaseSectorWidget):
 
     def _set_tube_duration_text(self, duration_text: str, alert: bool):
         if alert:
-            self.lbl_tube_duration.setText(
+            self._set_text_if_changed(self.lbl_tube_duration,
                 f'<span style="color: {COLOR_DANGER}; font-weight: bold;">{duration_text}</span>'
             )
             return
-        self.lbl_tube_duration.setText(duration_text)
+        self._set_text_if_changed(self.lbl_tube_duration, duration_text)
 
     def _clear_extubation_reason(self):
         self.extubation_reason_edit.setCurrentIndex(-1)
@@ -2076,6 +2155,7 @@ class SectorIvl(BaseSectorWidget):
         super().closeEvent(event)
 
     def shutdown(self):
+        self.cancel_event_edit()
         self._shutdown_requested = True
         self._refresh_closed = True
         self._invalidate_refresh_context()

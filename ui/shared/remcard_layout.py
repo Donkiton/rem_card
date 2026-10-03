@@ -1021,6 +1021,12 @@ class RemCardLayoutManager(QWidget):
         if hasattr(self, "sector_4b"):
             self.sector_4b.update_status(status_dto)
 
+    def _cancel_ivl_edit_for_tab_navigation(self, source):
+        if source == "click":
+            sector_ivl = getattr(self, "sector_ivl", None)
+            if sector_ivl is not None and hasattr(sector_ivl, "cancel_event_edit"):
+                sector_ivl.cancel_event_edit()
+
     def set_active_tab(self, tab_name, *, source: str = "click"):
         started = time.perf_counter()
         requested_tab_name = tab_name
@@ -1077,6 +1083,7 @@ class RemCardLayoutManager(QWidget):
         if not hasattr(self, 'vitals_stack'):
             _record_set_active_tab_end("missing_stack", tab_name)
             return tab_name
+        self._cancel_ivl_edit_for_tab_navigation(normalized_source)
         loading_key = None
         if normalized_source == "click":
             loading_key = show_app_loading(

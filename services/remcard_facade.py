@@ -2850,6 +2850,9 @@ class RemCardService(QObject):
     def get_ventilation_events(self, case_id: int):
         return self._require_ventilation().get_case_events(case_id)
 
+    def edit_ventilation_event(self, event_id: int, **kwargs):
+        return self._require_ventilation().edit_event(event_id, **kwargs)
+
     def get_ventilation_timeline(self, admission_id: int):
         return self._require_ventilation().get_admission_events(admission_id)
 

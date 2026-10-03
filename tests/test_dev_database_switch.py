@@ -289,6 +289,7 @@ def test_broken_dev_database_config_is_quarantined_and_falls_back(monkeypatch, t
 
 def test_dev_database_config_quarantines_invalid_json_types(monkeypatch, tmp_path):
     config_path = isolate_dev_database_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime_paths.time, "time", lambda: 1234567890.0)
     invalid_payloads = [
         {"active_baza_dir": ["C:/wrong"], "saved_baza_dirs": []},
         {"active_baza_dir": None, "saved_baza_dirs": 1},
@@ -302,6 +303,12 @@ def test_dev_database_config_quarantines_invalid_json_types(monkeypatch, tmp_pat
         assert loaded["saved_baza_dirs"] == []
         assert loaded.get("load_error")
         assert not config_path.exists()
+
+    archives = list(tmp_path.glob("dev_database_paths.json.broken.*"))
+    assert len(archives) == len(invalid_payloads)
+    assert sorted(path.read_text(encoding="utf-8") for path in archives) == sorted(
+        json.dumps(payload) for payload in invalid_payloads
+    )
 
 
 def test_dev_database_config_lock_is_removed_if_token_write_fails(monkeypatch, tmp_path):
