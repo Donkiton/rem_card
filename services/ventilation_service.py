@@ -300,6 +300,22 @@ class VentilationService:
             expected_case_revision=expected_case_revision,
         )
 
+    def edit_event(self, event_id: int, *, admission_id: int, event_time: datetime,
+                   event_type=None, mode=None, parameters=None, extubation_reason=None, o2_flow=None,
+                   expected_event_revision: int, expected_case_revision=None):
+        from .ventilation_event_edit import edit_event_in_transaction
+
+        def operation(cursor):
+            return edit_event_in_transaction(
+                self, cursor, event_id=event_id, admission_id=admission_id,
+                event_time=event_time, event_type=event_type, mode=mode, parameters=parameters,
+                indications=extubation_reason, o2_flow=o2_flow,
+                expected_event_revision=expected_event_revision,
+                expected_case_revision=expected_case_revision,
+            )
+
+        return self._run_write(f"vent_edit_event:{event_id}", operation)
+
     def replace_tube(
         self,
         case_id: int,

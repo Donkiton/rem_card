@@ -1,5 +1,7 @@
 {
   "core": [
+    "tests/test_ventilation_event_edit.py",
+    "tests/test_dev_replica_isolation.py",
     "tests/test_local_operblock_startup.py",
     "tests/test_operblock_local_sync.py",
     "tests/test_operblock_archive_edit.py",
@@ -112,6 +114,7 @@
     "tests/test_rework_guardrails.py"
   ],
   "ui": [
+    "tests/test_sector_ivl_event_edit.py",
     "tests/test_gui_gc.py",
     "tests/test_transfer_outcome_dialog.py",
     "tests/test_role_entry_preload.py",

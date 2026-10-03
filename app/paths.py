@@ -2,6 +2,7 @@ import os
 import sys
 
 from rem_card.app.runtime_paths import (
+    get_local_cache_dir,
     DEV_EXISTING_BAZA_ONLY_ENV,
     get_dev_baza_dir,
     get_required_baza_paths,
@@ -143,7 +144,7 @@ DB_ROTATION_LOCK_PATH = os.path.join(ARCHIV_DIR, "db_rotation.lock")
 RECOVERY_LOCK_PATH = os.path.join(LOCKS_DIR, "recovery.lock")
 
 LOCAL_APPDATA = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
-LOCAL_CACHE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "cache")
+LOCAL_CACHE_DIR = get_local_cache_dir()
 LOCAL_CACHE_SUFFIX = str(
     os.environ.get("REMCARD_LOCAL_CACHE_SUFFIX")
     or f"{os.getpid()}"

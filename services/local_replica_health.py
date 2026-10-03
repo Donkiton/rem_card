@@ -45,7 +45,21 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
+        for attempt in range(4):
+            try:
+                os.replace(tmp_name, path)
+                if attempt:
+                    logging.getLogger(__name__).debug(
+                        "Local replica health replacement recovered: path=%s attempts=%s",
+                        path, attempt + 1,
+                    )
+                break
+            except OSError as exc:
+                if getattr(exc, "winerror", None) not in (5, 32) or attempt == 3:
+                    raise
+                # Windows readers/antivirus may briefly hold the old JSON
+                # without FILE_SHARE_DELETE. Keep atomic replacement intact.
+                time.sleep(0.025 * (attempt + 1))
     finally:
         try:
             if os.path.exists(tmp_name):
