@@ -69,6 +69,11 @@ def test_main_initializes_diagnostics_before_window_only_for_primary_instance(tm
     from rem_card.app import main, unified_preflight
     from rem_card.ui import unified_window
     from rem_card.services import crash_reports
+    from rem_card.app import gui_gc
+
+    gc_steps = []
+    monkeypatch.setattr(gui_gc, "disable_automatic_gui_gc", lambda: gc_steps.append("disabled"))
+    monkeypatch.setattr(gui_gc, "install_gui_gc", lambda app: gc_steps.append("installed"))
 
     monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(tmp_path))
     monkeypatch.setattr(unified_main.multiprocessing, "freeze_support", lambda: None)
@@ -87,11 +92,13 @@ def test_main_initializes_diagnostics_before_window_only_for_primary_instance(tm
 
     def window():
         assert crash_reports.current_crash_session_id()
+        assert gc_steps == ["disabled", "installed"]
         created.append(True)
         return SimpleNamespace(show=lambda: None, initialize=lambda: None)
 
     monkeypatch.setattr(unified_window, "UnifiedWindow", window)
     unified_main.main([])
+    assert gc_steps == ["disabled", "installed"]
     assert created == ([True] if acquired else [])
     assert app.exec.call_count == int(acquired)
     assert not crash_reports.current_crash_session_id()
