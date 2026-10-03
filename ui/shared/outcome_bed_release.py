@@ -48,7 +48,7 @@ class OutcomeBedReleaseMonitor(QObject):
         # release, or until a cancelled outcome removes the local deadline.
         release = getattr(beds.patient_service, 'maybe_release_due_outcome_beds_async', None)
         if callable(release):
-            release()
+            release(force=True)
         beds.refresh_admissions(due, queue_if_running=False)
 
 

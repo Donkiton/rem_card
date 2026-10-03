@@ -254,6 +254,13 @@ class RemCardService(QObject):
         try:
             sync_actions = (payload or {}).get("sync_actions") or {}
             changed_entities = self._changed_entities_from_payload(payload or {})
+            if (
+                changed_entities.intersection({"beds", "admissions", "patient_status_events"})
+                or sync_actions.get("full_refresh_required")
+                or sync_actions.get("status_refresh")
+                or sync_actions.get("beds_refresh")
+            ):
+                self._patients.invalidate_outcome_release_schedule()
             if "vital_settings" in changed_entities or sync_actions.get("full_refresh_required"):
                 self._vitals.invalidate_cache()
                 logger.info(

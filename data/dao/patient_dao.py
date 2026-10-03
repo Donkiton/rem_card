@@ -338,6 +338,24 @@ class PatientDAO:
         patients = self._map_patients(rows)
         return patients[0] if patients else None
 
+    def get_next_outcome_bed_release_at(self, delay_minutes: int = 30) -> Optional[datetime]:
+        """Read the nearest deadline using the existing runtime read-source policy."""
+        rows = self.db.fetch_all_remcard(
+            """
+            SELECT MIN(DATETIME(pse.start_time)) AS outcome_time
+            FROM beds b
+            JOIN patient_status_events pse
+              ON pse.admission_id = b.current_admission_id AND pse.end_time IS NULL
+            WHERE b.status = 'OCCUPIED' AND b.current_admission_id IS NOT NULL
+              AND pse.status IN (?, ?)
+            """,
+            (PatientStatus.TRANSFERRED.value, PatientStatus.DEAD.value),
+        )
+        if not rows or not rows[0]["outcome_time"]:
+            return None
+        # SQLite normalizes timestamps exactly as the mutation's DATETIME comparison.
+        return datetime.fromisoformat(rows[0]["outcome_time"]) + timedelta(minutes=max(0, int(delay_minutes)))
+
     def release_due_outcome_beds(self, delay_minutes: int = 30) -> int:
         """
         Автоматически освобождает койки, если у пациента активный исход (TRANSFERRED/DEAD)

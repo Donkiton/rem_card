@@ -1,10 +1,12 @@
 import os
 import time
 import threading
+from datetime import datetime
 from typing import Any, Callable, List, Optional
 from ..data.dto.remcard_dto import PatientDTO
 from ..data.dao.patient_dao import PatientDAO
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.services.write_dispatch import enqueue_service_write
 
 class PatientService:
@@ -16,6 +18,24 @@ class PatientService:
         self._last_outcome_release_check_mono = 0.0
         self._outcome_release_guard = threading.Lock()
         self._outcome_release_worker_active = False
+        self._outcome_release_reconcile_interval_sec = 60.0
+        self._outcome_release_schedule_known = False
+        self._outcome_release_schedule_generation = 0
+        self._outcome_release_schedule_checked_mono = 0.0
+        self._next_outcome_release_at = None
+
+    def invalidate_outcome_release_schedule(self):
+        with self._outcome_release_guard:
+            self._outcome_release_schedule_generation += 1
+            self._outcome_release_schedule_known = False
+
+    def _outcome_release_check_needed(self, now_mono: float) -> bool:
+        """Called under the guard; performs no database access."""
+        return (
+            not self._outcome_release_schedule_known
+            or now_mono - self._outcome_release_schedule_checked_mono >= self._outcome_release_reconcile_interval_sec
+            or (self._next_outcome_release_at is not None and datetime.now() >= self._next_outcome_release_at)
+        )
 
     def enqueue_write(
         self,
@@ -39,9 +59,37 @@ class PatientService:
 
     def _release_due_outcome_beds_operation(self) -> int:
         """Run the mutation without hiding its outcome from a write owner."""
-        released = self.dao.release_due_outcome_beds(
-            delay_minutes=self.outcome_release_delay_minutes
-        )
+        started = time.perf_counter()
+        released = 0
+        next_release = None
+        status = "error"
+        deadline_due = False
+        with self._outcome_release_guard:
+            generation = self._outcome_release_schedule_generation
+        get_deadline = getattr(self.dao, "get_next_outcome_bed_release_at", None)
+        try:
+            if callable(get_deadline):
+                next_release = get_deadline(delay_minutes=self.outcome_release_delay_minutes)
+            deadline_due = next_release is not None and datetime.now() >= next_release
+            if not callable(get_deadline) or deadline_due:
+                released = self.dao.release_due_outcome_beds(delay_minutes=self.outcome_release_delay_minutes)
+            with self._outcome_release_guard:
+                if generation == self._outcome_release_schedule_generation and callable(get_deadline):
+                    self._next_outcome_release_at = next_release
+                    self._outcome_release_schedule_checked_mono = time.monotonic()
+                    # Reconcile after a due attempt, without introducing a read
+                    # failure after an already committed clinical mutation.
+                    self._outcome_release_schedule_known = not deadline_due
+            status = "ok"
+        except Exception:
+            self.invalidate_outcome_release_schedule()
+            raise
+        finally:
+            record_metric(
+                "outcome_bed_release_check_ms", round((time.perf_counter() - started) * 1000.0, 3),
+                status=status, released_count=released,
+                next_due_in_sec=None if next_release is None else round((next_release - datetime.now()).total_seconds(), 3),
+            )
         if released > 0:
             logger.info(
                 "Auto-release completed: %s patient(s) removed from beds after outcome timeout (%s min).",
@@ -55,10 +103,21 @@ class PatientService:
             self.maybe_release_due_outcome_beds_async(force=force)
             return 0
         now_mono = time.monotonic()
-        if not force and (now_mono - self._last_outcome_release_check_mono) < self._outcome_release_check_interval_sec:
-            return 0
-        self._last_outcome_release_check_mono = now_mono
-        return self._release_due_outcome_beds_impl()
+        with self._outcome_release_guard:
+            if self._outcome_release_worker_active:
+                return 0
+            if not force and (
+                (now_mono - self._last_outcome_release_check_mono) < self._outcome_release_check_interval_sec
+                or not self._outcome_release_check_needed(now_mono)
+            ):
+                return 0
+            self._last_outcome_release_check_mono = now_mono
+            self._outcome_release_worker_active = True
+        try:
+            return self._release_due_outcome_beds_impl()
+        finally:
+            with self._outcome_release_guard:
+                self._outcome_release_worker_active = False
 
     def maybe_release_due_outcome_beds_async(self, force: bool = False) -> bool:
         if self.data_service is not None:
@@ -69,7 +128,10 @@ class PatientService:
         with self._outcome_release_guard:
             if self._outcome_release_worker_active:
                 return False
-            if not force and (now_mono - self._last_outcome_release_check_mono) < self._outcome_release_check_interval_sec:
+            if not force and (
+                (now_mono - self._last_outcome_release_check_mono) < self._outcome_release_check_interval_sec
+                or not self._outcome_release_check_needed(now_mono)
+            ):
                 return False
             self._last_outcome_release_check_mono = now_mono
             self._outcome_release_worker_active = True
