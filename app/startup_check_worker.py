@@ -38,27 +38,31 @@ def check_startup_cancelled():
         check()
 
 
-def _read_only_probe(path, sender, diagnostics):
+def _read_only_probe(path, sender, diagnostics, admission_mode=None):
     # Never run policy writes, recovery, migration or bootstrap in this child.
     from rem_card.app.startup_db_guard import _check_quick_direct
     from rem_card.app.startup_diagnostics import startup_attempt
     from rem_card.app.local_metrics import flush_metrics
     try:
         with startup_attempt(diagnostics.get("session_id", ""), diagnostics.get("role", "")):
-            sender.send(_check_quick_direct(path))
+            if admission_mode == "light":
+                from rem_card.app.role_admission import read_only_admission_probe
+                sender.send(read_only_admission_probe(path))
+            else:
+                sender.send(_check_quick_direct(path, capture_admission=admission_mode == "full"))
     finally:
         flush_metrics(timeout=0.5)
         sender.close()
 
 
 def run_startup_probe(path: str, cancel: threading.Event, *, timeout=90.0,
-                      _target=None) -> tuple[bool, str, bool]:
+                      _target=None, admission_mode=None) -> tuple[bool, str, bool]:
     """Return only after the child has exited and released its SQLite handles."""
     context = multiprocessing.get_context("spawn")
     from rem_card.app.startup_diagnostics import startup_context
     receiver, sender = context.Pipe(duplex=False)
     process = context.Process(target=_target or _read_only_probe,
-                              args=(path, sender) if _target else (path, sender, startup_context()),
+                              args=(path, sender) if _target else (path, sender, startup_context(), admission_mode),
                               name="RemCardStartupCheck")
     started = False
     try:

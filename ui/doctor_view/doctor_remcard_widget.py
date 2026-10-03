@@ -266,6 +266,9 @@ class DoctorRemCardWidget(
         sector_ivl = getattr(getattr(self, "layout_manager", None), "sector_ivl", None)
         if sector_ivl is not None and hasattr(sector_ivl, "shutdown"):
             sector_ivl.shutdown()
+        sector_anal = getattr(getattr(self, "layout_manager", None), "sector_anal", None)
+        if sector_anal is not None and hasattr(sector_anal, "shutdown"):
+            sector_anal.shutdown()
         sector_notice = getattr(getattr(self, "layout_manager", None), "sector_7vit_b", None)
         if sector_notice is not None and hasattr(sector_notice, "shutdown"):
             sector_notice.shutdown()

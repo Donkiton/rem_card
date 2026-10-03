@@ -1230,7 +1230,7 @@ class NurseMainWidget(QWidget):
         except Exception:
             logger.exception("Nurse procedures partial refresh failed")
 
-    def _sync_lab_orders_context(self) -> bool:
+    def _sync_lab_orders_context(self, *, force_refresh=False) -> bool:
         try:
             layout = getattr(self, "layout_manager", None)
             if layout is None:
@@ -1241,11 +1241,14 @@ class NurseMainWidget(QWidget):
                 return False
             admission_id = getattr(layout, "current_admission_id", None)
             if not admission_id or self._current_date is None:
-                if hasattr(sector_anal, "set_lab_orders"):
+                if hasattr(sector_anal, "clear_context"):
+                    sector_anal.clear_context()
+                elif hasattr(sector_anal, "set_lab_orders"):
                     sector_anal.set_lab_orders([])
                 return True
             if hasattr(sector_anal, "set_context"):
-                sector_anal.set_context(self.remcard_service, admission_id, self._current_date)
+                sector_anal.set_context(self.remcard_service, admission_id, self._current_date,
+                                        force_refresh=force_refresh)
                 return True
             if hasattr(sector_anal, "refresh"):
                 sector_anal.refresh()
@@ -1256,7 +1259,7 @@ class NurseMainWidget(QWidget):
 
     def _refresh_labs_from_db(self) -> None:
         try:
-            self._sync_lab_orders_context()
+            self._sync_lab_orders_context(force_refresh=True)
         except Exception:
             logger.exception("Nurse lab orders partial refresh failed")
 
@@ -3048,6 +3051,9 @@ class NurseMainWidget(QWidget):
         sector_ivl = getattr(getattr(self, "layout_manager", None), "sector_ivl", None)
         if sector_ivl is not None and hasattr(sector_ivl, "shutdown"):
             sector_ivl.shutdown()
+        sector_anal = getattr(getattr(self, "layout_manager", None), "sector_anal", None)
+        if sector_anal is not None and hasattr(sector_anal, "shutdown"):
+            sector_anal.shutdown()
         sector_notice = getattr(getattr(self, "layout_manager", None), "sector_7vit_b", None)
         if sector_notice is not None and hasattr(sector_notice, "shutdown"):
             sector_notice.shutdown()

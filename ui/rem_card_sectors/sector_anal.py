@@ -4,11 +4,12 @@ from rem_card.ui.styles.theme_runtime import register_theme_callback, set_widget
 
 import json
 import os
+from time import perf_counter
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QSettings, QTimer, Qt, QSize
+from PySide6.QtCore import QSettings, QTimer, Qt, QSize, Slot
 from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -29,6 +30,8 @@ from PySide6.QtWidgets import (
 
 from rem_card.ui.rem_card_sectors.lab_analysis_dialog import AddLabAnalysisDialog, EditLabOrderDialog
 from rem_card.ui.shared.async_call import AsyncCallThread
+from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
@@ -306,6 +309,17 @@ class SectorAnal(BaseSectorWidget):
         self._delete_pending = False
         self._load_yesterday_pending = False
         self._load_yesterday_worker = None
+        self._edit_pending = False
+        self._snapshot_ready = False
+        self._refresh_loading = False
+        self._refresh_error = False
+        self._refresh_closed = False
+        self._refresh_generation = 0
+        self._refresh_context = None
+        self._refresh_worker = None
+        self._refresh_request = None
+        self._refresh_pending = False
+        self._refresh_force = False
         self._restoring_header = False
         self._constraining_header = False
         self._save_header_timer = QTimer(self)
@@ -315,6 +329,7 @@ class SectorAnal(BaseSectorWidget):
         self._build_ui()
         register_theme_callback(self, self._apply_theme_paint)
         self.set_lab_orders([])
+        self._update_controls_state()
 
     def _build_ui(self):
         main_frame = QFrame()
@@ -361,7 +376,8 @@ class SectorAnal(BaseSectorWidget):
             }
             QToolButton#lab_filter_button,
             QPushButton#lab_delete_button,
-            QPushButton#lab_assign_button {
+            QPushButton#lab_assign_button,
+            QPushButton#lab_retry_button {
                 background: #eef3f8;
                 color: #172033;
                 border: 1px solid #aebccd;
@@ -372,13 +388,15 @@ class SectorAnal(BaseSectorWidget):
             }
             QToolButton#lab_filter_button:hover,
             QPushButton#lab_delete_button:hover,
-            QPushButton#lab_assign_button:hover {
+            QPushButton#lab_assign_button:hover,
+            QPushButton#lab_retry_button:hover {
                 background: #e2ebf5;
                 border-color: #7aa6d8;
             }
             QToolButton#lab_filter_button:pressed,
             QPushButton#lab_delete_button:pressed,
-            QPushButton#lab_assign_button:pressed {
+            QPushButton#lab_assign_button:pressed,
+            QPushButton#lab_retry_button:pressed {
                 background: #d5e2ef;
                 padding-top: 7px;
                 padding-bottom: 5px;
@@ -392,7 +410,9 @@ class SectorAnal(BaseSectorWidget):
                 background: #f1e2e2;
                 border-color: #c99191;
             }
-            QPushButton#lab_delete_button:disabled {
+            QPushButton#lab_delete_button:disabled,
+            QPushButton#lab_assign_button:disabled,
+            QToolButton#lab_filter_button:disabled {
                 background: #eef2f6;
                 border-color: #d4dde6;
                 color: #9aa6b2;
@@ -569,6 +589,18 @@ class SectorAnal(BaseSectorWidget):
             controls.addWidget(self.assign_button, 0)
         body_layout.addLayout(controls)
 
+        load_state = QHBoxLayout()
+        self.load_status_label = QLabel()
+        self.load_status_label.setWordWrap(True)
+        self.retry_button = QPushButton("Повторить загрузку")
+        self.retry_button.setObjectName("lab_retry_button")
+        self.retry_button.clicked.connect(self._retry_snapshot)
+        self.load_status_label.hide()
+        self.retry_button.hide()
+        load_state.addWidget(self.load_status_label, 1)
+        load_state.addWidget(self.retry_button)
+        body_layout.addLayout(load_state)
+
         summary_row = QHBoxLayout()
         summary_row.setSpacing(10)
         self.assigned_card = LabSummaryCard("Назначено", "Ожидает выполнения", "assigned")
@@ -660,6 +692,8 @@ class SectorAnal(BaseSectorWidget):
         worker.start()
 
     def _apply_managed_default_header_payload(self, payload: object) -> None:
+        if self._refresh_closed:
+            return
         if QSettings("MyHospital", "RemCard").value(self.HEADER_SETTINGS_KEY) is not None:
             return
         active = payload.get("active") if isinstance(payload, dict) else None
@@ -935,17 +969,14 @@ class SectorAnal(BaseSectorWidget):
         if hasattr(self, "filter_button"):
             self.filter_button.setText("Фильтры")
 
-    def set_context(self, remcard_service=None, admission_id=None, card_date=None):
-        old_scope = (self.remcard_service, self.admission_id, self.card_date)
+    def set_context(self, remcard_service=None, admission_id=None, card_date=None, *, force_refresh=False):
         if remcard_service is not None:
             self.remcard_service = remcard_service
         if admission_id is not None:
             self.admission_id = admission_id
         if card_date is not None:
             self.card_date = card_date
-        if old_scope != (self.remcard_service, self.admission_id, self.card_date):
-            self._last_content_hash = None
-        self.refresh()
+        self.refresh(force=force_refresh)
 
     def set_lab_orders(self, rows: list[Any] | tuple[Any, ...] | None, *, content_hash: str | None = None):
         if content_hash is not None:
@@ -962,43 +993,199 @@ class SectorAnal(BaseSectorWidget):
         self._apply_filter()
         self._update_delete_button_state()
 
-    def refresh(self):
+    def refresh(self, force: bool = False):
+        if self._refresh_closed:
+            return
         self._resolve_runtime_context()
+        context = (self.remcard_service, self.admission_id, self.card_date, self.role_key)
+        changed = context != self._refresh_context
+        if changed:
+            self._refresh_context = context
+            self._last_content_hash = None
+            self._snapshot_ready = False
+            self._checked_order_ids.clear()
+            self.set_lab_orders([])
         if not self.remcard_service or not self.admission_id or self.card_date is None:
+            self._refresh_generation += 1
+            self._refresh_pending = False
+            self._set_snapshot_state("empty")
             self.set_lab_orders([])
             return
+        if not force and not changed and (self._refresh_pending or self._refresh_worker is not None):
+            return
+        self._refresh_generation += 1
+        self._refresh_pending = True
+        self._refresh_force = bool(force or self._refresh_force)
+        self._set_snapshot_state("loading")
+        self._start_snapshot_refresh()
 
+    def _start_snapshot_refresh(self):
+        if self._refresh_closed or not self._refresh_pending or self._refresh_worker is not None:
+            return
+        self._refresh_pending = False
+        request = (self._refresh_generation, self._refresh_context)
+        self._refresh_request = request
+        service, admission_id, card_date, role = request[1]
+        worker = AsyncCallThread(self._load_snapshot, service, int(admission_id), card_date, role,
+                                 self._refresh_force, request[0])
+        self._refresh_force = False
+        self._refresh_worker = worker
+        worker.succeeded.connect(self._on_snapshot_loaded, Qt.QueuedConnection)
+        worker.failed.connect(self._on_snapshot_failed, Qt.QueuedConnection)
+        worker.finished.connect(self._on_snapshot_finished, Qt.QueuedConnection)
         try:
-            snapshot = self._load_snapshot()
-            content_hash = str(snapshot.get("content_hash") or "")
-            if content_hash and content_hash == self._last_content_hash:
-                return
-            self.set_lab_orders(snapshot.get("rows") or [], content_hash=content_hash or None)
-        except Exception:
-            self.set_lab_orders([])
+            worker.start()
+        except Exception as exc:
+            self._on_snapshot_failed(exc)
+            self._on_snapshot_finished()
 
-    def _load_snapshot(self) -> dict[str, Any]:
-        coordinator = getattr(self.remcard_service, "read_coordinator", None)
+    def clear_context(self):
+        self.admission_id = None
+        self.card_date = None
+        self._refresh_context = None
+        self._refresh_generation += 1
+        self._refresh_pending = False
+        self._snapshot_ready = False
+        self._last_content_hash = None
+        self._checked_order_ids.clear()
+        self._set_snapshot_state("empty")
+        self.set_lab_orders([])
+
+    def _snapshot_request_is_current(self):
+        if self._refresh_closed or self._refresh_request is None:
+            return False
+        # Parent context can change before its notification reaches this sector.
+        self._resolve_runtime_context()
+        return self._refresh_request == (
+            self._refresh_generation,
+            (self.remcard_service, self.admission_id, self.card_date, self.role_key),
+        )
+
+    @Slot(object)
+    def _on_snapshot_loaded(self, snapshot):
+        if not self._snapshot_request_is_current():
+            return
+        started = perf_counter()
+        try:
+            self._refresh_loading = False
+            self._refresh_error = False
+            content_hash = str(snapshot.get("content_hash") or "")
+            if not content_hash or content_hash != self._last_content_hash:
+                self.set_lab_orders(snapshot.get("rows") or [], content_hash=content_hash or None)
+            self._snapshot_ready = True
+            self._set_snapshot_state("ready")
+        except Exception as exc:
+            self._last_content_hash = None
+            self._snapshot_ready = False
+            self._orders = []
+            self._on_snapshot_failed(exc)
+        record_metric("labs_snapshot_apply_ms", round((perf_counter() - started) * 1000, 3),
+                      role=self.role_key, generation=self._refresh_generation, rows=len(self._orders))
+
+    @Slot(object)
+    def _on_snapshot_failed(self, exc):
+        if not self._snapshot_request_is_current():
+            return
+        logger.warning("[Labs] snapshot_load_failed role=%s generation=%s error_class=%s",
+                       self.role_key, self._refresh_generation, type(exc).__name__)
+        self._set_snapshot_state("error")
+
+    @Slot()
+    def _on_snapshot_finished(self):
+        worker = self._refresh_worker
+        self._refresh_worker = None
+        self._refresh_request = None
+        if worker is not None:
+            worker.deleteLater()
+        if self._refresh_pending and not self._refresh_closed:
+            self._start_snapshot_refresh()
+
+    @Slot()
+    def _retry_snapshot(self):
+        self.refresh(force=True)
+
+    def _set_snapshot_state(self, state):
+        self._refresh_loading = state == "loading"
+        self._refresh_error = state == "error"
+        if state == "loading":
+            message = "Обновление анализов…" if self._snapshot_ready else "Загрузка анализов…"
+        elif state == "error":
+            message = ("Не удалось обновить анализы. Показаны ранее загруженные данные."
+                       if self._snapshot_ready else "Не удалось загрузить анализы.")
+        else:
+            message = ""
+        self.load_status_label.setText(message)
+        self.load_status_label.setVisible(bool(message))
+        self.retry_button.setVisible(self._refresh_error)
+        if not self._snapshot_ready and state in {"loading", "error"}:
+            self._render_table([], filtered=False)
+            for card in (self.assigned_card, self.completed_card, self.total_card):
+                card.value_label.setText("—")
+        self._update_controls_state()
+
+    def _update_controls_state(self):
+        enabled = (self._snapshot_ready and not self._refresh_closed
+                   and not self._refresh_loading and not self._refresh_error
+                   and not self._delete_pending and not self._load_yesterday_pending
+                   and not self._edit_pending)
+        self.table.setEnabled(enabled)
+        self.search_input.setEnabled(enabled)
+        self.filter_button.setEnabled(enabled)
+        if hasattr(self, "assign_button"):
+            self.assign_button.setEnabled(enabled)
+        self._update_delete_button_state()
+
+    def shutdown(self):
+        self._refresh_closed = True
+        self._refresh_generation += 1
+        self._refresh_pending = False
+        self._refresh_request = None
+        self._save_header_timer.stop()
+        for worker in (self._refresh_worker, self._load_yesterday_worker,
+                       getattr(self, "_columns_settings_worker", None)):
+            if worker is not None:
+                worker.quit()
+        self._update_controls_state()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
+
+    @staticmethod
+    def _load_snapshot(service, admission_id, card_date, role, force_refresh=False, generation=0):
+        started = perf_counter()
+        try:
+            return SectorAnal._read_snapshot(service, admission_id, card_date, role, force_refresh)
+        finally:
+            elapsed_ms = round((perf_counter() - started) * 1000, 3)
+            record_metric("labs_snapshot_read_ms", elapsed_ms, role=role, generation=generation)
+            if elapsed_ms >= 750:
+                logger.warning("[Labs] snapshot_read_slow role=%s generation=%s elapsed_ms=%.3f",
+                               role, generation, elapsed_ms)
+
+    @staticmethod
+    def _read_snapshot(service, admission_id, card_date, role, force_refresh):
+        coordinator = getattr(service, "read_coordinator", None)
         if coordinator is not None and hasattr(coordinator, "load_lab_orders_snapshot"):
             snapshot = coordinator.load_lab_orders_snapshot(
-                int(self.admission_id),
-                self.card_date,
-                role=self.role_key,
-                force_refresh=False,
+                admission_id,
+                card_date,
+                role=role,
+                force_refresh=force_refresh,
             )
             return snapshot or {}
 
-        loader = getattr(self.remcard_service, "build_lab_orders_snapshot", None)
+        loader = getattr(service, "build_lab_orders_snapshot", None)
         if callable(loader):
             return loader(
-                int(self.admission_id),
-                shift_date=self.card_date,
+                admission_id,
+                shift_date=card_date,
                 include_change_cursor=True,
             ) or {}
 
-        legacy_loader = getattr(self.remcard_service, "list_lab_orders", None)
+        legacy_loader = getattr(service, "list_lab_orders", None)
         if callable(legacy_loader):
-            rows = legacy_loader(int(self.admission_id), self.card_date) or []
+            rows = legacy_loader(admission_id, card_date) or []
             return {"rows": rows, "content_hash": None}
         return {"rows": [], "content_hash": None}
 
@@ -1017,7 +1204,7 @@ class SectorAnal(BaseSectorWidget):
         )
         if dialog.exec():
             self._last_content_hash = None
-            self.refresh()
+            self.refresh(force=True)
 
     def load_yesterday_lab_orders(self):
         if self.is_nurse:
@@ -1072,6 +1259,8 @@ class SectorAnal(BaseSectorWidget):
         self._load_yesterday_worker.start()
 
     def _on_load_yesterday_lab_orders_ready(self, payload):
+        if self._refresh_closed:
+            return
         if not isinstance(payload, dict):
             self._set_load_yesterday_pending(False)
             return
@@ -1112,6 +1301,8 @@ class SectorAnal(BaseSectorWidget):
             )
 
         def on_success(result=None):
+            if self._refresh_closed:
+                return
             self._set_load_yesterday_pending(False)
             self._last_content_hash = None
             same_context = (
@@ -1119,11 +1310,13 @@ class SectorAnal(BaseSectorWidget):
                 and self._effective_card_datetime() == target_shift_date
             )
             if same_context:
-                self.refresh()
+                self.refresh(force=True)
                 count = len(result or [])
                 CustomMessageBox.information(self, "Анализы", f"Загружено анализов: {count}.")
 
         def on_error(exc):
+            if self._refresh_closed:
+                return
             self._set_load_yesterday_pending(False)
             self._last_content_hash = None
             same_context = (
@@ -1131,7 +1324,7 @@ class SectorAnal(BaseSectorWidget):
                 and self._effective_card_datetime() == target_shift_date
             )
             if same_context:
-                self.refresh()
+                self.refresh(force=True)
                 CustomMessageBox.warning(self, "Ошибка загрузки", f"Не удалось загрузить вчерашние анализы: {exc}")
 
         if hasattr(service, "enqueue_write"):
@@ -1149,6 +1342,8 @@ class SectorAnal(BaseSectorWidget):
             on_error(exc)
 
     def _on_load_yesterday_lab_orders_failed(self, exc):
+        if self._refresh_closed:
+            return
         self._set_load_yesterday_pending(False)
         CustomMessageBox.warning(self, "Предупреждение", f"Не удалось найти анализы за предыдущие дни: {exc}")
 
@@ -1157,17 +1352,10 @@ class SectorAnal(BaseSectorWidget):
 
     def _set_load_yesterday_pending(self, pending: bool):
         self._load_yesterday_pending = bool(pending)
-        enabled = not self._load_yesterday_pending
-        self.table.setEnabled(enabled)
-        self.search_input.setEnabled(enabled)
-        if hasattr(self, "filter_button"):
-            self.filter_button.setEnabled(enabled)
-        if hasattr(self, "assign_button"):
-            self.assign_button.setEnabled(enabled)
-        self._update_delete_button_state()
+        self._update_controls_state()
 
     def _open_edit_dialog_for_table_row(self, row_index: int, column_index: int):
-        if self.is_nurse:
+        if self.is_nurse or not self.table.isEnabled():
             return
         if column_index == 0:
             return
@@ -1211,10 +1399,12 @@ class SectorAnal(BaseSectorWidget):
             CustomMessageBox.warning(self, "Анализы", f"Не удалось определить время анализа: {exc}")
             return
         expected_revision = _optional_int(_row_value(row_payload, "revision"))
-        self.table.setEnabled(False)
+        service = self.remcard_service
+        self._edit_pending = True
+        self._update_controls_state()
 
         def operation():
-            return self.remcard_service.update_lab_order_details(
+            return service.update_lab_order_details(
                 int(order_id),
                 material=data.get("material"),
                 scheduled_at=scheduled_at,
@@ -1223,18 +1413,22 @@ class SectorAnal(BaseSectorWidget):
             )
 
         def on_success(_result=None):
-            self.table.setEnabled(True)
+            if self._refresh_closed:
+                return
+            self._edit_pending = False
             self._last_content_hash = None
-            self.refresh()
+            self.refresh(force=True)
 
         def on_error(exc):
-            self.table.setEnabled(True)
+            if self._refresh_closed:
+                return
+            self._edit_pending = False
             self._last_content_hash = None
-            self.refresh()
+            self.refresh(force=True)
             CustomMessageBox.warning(self, "Ошибка сохранения", f"Не удалось изменить анализ: {exc}")
 
-        if hasattr(self.remcard_service, "enqueue_write"):
-            self.remcard_service.enqueue_write(
+        if hasattr(service, "enqueue_write"):
+            service.enqueue_write(
                 description=f"lab_order_update_ui:{int(order_id)}",
                 operation=operation,
                 on_success=on_success,
@@ -1277,19 +1471,20 @@ class SectorAnal(BaseSectorWidget):
                 bool(self._checked_lab_order_ids())
                 and not self._delete_pending
                 and not self._load_yesterday_pending
+                and not self._edit_pending
+                and self._snapshot_ready
+                and not self._refresh_loading
+                and not self._refresh_error
+                and not self._refresh_closed
             )
 
     def _set_delete_pending(self, pending: bool):
         self._delete_pending = bool(pending)
-        self.table.setEnabled(not pending)
-        self.search_input.setEnabled(not pending)
-        if hasattr(self, "filter_button"):
-            self.filter_button.setEnabled(not pending)
-        if hasattr(self, "assign_button"):
-            self.assign_button.setEnabled(not pending)
-        self._update_delete_button_state()
+        self._update_controls_state()
 
     def _delete_checked_lab_orders(self):
+        if not self.table.isEnabled():
+            return
         self._resolve_runtime_context()
         order_ids = self._checked_lab_order_ids()
         if not order_ids:
@@ -1300,28 +1495,33 @@ class SectorAnal(BaseSectorWidget):
             return
 
         self._set_delete_pending(True)
+        service, admission_id = self.remcard_service, int(self.admission_id)
 
         def operation():
-            return self.remcard_service.delete_lab_orders(
-                int(self.admission_id),
+            return service.delete_lab_orders(
+                admission_id,
                 order_ids=order_ids,
             )
 
         def on_success(_result=None):
+            if self._refresh_closed:
+                return
             self._checked_order_ids.difference_update(order_ids)
             self._set_delete_pending(False)
             self._last_content_hash = None
-            self.refresh()
+            self.refresh(force=True)
 
         def on_error(exc):
+            if self._refresh_closed:
+                return
             self._set_delete_pending(False)
             self._last_content_hash = None
-            self.refresh()
+            self.refresh(force=True)
             CustomMessageBox.warning(self, "Ошибка удаления", f"Не удалось удалить отмеченные анализы: {exc}")
 
-        if hasattr(self.remcard_service, "enqueue_write"):
-            self.remcard_service.enqueue_write(
-                description=f"lab_orders_delete_ui:{int(self.admission_id)}",
+        if hasattr(service, "enqueue_write"):
+            service.enqueue_write(
+                description=f"lab_orders_delete_ui:{admission_id}",
                 operation=operation,
                 on_success=on_success,
                 on_error=on_error,
@@ -1421,7 +1621,10 @@ class SectorAnal(BaseSectorWidget):
 
             if not rows:
                 self._render_empty_row(
-                    "Подходящих анализов не найдено." if filtered else "Анализы на текущие сутки не назначены"
+                    "Не удалось загрузить анализы." if self._refresh_error and not self._snapshot_ready
+                    else "Загрузка анализов…" if self._refresh_loading and not self._snapshot_ready
+                    else "Подходящих анализов не найдено." if filtered
+                    else "Анализы на текущие сутки не назначены"
                 )
                 return
 
@@ -1592,7 +1795,7 @@ class SectorAnal(BaseSectorWidget):
         )
 
     def _complete_lab_order(self, row_payload: Any):
-        if not self.is_nurse:
+        if not self.is_nurse or not self.table.isEnabled():
             return
         order_id = _optional_int(_row_value(row_payload, "id"))
         if order_id is None:
@@ -1606,26 +1809,31 @@ class SectorAnal(BaseSectorWidget):
 
         self._completion_pending_ids.add(order_id)
         self._apply_filter()
+        service = self.remcard_service
 
         def operation():
-            return self.remcard_service.mark_lab_order_completed(
+            return service.mark_lab_order_completed(
                 int(order_id),
                 completed_by_role="nurse",
             )
 
         def on_success(_result=None):
+            if self._refresh_closed:
+                return
             self._completion_pending_ids.discard(order_id)
             self._last_content_hash = None
-            self.refresh()
+            self.refresh(force=True)
 
         def on_error(exc):
+            if self._refresh_closed:
+                return
             self._completion_pending_ids.discard(order_id)
             self._last_content_hash = None
-            self.refresh()
+            self.refresh(force=True)
             CustomMessageBox.warning(self, "Ошибка выполнения", f"Не удалось отметить анализ выполненным: {exc}")
 
-        if hasattr(self.remcard_service, "enqueue_write"):
-            self.remcard_service.enqueue_write(
+        if hasattr(service, "enqueue_write"):
+            service.enqueue_write(
                 description=f"lab_order_complete_ui:{int(order_id)}",
                 operation=operation,
                 on_success=on_success,
