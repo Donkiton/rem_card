@@ -1,6 +1,7 @@
 """Keep Qt responsive while a read-only child owns a startup scan."""
 from __future__ import annotations
 
+import json
 import threading
 import time
 from contextvars import copy_context
@@ -57,3 +58,33 @@ def responsive_startup_probe(path, cancel, *, probe=None):
     if cancel.is_set():
         raise StartupCheckAborted()
     return result
+
+
+def role_startup_check_runner(cancel, preparing):
+    """Use the same cancellable child for full scans and cheap admission reads."""
+    def probe(path, mode):
+        return responsive_startup_probe(path, cancel, probe=lambda path, cancel: run_startup_probe(
+            path, cancel, admission_mode=mode))
+
+    def check(path):
+        preparing("Проверка целостности базы…")
+        check.admission_receipt = None
+        outcome = probe(path, "full")
+        if outcome[0] and outcome[1] != "ok":
+            check.admission_receipt = json.loads(outcome[1])
+            return True, "ok", False
+        return outcome
+
+    def admission_probe(path):
+        preparing("Проверка доступности базы…")
+        outcome = probe(path, "light")
+        return json.loads(outcome[1]) if outcome[0] else None
+
+    def check_cancelled():
+        if cancel.is_set():
+            raise StartupCheckAborted()
+
+    check.check_cancelled = check_cancelled
+    check.admission_probe = admission_probe
+    check.wait_retry = lambda seconds: responsive_startup_wait(cancel, seconds)
+    return check

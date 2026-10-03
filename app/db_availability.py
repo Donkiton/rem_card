@@ -150,6 +150,10 @@ def notify_database_unavailable(
 ) -> DatabaseUnavailableError:
     global _incident_active, _warning_presented_for_incident
     wrapped = to_database_unavailable_error(exc)
+    unavailable = is_database_unavailable_error(exc)
+    if unavailable:
+        from rem_card.app.role_admission import invalidate_role_admission
+        invalidate_role_admission()
     active_logger = logger or logging.getLogger("RemCard")
     active_logger.error("%s unavailable: %s", context, exc, exc_info=True)
     try:
@@ -168,7 +172,7 @@ def notify_database_unavailable(
             ).start()
     except Exception:
         pass
-    if is_database_unavailable_error(exc):
+    if unavailable:
         with _incident_lock:
             _incident_active = True
         event = DirectCentralFailureEvent(

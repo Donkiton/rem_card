@@ -24,6 +24,7 @@ from rem_card.app.runtime_paths import (
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.version import APP_VERSION
 from rem_card.app.startup_check_worker import StartupCheckAborted, check_startup_cancelled
+from rem_card.app import role_admission
 from rem_card.app.sqlite_shared import (
     NETWORK_SAFE_DB_PROFILE,
     FileWriteLock,
@@ -520,7 +521,7 @@ def _check_quick(db_path: str) -> tuple[bool, str, bool]:
         return runner(db_path) if runner else _check_quick_direct(db_path)
 
 
-def _check_quick_direct(db_path: str) -> tuple[bool, str, bool]:
+def _check_quick_direct(db_path: str, *, capture_admission=False) -> tuple[bool, str, bool]:
     from rem_card.app.startup_diagnostics import startup_span
     if not os.path.exists(db_path):
         return False, "database file does not exist", False
@@ -535,8 +536,22 @@ def _check_quick_direct(db_path: str) -> tuple[bool, str, bool]:
             event("startup_database_metadata", size_bytes=os.path.getsize(db_path))
         except OSError:
             pass
+        admission_state = None
+        if capture_admission:
+            conn.execute("BEGIN")
+            try:
+                admission_state = role_admission.read_admission_state(conn, db_path)
+            except Exception:
+                # Unsupported identity/metadata disables reuse, not the full scan.
+                pass
         with startup_span("sqlite_quick_check", target="central_medical"):
             ok, result = run_quick_check(conn)
+        if ok and admission_state:
+            try:
+                if role_admission.file_identity(db_path) == admission_state["identity"]:
+                    return True, json.dumps(admission_state), False
+            except Exception:
+                pass
         return ok, result, not ok
     except Exception as exc:
         reason = str(exc)
@@ -579,7 +594,7 @@ def _check_quick_with_retries(
     return False, last_result, last_confirmed_corruption
 
 
-def _publish_startup_quickcheck_result(db_path: str) -> None:
+def _publish_startup_quickcheck_result(db_path: str, *, check_mode="full", full_checked_at_epoch=None) -> None:
     try:
         stat_result = os.stat(db_path)
         os.environ[STARTUP_GUARD_QUICKCHECK_ENV] = json.dumps(
@@ -587,6 +602,8 @@ def _publish_startup_quickcheck_result(db_path: str) -> None:
                 "result": "ok",
                 "pid": os.getpid(),
                 "checked_at_epoch": time.time(),
+                "check_mode": check_mode,
+                "full_checked_at_epoch": full_checked_at_epoch,
                 "db_path_norm": os.path.normcase(os.path.abspath(db_path)),
                 "size_bytes": int(stat_result.st_size),
                 "mtime_ns": int(
@@ -1099,6 +1116,7 @@ def recover_shared_db_with_locks(
     role: Optional[str],
     failure_reason: str,
 ) -> StartupGuardResult:
+    role_admission.invalidate_role_admission()
     if not startup_auto_recovery_allowed(db_path, failure_reason):
         category = _startup_access_category(failure_reason)
         write_audit_event(
@@ -1157,6 +1175,18 @@ def recover_shared_db_with_locks(
 
 
 def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
+    generation = role_admission.admission_generation()
+    try:
+        result = _run_startup_db_guard(role, generation=generation)
+        if not result.ok or result.recovered:
+            role_admission.invalidate_role_admission()
+        return result
+    except BaseException:
+        role_admission.invalidate_role_admission()
+        raise
+
+
+def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGuardResult:
     try:
         baza_dir = resolve_baza_dir()
     except DataPathConfigurationError as exc:
@@ -1267,11 +1297,32 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             baza_dir=baza_dir,
         )
     try:
-        ok, result, confirmed_corruption = _check_quick_with_retries(
-            db_path,
-            baza_dir=baza_dir,
-            role=role,
-        )
+        from rem_card.app.startup_check_worker import current_startup_check_runner
+        from rem_card.app.startup_diagnostics import startup_event
+        runner = current_startup_check_runner()
+        admission_probe = getattr(runner, "admission_probe", None)
+        receipt, decision = role_admission.recent_admission(db_path) if admission_probe else (None, "full_runner")
+        reused = False
+        if receipt:
+            check_startup_cancelled()
+            state = admission_probe(db_path)
+            check_startup_cancelled()
+            reused = state == receipt["state"] and role_admission.admission_still_valid(receipt)
+            if not reused:
+                changed = [key for key in receipt["state"] if state and state.get(key) != receipt["state"][key]]
+                decision = "changed_" + "_".join(changed) if changed else "probe_unavailable_or_admission_invalidated"
+                role_admission.invalidate_role_admission()
+                generation = role_admission.admission_generation()
+        startup_event("startup_admission_decision", check_mode="recent" if reused else "full",
+                      reason=decision, full_scan_age_sec=round(time.monotonic() - receipt["checked_monotonic"], 3) if receipt else None)
+        if reused:
+            ok, result, confirmed_corruption = True, "ok", False
+        else:
+            ok, result, confirmed_corruption = _check_quick_with_retries(
+                db_path, baza_dir=baza_dir, role=role,
+            )
+        full_checked_monotonic = receipt["checked_monotonic"] if reused else time.monotonic()
+        full_checked_at_epoch = receipt["checked_at_epoch"] if reused else time.time()
         check_startup_cancelled()
         if ok:
             profile = _apply_network_safe_profile_with_lock(
@@ -1283,12 +1334,25 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             # DatabaseManager validates the exact same fingerprint and skips a
             # second full quick_check in this process.
             check_startup_cancelled()
-            _publish_startup_quickcheck_result(db_path)
+            if not reused:
+                state = getattr(runner, "admission_receipt", None)
+                if state:
+                    try:
+                        if role_admission.file_identity(db_path) == state["identity"]:
+                            role_admission.remember_full_scan(
+                                state, generation=generation, checked_monotonic=full_checked_monotonic,
+                                checked_at_epoch=full_checked_at_epoch)
+                    except OSError:
+                        pass
+            if generation == role_admission.admission_generation():
+                _publish_startup_quickcheck_result(db_path, check_mode="recent" if reused else "full",
+                                                  full_checked_at_epoch=full_checked_at_epoch)
             write_audit_event(
                 "db_guard_ok",
                 baza_dir=baza_dir,
                 role=role,
-                details={"db_path": db_path, "quick_check": "ok", **profile},
+                details={"db_path": db_path, "quick_check": "recent_ok" if reused else "ok",
+                         "full_checked_at_epoch": full_checked_at_epoch, **profile},
             )
             return StartupGuardResult(ok=True, baza_dir=baza_dir)
 

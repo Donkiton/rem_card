@@ -1438,6 +1438,14 @@ class DatabaseManager:
         age_sec = max(0.0, time.time() - checked_at)
         if age_sec > STARTUP_GUARD_QUICKCHECK_MAX_AGE_SEC:
             return False, age_sec
+        if state.get("check_mode") == "recent":
+            from rem_card.app.role_admission import recent_admission, admission_still_valid
+            receipt, _ = recent_admission(str(fingerprint.get("db_path_norm") or ""))
+            if (not receipt or not admission_still_valid(receipt)
+                    or state.get("full_checked_at_epoch") != receipt["checked_at_epoch"]):
+                return False, None
+            checked_at = receipt["checked_at_epoch"]
+            age_sec = max(0.0, time.time() - checked_at)
         self._startup_quickcheck_skipped_ts = int(checked_at)
         return True, age_sec
 
@@ -1834,15 +1842,21 @@ class DatabaseManager:
                 logger.info("Background startup quick_check cancelled because writes became active")
                 return False
             logger.warning("Background startup quick_check failed for %s: %s", self.db_path, result)
+            from rem_card.app.role_admission import invalidate_role_admission
+            invalidate_role_admission()
             return False
         except sqlite3.OperationalError as exc:
             if cancelled or "interrupted" in str(exc).lower():
                 logger.info("Background startup quick_check cancelled because writes became active")
                 return False
             logger.warning("Background startup quick_check could not run: %s", exc)
+            from rem_card.app.role_admission import invalidate_role_admission
+            invalidate_role_admission()
             return False
         except Exception as exc:
             logger.warning("Background startup quick_check could not run: %s", exc)
+            from rem_card.app.role_admission import invalidate_role_admission
+            invalidate_role_admission()
             return False
         finally:
             if conn is not None:

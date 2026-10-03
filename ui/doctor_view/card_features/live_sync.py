@@ -274,7 +274,7 @@ class DoctorLiveSyncMixin:
         except Exception:
             logger.exception("Doctor procedures partial refresh failed")
 
-    def _sync_lab_orders_context(self) -> bool:
+    def _sync_lab_orders_context(self, *, force_refresh=False) -> bool:
         try:
             layout = getattr(self, "layout_manager", None)
             if layout is None:
@@ -285,11 +285,14 @@ class DoctorLiveSyncMixin:
             if sector_anal is None:
                 return False
             if not self.admission_id or self._current_date is None:
-                if hasattr(sector_anal, "set_lab_orders"):
+                if hasattr(sector_anal, "clear_context"):
+                    sector_anal.clear_context()
+                elif hasattr(sector_anal, "set_lab_orders"):
                     sector_anal.set_lab_orders([])
                 return True
             if hasattr(sector_anal, "set_context"):
-                sector_anal.set_context(self.service, self.admission_id, self._current_date)
+                sector_anal.set_context(self.service, self.admission_id, self._current_date,
+                                        force_refresh=force_refresh)
                 return True
             if hasattr(sector_anal, "refresh"):
                 sector_anal.refresh()
@@ -300,7 +303,7 @@ class DoctorLiveSyncMixin:
 
     def _refresh_labs_from_db(self) -> None:
         try:
-            self._sync_lab_orders_context()
+            self._sync_lab_orders_context(force_refresh=True)
         except Exception:
             logger.exception("Doctor lab orders partial refresh failed")
 

@@ -1609,6 +1609,9 @@ class DataService(QObject):
         if worker_timeout is not None and worker_timeout.phase == "local_coordination":
             category = "locked_busy"
         self._last_failure_category = category
+        if category in {"corruption", "schema_incompatible", "policy_block"} or runtime_outage_transition_allowed(category):
+            from rem_card.app.role_admission import invalidate_role_admission
+            invalidate_role_admission()
         transition_allowed = runtime_outage_transition_allowed(category)
         outcome_unknown = bool(worker_timeout is None or worker_timeout.outcome_unknown)
         if write_description and transition_allowed and outcome_unknown:

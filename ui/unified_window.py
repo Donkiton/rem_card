@@ -631,17 +631,10 @@ class UnifiedWindow(QMainWindow):
             marker = request.emergency_startup_request if self.role == request.role else ""
             from rem_card.app.startup_check_worker import startup_check_runner, StartupCheckAborted
             from rem_card.app.startup_diagnostics import startup_attempt, startup_span
-            from rem_card.ui.shared.startup_check import responsive_startup_probe, responsive_startup_wait
+            from rem_card.ui.shared.startup_check import role_startup_check_runner
             from rem_card.app.emergency_validation import emergency_snapshot_validation_attempt
             cancel = self._entry_cancel or threading.Event()
-            def check(path):
-                self.welcome.set_preparing(self.role, "Проверка целостности базы…")
-                return responsive_startup_probe(path, cancel)
-            def check_cancelled():
-                if cancel.is_set():
-                    raise StartupCheckAborted()
-            check.check_cancelled = check_cancelled
-            check.wait_retry = lambda seconds: responsive_startup_wait(cancel, seconds)
+            check = role_startup_check_runner(cancel, lambda text: self.welcome.set_preparing(self.role, text))
             with startup_attempt(self.session_id, self.role), startup_check_runner(check), emergency_snapshot_validation_attempt():
                 with startup_span("role_preflight"):
                     runtime_context = prepare_admitted_runtime_context(
@@ -676,6 +669,8 @@ class UnifiedWindow(QMainWindow):
         complete_startup_request(self)
 
     def _admitted_failed(self, exc):
+        from rem_card.app.role_admission import invalidate_role_admission
+        invalidate_role_admission()
         from rem_card.app.startup_check_worker import StartupCheckAborted
         if isinstance(exc, StartupCheckAborted) and not exc.cleanup_failed:
             self._finish_cancelled_entry()
