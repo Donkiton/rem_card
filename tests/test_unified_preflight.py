@@ -795,6 +795,34 @@ def test_real_local_only_bootstrap_from_synthetic_standby_never_touches_central(
             row = container.db_manager._remcard_conn.execute("SELECT COUNT(*) FROM patients").fetchone()
             assert int(row[0]) >= 1
             active_path = container.db_manager.db_path
+            # The deadline planner and its queued mutation must also stay
+            # entirely inside the active local emergency database.
+            from datetime import datetime, timedelta
+            import time
+            from rem_card.data.dao.patient_dao import PatientDAO
+            from rem_card.services.patient_service import PatientService
+            outcome_time = (datetime.now() - timedelta(minutes=31)).isoformat()
+            def seed_local_outcome(cursor):
+                admission_id = cursor.execute("SELECT id FROM admissions LIMIT 1").fetchone()[0]
+                cursor.execute(
+                    "INSERT INTO beds(bed_number, status, current_admission_id) VALUES (1, 'OCCUPIED', ?) "
+                    "ON CONFLICT(bed_number) DO UPDATE SET status='OCCUPIED', current_admission_id=excluded.current_admission_id",
+                    (admission_id,),
+                )
+                cursor.execute("UPDATE patient_status_events SET end_time=? WHERE admission_id=? AND end_time IS NULL", (outcome_time, admission_id))
+                cursor.execute(
+                    "INSERT INTO patient_status_events(admission_id, status, start_time) VALUES (?, 'TRANSFERRED', ?)",
+                    (admission_id, outcome_time),
+                )
+            container.data_service.run_write("synthetic_local_outcome", seed_local_outcome)
+            patients = PatientService(PatientDAO(container.db_manager), data_service=container.data_service)
+            assert patients.maybe_release_due_outcome_beds_async(force=True)
+            end = time.monotonic() + 5
+            while patients._outcome_release_worker_active and time.monotonic() < end:
+                time.sleep(0.01)
+            assert not patients._outcome_release_worker_active
+            bed = container.db_manager._remcard_conn.execute("SELECT status, current_admission_id FROM beds WHERE bed_number=1").fetchone()
+            assert bed[0] == "FREE" and bed[1] is None, tuple(bed)
             from rem_card.app.unified_runtime import SessionShutdown
             result = SessionShutdown([container], role="nurse").run()
             assert result["ok"], result

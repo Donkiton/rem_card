@@ -20,6 +20,7 @@
     "tests/test_unified_preflight.py",
     "tests/test_unified_shortcuts.py",
     "tests/test_unified_write_outcomes.py",
+    "tests/test_outcome_bed_release_schedule.py",
     "tests/test_unified_update_package.py",
     "tests/test_emergency_restore_stale_locks.py",
     "tests/test_emergency_participants.py",
