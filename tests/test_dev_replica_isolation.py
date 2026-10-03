@@ -114,3 +114,27 @@ def test_real_windows_reader_lock_is_recovered_without_deleting_health(tmp_path,
             kernel.CloseHandle(handle)
     assert released == [True]
     assert json.loads(path.read_text()) == {"new": True}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires Windows sharing semantics")
+def test_dev_quarantine_does_not_replace_locked_previous_archive(tmp_path, monkeypatch):
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    path = tmp_path / "dev_database_paths.json"
+    payload = '{"active_baza_dir": ["invalid"]}'
+    path.write_text(payload)
+    monkeypatch.setattr(runtime_paths.time, "time", lambda: 1234567890.0)
+    previous = tmp_path / "dev_database_paths.json.broken.1234567890"
+    previous.write_text("older corrupt config")
+    handle = kernel.CreateFileW(str(previous), 0x80000000, 1 | 2, None, 3, 0, None)
+    assert handle != ctypes.c_void_p(-1).value
+    try:
+        archived = runtime_paths._quarantine_broken_dev_database_config(str(path))
+        assert archived and Path(archived).read_text() == payload
+        assert not path.exists()
+        assert previous.read_text() == "older corrupt config"
+    finally:
+        kernel.CloseHandle(handle)

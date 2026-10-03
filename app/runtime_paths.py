@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from typing import Optional
 
@@ -501,7 +502,7 @@ def read_dev_database_config() -> dict[str, object]:
 def _quarantine_broken_dev_database_config(config_path: str) -> Optional[str]:
     if not os.path.isfile(config_path):
         return None
-    quarantine_path = f"{config_path}.broken.{int(time.time())}"
+    quarantine_path = f"{config_path}.broken.{int(time.time())}.{uuid.uuid4().hex}"
     try:
         os.replace(config_path, quarantine_path)
         return quarantine_path
