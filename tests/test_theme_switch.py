@@ -183,9 +183,12 @@ def test_sector8_has_no_theme_switch_after_layout_refresh(
 
 
 @pytest.mark.parametrize("role", ["doctor", "nurse"])
-def test_theme_switch_is_in_interface_settings(monkeypatch, role):
+@pytest.mark.parametrize("unified_entry", [False, True])
+def test_theme_switch_is_in_interface_settings(monkeypatch, role, unified_entry):
     from rem_card.ui.admin_view.admin_main_widget import AdminMainWidget
-    _app()
+    app = _app()
+    previous_unified_entry = app.property("unified_entry")
+    app.setProperty("unified_entry", unified_entry)
     manager = FakeThemeManager()
     monkeypatch.setenv("REMCARD_FULL_RUNTIME_THEME", "1")
     monkeypatch.setattr(theme_switch_module, "get_theme_manager", lambda: manager)
@@ -193,9 +196,10 @@ def test_theme_switch_is_in_interface_settings(monkeypatch, role):
     try:
         category = next(item for item in widget.settings_categories if item["key"] == "interface")
         assert widget.theme_switch in category["page"].findChildren(ThemeSwitch)
-        assert len(category["cards"]) == 4
+        assert len(category["cards"]) == (5 if unified_entry else 4)
         widget.theme_switch.click()
         assert manager.calls == [("dark", True)]
     finally:
         widget.close()
         widget.deleteLater()
+        app.setProperty("unified_entry", previous_unified_entry)
