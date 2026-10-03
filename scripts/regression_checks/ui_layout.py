@@ -1257,6 +1257,7 @@ def _check_vital_settings_cache_invalidates_on_sync(temp_root: str) -> tuple[boo
 
     from rem_card.services.remcard_facade import RemCardService
     from rem_card.services.vital_service import VitalService
+    from rem_card.services.patient_service import PatientService
 
     class FakeVitalsDAO:
         def __init__(self):
@@ -1271,6 +1272,7 @@ def _check_vital_settings_cache_invalidates_on_sync(temp_root: str) -> tuple[boo
     service = RemCardService.__new__(RemCardService)
     fake_dao = FakeVitalsDAO()
     service._vitals = VitalService(fake_dao, patient_dao=None)
+    service._patients = PatientService(dao=None)
 
     from datetime import datetime
 
@@ -1306,6 +1308,8 @@ def _check_vital_settings_cache_invalidates_on_sync(temp_root: str) -> tuple[boo
     after_orders_change = service._vitals.get_vital_settings_cached(29, shift_date)
     if after_orders_change.get("cvp") != 1:
         return False, "unrelated orders change should not invalidate vital settings cache"
+    if service._patients._outcome_release_schedule_generation != 0:
+        return False, "unrelated settings/orders changes should not invalidate bed release schedule"
 
     RemCardService._handle_data_changes_for_cache(
         service,
@@ -1317,6 +1321,8 @@ def _check_vital_settings_cache_invalidates_on_sync(temp_root: str) -> tuple[boo
     after_full_refresh = service._vitals.get_vital_settings_cached(29, shift_date)
     if after_full_refresh.get("cvp") != 0:
         return False, "full refresh did not invalidate vital settings cache"
+    if service._patients._outcome_release_schedule_generation != 1:
+        return False, "full refresh did not invalidate bed release schedule"
 
     return True, "ok"
 
