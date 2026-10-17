@@ -295,3 +295,97 @@ def test_empty_or_foreign_admission_envelope_is_rejected(source):
         result = (True, json.dumps({"admission": state, "snapshot": None}), False)
         with pytest.raises(StartupCheckAborted, match="Проверка базы"):
             _validated_snapshot_result(result, None, str(source), True)
+
+
+def test_expired_snapshot_deletion_is_retried_after_transient_local_failure(source, monkeypatch):
+    receipt = remember(checked(source))
+    workspace = receipt["snapshot"]["workspace"]
+    remove = snapshots._remove_workspace
+    monkeypatch.setattr(snapshots, "_remove_workspace", lambda *args: False)
+    receipt["checked_monotonic"] -= admission.ADMISSION_TTL_SEC
+    assert admission.recent_admission(str(source))[0] is None
+    assert workspace in snapshots._pending_deletions
+    assert os.path.isdir(workspace)
+    monkeypatch.setattr(snapshots, "_remove_workspace", remove)
+    snapshots._retry_deletions()
+    assert not os.path.exists(workspace)
+    assert workspace not in snapshots._owned_workspaces
+    assert workspace not in snapshots._pending_deletions
+
+
+def test_exit_cleanup_retries_snapshots_even_without_an_admission_receipt(monkeypatch):
+    workspace = snapshots.create_workspace()
+    remove = snapshots._remove_workspace
+    monkeypatch.setattr(snapshots, "_stopping", False)
+    monkeypatch.setattr(snapshots, "_remove_workspace", lambda *args: False)
+    snapshots.discard({"workspace": workspace})
+    assert admission._receipt is None
+    monkeypatch.setattr(snapshots, "_remove_workspace", remove)
+    snapshots._cleanup_at_exit()
+    assert not os.path.exists(workspace)
+
+
+@pytest.mark.parametrize("alive", [True, None, False])
+def test_restart_sweep_removes_only_verified_stopped_owner_workspaces(tmp_path, monkeypatch, alive):
+    from rem_card.app import sqlite_shared
+    root = tmp_path / "cache" / "startup_snapshots"
+    stale = root / "123456789_deadbeef"
+    stale.mkdir(parents=True)
+    (stale / snapshots._OWNER_FILE).write_text('{"format":1,"pid":123456789}', encoding="utf-8")
+    (stale / "validated.db").write_bytes(b"synthetic clinical image")
+    unmarked = root / "123456789_abcdefgh"
+    unmarked.mkdir()
+    foreign = root / "123456789_foreign_"
+    foreign.mkdir()
+    (foreign / snapshots._OWNER_FILE).write_text('{"format":1,"pid":7}', encoding="utf-8")
+    monkeypatch.setattr(sqlite_shared, "is_local_pid_alive", lambda pid: alive)
+    snapshots.create_workspace()
+    assert stale.exists() is (alive is not False)
+    assert unmarked.is_dir() and foreign.is_dir()
+
+
+def test_next_process_removes_snapshot_left_by_a_crashed_owner(tmp_path):
+    import subprocess
+    import sys
+    root = str(tmp_path / "cache")
+    script = (
+        "import os; from rem_card.app import runtime_paths, startup_snapshot; "
+        f"runtime_paths.get_local_cache_dir = lambda: {root!r}; "
+        "workspace = startup_snapshot.create_workspace(); "
+        "open(os.path.join(workspace, 'validated.db'), 'wb').write(b'synthetic'); "
+        "print(workspace, flush=True); os._exit(0)"
+    )
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    workspace = result.stdout.strip()
+    assert os.path.isfile(os.path.join(workspace, "validated.db"))
+    snapshots.create_workspace()
+    assert not os.path.exists(workspace)
+
+
+@pytest.mark.parametrize("destination_full", [True, False])
+def test_backup_error_falls_back_only_when_proven_local(source, monkeypatch, destination_full):
+    from rem_card.app import startup_db_guard as guard
+    open_central = worker._open_central_readonly
+
+    class FailingBackup:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+        def backup(self, *args, **kwargs):
+            error = sqlite3.OperationalError("database or disk is full" if destination_full else "disk I/O error")
+            error.sqlite_errorcode = sqlite3.SQLITE_FULL if destination_full else sqlite3.SQLITE_IOERR
+            raise error
+
+    monkeypatch.setattr(worker, "_open_central_readonly", lambda path: FailingBackup(open_central(path)))
+    if not destination_full:
+        monkeypatch.setattr(guard, "_check_quick_direct", lambda *a, **k: pytest.fail("source I/O fallback"))
+    before = source.read_bytes()
+    ok, payload, corrupt = snapshots.check_snapshot(str(source), snapshots.create_workspace())
+    assert ok is destination_full and not corrupt
+    if ok:
+        assert json.loads(payload)["snapshot"] is None
+    assert source.read_bytes() == before

@@ -6,11 +6,15 @@ permission to write, nor evidence that a replica has caught up with newer writes
 from __future__ import annotations
 
 import hashlib
+import atexit
 import json
 import os
+import re
 import shutil
 import sqlite3
+import stat
 import tempfile
+import threading
 import time
 from contextlib import closing
 from typing import Callable
@@ -18,31 +22,122 @@ from typing import Callable
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 _owned_workspaces: set[str] = set()
+_workspace_roots: dict[str, str] = {}
+_pending_deletions: set[str] = set()
+_cleanup_lock = threading.RLock()
+_cleanup_timer = None
+_stopping = False
+_OWNER_FILE = ".remcard-startup-owner.json"
+_WORKSPACE_NAME = re.compile(r"([1-9]\d*)_[a-z0-9_]{8}\Z")
+
+
+def _safe_workspace(workspace: str, root: str) -> bool:
+    try:
+        info = os.lstat(workspace)
+        return (stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode)
+                and not getattr(info, "st_file_attributes", 0) & 0x400
+                and os.path.normcase(os.path.realpath(os.path.dirname(workspace))) == os.path.normcase(root)
+                and os.path.normcase(os.path.realpath(workspace)) == os.path.normcase(
+                    os.path.join(root, os.path.basename(workspace))))
+    except OSError:
+        return False
+
+
+def _remove_workspace(workspace: str, root: str) -> bool:
+    if not os.path.lexists(workspace):
+        return True
+    for attempt in range(3):
+        if not _safe_workspace(workspace, root):
+            return not os.path.lexists(workspace)
+        try:
+            shutil.rmtree(workspace)
+            return True
+        except OSError:
+            if not os.path.lexists(workspace):
+                return True
+            if attempt < 2:
+                time.sleep(0.05)
+    return False
+
+
+def _retry_deletions() -> None:
+    global _cleanup_timer
+    with _cleanup_lock:
+        if _cleanup_timer is not None:
+            _cleanup_timer.cancel()
+        _cleanup_timer = None
+        for workspace in list(_pending_deletions):
+            if _remove_workspace(workspace, _workspace_roots[workspace]):
+                _owned_workspaces.discard(workspace)
+                _pending_deletions.discard(workspace)
+                _workspace_roots.pop(workspace, None)
+        if _pending_deletions and not _stopping:
+            _cleanup_timer = threading.Timer(5.0, _retry_deletions)
+            _cleanup_timer.daemon = True
+            _cleanup_timer.start()
+
+
+def _sweep_stopped_workspaces(root: str) -> None:
+    from rem_card.app.sqlite_shared import is_local_pid_alive
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        match = _WORKSPACE_NAME.fullmatch(entry.name)
+        if match is None or not _safe_workspace(entry.path, os.path.realpath(root)):
+            continue
+        try:
+            with open(os.path.join(entry.path, _OWNER_FILE), encoding="utf-8") as handle:
+                owner = json.load(handle)
+            pid = int(match[1])
+            if owner != {"format": 1, "pid": pid} or is_local_pid_alive(pid) is not False:
+                continue
+        except (OSError, ValueError, TypeError):
+            continue
+        with _cleanup_lock:
+            _owned_workspaces.add(entry.path)
+            _workspace_roots[entry.path] = os.path.realpath(root)
+        discard({"workspace": entry.path})
+
+
+def _cleanup_at_exit() -> None:
+    global _stopping
+    with _cleanup_lock:
+        _stopping = True
+        if _cleanup_timer is not None:
+            _cleanup_timer.cancel()
+        for workspace in list(_owned_workspaces):
+            _pending_deletions.add(workspace)
+        _retry_deletions()
+
+
+atexit.register(_cleanup_at_exit)
 
 
 def create_workspace() -> str:
     from rem_card.app.runtime_paths import get_local_cache_dir
     root = os.path.abspath(os.path.join(get_local_cache_dir(), "startup_snapshots"))
     os.makedirs(root, exist_ok=True)
+    _sweep_stopped_workspaces(root)
     workspace = tempfile.mkdtemp(prefix=f"{os.getpid()}_", dir=root)
-    _owned_workspaces.add(workspace)
+    with _cleanup_lock:
+        _owned_workspaces.add(workspace)
+        _workspace_roots[workspace] = os.path.realpath(root)
+    try:
+        with open(os.path.join(workspace, _OWNER_FILE), "x", encoding="utf-8") as handle:
+            json.dump({"format": 1, "pid": os.getpid()}, handle)
+    except OSError:
+        discard({"workspace": workspace})
+        raise
     return workspace
 
 
 def discard(snapshot: dict | None) -> None:
-    if snapshot and snapshot.get("workspace") in _owned_workspaces:
-        workspace = snapshot["workspace"]
-        parent = os.path.realpath(os.path.dirname(workspace))
-        resolved = os.path.realpath(workspace)
-        try:
-            contained = resolved != parent and os.path.commonpath((resolved, parent)) == parent
-        except ValueError:
-            contained = False
-        if not contained:
-            return
-        shutil.rmtree(workspace, ignore_errors=True)
-        if not os.path.exists(workspace):
-            _owned_workspaces.discard(workspace)
+    with _cleanup_lock:
+        if snapshot and snapshot.get("workspace") in _owned_workspaces:
+            _pending_deletions.add(snapshot["workspace"])
+            _retry_deletions()
 
 
 def _fingerprint(path: str) -> list[int]:

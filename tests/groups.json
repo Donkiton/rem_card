@@ -60,6 +60,7 @@
     "tests/test_lazy_operblock_service_proxy.py",
     "tests/test_lazy_startup_services.py",
     "tests/test_legacy_datetime_compatibility.py",
+    "tests/test_local_replica_worker.py",
     "tests/test_local_replica_sync.py",
     "tests/test_local_replica_health.py",
     "tests/test_manual_db_rotation_undo.py",

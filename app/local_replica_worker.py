@@ -51,6 +51,27 @@ class LocalReplicaDestinationError(LocalReplicaWorkerError):
     """Failure known to concern only the local snapshot destination."""
 
 
+def _is_proven_backup_destination_failure(exc: BaseException) -> bool:
+    """Identify the one Backup API failure attributable to its destination.
+
+    SQLite attaches Backup API errors to the destination connection.  That is
+    not enough to turn arbitrary I/O or locking failures into local-disk
+    failures: those can still describe the source path or a concurrent writer.
+    ``SQLITE_FULL`` (and CPython's equivalent canonical message) is the
+    narrow, actionable exception for a full destination volume.
+    """
+    if not isinstance(exc, sqlite3.Error):
+        return False
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    sqlite_full = getattr(sqlite3, "SQLITE_FULL", 13)
+    if error_code is not None:
+        try:
+            return int(error_code) & 0xFF == sqlite_full
+        except (TypeError, ValueError):
+            return False
+    return "database or disk is full" in str(exc).casefold()
+
+
 @contextmanager
 def _local_destination():
     try:
@@ -274,6 +295,7 @@ def _sync_snapshot(
         last_writer_probe = 0.0
         last_backup_progress_emit = 0.0
         last_backup_progress: tuple[int, int] | None = None
+        backup_reported_full = False
 
         def report_backup_progress(remaining: int, total: int) -> None:
             """Emit bounded, content-free SQLite backup progress diagnostics."""
@@ -302,8 +324,10 @@ def _sync_snapshot(
             last_backup_progress = current
 
         def yield_to_writer(status: int, remaining: int, total: int) -> None:
-            nonlocal last_writer_probe
+            nonlocal backup_reported_full, last_writer_probe
             now = time.monotonic()
+            if int(status) & 0xFF == getattr(sqlite3, "SQLITE_FULL", 13):
+                backup_reported_full = True
             sqlite_busy = status in (
                 getattr(sqlite3, "SQLITE_BUSY", 5),
                 getattr(sqlite3, "SQLITE_LOCKED", 6),
@@ -322,21 +346,26 @@ def _sync_snapshot(
         mark_stage("replica_backup")
         if progress_callback is not None:
             progress_callback("backup")
-        central_conn.backup(
-            temp_conn,
-            pages=LOCAL_REPLICA_BACKUP_PAGES,
-            progress=yield_to_writer,
-            sleep=0.01,
-        )
+        try:
+            central_conn.backup(
+                temp_conn,
+                pages=LOCAL_REPLICA_BACKUP_PAGES,
+                progress=yield_to_writer,
+                sleep=0.01,
+            )
+        except Exception as exc:
+            if backup_reported_full or _is_proven_backup_destination_failure(exc):
+                raise LocalReplicaDestinationError(str(exc)) from exc
+            raise
         mark_stage("replica_checkpoint")
         if progress_callback is not None:
             progress_callback("checkpoint")
         with _local_destination():
             checkpoint_row = temp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        if checkpoint_row and int(checkpoint_row[0] or 0) not in (0,):
-            raise sqlite3.OperationalError(
-                f"local replica WAL checkpoint failed: {tuple(checkpoint_row)}"
-            )
+            if checkpoint_row and int(checkpoint_row[0] or 0) not in (0,):
+                raise sqlite3.OperationalError(
+                    f"local replica WAL checkpoint failed: {tuple(checkpoint_row)}"
+                )
         mark_stage("replica_quick_check")
         if progress_callback is not None:
             progress_callback("quick_check")
