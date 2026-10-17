@@ -98,6 +98,68 @@ def test_expiry_is_not_extended_by_repeated_role_entries(database, monkeypatch):
     assert runner.calls == ["full", "light", "full"]
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_expiry_during_profile_application_performs_full_scan_before_handoff(database, monkeypatch, cached):
+    epoch = [time.time()]
+    monotonic = [100.0]
+    clock = SimpleNamespace(time=lambda: epoch[0], monotonic=lambda: monotonic[0])
+    monkeypatch.setattr(admission, "time", clock)
+    monkeypatch.setattr(guard, "time", clock)
+    runner = _runner()
+    assert _enter(runner).ok
+    original = epoch[0]
+    if cached:
+        # Model a protected cache receipt consumed by a fresh process.
+        admission.invalidate_role_admission()
+        normal_check = runner
+        forced = []
+
+        def cached_check(path):
+            forced.append(cached_check.force_full_scan)
+            result = normal_check(path)
+            cached_check.admission_receipt = normal_check.admission_receipt
+            cached_check.full_checked_at_epoch = None if cached_check.force_full_scan else original
+            return result
+
+        cached_check.force_full_scan = False
+        cached_check.requires_confirmation = True
+        cached_check.admission_probe = normal_check.admission_probe
+        runner = cached_check
+    epoch[0] += admission.ADMISSION_TTL_SEC - 1
+    monotonic[0] += admission.ADMISSION_TTL_SEC - 1
+    apply_profile = guard._apply_network_safe_profile_with_lock
+
+    def profile_then_expire(**kwargs):
+        result = apply_profile(**kwargs)
+        epoch[0] += 2
+        monotonic[0] += 2
+        return result
+
+    monkeypatch.setattr(guard, "_apply_network_safe_profile_with_lock", profile_then_expire)
+    assert _enter(runner, "nurse").ok
+    if cached:
+        assert forced == [False, True]
+    else:
+        assert runner.calls == ["full", "light", "full"]
+    receipt, _ = admission.recent_admission(str(database))
+    assert receipt and receipt["checked_at_epoch"] == epoch[0]
+    handoff = json.loads(os.environ[admission.HANDOFF_ENV])
+    assert handoff["full_checked_at_epoch"] == epoch[0]
+
+
+def test_expired_full_handoff_is_rejected_even_with_fresh_handoff_timestamp(database, monkeypatch):
+    from rem_card.data.dao.db_manager import DatabaseManager
+    runner = _runner()
+    assert _enter(runner).ok
+    handoff = json.loads(os.environ[admission.HANDOFF_ENV])
+    handoff["check_mode"] = "full"
+    handoff["full_checked_at_epoch"] = time.time() - admission.ADMISSION_TTL_SEC
+    os.environ[admission.HANDOFF_ENV] = json.dumps(handoff)
+    manager = DatabaseManager.__new__(DatabaseManager)
+    assert not manager._startup_guard_quickcheck_matches(handoff)[0]
+    assert guard._admission_handoff_mode(SimpleNamespace(requires_confirmation=True), None, False) == "admission"
+
+
 @pytest.mark.parametrize("change", ["schema", "migration", "revision", "replacement", "quarantine", "profile", "recovery"])
 def test_changed_database_requires_full_scan(database, change):
     from rem_card.app.unified_db_schema import SCHEMA_FASTPATH_META_KEY

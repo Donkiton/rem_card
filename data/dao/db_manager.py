@@ -1463,6 +1463,14 @@ class DatabaseManager:
         age_sec = max(0.0, time.time() - checked_at)
         if age_sec > STARTUP_GUARD_QUICKCHECK_MAX_AGE_SEC:
             return False, age_sec
+        if "full_checked_at_epoch" in state:
+            from rem_card.app.role_admission import ADMISSION_TTL_SEC
+            try:
+                full_age = time.time() - float(state["full_checked_at_epoch"])
+                if not 0 <= full_age < ADMISSION_TTL_SEC:
+                    return False, full_age
+            except (TypeError, ValueError):
+                return False, None
         if state.get("check_mode") in {"recent", "snapshot", "admission"}:
             from rem_card.app.role_admission import recent_admission, admission_still_valid
             receipt, _ = recent_admission(str(fingerprint.get("db_path_norm") or ""))

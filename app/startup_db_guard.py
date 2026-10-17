@@ -613,19 +613,30 @@ def _startup_full_check_times(runner, db_path, *, baza_dir, role):
         checked_epoch = float(original)
         return None, role_admission.monotonic_full_check_time(checked_epoch), checked_epoch
     except (ValueError, TypeError):
-        previous = getattr(runner, "force_full_scan", False)
+        return _retry_full_startup_check(runner, db_path, baza_dir=baza_dir, role=role)
+
+
+def _retry_full_startup_check(runner, db_path, *, baza_dir, role):
+    previous = getattr(runner, "force_full_scan", False)
+    if runner is not None:
         runner.force_full_scan = True
-        try:
-            outcome = _check_quick_with_retries(db_path, baza_dir=baza_dir, role=role)
-        finally:
+    try:
+        outcome = _check_quick_with_retries(db_path, baza_dir=baza_dir, role=role)
+    finally:
+        if runner is not None:
             runner.force_full_scan = previous
-        after = getattr(runner, "full_checked_at_epoch", None)
-        if outcome[0] and after is not None:
-            try:
-                return outcome, role_admission.monotonic_full_check_time(float(after)), float(after)
-            except (ValueError, TypeError):
-                outcome = (False, "expired startup receipt after full-check retry", False)
-        return outcome, time.monotonic(), time.time()
+    after = getattr(runner, "full_checked_at_epoch", None)
+    if outcome[0] and after is not None:
+        try:
+            return outcome, role_admission.monotonic_full_check_time(float(after)), float(after)
+        except (ValueError, TypeError):
+            outcome = (False, "expired startup receipt after full-check retry", False)
+    return outcome, time.monotonic(), time.time()
+
+
+def _startup_scan_expired(checked_monotonic, checked_epoch):
+    return (not 0 <= time.monotonic() - checked_monotonic < role_admission.ADMISSION_TTL_SEC
+            or not 0 <= time.time() - checked_epoch < role_admission.ADMISSION_TTL_SEC)
 
 
 def _remember_startup_admission(runner, db_path, admission_probe, *, generation,
@@ -656,8 +667,8 @@ def _remember_startup_admission(runner, db_path, admission_probe, *, generation,
 def _admission_handoff_mode(runner, receipt, reused):
     if reused:
         return "recent"
-    if receipt and getattr(runner, "requires_confirmation", False):
-        return "snapshot" if receipt.get("snapshot") else "admission"
+    if getattr(runner, "requires_confirmation", False):
+        return "snapshot" if receipt and receipt.get("snapshot") else "admission"
     return "full"
 
 
@@ -1384,6 +1395,12 @@ def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGua
             # DatabaseManager validates the exact same fingerprint and skips a
             # second full quick_check in this process.
             check_startup_cancelled()
+            if _startup_scan_expired(full_checked_monotonic, full_checked_at_epoch):
+                retry, full_checked_monotonic, full_checked_at_epoch = _retry_full_startup_check(
+                    runner, db_path, baza_dir=baza_dir, role=role)
+                ok, result, confirmed_corruption = retry
+                reused = False
+        if ok:
             if not reused:
                 _remember_startup_admission(runner, db_path, admission_probe, generation=generation,
                                             checked_monotonic=full_checked_monotonic,
