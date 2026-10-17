@@ -122,7 +122,7 @@ def test_corrupt_local_operblock_database_without_backup_is_preserved(tmp_path):
     assert active.read_bytes() == original
 
 
-def test_first_install_chooser_keeps_only_local_operblock_roles_available(
+def test_first_install_chooser_keeps_all_roles_available(
     tmp_path,
     monkeypatch,
 ):
@@ -144,8 +144,8 @@ def test_first_install_chooser_keeps_only_local_operblock_roles_available(
     monkeypatch.setattr(window, "_dispatch_startup_role", lambda: None)
     try:
         window._ready_without_central()
-        assert not window.welcome.role_buttons[ROLE_DOCTOR].isEnabled()
-        assert not window.welcome.role_buttons[ROLE_NURSE].isEnabled()
+        assert window.welcome.role_buttons[ROLE_DOCTOR].isEnabled()
+        assert window.welcome.role_buttons[ROLE_NURSE].isEnabled()
         assert window.welcome.role_buttons[ROLE_OPERBLOCK_PLANNED].isEnabled()
         assert window.welcome.role_buttons[ROLE_OPERBLOCK_EMERGENCY].isEnabled()
     finally:
