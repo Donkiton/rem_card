@@ -1735,11 +1735,11 @@ class DatabaseManager:
         replica = self._local_replica
         if replica is None:
             return True
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
         try:
             replica.set_failure_callback(None)
-            # LocalReplicaSync.stop() closes its worker client immediately.  Do
-            # not call it while sync_once may still own that client: request a
-            # cooperative stop and retain the replica until its thread exits.
+            # Request cooperative cancellation first. Retain the owner until
+            # both its thread and any isolated processes are confirmed stopped.
             stop_evt = getattr(replica, "_stop_evt", None)
             fast_sync_evt = getattr(replica, "_fast_sync_evt", None)
             if stop_evt is not None:
@@ -1751,11 +1751,13 @@ class DatabaseManager:
                 if thread is threading.current_thread():
                     logger.warning("Local replica sync cannot join its own worker thread")
                     return False
-                thread.join(timeout=max(0.0, float(timeout_sec)))
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
                 if thread.is_alive():
                     logger.warning("Local replica sync did not stop before shutdown timeout")
                     return False
-            replica.stop()
+            if replica.stop(timeout_sec=max(0.0, deadline - time.monotonic())) is False:
+                logger.warning("Local replica resources did not stop before shutdown timeout")
+                return False
         except Exception as exc:
             logger.warning("Failed to stop local replica sync: %s", exc)
             return False

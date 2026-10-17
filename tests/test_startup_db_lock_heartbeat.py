@@ -75,5 +75,60 @@ class StartupDbLockHeartbeatTests(unittest.TestCase):
             self.assertTrue(connection_lock.release())
 
 
+class ReplicaLeaseAbandonmentTests(unittest.TestCase):
+    def _lease(self, path):
+        return FileWriteLock(str(path), stale_timeout_sec=1,
+                             allow_expired_lease_cleanup=True,
+                             allow_legacy_replica_cleanup=True)
+
+    def test_expired_foreign_live_unknown_and_unidentified_owners_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "snapshot.lock")
+            cases = (("foreign-host", 12345, False),
+                     (socket.gethostname(), os.getpid(), True),
+                     (socket.gethostname(), 12345, None),
+                     ("", 12345, False),
+                     (socket.gethostname(), None, False))
+            for host, pid, alive in cases:
+                for has_expiry in (True, False):
+                    payload = {"host": host, "pid": pid, "source": "local_replica_snapshot",
+                               "timestamp": time.time() - 7200, "lock_token": "owner"}
+                    if has_expiry:
+                        payload["lease_expires_at"] = time.time() - 3600
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    before = path.read_bytes()
+                    with patch("rem_card.app.sqlite_shared.is_local_pid_alive", return_value=alive):
+                        self.assertFalse(self._lease(path).cleanup_abandoned(source="db_rotation_replica_wait"))
+                        self.assertFalse(self._lease(path).acquire("other-owner", "local_replica_snapshot"))
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_dead_local_owner_is_recovered_without_waiting_for_expiry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "snapshot.lock")
+            path.write_text(json.dumps({"host": socket.gethostname(), "pid": 12345,
+                                        "source": "local_replica_snapshot", "lock_token": "dead",
+                                        "timestamp": time.time(), "lease_expires_at": time.time() + 3600}),
+                            encoding="utf-8")
+            with patch("rem_card.app.sqlite_shared.is_local_pid_alive", return_value=False):
+                self.assertTrue(self._lease(path).cleanup_abandoned(source="db_rotation_replica_wait"))
+            self.assertFalse(path.exists())
+
+    def test_replaced_owner_is_preserved_during_dead_pid_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "snapshot.lock")
+            dead = {"host": socket.gethostname(), "pid": 12345,
+                    "source": "local_replica_snapshot", "lock_token": "dead", "timestamp": time.time()}
+            replacement = {**dead, "pid": os.getpid(), "lock_token": "replacement"}
+            path.write_text(json.dumps(dead), encoding="utf-8")
+
+            def replace_during_probe(_pid):
+                path.write_text(json.dumps(replacement), encoding="utf-8")
+                return False
+
+            with patch("rem_card.app.sqlite_shared.is_local_pid_alive", side_effect=replace_during_probe):
+                self.assertFalse(self._lease(path).cleanup_abandoned(source="db_rotation_replica_wait"))
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), replacement)
+
+
 if __name__ == "__main__":
     unittest.main()

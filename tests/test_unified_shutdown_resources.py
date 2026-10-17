@@ -30,17 +30,19 @@ class _ControlledThread:
 
 
 class _Replica:
-    def __init__(self, thread):
+    def __init__(self, thread, *, stop_result=True):
         self._thread = thread
         self._stop_evt = threading.Event()
         self._fast_sync_evt = threading.Event()
         self.stop_calls = 0
+        self.stop_result = stop_result
 
     def set_failure_callback(self, _callback) -> None:
         pass
 
-    def stop(self) -> None:
+    def stop(self, *, timeout_sec=2.0) -> bool:
         self.stop_calls += 1
+        return self.stop_result
 
 
 class _NetworkWorker:
@@ -156,6 +158,22 @@ def test_busy_network_writer_is_retained_instead_of_terminated(tmp_path, monkeyp
     assert manager.close(timeout_sec=0.1) is True
     assert worker.close_calls == 1
     assert manager._network_write_worker is None
+
+
+def test_replica_process_stop_failure_retains_owner_after_thread_exits(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    replica = _Replica(_ControlledThread(alive=False), stop_result=False)
+    manager._local_replica = replica
+
+    assert manager.close(timeout_sec=0.1) is False
+    assert replica.stop_calls == 1
+    assert manager._local_replica is replica
+    assert manager._remcard_conn.execute("SELECT 1").fetchone() == (1,)
+
+    replica.stop_result = True
+    assert manager.close(timeout_sec=0.1) is True
+    assert replica.stop_calls == 2
+    assert manager._local_replica is None
 
 
 def test_outbox_and_failed_read_connection_remain_visible_until_closed(tmp_path, monkeypatch) -> None:
