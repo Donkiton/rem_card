@@ -9,7 +9,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 from rem_card.app.network_write_worker import NetworkWriteWorkerTimeout
-from rem_card.app.sqlite_shared import LocalWriteQueue
+from rem_card.app.sqlite_shared import LocalWriteQueue, QueuedWriteDeadlineExceeded
 from rem_card.services.data_service import DataService
 from rem_card.services.patient_service import PatientService
 
@@ -184,6 +184,10 @@ def test_expired_queued_write_is_failed_without_executing_mutation():
     finally:
         release.set()
         data.shutdown(timeout=1, application_exit=True)
+
+
+def test_terminal_deadline_exception_is_not_retryable_even_with_a_busy_message():
+    assert not LocalWriteQueue._is_retryable_operational_error(QueuedWriteDeadlineExceeded("database is locked"))
 
 
 class UnifiedWriteOutcomeTest(unittest.TestCase):

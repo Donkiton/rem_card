@@ -2022,6 +2022,8 @@ class DatabaseManager:
         return True
 
     def _enqueue_outbox_fallback(self, statements: list[tuple[str, tuple]], source: str, exc: Exception) -> Optional[str]:
+        if isinstance(exc, QueuedWriteDeadlineExceeded):
+            return None
         if not self._outbox:
             return None
         if is_corruption_write_error(exc):
@@ -3305,6 +3307,10 @@ class DatabaseManager:
                         self._request_periodic_backup(source=source)
                         self._after_write_committed()
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
+            if isinstance(exc, QueuedWriteDeadlineExceeded) or effective_write_options.get("write_budget_ms") is not None:
+                # The owning queue controls retries and the absolute deadline.
+                # Durable replay cannot carry this session-bound write budget.
+                raise
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context=f"remcard_transaction:{source}", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             op_id = None
@@ -3400,6 +3406,10 @@ class DatabaseManager:
                         self._after_write_committed()
             return cursor
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
+            if isinstance(exc, QueuedWriteDeadlineExceeded) or write_options.get("write_budget_ms") is not None:
+                # Never hide a bounded failure behind an unbounded reconnect or
+                # replay; LocalWriteQueue retries retain the original deadline.
+                raise
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context=f"remcard_write:{source}", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             if is_corruption_write_error(exc):

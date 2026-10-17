@@ -2429,7 +2429,7 @@ class SQLiteWriteController:
         retry_count = 0
         last_exc: sqlite3.OperationalError | None = None
         while True:
-            if last_exc is not None:
+            if state.is_bounded_write:
                 remaining_ms = self._remaining_ms(state.deadline)
                 if remaining_ms <= 0:
                     record_metric(
@@ -2442,12 +2442,14 @@ class SQLiteWriteController:
                             3,
                         ),
                         timeout_ms=state.timeout_ms,
-                        sqlite_error_class=type(last_exc).__name__,
+                        sqlite_error_class=type(last_exc).__name__ if last_exc else "",
                         sqlite_error_message_sanitized=(
                             _sanitize_sqlite_error_message(last_exc)
                         ),
                         **state.metric_context,
                     )
+                    if getattr(state, "options", {}).get("write_budget_ms") is not None or last_exc is None:
+                        raise QueuedWriteDeadlineExceeded("Write budget exhausted at commit") from last_exc
                     raise last_exc
 
                 # The outer transaction restores the original value. Bounding
@@ -2518,6 +2520,8 @@ class SQLiteWriteController:
                         sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
                         **state.metric_context,
                     )
+                    if getattr(state, "options", {}).get("write_budget_ms") is not None:
+                        raise QueuedWriteDeadlineExceeded("Write budget exhausted at commit") from exc
                     raise
                 self._sleep_before_retry(state.deadline)
 
@@ -2777,6 +2781,8 @@ class LocalWriteQueue:
 
     @staticmethod
     def _is_retryable_operational_error(exc: Exception) -> bool:
+        if isinstance(exc, QueuedWriteDeadlineExceeded):
+            return False
         message = str(exc).lower()
         if "database is locked" in message or "database table is locked" in message:
             return True
