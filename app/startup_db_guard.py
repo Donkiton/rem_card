@@ -1341,8 +1341,18 @@ def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGua
             ok, result, confirmed_corruption = _check_quick_with_retries(
                 db_path, baza_dir=baza_dir, role=role,
             )
-        full_checked_monotonic = receipt["checked_monotonic"] if reused else time.monotonic()
-        full_checked_at_epoch = receipt["checked_at_epoch"] if reused else time.time()
+        if reused:
+            full_checked_monotonic = receipt["checked_monotonic"]
+            full_checked_at_epoch = receipt["checked_at_epoch"]
+        else:
+            original_checked_epoch = getattr(runner, "full_checked_at_epoch", None)
+            if original_checked_epoch is None:
+                full_checked_monotonic = time.monotonic()
+                full_checked_at_epoch = time.time()
+            else:
+                full_checked_at_epoch = float(original_checked_epoch)
+                full_checked_monotonic = role_admission.monotonic_full_check_time(
+                    full_checked_at_epoch)
         check_startup_cancelled()
         if ok:
             profile = _apply_network_safe_profile_with_lock(

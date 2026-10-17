@@ -109,6 +109,7 @@ class LocalReplicaSync:
         self._snapshot_blocked_attempts = 0
         self._worker_client = worker_client or LocalReplicaWorkerClient(
             central_db_path=self.central_db_path,
+            local_db_path=self.local_db_path,
             rotation_lock_path=self.rotation_lock_path,
             timeout_sec=self.sync_timeout_sec,
         )
@@ -353,6 +354,12 @@ class LocalReplicaSync:
                     raise RuntimeError(
                         "Local replica worker confirmed state without a valid local copy"
                     )
+                from rem_card.app.replica_provenance import remember_source
+                try:
+                    remember_source(self.local_db_path, dict(response.get("source_identity") or {}),
+                                    source_stamp=response.get("source_stamp"), state=state)
+                except OSError:
+                    self.logger.warning("Replica source receipt could not be saved; next sync will use a full snapshot")
                 recovered_after = int(self.consecutive_failures)
                 self.last_sync_ok_ts = time.time()
                 self.last_sync_error = None
@@ -375,6 +382,9 @@ class LocalReplicaSync:
                 result=status,
                 change_cursor=state.get("change_cursor"),
                 db_cycle=str(state.get("db_cycle") or ""),
+                sync_mode=str(response.get("sync_mode") or ""),
+                full_reason=str(response.get("full_reason") or ""),
+                delta_metrics=dict(response.get("delta_metrics") or {}),
             )
             if recovered_after:
                 record_metric(

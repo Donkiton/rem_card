@@ -41,6 +41,14 @@ def admission_generation() -> int:
         return _generation
 
 
+def monotonic_full_check_time(checked_at_epoch: float) -> float:
+    """Map a protected wall-clock receipt onto this process's monotonic clock."""
+    age = time.time() - float(checked_at_epoch)
+    if not 0 <= age < ADMISSION_TTL_SEC:
+        raise ValueError("startup full-check receipt is expired or from the future")
+    return time.monotonic() - age
+
+
 def file_identity(path: str) -> dict:
     stat = os.stat(path)
     if not stat.st_ino:

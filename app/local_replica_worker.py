@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from typing import Any
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
@@ -543,6 +543,8 @@ def _sync_snapshot_with_network_lease_observed(
             nonlocal snapshot_gate_acquired
             if writer_lock_path and os.path.exists(writer_lock_path):
                 raise LocalReplicaWriterBusy()
+            if snapshot_gate_acquired:
+                return
             if progress_callback is not None:
                 progress_callback("snapshot_gate_acquire")
             if not snapshot_gate.acquire(
@@ -558,12 +560,54 @@ def _sync_snapshot_with_network_lease_observed(
 
         if progress_callback is not None:
             progress_callback("snapshot")
+        from rem_card.app.replica_refresh import incremental_enabled, try_incremental_snapshot
+        fallback_reason = ""
+        if message.get("local_db_path") and incremental_enabled():
+            acquire_snapshot_gate()
+
+            def check_delta_cancel() -> None:
+                if writer_lock_path and os.path.exists(writer_lock_path):
+                    raise LocalReplicaWriterBusy()
+                if rotation_gate is not None and os.path.exists(rotation_lock_path):
+                    raise LocalReplicaRotationBusy()
+
+            result = try_incremental_snapshot(
+                message, check_cancel=check_delta_cancel,
+                progress=progress_callback or (lambda _: None),
+            )
+            if result["status"] != "full_required":
+                return result
+            fallback_reason = str(result.get("reason") or "delta_unavailable")
+            # An untracked table can change without advancing the notification
+            # cursor. A rejected delta therefore cannot use the old fast skip.
+            message = {**message, "local_state": {}}
+        elif message.get("require_snapshot"):
+            # Startup needs actual bytes even when the optional delta path is
+            # disabled. The legacy cursor shortcut cannot materialize a file.
+            message = {**message, "local_state": {}}
+        from rem_card.app.role_admission import file_identity
+        from rem_card.app.replica_source_stamp import capture_source_stamp
+        with closing(_open_central_readonly(central_db_path)) as stamp_conn:
+            source_stamp = capture_source_stamp(stamp_conn, central_db_path)
+        try:
+            source_identity = file_identity(central_db_path)
+        except ValueError:
+            source_identity = {}
         result = _sync_snapshot(
             message,
             before_backup=acquire_snapshot_gate,
             progress_callback=progress_callback,
             backup_progress_callback=backup_progress_callback,
         )
+        if source_identity and file_identity(central_db_path) != source_identity:
+            _remove_with_sidecars(str(message["temp_db_path"]))
+            raise LocalReplicaRotationBusy()
+        result["source_identity"] = source_identity
+        with closing(_open_central_readonly(central_db_path)) as stamp_conn:
+            result["source_stamp"] = source_stamp if capture_source_stamp(stamp_conn, central_db_path) == source_stamp else None
+        result["sync_mode"] = "full" if result["status"] == "snapshot_ready" else "unchanged"
+        if fallback_reason:
+            result["full_reason"] = fallback_reason
         return result
     finally:
         try:
@@ -665,12 +709,14 @@ class LocalReplicaWorkerClient:
         self,
         *,
         central_db_path: str,
+        local_db_path: str | None = None,
         rotation_lock_path: str | None = None,
         snapshot_lease_dir: str | None = None,
         snapshot_lease_id: str | None = None,
         timeout_sec: float = DEFAULT_REPLICA_SYNC_TIMEOUT_SEC,
     ):
         self.central_db_path = os.path.abspath(central_db_path)
+        self.local_db_path = os.path.abspath(local_db_path) if local_db_path else ""
         self.rotation_lock_path = (
             os.path.abspath(rotation_lock_path)
             if rotation_lock_path
@@ -1029,6 +1075,7 @@ class LocalReplicaWorkerClient:
                     {
                         "cmd": "sync",
                         "central_db_path": self.central_db_path,
+                        "local_db_path": self.local_db_path,
                         "temp_db_path": os.path.abspath(temp_db_path),
                         "local_state": dict(local_state or {}),
                         "debug_delay_sec": max(0.0, float(debug_delay_sec)),
@@ -1140,7 +1187,9 @@ class LocalReplicaWorkerClient:
                 try:
                     self._pipe.send({"cmd": "shutdown"})
                     self._process.join(
-                        timeout=self._remaining(deadline, WORKER_STOP_WAIT_SEC)
+                        # Reserve part of the same hard budget for termination
+                        # and bounded lease cleanup if Python shutdown stalls.
+                        timeout=min(WORKER_STOP_WAIT_SEC, max(0.0, deadline - time.monotonic()) / 2)
                     )
                 except Exception:
                     pass

@@ -94,12 +94,14 @@ def role_startup_check_runner(cancel, preparing):
     def check(path):
         preparing("Создание проверенной копии базы…")
         check.admission_receipt = None
+        check.full_checked_at_epoch = None
         check.discard_snapshot()
         outcome = probe(path, "snapshot")
         if outcome[0] and outcome[1] != "ok":
             payload = json.loads(outcome[1])
             check.admission_receipt = payload["admission"]
             check.startup_snapshot = payload["snapshot"]
+            check.full_checked_at_epoch = payload.get("full_checked_at_epoch")
             check.requires_confirmation = True
             return True, "ok", False
         return outcome
@@ -115,6 +117,7 @@ def role_startup_check_runner(cancel, preparing):
 
     check.check_cancelled = check_cancelled
     check.startup_snapshot = None
+    check.full_checked_at_epoch = None
     check.requires_confirmation = False
     def discard_snapshot():
         from rem_card.app.startup_snapshot import discard

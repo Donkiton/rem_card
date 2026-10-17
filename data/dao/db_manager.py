@@ -1752,6 +1752,11 @@ class DatabaseManager:
             candidate = copy_for_replica(receipt, self._local_replica_path)
             if candidate:
                 self._local_replica.install_startup_snapshot(candidate)
+                if not os.path.exists(candidate):
+                    from rem_card.app.replica_provenance import remember_source
+                    remember_source(self._local_replica_path, receipt["state"]["identity"],
+                                    source_stamp=receipt.get("snapshot", {}).get("source_stamp"),
+                                    state=receipt.get("snapshot", {}).get("state"))
                 self._record_startup_metric("local_replica_startup_seed", 1)
         except Exception as exc:
             # Seeding is an optimization. Normal async synchronization can use

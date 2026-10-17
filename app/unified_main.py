@@ -67,12 +67,14 @@ def _compiled_smoke_child() -> None:
             conn.executescript("""
                 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
                 INSERT INTO meta VALUES ('db_cycle_started_at', 'synthetic-smoke');
+                INSERT INTO meta VALUES ('unified_schema_fastpath_rev', '26');
                 CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
                 INSERT INTO schema_migrations VALUES (26);
-                CREATE TABLE change_log(id INTEGER PRIMARY KEY);
-                INSERT INTO change_log VALUES (1);
-                CREATE TABLE example(value TEXT);
-                INSERT INTO example VALUES ('synthetic');
+                CREATE TABLE change_log(id INTEGER PRIMARY KEY, entity_name TEXT,
+                    entity_id INTEGER, admission_id INTEGER, action TEXT,
+                    changed_at TEXT, changed_by TEXT, version INTEGER);
+                CREATE TABLE example(id INTEGER PRIMARY KEY, value TEXT);
+                INSERT INTO example VALUES (1, 'synthetic');
             """)
         before = source.read_bytes()
         workspace = root / "snapshot"
@@ -83,6 +85,26 @@ def _compiled_smoke_child() -> None:
             raise RuntimeError(f"Compiled startup snapshot failed: {payload}")
         if source.read_bytes() != before:
             raise RuntimeError("Compiled startup snapshot changed its source")
+        if os.name == "nt":
+            # Exercise native DPAPI, persistence and the incremental engine in
+            # the shipped executable, rather than merely importing modules.
+            first = json.loads(payload)
+            for index, expected_mode in ((2, "cache"), (3, "delta")):
+                if index == 3:
+                    with closing(sqlite3.connect(source)) as conn, conn:
+                        conn.execute("UPDATE example SET value='synthetic updated' WHERE id=1")
+                    before = source.read_bytes()
+                next_workspace = root / f"snapshot_{index}"
+                next_workspace.mkdir()
+                ok, payload, corrupt = check_snapshot(str(source), str(next_workspace))
+                if not ok or corrupt:
+                    raise RuntimeError(f"Compiled cached snapshot failed: {payload}")
+                result = json.loads(payload)
+                if (result.get("sync_mode") != expected_mode
+                        or result.get("full_checked_at_epoch") != first["full_checked_at_epoch"]):
+                    raise RuntimeError(f"Compiled snapshot mode/TTL failed: {result.get('sync_mode')}")
+                if source.read_bytes() != before:
+                    raise RuntimeError("Compiled incremental snapshot changed its source")
         import logging
         from rem_card.app.runtime_log_retention import stop_log_maintenance
         stop_log_maintenance()

@@ -218,6 +218,8 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
     )
     from rem_card.app.startup_db_guard import _check_quick_direct, is_confirmed_db_corruption_reason
     from rem_card.app.startup_diagnostics import startup_span
+    from rem_card.app.role_admission import ADMISSION_TTL_SEC
+    from rem_card.app import startup_snapshot_cache
 
     def stage(value):
         if progress:
@@ -231,16 +233,53 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
     try:
         stage("source_probe")
         before, original_state = _source_state(path)
+        stage("cache_probe")
+        cached = startup_snapshot_cache.load(
+            path, ttl_sec=ADMISSION_TTL_SEC,
+            destination_path=os.path.join(workspace, "cache_baseline.db"),
+        )
+        if cached is not None and (
+                cached.get("admission") != before
+                or cached.get("state", {}).get("db_cycle") != original_state.get("db_cycle")
+                or cached.get("schema_digest") != original_state.get("schema_digest")):
+            cached = None
         root = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+        sync_message = {
+            "central_db_path": path, "temp_db_path": snapshot_path,
+            "rotation_lock_path": os.path.join(os.path.dirname(path), "db_rotation.lock"),
+            "snapshot_lease_path": os.path.join(root, "locks", "replica_snapshots",
+                                                 f"startup_{os.getpid()}.lock"),
+            "lease_duration_sec": lease_duration_sec,
+        }
+        if cached is not None:
+            sync_message.update({
+                "local_db_path": cached["path"],
+                "local_state": cached["state"],
+                "baseline_source_identity": cached["admission"]["identity"],
+                "baseline_source_stamp": cached.get("source_stamp"),
+                "baseline_state": cached["state"],
+                "require_snapshot": True,
+            })
         with startup_span("startup_snapshot_copy", target="central_medical"):
             result = _sync_snapshot_with_network_lease(
-                {"central_db_path": path, "temp_db_path": snapshot_path,
-                 "rotation_lock_path": os.path.join(os.path.dirname(path), "db_rotation.lock"),
-                 "snapshot_lease_path": os.path.join(root, "locks", "replica_snapshots",
-                                                      f"startup_{os.getpid()}.lock"),
-                 "lease_duration_sec": lease_duration_sec},
+                sync_message,
                 progress_callback=stage, backup_progress_callback=pages,
             )
+            cache_mode = str(result.get("sync_mode") or "full")
+            if cached is not None and cache_mode in {"cache", "delta", "unchanged"}:
+                cache_age = time.time() - float(cached["full_checked_at_epoch"])
+                if not 0 <= cache_age < ADMISSION_TTL_SEC:
+                    stage("cache_expired")
+                    full_message = {key: value for key, value in sync_message.items()
+                                    if key not in {"local_db_path", "local_state",
+                                                   "baseline_source_identity",
+                                                   "baseline_source_stamp", "baseline_state",
+                                                   "require_snapshot"}}
+                    result = _sync_snapshot_with_network_lease(
+                        full_message,
+                        progress_callback=stage, backup_progress_callback=pages,
+                    )
+                    cached = None
         # Backup API already quick_checked, checkpointed, closed and fsynced the
         # local snapshot. Verify its schema/cycle against the live source too.
         stage("source_confirmation")
@@ -259,11 +298,26 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
             copied["schema"][key] = after["schema"][key]
         if copied != after or schema_digest != current["schema_digest"]:
             return False, "database is locked: snapshot schema differs from source", False
+        sync_mode = str(result.get("sync_mode") or "full")
+        if cached is not None and sync_mode in {"cache", "delta", "unchanged"}:
+            full_checked_at_epoch = float(cached["full_checked_at_epoch"])
+        else:
+            full_checked_at_epoch = time.time()
+        # Persistence is optional. DPAPI/cache/filesystem failures cannot turn a
+        # successfully validated source snapshot into an admission failure.
+        startup_snapshot_cache.store(
+            path, snapshot_path, admission=after, state=result["state"],
+            schema_digest=current["schema_digest"], source_stamp=result.get("source_stamp"),
+            full_checked_at_epoch=full_checked_at_epoch,
+        )
         with _local_destination():
             manifest = {"workspace": workspace, "path": snapshot_path, "source": after,
                         "state": result["state"], "fingerprint": _fingerprint(snapshot_path),
-                        "sha256": _digest(snapshot_path)}
-        return True, json.dumps({"admission": after, "snapshot": manifest}), False
+                        "sha256": _digest(snapshot_path), "sync_mode": sync_mode,
+                        "source_stamp": result.get("source_stamp")}
+        return True, json.dumps({"admission": after, "snapshot": manifest,
+                                 "full_checked_at_epoch": full_checked_at_epoch,
+                                 "sync_mode": sync_mode}), False
     except (LocalReplicaWriterBusy, LocalReplicaSnapshotBusy, LocalReplicaDestinationError):
         # One bounded attempt at the original direct full check. It can hold a
         # read lock like the old startup path, but avoids starving role entry
