@@ -20,6 +20,7 @@ from rem_card.app.local_replica_worker import (
     LocalReplicaRotationBusy,
     LocalReplicaSnapshotBusy,
     LocalReplicaWriterBusy,
+    LocalReplicaWorkerCancelled,
     LocalReplicaWorkerClient,
     _read_database_state,
 )
@@ -399,7 +400,7 @@ class LocalReplicaSync:
                 )
             self._reset_snapshot_blocked(outcome=status)
             return True
-        except _LocalReplicaStopping:
+        except (_LocalReplicaStopping, LocalReplicaWorkerCancelled):
             self._reset_snapshot_blocked(outcome="stopped")
             return False
         except (
