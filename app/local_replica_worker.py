@@ -36,6 +36,10 @@ class LocalReplicaWorkerError(RuntimeError):
         super().__init__(str(message or "Ошибка процесса локальной реплики"))
 
 
+class LocalReplicaWorkerCancelled(LocalReplicaWorkerError):
+    """The worker operation was intentionally cancelled by client shutdown."""
+
+
 class LocalReplicaWorkerTimeout(LocalReplicaWorkerError):
     def __init__(self, timeout_sec: float, *, stage: str = ""):
         self.timeout_sec = float(timeout_sec)
@@ -759,7 +763,9 @@ class LocalReplicaWorkerClient:
     def _ensure_started(self) -> None:
         with self._state_lock:
             if self._closing.is_set():
-                raise LocalReplicaWorkerError("Процесс локальной реплики останавливается")
+                raise LocalReplicaWorkerCancelled(
+                    "Процесс локальной реплики останавливается"
+                )
             if self._fenced:
                 if not self._terminate_locked():
                     raise LocalReplicaWorkerError(
@@ -1065,7 +1071,11 @@ class LocalReplicaWorkerClient:
                 mark_stage("replica_worker_wait")
                 temp_db_path = os.path.abspath(temp_db_path)
                 with self._state_lock:
-                    if self._fenced or self._closing.is_set():
+                    if self._closing.is_set():
+                        raise LocalReplicaWorkerCancelled(
+                            "Процесс локальной реплики останавливается"
+                        )
+                    if self._fenced:
                         raise LocalReplicaWorkerError(
                             "Процесс локальной реплики останавливается"
                         )
@@ -1099,7 +1109,7 @@ class LocalReplicaWorkerClient:
                         stopped = self._terminate()
                         if stopped:
                             _remove_with_sidecars(temp_db_path)
-                        raise LocalReplicaWorkerError(
+                        raise LocalReplicaWorkerCancelled(
                             "Обновление локальной реплики остановлено"
                         )
                     remaining = deadline - time.monotonic()

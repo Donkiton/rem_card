@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, Mock, patch
 
 from rem_card.app.local_replica_sync import (
     LocalReplicaSync,
@@ -24,6 +24,7 @@ from rem_card.app.local_replica_worker import (
     LocalReplicaRotationBusy,
     LocalReplicaSnapshotBusy,
     LocalReplicaWriterBusy,
+    LocalReplicaWorkerCancelled,
     LocalReplicaWorkerClient,
     LocalReplicaWorkerError,
     LocalReplicaWorkerTimeout,
@@ -646,9 +647,101 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertTrue(client.close(timeout_sec=2.0))
         thread.join(timeout=2.0)
         self.assertFalse(thread.is_alive())
-        self.assertIsInstance(result.get("error"), LocalReplicaWorkerError)
+        self.assertIsInstance(result.get("error"), LocalReplicaWorkerCancelled)
         self.assertIsNone(client._process)
         self.assertIsNone(client._pipe)
+
+    def test_sync_stop_cancels_active_worker_without_recording_failure(self):
+        class DelayedWorkerClient(LocalReplicaWorkerClient):
+            def sync(worker_self, **kwargs):
+                return super().sync(**kwargs, debug_delay_sec=1.0)
+
+        client = DelayedWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(self.root / "sync-stop-leases"),
+            timeout_sec=3.0,
+        )
+        logger = Mock()
+        replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            worker_client=client,
+            logger=logger,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault("sync", replica.sync_once()),
+            daemon=True,
+        )
+        replica._thread = thread
+
+        with patch("rem_card.app.local_replica_sync.record_metric") as metric:
+            thread.start()
+            deadline = time.monotonic() + 2.0
+            while not client._active_temp_path and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(client._active_temp_path)
+            self.assertTrue(replica.stop(timeout_sec=2.0))
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result.get("sync"))
+        self.assertEqual(replica.health_snapshot()["consecutive_failures"], 0)
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "local_replica_sync_failed"
+                for call in metric.call_args_list
+            )
+        )
+        logger.warning.assert_not_called()
+
+    def test_genuine_worker_error_racing_with_stop_is_still_recorded(self):
+        class RacingFailureWorkerClient:
+            def __init__(worker_self):
+                worker_self.started = threading.Event()
+                worker_self.release = threading.Event()
+
+            def sync(worker_self, **_kwargs):
+                worker_self.started.set()
+                worker_self.release.wait(2.0)
+                raise LocalReplicaWorkerError("independent worker failure")
+
+            def close(worker_self, **_kwargs):
+                worker_self.release.set()
+                return True
+
+        client = RacingFailureWorkerClient()
+        replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            worker_client=client,
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault("sync", replica.sync_once()),
+            daemon=True,
+        )
+        replica._thread = thread
+
+        with patch("rem_card.app.local_replica_sync.record_metric") as metric:
+            thread.start()
+            self.assertTrue(client.started.wait(1.0))
+            self.assertTrue(replica.stop(timeout_sec=2.0))
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result.get("sync"))
+        health = replica.health_snapshot()
+        self.assertEqual(health["consecutive_failures"], 1)
+        self.assertEqual(health["last_sync_error_class"], "LocalReplicaWorkerError")
+        metric.assert_any_call(
+            "local_replica_sync_failed",
+            1,
+            force_flush=False,
+            error_class="LocalReplicaWorkerError",
+            failure_stage="",
+            consecutive_failures=1,
+            retry_backoff_sec=15.0,
+            duration_ms=ANY,
+        )
 
     def test_snapshot_progress_names_real_io_stages(self):
         stages = []
