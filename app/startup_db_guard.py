@@ -579,11 +579,14 @@ def _check_quick_with_retries(
 def _publish_startup_quickcheck_result(db_path: str, *, check_mode="full", full_checked_at_epoch=None) -> None:
     try:
         stat_result = os.stat(db_path)
+        checked_at_epoch = time.time()
+        if full_checked_at_epoch is None and check_mode == "full":
+            full_checked_at_epoch = checked_at_epoch
         os.environ[STARTUP_GUARD_QUICKCHECK_ENV] = json.dumps(
             {
                 "result": "ok",
                 "pid": os.getpid(),
-                "checked_at_epoch": time.time(),
+                "checked_at_epoch": checked_at_epoch,
                 "check_mode": check_mode,
                 "full_checked_at_epoch": full_checked_at_epoch,
                 "db_path_norm": os.path.normcase(os.path.abspath(db_path)),
@@ -602,6 +605,74 @@ def _publish_startup_quickcheck_result(db_path: str, *, check_mode="full", full_
         )
     except Exception:
         os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
+
+
+def _startup_full_check_times(runner, db_path, *, baza_dir, role):
+    """An expired cached receipt requests a real full scan, not a login error."""
+    original = getattr(runner, "full_checked_at_epoch", None)
+    if original is None:
+        return None, time.monotonic(), time.time()
+    try:
+        checked_epoch = float(original)
+        return None, role_admission.monotonic_full_check_time(checked_epoch), checked_epoch
+    except (ValueError, TypeError):
+        return _retry_full_startup_check(runner, db_path, baza_dir=baza_dir, role=role)
+
+
+def _retry_full_startup_check(runner, db_path, *, baza_dir, role):
+    previous = getattr(runner, "force_full_scan", False)
+    if runner is not None:
+        runner.force_full_scan = True
+    try:
+        outcome = _check_quick_with_retries(db_path, baza_dir=baza_dir, role=role)
+    finally:
+        if runner is not None:
+            runner.force_full_scan = previous
+    after = getattr(runner, "full_checked_at_epoch", None)
+    if outcome[0] and after is not None:
+        try:
+            return outcome, role_admission.monotonic_full_check_time(float(after)), float(after)
+        except (ValueError, TypeError):
+            outcome = (False, "expired startup receipt after full-check retry", False)
+    return outcome, time.monotonic(), time.time()
+
+
+def _startup_scan_expired(checked_monotonic, checked_epoch):
+    return (not 0 <= time.monotonic() - checked_monotonic < role_admission.ADMISSION_TTL_SEC
+            or not 0 <= time.time() - checked_epoch < role_admission.ADMISSION_TTL_SEC)
+
+
+def _remember_startup_admission(runner, db_path, admission_probe, *, generation,
+                                checked_monotonic, checked_at_epoch):
+    state = getattr(runner, "admission_receipt", None)
+    if not state:
+        return
+    snapshot = getattr(runner, "startup_snapshot", None)
+    requires_confirmation = snapshot or getattr(runner, "requires_confirmation", False)
+    try:
+        identity_matches = role_admission.file_identity(db_path) == state["identity"]
+        if requires_confirmation and (not identity_matches or admission_probe(db_path) != state
+                         or generation != role_admission.admission_generation()):
+            raise RuntimeError("Состояние базы изменилось во время подготовки. Повторите вход.")
+        if not identity_matches:
+            return
+        role_admission.remember_full_scan(
+            state, generation=generation, checked_monotonic=checked_monotonic,
+            checked_at_epoch=checked_at_epoch, snapshot=snapshot)
+        registered, _ = role_admission.recent_admission(db_path)
+        if snapshot and registered and registered.get("snapshot") is snapshot:
+            runner.startup_snapshot = None
+    except OSError:
+        if requires_confirmation:
+            raise
+
+
+def _admission_handoff_mode(runner, receipt, reused):
+    if reused:
+        return "recent"
+    if getattr(runner, "requires_confirmation", False):
+        return "snapshot" if receipt and receipt.get("snapshot") else "admission"
+    return "full"
 
 
 def _apply_network_safe_profile(db_path: str) -> dict[str, Any]:
@@ -1166,6 +1237,11 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
     except BaseException:
         role_admission.invalidate_role_admission()
         raise
+    finally:
+        from rem_card.app.startup_check_worker import current_startup_check_runner
+        discard = getattr(current_startup_check_runner(), "discard_snapshot", None)
+        if discard:
+            discard()
 
 
 def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGuardResult:
@@ -1303,8 +1379,14 @@ def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGua
             ok, result, confirmed_corruption = _check_quick_with_retries(
                 db_path, baza_dir=baza_dir, role=role,
             )
-        full_checked_monotonic = receipt["checked_monotonic"] if reused else time.monotonic()
-        full_checked_at_epoch = receipt["checked_at_epoch"] if reused else time.time()
+        if reused:
+            full_checked_monotonic = receipt["checked_monotonic"]
+            full_checked_at_epoch = receipt["checked_at_epoch"]
+        else:
+            retry, full_checked_monotonic, full_checked_at_epoch = _startup_full_check_times(
+                runner, db_path, baza_dir=baza_dir, role=role)
+            if retry is not None:
+                ok, result, confirmed_corruption = retry
         check_startup_cancelled()
         if ok:
             profile = _apply_network_safe_profile_with_lock(
@@ -1316,18 +1398,20 @@ def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGua
             # DatabaseManager validates the exact same fingerprint and skips a
             # second full quick_check in this process.
             check_startup_cancelled()
+            if _startup_scan_expired(full_checked_monotonic, full_checked_at_epoch):
+                retry, full_checked_monotonic, full_checked_at_epoch = _retry_full_startup_check(
+                    runner, db_path, baza_dir=baza_dir, role=role)
+                ok, result, confirmed_corruption = retry
+                reused = False
+        if ok:
             if not reused:
-                state = getattr(runner, "admission_receipt", None)
-                if state:
-                    try:
-                        if role_admission.file_identity(db_path) == state["identity"]:
-                            role_admission.remember_full_scan(
-                                state, generation=generation, checked_monotonic=full_checked_monotonic,
-                                checked_at_epoch=full_checked_at_epoch)
-                    except OSError:
-                        pass
+                _remember_startup_admission(runner, db_path, admission_probe, generation=generation,
+                                            checked_monotonic=full_checked_monotonic,
+                                            checked_at_epoch=full_checked_at_epoch)
             if generation == role_admission.admission_generation():
-                _publish_startup_quickcheck_result(db_path, check_mode="recent" if reused else "full",
+                current_receipt, _ = role_admission.recent_admission(db_path)
+                mode = _admission_handoff_mode(runner, current_receipt, reused)
+                _publish_startup_quickcheck_result(db_path, check_mode=mode,
                                                   full_checked_at_epoch=full_checked_at_epoch)
             write_audit_event(
                 "db_guard_ok",

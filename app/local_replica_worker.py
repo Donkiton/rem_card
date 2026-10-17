@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import closing, contextmanager
 from typing import Any
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
@@ -19,9 +20,11 @@ from rem_card.app.sqlite_shared import FileWriteLock, configure_connection, desc
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
-DEFAULT_REPLICA_SYNC_TIMEOUT_SEC = 6.0
+DEFAULT_REPLICA_SYNC_TIMEOUT_SEC = 30.0
+MAX_REPLICA_SYNC_TIMEOUT_SEC = 90.0
 LOCAL_REPLICA_BACKUP_PAGES = 256
 WRITER_LOCK_PROBE_INTERVAL_SEC = 0.1
+BACKUP_PROGRESS_IPC_INTERVAL_SEC = 0.1
 WORKER_POLL_SLICE_SEC = 0.05
 WORKER_STOP_WAIT_SEC = 0.5
 STOPPED_WORKER_CLEANUP_TIMEOUT_SEC = 0.5
@@ -42,6 +45,39 @@ class LocalReplicaWorkerTimeout(LocalReplicaWorkerError):
             f"Обновление локальной реплики превысило безопасный тайм-аут "
             f"{self.timeout_sec:.1f} с.{stage_suffix}"
         )
+
+
+class LocalReplicaDestinationError(LocalReplicaWorkerError):
+    """Failure known to concern only the local snapshot destination."""
+
+
+def _is_proven_backup_destination_failure(exc: BaseException) -> bool:
+    """Identify the one Backup API failure attributable to its destination.
+
+    SQLite attaches Backup API errors to the destination connection.  That is
+    not enough to turn arbitrary I/O or locking failures into local-disk
+    failures: those can still describe the source path or a concurrent writer.
+    ``SQLITE_FULL`` (and CPython's equivalent canonical message) is the
+    narrow, actionable exception for a full destination volume.
+    """
+    if not isinstance(exc, sqlite3.Error):
+        return False
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    sqlite_full = getattr(sqlite3, "SQLITE_FULL", 13)
+    if error_code is not None:
+        try:
+            return int(error_code) & 0xFF == sqlite_full
+        except (TypeError, ValueError):
+            return False
+    return "database or disk is full" in str(exc).casefold()
+
+
+@contextmanager
+def _local_destination():
+    try:
+        yield
+    except (OSError, sqlite3.Error) as exc:
+        raise LocalReplicaDestinationError(str(exc)) from exc
 
 
 class LocalReplicaRotationBusy(LocalReplicaWorkerError):
@@ -193,6 +229,7 @@ def _sync_snapshot(
     *,
     before_backup: Callable[[], None] | None = None,
     progress_callback: Callable[[str], None] | None = None,
+    backup_progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     central_db_path = os.path.abspath(str(message.get("central_db_path") or ""))
     temp_db_path = os.path.abspath(str(message.get("temp_db_path") or ""))
@@ -251,62 +288,113 @@ def _sync_snapshot(
                 "state": central_state,
             }
 
-        os.makedirs(os.path.dirname(temp_db_path), exist_ok=True)
-        temp_conn = _open_temp_replica(temp_db_path)
+        with _local_destination():
+            os.makedirs(os.path.dirname(temp_db_path), exist_ok=True)
+            temp_conn = _open_temp_replica(temp_db_path)
 
         last_writer_probe = 0.0
+        last_backup_progress_emit = 0.0
+        last_backup_progress: tuple[int, int] | None = None
+        backup_reported_full = False
 
-        def yield_to_writer(_status: int, _remaining: int, _total: int) -> None:
-            nonlocal last_writer_probe
+        def report_backup_progress(remaining: int, total: int) -> None:
+            """Emit bounded, content-free SQLite backup progress diagnostics."""
+            nonlocal last_backup_progress_emit, last_backup_progress
+            remaining = max(0, int(remaining))
+            total = max(0, int(total))
+            current = (remaining, total)
             now = time.monotonic()
-            sqlite_busy = _status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            is_first = last_backup_progress is None
+            is_complete = remaining == 0
+            if (
+                backup_progress_callback is not None
+                and (
+                    is_first
+                    or is_complete
+                    or now - last_backup_progress_emit
+                    >= BACKUP_PROGRESS_IPC_INTERVAL_SEC
+                )
+            ):
+                try:
+                    backup_progress_callback(remaining, total)
+                except Exception:
+                    # UI/IPC diagnostics must not affect a validated snapshot.
+                    pass
+                last_backup_progress_emit = now
+            last_backup_progress = current
+
+        def yield_to_writer(status: int, remaining: int, total: int) -> None:
+            nonlocal backup_reported_full, last_writer_probe
+            now = time.monotonic()
+            if int(status) & 0xFF == getattr(sqlite3, "SQLITE_FULL", 13):
+                backup_reported_full = True
+            sqlite_busy = status in (
+                getattr(sqlite3, "SQLITE_BUSY", 5),
+                getattr(sqlite3, "SQLITE_LOCKED", 6),
+            )
             if (
                 not sqlite_busy
                 and now - last_writer_probe < WRITER_LOCK_PROBE_INTERVAL_SEC
             ):
+                report_backup_progress(remaining, total)
                 return
             last_writer_probe = now
             if writer_lock_path and os.path.exists(writer_lock_path):
                 raise LocalReplicaWriterBusy()
+            report_backup_progress(remaining, total)
 
         mark_stage("replica_backup")
         if progress_callback is not None:
             progress_callback("backup")
-        central_conn.backup(
-            temp_conn,
-            pages=LOCAL_REPLICA_BACKUP_PAGES,
-            progress=yield_to_writer,
-            sleep=0.01,
-        )
+        try:
+            central_conn.backup(
+                temp_conn,
+                pages=LOCAL_REPLICA_BACKUP_PAGES,
+                progress=yield_to_writer,
+                sleep=0.01,
+            )
+        except Exception as exc:
+            if backup_reported_full or _is_proven_backup_destination_failure(exc):
+                raise LocalReplicaDestinationError(str(exc)) from exc
+            raise
         mark_stage("replica_checkpoint")
         if progress_callback is not None:
             progress_callback("checkpoint")
-        checkpoint_row = temp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-        if checkpoint_row and int(checkpoint_row[0] or 0) not in (0,):
-            raise sqlite3.OperationalError(
-                f"local replica WAL checkpoint failed: {tuple(checkpoint_row)}"
-            )
+        with _local_destination():
+            checkpoint_row = temp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint_row and int(checkpoint_row[0] or 0) not in (0,):
+                raise sqlite3.OperationalError(
+                    f"local replica WAL checkpoint failed: {tuple(checkpoint_row)}"
+                )
         mark_stage("replica_quick_check")
         if progress_callback is not None:
             progress_callback("quick_check")
-        quick_row = temp_conn.execute("PRAGMA quick_check").fetchone()
-        if not quick_row or str(quick_row[0] or "").lower() != "ok":
-            raise sqlite3.DatabaseError(
-                f"local replica quick_check failed: {quick_row[0] if quick_row else 'empty'}"
-            )
-        snapshot_state = _read_database_state(temp_conn)
-        temp_conn.close()
+        with _local_destination():
+            quick_row = temp_conn.execute("PRAGMA quick_check").fetchone()
+            if not quick_row or str(quick_row[0] or "").lower() != "ok":
+                raise sqlite3.DatabaseError(
+                    f"local replica quick_check failed: {quick_row[0] if quick_row else 'empty'}"
+                )
+            snapshot_state = _read_database_state(temp_conn)
+            temp_conn.close()
         temp_conn = None
         mark_stage("replica_fsync")
         if progress_callback is not None:
             progress_callback("fsync")
-        with open(temp_db_path, "r+b") as fh:
-            fh.flush()
-            os.fsync(fh.fileno())
+        with _local_destination():
+            with open(temp_db_path, "r+b") as fh:
+                fh.flush()
+                os.fsync(fh.fileno())
         return {
             "status": "snapshot_ready",
             "state": snapshot_state,
             "temp_db_path": temp_db_path,
+            "backup_pages_remaining": (
+                last_backup_progress[0] if last_backup_progress is not None else 0
+            ),
+            "backup_pages_total": (
+                last_backup_progress[1] if last_backup_progress is not None else 0
+            ),
         }
     except Exception:
         failed = True
@@ -330,13 +418,21 @@ def _sync_snapshot_with_network_lease(
     message: dict[str, Any],
     *,
     progress_callback: Callable[[str], None] | None = None,
+    backup_progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     with observe("replica_snapshot", resource=message.get("central_db_path"), stage="replica_lease_wait"):
-        return _sync_snapshot_with_network_lease_observed(message, progress_callback=progress_callback)
+        return _sync_snapshot_with_network_lease_observed(
+            message,
+            progress_callback=progress_callback,
+            backup_progress_callback=backup_progress_callback,
+        )
 
 
 def _sync_snapshot_with_network_lease_observed(
-    message: dict[str, Any], *, progress_callback: Callable[[str], None] | None = None,
+    message: dict[str, Any],
+    *,
+    progress_callback: Callable[[str], None] | None = None,
+    backup_progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
     """Run every potentially blocking network operation inside the worker.
 
@@ -447,6 +543,8 @@ def _sync_snapshot_with_network_lease_observed(
             nonlocal snapshot_gate_acquired
             if writer_lock_path and os.path.exists(writer_lock_path):
                 raise LocalReplicaWriterBusy()
+            if snapshot_gate_acquired:
+                return
             if progress_callback is not None:
                 progress_callback("snapshot_gate_acquire")
             if not snapshot_gate.acquire(
@@ -462,11 +560,54 @@ def _sync_snapshot_with_network_lease_observed(
 
         if progress_callback is not None:
             progress_callback("snapshot")
+        from rem_card.app.replica_refresh import incremental_enabled, try_incremental_snapshot
+        fallback_reason = ""
+        if message.get("local_db_path") and incremental_enabled():
+            acquire_snapshot_gate()
+
+            def check_delta_cancel() -> None:
+                if writer_lock_path and os.path.exists(writer_lock_path):
+                    raise LocalReplicaWriterBusy()
+                if rotation_gate is not None and os.path.exists(rotation_lock_path):
+                    raise LocalReplicaRotationBusy()
+
+            result = try_incremental_snapshot(
+                message, check_cancel=check_delta_cancel,
+                progress=progress_callback or (lambda _: None),
+            )
+            if result["status"] != "full_required":
+                return result
+            fallback_reason = str(result.get("reason") or "delta_unavailable")
+            # An untracked table can change without advancing the notification
+            # cursor. A rejected delta therefore cannot use the old fast skip.
+            message = {**message, "local_state": {}}
+        elif message.get("require_snapshot"):
+            # Startup needs actual bytes even when the optional delta path is
+            # disabled. The legacy cursor shortcut cannot materialize a file.
+            message = {**message, "local_state": {}}
+        from rem_card.app.role_admission import file_identity
+        from rem_card.app.replica_source_stamp import capture_source_stamp
+        with closing(_open_central_readonly(central_db_path)) as stamp_conn:
+            source_stamp = capture_source_stamp(stamp_conn, central_db_path)
+        try:
+            source_identity = file_identity(central_db_path)
+        except ValueError:
+            source_identity = {}
         result = _sync_snapshot(
             message,
             before_backup=acquire_snapshot_gate,
             progress_callback=progress_callback,
+            backup_progress_callback=backup_progress_callback,
         )
+        if source_identity and file_identity(central_db_path) != source_identity:
+            _remove_with_sidecars(str(message["temp_db_path"]))
+            raise LocalReplicaRotationBusy()
+        result["source_identity"] = source_identity
+        with closing(_open_central_readonly(central_db_path)) as stamp_conn:
+            result["source_stamp"] = source_stamp if capture_source_stamp(stamp_conn, central_db_path) == source_stamp else None
+        result["sync_mode"] = "full" if result["status"] == "snapshot_ready" else "unchanged"
+        if fallback_reason:
+            result["full_reason"] = fallback_reason
         return result
     finally:
         try:
@@ -549,6 +690,13 @@ def _worker_main(pipe) -> None:
                         progress_callback=lambda stage: pipe.send(
                             {"progress": str(stage or "")}
                         ),
+                        backup_progress_callback=lambda remaining, total: pipe.send(
+                            {
+                                "progress": "backup",
+                                "backup_remaining": int(remaining),
+                                "backup_total": int(total),
+                            }
+                        ),
                     ),
                 }
             )
@@ -561,12 +709,14 @@ class LocalReplicaWorkerClient:
         self,
         *,
         central_db_path: str,
+        local_db_path: str | None = None,
         rotation_lock_path: str | None = None,
         snapshot_lease_dir: str | None = None,
         snapshot_lease_id: str | None = None,
         timeout_sec: float = DEFAULT_REPLICA_SYNC_TIMEOUT_SEC,
     ):
         self.central_db_path = os.path.abspath(central_db_path)
+        self.local_db_path = os.path.abspath(local_db_path) if local_db_path else ""
         self.rotation_lock_path = (
             os.path.abspath(rotation_lock_path)
             if rotation_lock_path
@@ -590,7 +740,10 @@ class LocalReplicaWorkerClient:
         self.malformed_quarantine_dir = malformed_lock_quarantine_dir(
             self.central_db_path
         )
-        self.timeout_sec = max(0.2, min(30.0, float(timeout_sec)))
+        self.timeout_sec = max(
+            0.2,
+            min(MAX_REPLICA_SYNC_TIMEOUT_SEC, float(timeout_sec)),
+        )
         self._mutex = threading.Lock()
         self._state_lock = threading.RLock()
         self._closing = threading.Event()
@@ -885,10 +1038,15 @@ class LocalReplicaWorkerClient:
         timeout_sec: float | None = None,
         debug_delay_sec: float = 0.0,
         debug_lease_delay_sec: float = 0.0,
+        progress_callback: Callable[[str], None] | None = None,
+        backup_progress_callback: Callable[[int, int], None] | None = None,
     ) -> dict[str, Any]:
         effective_timeout = max(
             0.2,
-            min(30.0, float(timeout_sec or self.timeout_sec)),
+            min(
+                MAX_REPLICA_SYNC_TIMEOUT_SEC,
+                float(timeout_sec or self.timeout_sec),
+            ),
         )
         deadline = time.monotonic() + effective_timeout
         mutex_remaining = deadline - time.monotonic()
@@ -917,6 +1075,7 @@ class LocalReplicaWorkerClient:
                     {
                         "cmd": "sync",
                         "central_db_path": self.central_db_path,
+                        "local_db_path": self.local_db_path,
                         "temp_db_path": os.path.abspath(temp_db_path),
                         "local_state": dict(local_state or {}),
                         "debug_delay_sec": max(0.0, float(debug_delay_sec)),
@@ -963,6 +1122,22 @@ class LocalReplicaWorkerClient:
                     if progress:
                         last_stage = progress
                         mark_stage(f"replica_{progress}")
+                        if progress_callback is not None:
+                            try:
+                                progress_callback(progress)
+                            except Exception:
+                                pass
+                        if "backup_remaining" in response or "backup_total" in response:
+                            try:
+                                remaining = max(
+                                    0,
+                                    int(response.get("backup_remaining") or 0),
+                                )
+                                total = max(0, int(response.get("backup_total") or 0))
+                                if backup_progress_callback is not None:
+                                    backup_progress_callback(remaining, total)
+                            except Exception:
+                                pass
                         continue
                     break
             except LocalReplicaWorkerTimeout:
@@ -1012,7 +1187,9 @@ class LocalReplicaWorkerClient:
                 try:
                     self._pipe.send({"cmd": "shutdown"})
                     self._process.join(
-                        timeout=self._remaining(deadline, WORKER_STOP_WAIT_SEC)
+                        # Reserve part of the same hard budget for termination
+                        # and bounded lease cleanup if Python shutdown stalls.
+                        timeout=min(WORKER_STOP_WAIT_SEC, max(0.0, deadline - time.monotonic()) / 2)
                     )
                 except Exception:
                     pass

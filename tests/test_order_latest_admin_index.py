@@ -4,6 +4,8 @@ import sqlite3
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 from rem_card.app.unified_db_schema import (
     SCHEMA_FASTPATH_META_KEY,
     SCHEMA_FASTPATH_REV,
@@ -38,9 +40,12 @@ def _service_with_schema():
     return conn, db, service
 
 
-def test_latest_committed_query_preserves_datetime_grouping_and_uses_expression_index():
+@pytest.mark.parametrize('expression_index', [True, False])
+def test_latest_committed_query_preserves_datetime_grouping_and_uses_expression_index(expression_index):
     conn, db, service = _service_with_schema()
     try:
+        if not expression_index:
+            conn.execute('DROP INDEX idx_admin_committed_planned_expr_order_id')
         conn.executemany(
             """
             INSERT INTO administrations
@@ -71,7 +76,7 @@ def test_latest_committed_query_preserves_datetime_grouping_and_uses_expression_
             db.last_params,
         ).fetchall()
         details = "\n".join(str(row[3]) for row in plan)
-        assert "idx_admin_committed_planned_expr_order_id" in details
+        assert ("idx_admin_committed_planned_expr_order_id" in details) is expression_index
 
         rows = service.get_latest_admin_rows_for_order_ids(
             start_dt=datetime(2026, 9, 28, 8),

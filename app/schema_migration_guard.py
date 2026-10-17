@@ -3,7 +3,7 @@ import os
 import socket
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterator, Optional
@@ -16,7 +16,9 @@ from rem_card.app.unified_db_schema import (
     is_unified_schema_ready,
 )
 from rem_card.app.version import APP_VERSION
-from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
+from rem_card.app.client_build_profile import (
+    database_upgrades_disabled, local_operblock_schema_upgrades_allowed, require_compatible_schema,
+)
 
 
 SCHEMA_MIGRATION_LOCK_TIMEOUT_SEC = 60.0
@@ -84,13 +86,16 @@ def _plain_write_transaction(conn: sqlite3.Connection) -> Iterator[None]:
         raise
 
 
-def _run_schema_migration(conn: sqlite3.Connection, logger: logging.Logger, controller: Any, source: str):
+def _run_schema_migration(
+    conn: sqlite3.Connection, logger: logging.Logger, controller: Any, source: str,
+    allow_local_schema_upgrades: bool = False,
+):
     if controller is not None:
         with controller.transaction(conn, source=source):
-            ensure_unified_schema(conn, logger=logger)
+            ensure_unified_schema(conn, logger=logger, allow_local_schema_upgrades=allow_local_schema_upgrades)
         return
     with _plain_write_transaction(conn):
-        ensure_unified_schema(conn, logger=logger)
+        ensure_unified_schema(conn, logger=logger, allow_local_schema_upgrades=allow_local_schema_upgrades)
 
 
 def _create_validated_backup(
@@ -143,6 +148,7 @@ def _ensure_after_lock(
     logger: logging.Logger,
     controller: Any,
     source: str,
+    allow_local_schema_upgrades: bool = False,
 ) -> SchemaMigrationResult:
     if is_unified_schema_ready(conn):
         policy_updated = _update_policy(
@@ -168,7 +174,7 @@ def _ensure_after_lock(
         baza_dir=baza_dir,
         source=source,
     )
-    _run_schema_migration(conn, logger, controller, source)
+    _run_schema_migration(conn, logger, controller, source, allow_local_schema_upgrades)
     if not is_unified_schema_ready(conn):
         raise RuntimeError("Unified schema migration finished but fastpath contract is not satisfied")
     return SchemaMigrationResult(migrated=True, backup_path=backup_path, policy_updated=policy_updated)
@@ -188,15 +194,14 @@ def ensure_unified_schema_with_migration_backup(
     controller: Any = None,
     lock_path: Optional[str] = None,
     source: str = "schema_migration",
+    runtime_context: Any = None,
 ) -> SchemaMigrationResult:
     logger = logger or logging.getLogger(__name__)
-    if database_upgrades_disabled():
-        if controller is not None:
-            with controller.connection_guard(conn):
-                require_compatible_schema(is_unified_schema_ready(conn))
-        else:
+    with controller.connection_guard(conn) if controller is not None else nullcontext():
+        allow_local_schema_upgrades = local_operblock_schema_upgrades_allowed(conn, runtime_context)
+        if database_upgrades_disabled() and not allow_local_schema_upgrades:
             require_compatible_schema(is_unified_schema_ready(conn))
-        return SchemaMigrationResult(migrated=False)
+            return SchemaMigrationResult(migrated=False)
     _ = db_path
     effective_min_client_version = str(min_client_version or APP_VERSION or SCHEMA_REQUIRED_CLIENT_VERSION)
 
@@ -215,6 +220,7 @@ def ensure_unified_schema_with_migration_backup(
                     logger=logger,
                     controller=controller,
                     source=source,
+                    allow_local_schema_upgrades=allow_local_schema_upgrades,
                 )
             finally:
                 controller.lock.release()
@@ -233,6 +239,7 @@ def ensure_unified_schema_with_migration_backup(
             logger=logger,
             controller=None,
             source=source,
+            allow_local_schema_upgrades=allow_local_schema_upgrades,
         )
     finally:
         if lock:

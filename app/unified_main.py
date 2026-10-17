@@ -39,7 +39,76 @@ def _crash_session():
 
 
 def _compiled_smoke_child() -> None:
-    """Importable no-op target that requires a real multiprocessing worker."""
+    """Exercise the shipped snapshot path in a real, isolated frozen worker."""
+    import json
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from contextlib import closing
+
+    with tempfile.TemporaryDirectory(prefix="remcard_snapshot_smoke_", ignore_cleanup_errors=True) as temporary:
+        root = Path(temporary)
+        central = root / "central"
+        source = central / "archiv" / "rao_journal.db"
+        source.parent.mkdir(parents=True)
+        config = root / "data_path.json"
+        config.write_text(json.dumps({"baza_dir": str(central)}), encoding="utf-8")
+        os.environ.update({
+            "REMCARD_DATA_PATH_CONFIG": str(config), "REMCARD_BAZA_DIR": str(central),
+            "REMCARD_DEV_DATABASE_CONFIG": str(config),
+            "REMCARD_LOCAL_LOGS_DIR": str(root / "logs"),
+            "LOCALAPPDATA": str(root / "profile" / "local"),
+            "APPDATA": str(root / "profile" / "roaming"),
+            "PROGRAMDATA": str(root / "profile" / "programdata"),
+            "USERPROFILE": str(root / "profile" / "user"),
+            "REMCARD_LOCAL_METRICS_ENABLED": "0", "REMCARD_LOG_STORAGE_ENABLED": "0",
+        })
+        with closing(sqlite3.connect(source)) as conn, conn:
+            conn.executescript("""
+                CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+                INSERT INTO meta VALUES ('db_cycle_started_at', 'synthetic-smoke');
+                INSERT INTO meta VALUES ('unified_schema_fastpath_rev', '26');
+                CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
+                INSERT INTO schema_migrations VALUES (26);
+                CREATE TABLE change_log(id INTEGER PRIMARY KEY, entity_name TEXT,
+                    entity_id INTEGER, admission_id INTEGER, action TEXT,
+                    changed_at TEXT, changed_by TEXT, version INTEGER);
+                CREATE TABLE example(id INTEGER PRIMARY KEY, value TEXT);
+                INSERT INTO example VALUES (1, 'synthetic');
+            """)
+        before = source.read_bytes()
+        workspace = root / "snapshot"
+        workspace.mkdir()
+        from rem_card.app.startup_snapshot import check_snapshot
+        ok, payload, corrupt = check_snapshot(str(source), str(workspace))
+        if not ok or corrupt or not json.loads(payload).get("snapshot"):
+            raise RuntimeError(f"Compiled startup snapshot failed: {payload}")
+        if source.read_bytes() != before:
+            raise RuntimeError("Compiled startup snapshot changed its source")
+        if os.name == "nt":
+            # Exercise native DPAPI, persistence and the incremental engine in
+            # the shipped executable, rather than merely importing modules.
+            first = json.loads(payload)
+            for index, expected_mode in ((2, "cache"), (3, "delta")):
+                if index == 3:
+                    with closing(sqlite3.connect(source)) as conn, conn:
+                        conn.execute("UPDATE example SET value='synthetic updated' WHERE id=1")
+                    before = source.read_bytes()
+                next_workspace = root / f"snapshot_{index}"
+                next_workspace.mkdir()
+                ok, payload, corrupt = check_snapshot(str(source), str(next_workspace))
+                if not ok or corrupt:
+                    raise RuntimeError(f"Compiled cached snapshot failed: {payload}")
+                result = json.loads(payload)
+                if (result.get("sync_mode") != expected_mode
+                        or result.get("full_checked_at_epoch") != first["full_checked_at_epoch"]):
+                    raise RuntimeError(f"Compiled snapshot mode/TTL failed: {result.get('sync_mode')}")
+                if source.read_bytes() != before:
+                    raise RuntimeError("Compiled incremental snapshot changed its source")
+        import logging
+        from rem_card.app.runtime_log_retention import stop_log_maintenance
+        stop_log_maintenance()
+        logging.shutdown()
 
 
 def _run_compiled_worker_smoke(

@@ -40,6 +40,9 @@ LIVE_DB_COPY_ALLOWLIST = {
     "app/startup_db_guard.py",
     "app/paths.py",
     "app/updater_main.py",
+    # Только закрытый локальный validated.db из cache_paths(); central source
+    # используется как ключ и никогда не передаётся в файловое копирование.
+    "app/startup_snapshot_cache.py",
     "scripts/regression_safety_checks.py",
     # Создание закрытой временной фикстуры; ранее находилось в общем runner.
     "scripts/regression_checks/backup.py",

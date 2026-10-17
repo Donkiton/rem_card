@@ -26,7 +26,7 @@ def responsive_startup_wait(cancel, seconds):
         raise StartupCheckAborted()
 
 
-def responsive_startup_probe(path, cancel, *, probe=None):
+def responsive_startup_probe(path, cancel, *, probe=None, progress_state=None, preparing=None):
     # The surrounding shell retains its admission lease and busy flag for the
     # entire nested event loop. No runtime is constructed until this returns.
     outcome = []
@@ -43,7 +43,23 @@ def responsive_startup_probe(path, cancel, *, probe=None):
     loop = QEventLoop()
     timer = QTimer()
     timer.setInterval(20)
-    timer.timeout.connect(lambda: loop.quit() if finished.is_set() else None)
+    last_progress = [None]
+    def tick():
+        value = progress_state[0] if progress_state else None
+        if preparing and value and value != last_progress[0]:
+            last_progress[0] = value
+            stage = value.get("stage")
+            total = value.get("total", 0)
+            if stage == "backup" and total:
+                percent = max(0, min(100, int(100 * (total - value["remaining"]) / total)))
+                preparing(f"Создание копии базы: {percent}%…")
+            elif stage in {"quick_check", "source_corruption_confirmation", "direct_check"}:
+                preparing("Проверка целостности базы…")
+            elif stage == "source_confirmation":
+                preparing("Подтверждение состояния базы…")
+        if finished.is_set():
+            loop.quit()
+    timer.timeout.connect(tick)
     thread.start()
     timer.start()
     try:
@@ -56,6 +72,13 @@ def responsive_startup_probe(path, cancel, *, probe=None):
     if not ok:
         raise result
     if cancel.is_set():
+        # The child may have finished between the last cancellation probe and
+        # the GUI consuming its result. Do not orphan its validated candidate.
+        try:
+            from rem_card.app.startup_snapshot import discard
+            discard(json.loads(result[1]).get("snapshot"))
+        except (ValueError, TypeError, AttributeError, IndexError):
+            pass
         raise StartupCheckAborted()
     return result
 
@@ -63,15 +86,23 @@ def responsive_startup_probe(path, cancel, *, probe=None):
 def role_startup_check_runner(cancel, preparing):
     """Use the same cancellable child for full scans and cheap admission reads."""
     def probe(path, mode):
+        progress = [None]
         return responsive_startup_probe(path, cancel, probe=lambda path, cancel: run_startup_probe(
-            path, cancel, admission_mode=mode))
+            path, cancel, admission_mode=mode, progress=lambda value: progress.__setitem__(0, value)),
+            progress_state=progress, preparing=preparing)
 
     def check(path):
-        preparing("Проверка целостности базы…")
+        preparing("Создание проверенной копии базы…")
         check.admission_receipt = None
-        outcome = probe(path, "full")
+        check.full_checked_at_epoch = None
+        check.discard_snapshot()
+        outcome = probe(path, "direct_admission" if check.force_full_scan else "snapshot")
         if outcome[0] and outcome[1] != "ok":
-            check.admission_receipt = json.loads(outcome[1])
+            payload = json.loads(outcome[1])
+            check.admission_receipt = payload["admission"]
+            check.startup_snapshot = payload["snapshot"]
+            check.full_checked_at_epoch = payload.get("full_checked_at_epoch")
+            check.requires_confirmation = True
             return True, "ok", False
         return outcome
 
@@ -85,6 +116,15 @@ def role_startup_check_runner(cancel, preparing):
             raise StartupCheckAborted()
 
     check.check_cancelled = check_cancelled
+    check.startup_snapshot = None
+    check.full_checked_at_epoch = None
+    check.requires_confirmation = False
+    check.force_full_scan = False
+    def discard_snapshot():
+        from rem_card.app.startup_snapshot import discard
+        discard(check.startup_snapshot)
+        check.startup_snapshot = None
+    check.discard_snapshot = discard_snapshot
     check.admission_probe = admission_probe
     check.wait_retry = lambda seconds: responsive_startup_wait(cancel, seconds)
     return check

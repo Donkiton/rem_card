@@ -12,6 +12,7 @@
     "tests/test_shutdown_safety_guard.py",
     "tests/test_no_database_upgrades.py",
     "tests/test_startup_check_worker.py",
+    "tests/test_startup_snapshot_cache.py",
     "tests/test_role_admission.py",
     "tests/test_unified_main.py",
     "tests/test_unified_database_setup.py",
@@ -60,6 +61,9 @@
     "tests/test_lazy_operblock_service_proxy.py",
     "tests/test_lazy_startup_services.py",
     "tests/test_legacy_datetime_compatibility.py",
+    "tests/test_local_replica_worker.py",
+    "tests/test_replica_delta.py",
+    "tests/test_replica_refresh.py",
     "tests/test_local_replica_sync.py",
     "tests/test_local_replica_health.py",
     "tests/test_manual_db_rotation_undo.py",
@@ -114,7 +118,8 @@
     "tests/test_rework_guardrails.py",
     "tests/test_initial_status_queue.py",
     "tests/test_order_latest_admin_index.py",
-    "tests/test_daily_backup_scheduler.py"
+    "tests/test_daily_backup_scheduler.py",
+    "tests/test_startup_snapshot.py"
   ],
   "ui": [
     "tests/test_sector_ivl_event_edit.py",

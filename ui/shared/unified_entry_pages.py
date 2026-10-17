@@ -626,7 +626,8 @@ class WelcomePage(_EntryPageBase):
         self.access_label.setObjectName("UnifiedEntryAccessState")
         self.access_label.setAlignment(Qt.AlignCenter)
         self.access_label.setWordWrap(True)
-        self.access_label.setFixedHeight(40)
+        # Reserve room for three status lines without shrinking the text.
+        self.access_label.setMinimumHeight(72)
         self.root_layout.addSpacing(6)
 
         footer = QGridLayout()

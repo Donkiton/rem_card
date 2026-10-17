@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import atexit
 import os
 import threading
 import time
@@ -19,14 +20,33 @@ _receipt = None
 def invalidate_role_admission() -> None:
     global _receipt, _generation
     with _lock:
+        previous = _receipt
         _generation += 1
         _receipt = None
         os.environ.pop(HANDOFF_ENV, None)
+    _discard_snapshot(previous)
+
+
+def _discard_snapshot(receipt) -> None:
+    if receipt and receipt.get("snapshot"):
+        from rem_card.app.startup_snapshot import discard
+        discard(receipt["snapshot"])
+
+
+atexit.register(invalidate_role_admission)
 
 
 def admission_generation() -> int:
     with _lock:
         return _generation
+
+
+def monotonic_full_check_time(checked_at_epoch: float) -> float:
+    """Map a protected wall-clock receipt onto this process's monotonic clock."""
+    age = time.time() - float(checked_at_epoch)
+    if not 0 <= age < ADMISSION_TTL_SEC:
+        raise ValueError("startup full-check receipt is expired or from the future")
+    return time.monotonic() - age
 
 
 def file_identity(path: str) -> dict:
@@ -74,15 +94,20 @@ def read_admission_state(conn, path: str) -> dict:
 
 
 def remember_full_scan(state: dict, *, generation: int, checked_monotonic: float,
-                       checked_at_epoch: float) -> None:
+                       checked_at_epoch: float, snapshot: dict | None = None) -> None:
     global _receipt
     # A profile conversion needs another full check before it can be reused.
     if not state or state.get("schema", {}).get("journal_mode") != "delete":
         return
     with _lock:
         if generation == _generation:
+            previous = _receipt
             _receipt = {"state": state, "generation": generation, "pid": os.getpid(),
-                        "checked_monotonic": checked_monotonic, "checked_at_epoch": checked_at_epoch}
+                        "checked_monotonic": checked_monotonic, "checked_at_epoch": checked_at_epoch,
+                        "snapshot": snapshot}
+        else:
+            previous = {"snapshot": snapshot}
+    _discard_snapshot(previous)
 
 
 def recent_admission(path: str) -> tuple[dict | None, str]:
@@ -94,9 +119,11 @@ def recent_admission(path: str) -> tuple[dict | None, str]:
         age = time.monotonic() - receipt["checked_monotonic"]
         if receipt["pid"] != os.getpid() or not 0 <= age < ADMISSION_TTL_SEC:
             _receipt = None
+            _discard_snapshot(receipt)
             return None, "expired"
         if receipt["state"]["identity"]["path"] != os.path.normcase(os.path.abspath(path)):
             _receipt = None
+            _discard_snapshot(receipt)
             return None, "database_path_changed"
         return receipt, "recent_full_scan"
 

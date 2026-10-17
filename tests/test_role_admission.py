@@ -98,6 +98,68 @@ def test_expiry_is_not_extended_by_repeated_role_entries(database, monkeypatch):
     assert runner.calls == ["full", "light", "full"]
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_expiry_during_profile_application_performs_full_scan_before_handoff(database, monkeypatch, cached):
+    epoch = [time.time()]
+    monotonic = [100.0]
+    clock = SimpleNamespace(time=lambda: epoch[0], monotonic=lambda: monotonic[0])
+    monkeypatch.setattr(admission, "time", clock)
+    monkeypatch.setattr(guard, "time", clock)
+    runner = _runner()
+    assert _enter(runner).ok
+    original = epoch[0]
+    if cached:
+        # Model a protected cache receipt consumed by a fresh process.
+        admission.invalidate_role_admission()
+        normal_check = runner
+        forced = []
+
+        def cached_check(path):
+            forced.append(cached_check.force_full_scan)
+            result = normal_check(path)
+            cached_check.admission_receipt = normal_check.admission_receipt
+            cached_check.full_checked_at_epoch = None if cached_check.force_full_scan else original
+            return result
+
+        cached_check.force_full_scan = False
+        cached_check.requires_confirmation = True
+        cached_check.admission_probe = normal_check.admission_probe
+        runner = cached_check
+    epoch[0] += admission.ADMISSION_TTL_SEC - 1
+    monotonic[0] += admission.ADMISSION_TTL_SEC - 1
+    apply_profile = guard._apply_network_safe_profile_with_lock
+
+    def profile_then_expire(**kwargs):
+        result = apply_profile(**kwargs)
+        epoch[0] += 2
+        monotonic[0] += 2
+        return result
+
+    monkeypatch.setattr(guard, "_apply_network_safe_profile_with_lock", profile_then_expire)
+    assert _enter(runner, "nurse").ok
+    if cached:
+        assert forced == [False, True]
+    else:
+        assert runner.calls == ["full", "light", "full"]
+    receipt, _ = admission.recent_admission(str(database))
+    assert receipt and receipt["checked_at_epoch"] == epoch[0]
+    handoff = json.loads(os.environ[admission.HANDOFF_ENV])
+    assert handoff["full_checked_at_epoch"] == epoch[0]
+
+
+def test_expired_full_handoff_is_rejected_even_with_fresh_handoff_timestamp(database, monkeypatch):
+    from rem_card.data.dao.db_manager import DatabaseManager
+    runner = _runner()
+    assert _enter(runner).ok
+    handoff = json.loads(os.environ[admission.HANDOFF_ENV])
+    handoff["check_mode"] = "full"
+    handoff["full_checked_at_epoch"] = time.time() - admission.ADMISSION_TTL_SEC
+    os.environ[admission.HANDOFF_ENV] = json.dumps(handoff)
+    manager = DatabaseManager.__new__(DatabaseManager)
+    assert not manager._startup_guard_quickcheck_matches(handoff)[0]
+    assert guard._admission_handoff_mode(SimpleNamespace(requires_confirmation=True), None, False) == "admission"
+
+
 @pytest.mark.parametrize("change", ["schema", "migration", "revision", "replacement", "quarantine", "profile", "recovery"])
 def test_changed_database_requires_full_scan(database, change):
     from rem_card.app.unified_db_schema import SCHEMA_FASTPATH_META_KEY
@@ -282,10 +344,38 @@ def test_actual_qt_role_runner_uses_child_and_keeps_timers_alive(database):
     timer.start()
     try:
         runner = role_startup_check_runner(threading.Event(), preparing.append)
-        assert _enter(runner).ok
+        result = _enter(runner)
+        assert result.ok, result.technical_reason
         assert _enter(runner, "nurse").ok
-        assert preparing == ["Проверка целостности базы…", "Проверка доступности базы…"]
+        assert preparing[0] == "Создание проверенной копии базы…"
+        assert preparing[-1] == "Проверка доступности базы…"
         assert len(ticks) > 10
     finally:
         timer.stop()
+        app.processEvents()
+
+
+def test_busy_snapshot_fallback_keeps_a_live_admission_without_seed(database):
+    from PySide6.QtWidgets import QApplication
+    from rem_card.app.local_replica_worker import replica_snapshot_gate_path
+    from rem_card.app.sqlite_shared import FileWriteLock
+    from rem_card.ui.shared.startup_check import role_startup_check_runner
+    from rem_card.data.dao.db_manager import DatabaseManager
+    app = QApplication.instance() or QApplication([])
+    gate = FileWriteLock(replica_snapshot_gate_path(str(database)))
+    assert gate.acquire(f"synthetic:{os.getpid()}:other_copy", "synthetic")
+    try:
+        runner = role_startup_check_runner(threading.Event(), lambda text: None)
+        result = _enter(runner)
+        assert result.ok, result.technical_reason
+        receipt, _ = admission.recent_admission(str(database))
+        assert receipt and receipt["snapshot"] is None
+        handoff = json.loads(os.environ[admission.HANDOFF_ENV])
+        assert handoff["check_mode"] == "admission"
+        manager = DatabaseManager.__new__(DatabaseManager)
+        assert manager._startup_guard_quickcheck_matches(handoff)[0]
+        assert _enter(runner, "nurse").ok
+        assert admission.recent_admission(str(database))[0] is receipt
+    finally:
+        gate.release()
         app.processEvents()

@@ -19,6 +19,8 @@ from rem_card.app.local_replica_sync import (
     build_local_replica_path,
 )
 from rem_card.app.local_replica_worker import (
+    DEFAULT_REPLICA_SYNC_TIMEOUT_SEC,
+    MAX_REPLICA_SYNC_TIMEOUT_SEC,
     LocalReplicaRotationBusy,
     LocalReplicaSnapshotBusy,
     LocalReplicaWriterBusy,
@@ -154,6 +156,46 @@ class LocalReplicaSyncTest(unittest.TestCase):
         if self.replica is not None:
             self.replica.stop()
         self._tmp.cleanup()
+
+    def test_replica_sync_timeout_defaults_to_thirty_seconds_and_caps_at_ninety(self):
+        self.assertEqual(DEFAULT_REPLICA_SYNC_TIMEOUT_SEC, 30.0)
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            timeout_sec=MAX_REPLICA_SYNC_TIMEOUT_SEC + 1.0,
+        )
+        replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_timeout_sec=MAX_REPLICA_SYNC_TIMEOUT_SEC + 1.0,
+            worker_client=client,
+        )
+        try:
+            self.assertEqual(client.timeout_sec, MAX_REPLICA_SYNC_TIMEOUT_SEC)
+            self.assertEqual(replica.sync_timeout_sec, MAX_REPLICA_SYNC_TIMEOUT_SEC)
+        finally:
+            replica.stop()
+
+    def test_install_startup_snapshot_publishes_copy_without_marking_it_fresh(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_interval_sec=60.0,
+        )
+        snapshot_path = self.root / "validated-startup-snapshot.db"
+        shutil.copy2(self.central_path, snapshot_path)
+
+        self.replica.install_startup_snapshot(str(snapshot_path))
+
+        self.assertFalse(snapshot_path.exists())
+        self.assertEqual(
+            [tuple(row) for row in self.replica.fetch_all(
+                "SELECT value FROM replica_items ORDER BY id"
+            )],
+            [("one",), ("two",)],
+        )
+        self.assertFalse(self.replica.is_ready(max_stale_sec=10.0))
+        self.assertEqual(self.replica.last_sync_ok_ts, 0.0)
+        self.assertEqual(self.replica.last_state, {})
 
     def test_snapshot_is_read_only_and_reports_fresh_state(self):
         self.replica = LocalReplicaSync(
@@ -610,6 +652,7 @@ class LocalReplicaSyncTest(unittest.TestCase):
 
     def test_snapshot_progress_names_real_io_stages(self):
         stages = []
+        backup_pages = []
         temp_path = self.root / "progress-stages.sync_tmp.db"
         result = _sync_snapshot_with_network_lease(
             {
@@ -622,8 +665,17 @@ class LocalReplicaSyncTest(unittest.TestCase):
                 "lease_duration_sec": 15.0,
             },
             progress_callback=stages.append,
+            backup_progress_callback=lambda remaining, total: backup_pages.append(
+                (remaining, total)
+            ),
         )
         self.assertEqual(result["status"], "snapshot_ready")
+        self.assertTrue(backup_pages)
+        self.assertEqual(backup_pages[-1][0], 0)
+        self.assertEqual(
+            result["backup_pages_total"],
+            backup_pages[-1][1],
+        )
         for stage in (
             "lease_acquire",
             "central_probe",
@@ -640,6 +692,31 @@ class LocalReplicaSyncTest(unittest.TestCase):
             self.assertIn(stage, stages)
         self.assertLess(stages.index("backup"), stages.index("quick_check"))
         self.assertLess(stages.index("quick_check"), stages.index("fsync"))
+
+    def test_worker_forwards_bounded_backup_page_progress(self):
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(self.root / "progress-forward-leases"),
+            timeout_sec=2.0,
+        )
+        stages = []
+        backup_pages = []
+        try:
+            result = client.sync(
+                local_state={},
+                temp_db_path=str(self.root / "progress-forward.sync_tmp.db"),
+                progress_callback=stages.append,
+                backup_progress_callback=lambda remaining, total: backup_pages.append(
+                    (remaining, total)
+                ),
+            )
+        finally:
+            client.close()
+
+        self.assertEqual(result["status"], "snapshot_ready")
+        self.assertIn("backup", stages)
+        self.assertTrue(backup_pages)
+        self.assertEqual(backup_pages[-1][0], 0)
 
     def test_release_progress_failure_cannot_leave_snapshot_locks(self):
         for failed_stage in ("snapshot_gate_release", "lease_release"):
@@ -1263,9 +1340,9 @@ class LocalReplicaSyncTest(unittest.TestCase):
 
             def backup(self, target, *, pages, progress, sleep):
                 backup_calls.append((pages, sleep))
-                progress(sqlite3.SQLITE_OK, 2, 2)
+                progress(getattr(sqlite3, "SQLITE_OK", 0), 2, 2)
                 writer_lock_path.write_text("writer pending", encoding="utf-8")
-                progress(sqlite3.SQLITE_BUSY, 1, 2)
+                progress(getattr(sqlite3, "SQLITE_BUSY", 5), 1, 2)
 
         def open_interruptible(path):
             return InterruptibleConnection(_open_central_readonly(path))

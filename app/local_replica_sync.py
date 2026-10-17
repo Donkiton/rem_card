@@ -16,10 +16,12 @@ from typing import Any, Callable, Optional
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.local_replica_worker import (
     DEFAULT_REPLICA_SYNC_TIMEOUT_SEC,
+    MAX_REPLICA_SYNC_TIMEOUT_SEC,
     LocalReplicaRotationBusy,
     LocalReplicaSnapshotBusy,
     LocalReplicaWriterBusy,
     LocalReplicaWorkerClient,
+    _read_database_state,
 )
 from rem_card.app.sqlite_shared import configure_connection
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
@@ -88,7 +90,10 @@ class LocalReplicaSync:
             else ""
         )
         self.sync_interval_sec = max(1.0, float(sync_interval_sec))
-        self.sync_timeout_sec = max(0.2, min(30.0, float(sync_timeout_sec)))
+        self.sync_timeout_sec = max(
+            0.2,
+            min(MAX_REPLICA_SYNC_TIMEOUT_SEC, float(sync_timeout_sec)),
+        )
         self.logger = logger or logging.getLogger(__name__)
 
         self._lock = threading.RLock()
@@ -104,6 +109,7 @@ class LocalReplicaSync:
         self._snapshot_blocked_attempts = 0
         self._worker_client = worker_client or LocalReplicaWorkerClient(
             central_db_path=self.central_db_path,
+            local_db_path=self.local_db_path,
             rotation_lock_path=self.rotation_lock_path,
             timeout_sec=self.sync_timeout_sec,
         )
@@ -138,6 +144,52 @@ class LocalReplicaSync:
             self._close_local_conn()
         self._start_worker()
         self.trigger_fast_sync()
+
+    def install_startup_snapshot(self, temp_path: str) -> None:
+        """Publish a validated startup snapshot before this replica starts.
+
+        A first normal worker sync still confirms the source state and records
+        freshness.  This hook only makes the already validated local snapshot
+        readable without treating it as a completed replica synchronization.
+        """
+        snapshot_path = os.path.abspath(str(temp_path or ""))
+        if not snapshot_path or not os.path.isfile(snapshot_path):
+            raise FileNotFoundError(
+                f"Startup local replica snapshot is missing: {snapshot_path}"
+            )
+        if not self._sync_lock.acquire(blocking=False):
+            raise RuntimeError("Local replica synchronization is already running")
+        try:
+            with self._lock:
+                if self._stop_evt.is_set():
+                    raise RuntimeError("Local replica has been stopped")
+                if self._thread is not None:
+                    raise RuntimeError(
+                        "Startup local replica snapshot must be installed before start()"
+                    )
+            # The old generation must be opened before promotion so the normal
+            # swap path retains a rollback copy on Windows/AV reopen failures.
+            try:
+                self._ensure_local_conn()
+            except Exception:
+                self._close_local_conn()
+            if self._local_conn is not None:
+                with self._lock:
+                    existing_state = self._read_local_state()
+                    probe = self._open_validated_local(snapshot_path)
+                    try:
+                        seed_state = _read_database_state(probe)
+                    finally:
+                        probe.close()
+                    if (existing_state.get("db_cycle") == seed_state.get("db_cycle")
+                            and existing_state.get("schema_revision") == seed_state.get("schema_revision")
+                            and existing_state.get("change_cursor") is not None
+                            and seed_state.get("change_cursor") is not None
+                            and existing_state["change_cursor"] >= seed_state["change_cursor"]):
+                        return
+            self._swap_local_replica(snapshot_path)
+        finally:
+            self._sync_lock.release()
 
     def stop(self, *, timeout_sec: float = 2.0) -> bool:
         deadline = time.monotonic() + max(0.0, float(timeout_sec))
@@ -302,6 +354,12 @@ class LocalReplicaSync:
                     raise RuntimeError(
                         "Local replica worker confirmed state without a valid local copy"
                     )
+                from rem_card.app.replica_provenance import remember_source
+                try:
+                    remember_source(self.local_db_path, dict(response.get("source_identity") or {}),
+                                    source_stamp=response.get("source_stamp"), state=state)
+                except OSError:
+                    self.logger.warning("Replica source receipt could not be saved; next sync will use a full snapshot")
                 recovered_after = int(self.consecutive_failures)
                 self.last_sync_ok_ts = time.time()
                 self.last_sync_error = None
@@ -324,6 +382,9 @@ class LocalReplicaSync:
                 result=status,
                 change_cursor=state.get("change_cursor"),
                 db_cycle=str(state.get("db_cycle") or ""),
+                sync_mode=str(response.get("sync_mode") or ""),
+                full_reason=str(response.get("full_reason") or ""),
+                delta_metrics=dict(response.get("delta_metrics") or {}),
             )
             if recovered_after:
                 record_metric(
