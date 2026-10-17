@@ -1,5 +1,6 @@
 import pytest
 from rem_card.app import startup_diagnostics as diag
+from rem_card.app import main as app_main
 
 
 def test_span_preserves_result_exception_and_records_deltas(monkeypatch):
@@ -54,3 +55,52 @@ def test_quick_check_keeps_exact_sql_and_result():
         def fetchone(self):
             return ('ok',)
     assert run_quick_check(Connection()) == (True, 'ok')
+
+
+def test_startup_failure_category_preserves_structured_user_message():
+    failure = type(
+        "StructuredStartupFailure",
+        (),
+        {
+            "technical_reason": "startup probe failed",
+            "user_message": "База данных повреждена; требуется восстановление.",
+        },
+    )()
+
+    assert app_main._startup_failure_category(failure) == "corruption"
+
+
+def test_startup_db_profile_lock_timeout_is_locked_busy():
+    from rem_card.app.startup_db_guard import StartupGuardResult, _lock_timeout_user_message
+
+    reason = "Could not acquire db_profile lock: synthetic/db.lock"
+    failure = StartupGuardResult(ok=False, technical_reason=reason, user_message=_lock_timeout_user_message(reason))
+    assert app_main._startup_failure_category(failure) == "locked_busy"
+
+
+def test_startup_failure_category_keeps_plain_reason_fallback():
+    failure = type(
+        "StructuredStartupFailure",
+        (),
+        {
+            "technical_reason": "unable to open database file",
+            "user_message": "База временно недоступна.",
+        },
+    )()
+
+    assert app_main._startup_failure_category(failure) == "network_unavailable"
+
+
+def test_role_theme_selection_updates_active_crash_marker(monkeypatch):
+    from rem_card.services import crash_reports
+
+    roles = []
+    monkeypatch.setattr(crash_reports, "update_crash_session_role", roles.append)
+    monkeypatch.setattr(app_main, "_install_no_button_focus_rect_style", lambda _app: None)
+    monkeypatch.setattr(app_main, "full_runtime_theme_enabled", lambda: False)
+    monkeypatch.setattr(app_main, "_apply_basic_app_theme", lambda _app: None)
+
+    app_main._apply_app_theme(object(), "nurse")
+    app_main._apply_app_theme(object(), "system")
+
+    assert roles == ["nurse"]

@@ -142,12 +142,9 @@ class PatientService:
             logger.warning("Auto-release check skipped: lifecycle DataService is unavailable")
             return False
 
-        def _operation():
-            try:
-                return self._release_due_outcome_beds_operation()
-            finally:
-                with self._outcome_release_guard:
-                    self._outcome_release_worker_active = False
+        def _on_settled(_state, _payload):
+            with self._outcome_release_guard:
+                self._outcome_release_worker_active = False
 
         def _on_error(exc: Exception):
             logger.warning("Auto-release check failed: %s", exc)
@@ -156,8 +153,14 @@ class PatientService:
             accepted = bool(
                 self.data_service.enqueue_write(
                     description="auto_release_outcome_beds",
-                    operation=_operation,
+                    operation=self._release_due_outcome_beds_operation,
                     on_error=_on_error,
+                    on_settled=_on_settled,
+                    write_metadata={
+                        "queue_deadline_sec": 10.0,
+                        "write_budget_ms": 1500,
+                        "queue_retries_left": 1,
+                    },
                 )
             )
         except Exception as exc:

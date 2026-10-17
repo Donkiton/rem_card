@@ -48,6 +48,7 @@ _FAULT_FILE = None
 _CURRENT_SESSION_ID = ""
 _CURRENT_MARKER_PATH: Path | None = None
 _CURRENT_NATIVE_PATH: Path | None = None
+_CURRENT_ROLE = ""
 _DATABASE_LAST_REPORTED: dict[str, float] = {}
 _UI_HANG_LAST_DUMP_MONO = 0.0
 _UI_HANG_STARTED_MONO = 0.0
@@ -58,6 +59,9 @@ UI_HANG_INCIDENT_RESET_SEC = 120.0
 UI_HANG_MAX_DUMPS = 5
 UI_HANG_MAX_DUMPS_PER_SIGNATURE = 2
 UI_HANG_MAX_NATIVE_BYTES = 2 * 1024 * 1024
+THREAD_DUMP_CAPTURED = "captured"
+THREAD_DUMP_SUPPRESSED = "suppressed"
+THREAD_DUMP_UNAVAILABLE = "unavailable"
 
 _WINDOWS_PATH_RE = re.compile(r"(?i)(?:[a-z]:\\|\\\\)[^\r\n\t\"<>|]+")
 _UNIX_PATH_RE = re.compile(r"(?<![\w.])/(?:[^\s/:]+/)+[^\s:]+")
@@ -272,6 +276,7 @@ def capture_crash_event(
     frames: list[dict[str, Any]] | None = None,
     details: dict[str, Any] | None = None,
     session_id: str | None = None,
+    subject: dict[str, Any] | None = None,
 ) -> Path | None:
     if event_type not in EVENT_TYPES:
         return None
@@ -279,21 +284,42 @@ def capture_crash_event(
         report_id = uuid.uuid4().hex
         clean_frames = list(frames or [])[-40:]
         clean_details = _allowed_details(details)
-        app_version, effective_role = _runtime_metadata(role)
+        subject_metadata = subject if isinstance(subject, dict) else {}
+        default_role = role if role is not None else (_CURRENT_ROLE or None)
+        app_version, effective_role = _runtime_metadata(default_role)
+        if "app_version" in subject_metadata:
+            app_version = _sanitize_text(subject_metadata.get("app_version"), max_chars=100) or "unknown"
+        try:
+            subject_pid = int(subject_metadata["pid"]) if "pid" in subject_metadata else os.getpid()
+        except (TypeError, ValueError):
+            subject_pid = 0
+        subject_host = (
+            _sanitize_text(subject_metadata.get("host"), max_chars=255) or "unknown"
+            if "host" in subject_metadata
+            else socket.gethostname()
+        )
+        reported_at = _now_iso()
         payload = {
             "schema_version": SCHEMA_VERSION,
             "id": report_id,
             "event_type": event_type,
-            "occurred_at": _now_iso(),
+            # Schema v1 requires occurred_at. For recovered material this is
+            # detection time; do not invent an unavailable historical crash time.
+            "occurred_at": reported_at,
+            "reported_at": reported_at,
+            "timestamp_source": "detected_on_next_start" if subject is not None else "captured",
+            "reporter_pid": os.getpid(),
             "app_version": app_version,
             "role": effective_role,
-            "host": socket.gethostname(),
-            "pid": os.getpid(),
+            "host": subject_host,
+            "pid": subject_pid,
             "session_id": str(session_id or _CURRENT_SESSION_ID or ""),
             "exception_type": _sanitize_text(exception_type, max_chars=200),
             "frames": clean_frames,
             "details": clean_details,
         }
+        if subject is not None:
+            payload["subject_session_started_at"] = _sanitize_text(subject_metadata.get("started_at"), max_chars=100)
         payload["fingerprint"] = _fingerprint(
             event_type,
             str(payload["exception_type"]),
@@ -520,33 +546,65 @@ def _process_stale_sessions() -> None:
                 native_content = native_path.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 native_content = ""
+        subject = {
+            "pid": marker_pid,
+            "app_version": marker.get("app_version") or "unknown",
+            "host": marker.get("host") or "unknown",
+            "started_at": marker.get("started_at") or "",
+        }
         if native_content.strip():
-            capture_crash_event(
+            report_path = capture_crash_event(
                 _native_trace_event_type(native_content),
-                role=str(marker.get("role") or ""),
+                role=str(marker.get("role") or "unknown"),
                 details={
                     "native_trace": _native_trace_payload(native_content),
                     "previous_session_unclean": True,
                 },
                 session_id=str(marker.get("session_id") or ""),
+                subject=subject,
             )
         else:
-            capture_crash_event(
+            report_path = capture_crash_event(
                 "previous_session_unclean",
-                role=str(marker.get("role") or ""),
+                role=str(marker.get("role") or "unknown"),
                 details={"previous_session_unclean": True},
                 session_id=str(marker.get("session_id") or ""),
+                subject=subject,
             )
-        _remove_file(native_path)
-        _remove_file(marker_path)
+        if report_path is not None:
+            _remove_file(native_path)
+            _remove_file(marker_path)
 
 
 def current_crash_session_id() -> str:
     return _CURRENT_SESSION_ID
 
 
+def update_crash_session_role(role: str) -> bool:
+    """Atomically bind the active crash marker to the selected UI role."""
+    global _CURRENT_ROLE
+    effective_role = str(role or "").strip()
+    if not effective_role:
+        return False
+    with _STATE_LOCK:
+        marker_path = _CURRENT_MARKER_PATH
+        if marker_path is None:
+            return False
+        marker = _read_json(marker_path)
+        if not marker or str(marker.get("session_id") or "") != _CURRENT_SESSION_ID:
+            return False
+        marker["role"] = effective_role
+        marker["role_updated_at"] = _now_iso()
+        try:
+            _atomic_write_json(marker_path, marker)
+        except Exception:
+            return False
+        _CURRENT_ROLE = effective_role
+        return True
+
+
 def initialize_crash_session(role: str | None = None) -> str:
-    global _FAULT_FILE, _CURRENT_MARKER_PATH, _CURRENT_NATIVE_PATH, _CURRENT_SESSION_ID
+    global _FAULT_FILE, _CURRENT_MARKER_PATH, _CURRENT_NATIVE_PATH, _CURRENT_SESSION_ID, _CURRENT_ROLE
     with _STATE_LOCK:
         migrate_legacy_crash_spool()
         cleanup_old_local_crash_reports()
@@ -565,6 +623,7 @@ def initialize_crash_session(role: str | None = None) -> str:
                 "session_id": session_id,
                 "started_at": _now_iso(),
                 "pid": os.getpid(),
+                "host": socket.gethostname(),
                 "role": effective_role,
                 "app_version": app_version,
                 "native_path": str(native_path),
@@ -581,6 +640,7 @@ def initialize_crash_session(role: str | None = None) -> str:
         _CURRENT_SESSION_ID = session_id
         _CURRENT_MARKER_PATH = marker_path
         _CURRENT_NATIVE_PATH = native_path
+        _CURRENT_ROLE = effective_role
         _reset_ui_hang_state_locked()
         return session_id
 
@@ -617,6 +677,9 @@ def _write_ui_hang_summary_locked(fault_file, *, status: str, now: float) -> Non
     payload = {
         "status": status,
         "duration_ms": round(max(0.0, now - _UI_HANG_STARTED_MONO) * 1000.0, 3),
+        "attempted": _UI_HANG_TOTAL_CAPTURED + sum(
+            item.get("suppressed", 0) for item in _UI_HANG_SIGNATURES.values()
+        ),
         "captured": _UI_HANG_TOTAL_CAPTURED,
         "suppressed": sum(item.get("suppressed", 0) for item in _UI_HANG_SIGNATURES.values()),
         "signatures": [
@@ -632,15 +695,15 @@ def _write_ui_hang_summary_locked(fault_file, *, status: str, now: float) -> Non
     fault_file.flush()
 
 
-def dump_current_thread_stacks(*, reason: str = "ui_hang") -> bool:
+def dump_current_thread_stacks(*, reason: str = "ui_hang") -> str:
     """Append every Python thread stack to the current local native log."""
     global _UI_HANG_LAST_DUMP_MONO, _UI_HANG_STARTED_MONO, _UI_HANG_TOTAL_CAPTURED
     if not _STATE_LOCK.acquire(timeout=0.1):
-        return False
+        return THREAD_DUMP_UNAVAILABLE
     try:
         fault_file = _FAULT_FILE
         if fault_file is None:
-            return False
+            return THREAD_DUMP_UNAVAILABLE
         if os.environ.get("REMCARD_TEXT_LOG_COMPACTION_ENABLED", "1") != "0":
             now = time.monotonic()
             if _UI_HANG_LAST_DUMP_MONO and now - _UI_HANG_LAST_DUMP_MONO >= UI_HANG_INCIDENT_RESET_SEC:
@@ -682,7 +745,7 @@ def dump_current_thread_stacks(*, reason: str = "ui_hang") -> bool:
                 suppressed = sum(value["suppressed"] for value in _UI_HANG_SIGNATURES.values())
                 if suppressed in {1, 10, 100, 1000} or (suppressed > 1000 and suppressed % 1000 == 0):
                     _write_ui_hang_summary_locked(fault_file, status="active", now=now)
-                return True
+                return THREAD_DUMP_SUPPRESSED
         fault_file.write(
             f"\n=== REMCARD_THREAD_DUMP reason={_sanitize_text(reason or 'ui_hang', max_chars=80)} "
             f"ts={_now_iso()} ===\n"
@@ -693,22 +756,24 @@ def dump_current_thread_stacks(*, reason: str = "ui_hang") -> bool:
         if os.environ.get("REMCARD_TEXT_LOG_COMPACTION_ENABLED", "1") != "0":
             _UI_HANG_TOTAL_CAPTURED += 1
             item["captured"] += 1
-        return True
+        return THREAD_DUMP_CAPTURED
     finally:
         _STATE_LOCK.release()
 
 
 def finalize_crash_session(exit_code: int | None = None, *, crash_recorded: bool = False) -> None:
-    global _FAULT_FILE, _CURRENT_MARKER_PATH, _CURRENT_NATIVE_PATH, _CURRENT_SESSION_ID
+    global _FAULT_FILE, _CURRENT_MARKER_PATH, _CURRENT_NATIVE_PATH, _CURRENT_SESSION_ID, _CURRENT_ROLE
     with _STATE_LOCK:
         fault_file = _FAULT_FILE
         marker_path = _CURRENT_MARKER_PATH
         native_path = _CURRENT_NATIVE_PATH
         session_id = _CURRENT_SESSION_ID
+        role = _CURRENT_ROLE
         _FAULT_FILE = None
         _CURRENT_MARKER_PATH = None
         _CURRENT_NATIVE_PATH = None
         _CURRENT_SESSION_ID = ""
+        _CURRENT_ROLE = ""
         try:
             faulthandler.disable()
         except Exception:
@@ -729,20 +794,27 @@ def finalize_crash_session(exit_code: int | None = None, *, crash_recorded: bool
             native_content = native_path.read_text(encoding="utf-8", errors="replace")
         except Exception:
             native_content = ""
+    report_required = False
+    report_path = None
     if native_content.strip():
-        capture_crash_event(
+        report_required = True
+        report_path = capture_crash_event(
             _native_trace_event_type(native_content),
+            role=role,
             details={"native_trace": _native_trace_payload(native_content)},
             session_id=session_id,
         )
     elif exit_code not in (None, 0) and not crash_recorded:
-        capture_crash_event(
+        report_required = True
+        report_path = capture_crash_event(
             "previous_session_unclean",
+            role=role,
             details={"previous_session_unclean": True},
             session_id=session_id,
         )
-    _remove_file(native_path)
-    _remove_file(marker_path)
+    if not report_required or report_path is not None:
+        _remove_file(native_path)
+        _remove_file(marker_path)
 
 
 def flush_local_crash_outbox(data_root: str | os.PathLike[str] | None = None) -> dict[str, int]:

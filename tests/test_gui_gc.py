@@ -14,7 +14,7 @@ def run_probe(source, platform="offscreen"):
     env = dict(os.environ, QT_QPA_PLATFORM=platform, PYTHONUTF8="1")
     result = subprocess.run(
         [sys.executable, "-X", "faulthandler", "-c", textwrap.dedent(source)],
-        cwd=Path(__file__).resolve().parents[2], env=env,
+        cwd=Path(__file__).resolve().parents[1], env=env,
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=25,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -218,4 +218,135 @@ def test_collection_continues_when_diagnostics_fail():
         controller.collect()
         assert released == [True] and not controller._collecting
         controller.close()
+    """)
+
+
+def test_every_generation_waits_for_idle_and_resumes_after_runtime_blockers():
+    run_probe("""
+        import gc
+        import logging
+        import time
+        from types import SimpleNamespace
+        from rem_card.app.gui_gc import (
+            USER_IDLE_SEC, install_gui_gc,
+        )
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtWidgets import QApplication, QDialog, QWidget
+
+        app = QApplication([])
+        controller = install_gui_gc(app, logger=logging.getLogger('probe'))
+        root = QWidget()
+        root.container = SimpleNamespace(
+            data_service=SimpleNamespace(is_write_queue_idle=lambda: True)
+        )
+        root.show()
+        app.processEvents()
+
+        actual_collect = gc.collect
+        collected = []
+        gc.collect = lambda generation=2: collected.append(generation) or 0
+        try:
+            # Input is observed by the application event filter. Every pending
+            # generation remains pending until the complete idle gate passes.
+            QApplication.sendEvent(
+                root,
+                QKeyEvent(QEvent.Type.KeyPress, Qt.Key_A, Qt.NoModifier),
+            )
+            for generation in (0, 1, 2):
+                controller._due_collection = lambda _now, value=generation: (value, 'test')
+                controller._poll()
+            assert collected == [], collected
+
+            # A prolonged deferral must not force a slow finalizer during input.
+            controller._deferred_since = time.monotonic() - 3600
+            controller._due_collection = lambda _now: (0, 'test')
+            controller._poll()
+            assert collected == []
+            collected.clear()
+
+            controller._last_user_activity -= USER_IDLE_SEC + 1
+            controller._deferred_since = time.monotonic() - 3600
+            root._busy = True
+            controller._poll()
+            assert collected == []
+            root._busy = False
+
+            root._card_ui_prewarmer = SimpleNamespace(active=True)
+            controller._poll()
+            assert collected == []
+            root._card_ui_prewarmer.active = False
+
+            root.container.data_service.is_write_queue_idle = lambda: False
+            controller._poll()
+            assert collected == []
+            root.container.data_service.is_write_queue_idle = lambda: True
+
+            dialog = QDialog(root)
+            dialog.setWindowModality(Qt.ApplicationModal)
+            dialog.open()
+            app.processEvents()
+            assert app.activeModalWidget() is dialog
+            controller._poll()
+            assert collected == []
+            dialog.close()
+            app.processEvents()
+
+            for generation in (0, 1, 2):
+                controller._due_collection = lambda _now, value=generation: (value, 'test')
+                controller._poll()
+            assert collected == [0, 1, 2], collected
+
+            previous_activity = controller._last_user_activity
+            controller.close()
+            QApplication.sendEvent(
+                root,
+                QKeyEvent(QEvent.Type.KeyPress, Qt.Key_B, Qt.NoModifier),
+            )
+            assert controller._last_user_activity == previous_activity
+            assert not controller._timer.isActive()
+        finally:
+            gc.collect = actual_collect
+            if not controller._closed:
+                controller.close()
+    """)
+
+
+def test_balance_icons_skip_exists_probe_and_are_loaded_once():
+    run_probe("""
+        import os
+        from types import SimpleNamespace
+        from rem_card.ui.rem_card_sectors import sector_3a
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication([])
+        actual_pixmap = sector_3a.QPixmap
+        path_loads = []
+
+        def forbidden_exists(_path):
+            raise AssertionError('sector_3a must not probe icon existence')
+
+        def observed_pixmap(source=None):
+            if isinstance(source, (str, os.PathLike)):
+                path_loads.append(os.fspath(source))
+            return actual_pixmap() if source is None else actual_pixmap(source)
+
+        sector_3a.os = SimpleNamespace(path=SimpleNamespace(
+            abspath=os.path.abspath,
+            dirname=os.path.dirname,
+            exists=forbidden_exists,
+            join=os.path.join,
+        ))
+        sector_3a.QPixmap = observed_pixmap
+        sector_3a._BALANCE_ICON_CACHE.clear()
+        first = sector_3a.Sector3a()
+        second = sector_3a.Sector3a()
+        assert len(path_loads) == 5, path_loads
+        assert set(sector_3a._BALANCE_ICON_CACHE) == {
+            'balans_infuzia.png', 'balans_preparat.png', 'balans_blood.png',
+            'balans_plasma.png', 'diet.png',
+        }
+        assert all(not pixmap.isNull() for pixmap in sector_3a._BALANCE_ICON_CACHE.values())
+        first.close()
+        second.close()
     """)

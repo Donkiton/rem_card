@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from rem_card.data.dao import db_manager as dbm
+from rem_card.app.sqlite_shared import QueuedWriteDeadlineExceeded
 
 
 class ManualTimer:
@@ -217,3 +218,81 @@ def test_recent_backup_or_disabled_option_prevents_duplicate_backup(manager, mon
     create.assert_not_called()
     manager._request_periodic_backup()
     assert manager._periodic_backup_timer is None
+
+
+@pytest.mark.parametrize("write_kind", ["transaction", "transaction_options", "execute"])
+def test_queued_write_deadline_bounds_outer_central_mutex(manager, write_kind):
+    errors = []
+
+    def submit():
+        try:
+            options = {"write_budget_ms": 50, "write_deadline_monotonic": dbm.time.perf_counter() + 0.05}
+            with manager.write_metadata_context({} if write_kind == "transaction_options" else options):
+                if write_kind.startswith("transaction"):
+                    with manager.remcard_transaction(write_options=options if write_kind == "transaction_options" else None) as cursor:
+                        cursor.execute("INSERT INTO entries VALUES ('must not run')")
+                else:
+                    manager.execute_remcard("INSERT INTO entries VALUES ('must not run')").close()
+        except Exception as exc:
+            errors.append(exc)
+
+    with manager._central_io_lock:
+        worker = threading.Thread(target=submit)
+        worker.start()
+        worker.join(timeout=0.4)
+        stopped_while_mutex_held = not worker.is_alive()
+    worker.join(timeout=1)
+    assert stopped_while_mutex_held, "queued write escaped its deadline at the central mutex"
+    assert len(errors) == 1 and isinstance(errors[0], QueuedWriteDeadlineExceeded)
+    assert manager._remcard_conn.execute("SELECT * FROM entries").fetchall() == []
+
+
+def test_bounded_commit_timeout_cannot_reconnect_or_replay_after_reader_releases(manager, monkeypatch):
+    manager._remcard_conn.execute("INSERT INTO entries VALUES ('old')")
+    reconnect = Mock()
+    outbox = Mock(return_value="must-not-replay")
+    manager._reconnect = reconnect
+    manager._enqueue_outbox_fallback = outbox
+    monkeypatch.setattr(dbm, "DEFERRED_WRITE_FALLBACK_ENABLED", True)
+    errors = []
+    with closing(sqlite3.connect(manager.db_path, isolation_level=None)) as reader:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT * FROM entries").fetchall() == [("old",)]
+
+        def write():
+            try:
+                with manager.write_metadata_context({"write_budget_ms": 50, "write_deadline_monotonic": dbm.time.perf_counter() + 0.05}):
+                    manager.execute_remcard("UPDATE entries SET value='new'").close()
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=write)
+        worker.start()
+        worker.join(timeout=0.4)
+        stopped_before_reader_released = not worker.is_alive()
+        reader.execute("ROLLBACK")
+        worker.join(timeout=1)
+    assert stopped_before_reader_released, "bounded failure entered a hidden reconnect"
+    assert len(errors) == 1 and isinstance(errors[0], QueuedWriteDeadlineExceeded)
+    reconnect.assert_not_called()
+    outbox.assert_not_called()
+    assert manager._remcard_conn.execute("SELECT value FROM entries").fetchall() == [("old",)]
+
+
+def test_expired_transaction_body_is_not_put_in_durable_replay(manager, monkeypatch):
+    outbox = Mock(return_value="must-not-replay")
+    manager._enqueue_outbox_fallback = outbox
+    monkeypatch.setattr(dbm, "DEFERRED_WRITE_FALLBACK_ENABLED", True)
+    with pytest.raises(QueuedWriteDeadlineExceeded):
+        with manager.remcard_transaction(write_options={"write_budget_ms": 10}) as cursor:
+            cursor.execute("INSERT INTO entries VALUES ('must not persist')")
+            dbm.time.sleep(0.02)
+    outbox.assert_not_called()
+    assert manager._remcard_conn.execute("SELECT * FROM entries").fetchall() == []
+
+
+def test_terminal_deadline_is_rejected_by_durable_replay_entry_point():
+    assert dbm.DatabaseManager._enqueue_outbox_fallback(
+        object(), [("INSERT INTO entries VALUES ('expired')", ())], "budget",
+        QueuedWriteDeadlineExceeded("database is locked"),
+    ) is None

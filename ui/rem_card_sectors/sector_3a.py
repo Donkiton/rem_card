@@ -5,6 +5,18 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 
+
+_BALANCE_ICON_CACHE = {}
+
+
+def _balance_icon_pixmap(icons_dir, icon_name):
+    """Load each bundled balance icon once without a separate filesystem probe."""
+    pixmap = _BALANCE_ICON_CACHE.get(icon_name)
+    if pixmap is None:
+        pixmap = QPixmap(os.path.join(icons_dir, icon_name))
+        _BALANCE_ICON_CACHE[icon_name] = pixmap
+    return QPixmap(pixmap)
+
 class Sector3a(BaseSectorWidget):
     def __init__(self, parent=None):
         super().__init__("3а", parent)
@@ -107,18 +119,10 @@ class Sector3a(BaseSectorWidget):
         icon_lbl.setFixedSize(12, 16)
         icon_lbl.setAlignment(Qt.AlignCenter)
         set_widget_style(icon_lbl, "border: none; background: transparent;")
-        icon_path = os.path.join(self.icons_dir, icon_name)
-        
-        if os.path.exists(icon_path):
-            pixmap = QPixmap(icon_path)
+        pixmap = _balance_icon_pixmap(self.icons_dir, icon_name)
+        if not pixmap.isNull():
             scaled_pixmap = pixmap.scaled(12, 14, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             icon_lbl.setPixmap(scaled_pixmap)
-        else:
-            alt_path = os.path.join("icon", icon_name)
-            if os.path.exists(alt_path):
-                pixmap = QPixmap(alt_path)
-                scaled_pixmap = pixmap.scaled(12, 14, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                icon_lbl.setPixmap(scaled_pixmap)
             
         text_lbl = QLabel(title)
         set_widget_style(text_lbl, "font-size: 12px; color: #495057; border: none; background: transparent;")

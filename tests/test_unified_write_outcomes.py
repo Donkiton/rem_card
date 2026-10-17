@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import threading
 import time
+import sqlite3
 import unittest
 from contextlib import nullcontext
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 from rem_card.app.network_write_worker import NetworkWriteWorkerTimeout
-from rem_card.app.sqlite_shared import LocalWriteQueue
+from rem_card.app.sqlite_shared import LocalWriteQueue, QueuedWriteDeadlineExceeded
 from rem_card.services.data_service import DataService
 from rem_card.services.patient_service import PatientService
 
@@ -102,6 +103,91 @@ def _wait_until(predicate, timeout: float = 1.0) -> bool:
             return True
         time.sleep(0.005)
     return bool(predicate())
+
+
+def test_outcome_release_single_flight_survives_retry_backoff():
+    data = _service_harness()
+    attempted = threading.Event()
+    release = threading.Event()
+    calls = []
+    patients = PatientService(SimpleNamespace(), data_service=data)
+
+    def operation():
+        calls.append(1)
+        if len(calls) == 1:
+            attempted.set()
+            raise sqlite3.OperationalError("database is locked")
+        release.wait(1)
+        return 0
+
+    patients._release_due_outcome_beds_operation = operation
+    try:
+        assert patients.maybe_release_due_outcome_beds_async(force=True)
+        assert attempted.wait(1)
+        for _ in range(20):
+            assert not patients.maybe_release_due_outcome_beds_async(force=True)
+        assert len(data.write_outcomes()) == 1
+        release.set()
+        assert _wait_until(lambda: not patients._outcome_release_worker_active)
+        assert data.write_outcomes()[0]["state"] == "committed"
+        assert len(calls) == 2
+    finally:
+        release.set()
+        data.shutdown(timeout=1, application_exit=True)
+
+
+def test_internal_settled_callback_runs_once_after_shutdown_without_ui_callback():
+    data = _service_harness()
+    entered, release = threading.Event(), threading.Event()
+    settled, ui = [], []
+
+    def operation():
+        entered.set()
+        release.wait(1)
+        return 42
+
+    try:
+        assert data.enqueue_write("pending", operation, on_success=ui.append,
+                                  on_settled=lambda *args: settled.append(args))
+        assert entered.wait(1)
+        data.set_shutting_down()
+        release.set()
+        assert _wait_until(lambda: bool(settled))
+        assert settled == [("committed", 42)]
+        assert ui == []
+        rejected = []
+        assert not data.enqueue_write("rejected", lambda: None, on_settled=lambda *args: rejected.append(args))
+        assert len(rejected) == 1 and rejected[0][0] == "failed"
+    finally:
+        release.set()
+        data.shutdown(timeout=1, application_exit=True)
+
+
+def test_expired_queued_write_is_failed_without_executing_mutation():
+    data = _service_harness()
+    entered, release = threading.Event(), threading.Event()
+    mutation = []
+
+    def blocker():
+        entered.set()
+        release.wait(1)
+
+    try:
+        assert data.enqueue_write("blocker", blocker)
+        assert entered.wait(1)
+        assert data.enqueue_write("expired", lambda: mutation.append(1), write_metadata={"queue_deadline_sec": 0.02})
+        time.sleep(0.03)
+        release.set()
+        assert _wait_until(lambda: all(item["state"] != "pending" for item in data.write_outcomes()))
+        assert mutation == []
+        assert data.write_outcomes()[1]["state"] == "failed"
+    finally:
+        release.set()
+        data.shutdown(timeout=1, application_exit=True)
+
+
+def test_terminal_deadline_exception_is_not_retryable_even_with_a_busy_message():
+    assert not LocalWriteQueue._is_retryable_operational_error(QueuedWriteDeadlineExceeded("database is locked"))
 
 
 class UnifiedWriteOutcomeTest(unittest.TestCase):

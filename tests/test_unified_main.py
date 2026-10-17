@@ -51,7 +51,7 @@ def test_top_level_failure_writes_exactly_one_report_with_session(tmp_path):
     result = subprocess.run(
         [sys.executable, "-c", "from rem_card.app.unified_main import _crash_session\n"
          "with _crash_session():\n    raise RuntimeError('synthetic-top-level-failure')"],
-        cwd=Path(__file__).resolve().parents[2], env=env, capture_output=True, timeout=20,
+        cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, timeout=20,
     )
     assert result.returncode != 0
     reports = list((tmp_path / "outbox").glob("*.json"))

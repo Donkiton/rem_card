@@ -351,6 +351,13 @@ def _reset_runtime_theme_to_light(app):
 
 
 def _apply_app_theme(app, role: Optional[str] = None):
+    if role in ROLE_KEYS:
+        try:
+            from rem_card.services.crash_reports import update_crash_session_role
+
+            update_crash_session_role(role)
+        except Exception:
+            pass
     _install_no_button_focus_rect_style(app)
     if not full_runtime_theme_enabled():
         _apply_basic_app_theme(app)
@@ -1120,7 +1127,7 @@ def _startup_failure_category(failure: object) -> str:
         technical = str(getattr(failure, "technical_reason", "") or failure or "")
         if "database file does not exist" in technical.lower() or "missing_db" in technical.lower():
             return "missing_db"
-        category = classify_database_access_error(RuntimeError(technical))
+        category = classify_database_access_error(failure)
         if category:
             return str(category)
     except Exception:
