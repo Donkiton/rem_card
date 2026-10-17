@@ -751,13 +751,14 @@ class DatabaseManager:
             deferred_since.pop(str(task_type or "maintenance"), None)
 
     @contextmanager
-    def _central_io_lock_scope(self, operation: str, *, source: str = "db"):
+    def _central_io_lock_scope(self, operation: str, *, source: str = "db", deadline: float | None = None):
         with observe(operation, resource=getattr(self, "db_path", ""), mutex=self._central_io_lock,
                      stage="central_io_wait") as diagnostic:
             started = time.perf_counter()
             lock = self._central_io_lock
             metadata = getattr(getattr(self, "_thread_state", None), "write_metadata", None) or {}
-            deadline = metadata.get("write_deadline_monotonic")
+            if deadline is None:
+                deadline = metadata.get("write_deadline_monotonic")
             acquired = (
                 lock.acquire(timeout=max(0.0, deadline - time.perf_counter()))
                 if isinstance(deadline, (int, float)) else lock.acquire()
@@ -3289,11 +3290,10 @@ class DatabaseManager:
         statement_sink: list[tuple[str, tuple]] = []
         outer_transaction = not self._in_current_thread_remcard_transaction()
         effective_write_options = dict(write_options or self._current_thread_write_metadata())
+        effective_write_options = self._write_options_with_deadline(effective_write_options)
         try:
             with self._mark_write_activity():
-                with observe(source, resource=getattr(self, "db_path", ""), mutex=self._central_io_lock,
-                             stage="central_io_wait") as diagnostic, self._central_io_lock:
-                    diagnostic.stage("central_io_held")
+                with self._central_io_lock_scope(source, source=source, deadline=effective_write_options.get("write_deadline_monotonic")):
                     if self._closed or self._remcard_conn is None:
                         raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
                     conn = self._remcard_conn
@@ -3315,6 +3315,19 @@ class DatabaseManager:
             if op_id:
                 return
             raise
+
+    @staticmethod
+    def _write_options_with_deadline(options: dict[str, Any]) -> dict[str, Any]:
+        """Start the attempt budget before waiting for the outer I/O mutex."""
+        effective = dict(options)
+        if effective.get("write_budget_ms") is not None:
+            budget_ms = max(1, min(30000, int(effective["write_budget_ms"])))
+            deadline = time.perf_counter() + budget_ms / 1000.0
+            queue_deadline = effective.get("write_deadline_monotonic")
+            if isinstance(queue_deadline, (int, float)):
+                deadline = min(deadline, queue_deadline)
+            effective["write_deadline_monotonic"] = deadline
+        return effective
 
     def run_write_operation(
         self,
@@ -3374,13 +3387,14 @@ class DatabaseManager:
 
     def execute_remcard(self, query, params=(), source: str = "execute_remcard"):
         logger.debug("SQL RemCard Exec: %s | Params: %s", query, params)
+        write_options = self._write_options_with_deadline(self._current_thread_write_metadata())
         try:
             with self._mark_write_activity():
-                with self._central_io_lock:
+                with self._central_io_lock_scope(source, source=source, deadline=write_options.get("write_deadline_monotonic")):
                     if self._closed or self._remcard_conn is None:
                         raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
                     conn = self._remcard_conn
-                    cursor = self.write_controller.execute(conn, query, params, source=source)
+                    cursor = self.write_controller.execute(conn, query, params, source=source, **({"write_options": write_options} if write_options else {}))
                     if conn and not self._closed and not self._in_current_thread_remcard_transaction():
                         self._request_periodic_backup(source=source)
                         self._after_write_committed()

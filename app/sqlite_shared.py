@@ -2604,8 +2604,8 @@ class SQLiteWriteController:
                 )
                 _clear_active_sqlite_operation(state.thread_id)
 
-    def execute(self, conn: sqlite3.Connection, query: str, params: tuple = (), source: str = "unknown"):
-        with self.transaction(conn, source=source) as cursor:
+    def execute(self, conn: sqlite3.Connection, query: str, params: tuple = (), source: str = "unknown", write_options: Optional[dict[str, Any]] = None):
+        with self.transaction(conn, source=source, write_options=write_options) as cursor:
             cursor.execute(query, params)
             return cursor
 
