@@ -101,7 +101,8 @@ def _safe_lease_component(value: str) -> str:
     return cleaned[:80] or "client"
 
 
-def _remove_with_sidecars(db_path: str) -> None:
+def _remove_with_sidecars(db_path: str) -> bool:
+    removed = True
     for candidate in (
         db_path,
         f"{db_path}-wal",
@@ -109,10 +110,12 @@ def _remove_with_sidecars(db_path: str) -> None:
         f"{db_path}-journal",
     ):
         try:
-            if os.path.isfile(candidate):
-                os.remove(candidate)
-        except OSError:
+            os.remove(candidate)
+        except FileNotFoundError:
             pass
+        except OSError:
+            removed = False
+    return removed
 
 
 def _read_database_state(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -663,6 +666,16 @@ class LocalReplicaWorkerClient:
         with self._state_lock:
             return self._terminate_locked(deadline=deadline)
 
+    def _discard_stopped_temp_locked(self) -> bool:
+        if not self._active_temp_path:
+            return True
+        if not _remove_with_sidecars(self._active_temp_path):
+            # The child is dead, but Windows/AV may still deny unlink. Retain
+            # the only reference and retry before allowing a replacement worker.
+            return False
+        self._active_temp_path = ""
+        return True
+
     def _terminate_locked(self, *, deadline: float | None = None) -> bool:
         process = self._process
         pipe = self._pipe
@@ -674,7 +687,7 @@ class LocalReplicaWorkerClient:
                     pass
             self._pipe = None
             self._fenced = False
-            self._active_temp_path = ""
+            temp_removed = self._discard_stopped_temp_locked()
             if self._cleanup_required_pid is not None:
                 cleanup_ok = self._bounded_cleanup_stopped_worker_locks(
                     self._cleanup_required_pid,
@@ -682,8 +695,8 @@ class LocalReplicaWorkerClient:
                 )
                 if cleanup_ok:
                     self._cleanup_required_pid = None
-                return cleanup_ok
-            return self._reap_cleanup_locked(deadline=deadline)
+                return cleanup_ok and temp_removed
+            return self._reap_cleanup_locked(deadline=deadline) and temp_removed
 
         worker_pid = process.pid
         forced = self._is_alive(process)
@@ -734,10 +747,10 @@ class LocalReplicaWorkerClient:
             self._process = None
             self._pipe = None
         self._fenced = False
-        self._active_temp_path = ""
+        temp_removed = self._discard_stopped_temp_locked()
         if cleanup_ok:
             self._cleanup_required_pid = None
-        return cleanup_ok
+        return cleanup_ok and temp_removed
 
     def _bounded_cleanup_stopped_worker_locks(
         self,

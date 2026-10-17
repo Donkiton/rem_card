@@ -437,6 +437,9 @@ class LocalReplicaSyncTest(unittest.TestCase):
         pipe = SimpleNamespace(close=lambda: None)
         client = LocalReplicaWorkerClient(central_db_path=str(self.central_path))
         active_temp = self.root / "still-owned.sync_tmp.db"
+        active_temp.write_bytes(b"protected partial snapshot")
+        sidecar = Path(f"{active_temp}-wal")
+        sidecar.write_bytes(b"protected WAL")
         client._process = process
         client._pipe = pipe
         client._active_temp_path = str(active_temp)
@@ -447,6 +450,8 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertIs(client._pipe, pipe)
         self.assertTrue(client._fenced)
         self.assertFalse(client.can_cleanup_temp_path(str(active_temp)))
+        self.assertTrue(active_temp.exists())
+        self.assertTrue(sidecar.exists())
         with self.assertRaises(LocalReplicaWorkerError):
             client._ensure_started()
         self.assertEqual(process.terminate_calls, 2)
@@ -460,6 +465,29 @@ class LocalReplicaSyncTest(unittest.TestCase):
             self.assertTrue(client._terminate())
         self.assertIsNone(client._process)
         self.assertIsNone(client._pipe)
+        self.assertFalse(active_temp.exists())
+        self.assertFalse(sidecar.exists())
+        self.assertEqual(client._active_temp_path, "")
+
+    def test_failed_stopped_snapshot_unlink_retains_path_for_retry(self):
+        client = LocalReplicaWorkerClient(central_db_path=str(self.central_path))
+        active_temp = self.root / "stopped-unlink-denied.sync_tmp.db"
+        active_temp.write_bytes(b"stopped snapshot")
+        client._active_temp_path = str(active_temp)
+        original_remove = os.remove
+
+        def deny_snapshot_unlink(path):
+            if os.path.abspath(path) == os.path.abspath(active_temp):
+                raise PermissionError("snapshot temporarily held by antivirus")
+            return original_remove(path)
+
+        with patch("rem_card.app.local_replica_worker.os.remove", side_effect=deny_snapshot_unlink):
+            self.assertFalse(client._terminate())
+        self.assertEqual(client._active_temp_path, str(active_temp))
+        self.assertTrue(active_temp.exists())
+        self.assertTrue(client._terminate())
+        self.assertFalse(active_temp.exists())
+        self.assertEqual(client._active_temp_path, "")
 
     def test_liveness_probe_error_is_not_treated_as_process_death(self):
         class UnknownProcess:
