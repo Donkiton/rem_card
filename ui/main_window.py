@@ -1078,12 +1078,18 @@ class MainWindow(QMainWindow):
 
     def _poll_event_loop_watchdog(self, expected_interval_ms: int):
         now = time.perf_counter()
-        hard_watchdog = getattr(self, "_hard_ui_watchdog", None)
-        if hard_watchdog is not None:
-            hard_watchdog.beat(now)
         previous = float(self._event_loop_watchdog_last_ts or now)
         self._event_loop_watchdog_last_ts = now
         delta_ms = max(0.0, (now - previous) * 1000.0)
+        hard_watchdog = getattr(self, "_hard_ui_watchdog", None)
+        resume_gap_sec = 0.0
+        if hard_watchdog is not None:
+            resume_gap_sec = hard_watchdog.beat(
+                now,
+                observed_gap_sec=delta_ms / 1000.0,
+            )
+        if resume_gap_sec > 0.0:
+            return
         pause_ms = max(0.0, delta_ms - float(expected_interval_ms or 0))
         if pause_ms < float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)):
             return

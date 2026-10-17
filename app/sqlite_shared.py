@@ -1760,6 +1760,14 @@ class _WriteTransactionState:
     lock_held_started: float | None = None
     released_file_lock_owner: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def is_bounded_write(self) -> bool:
+        return self.deadline is not None
+
+
+class QueuedWriteDeadlineExceeded(sqlite3.OperationalError):
+    """The operation has not committed and must not be replayed by the queue."""
+
 
 class SQLiteWriteController:
     def __init__(
@@ -1798,15 +1806,20 @@ class SQLiteWriteController:
             return lock
 
     @contextmanager
-    def connection_guard(self, conn: sqlite3.Connection):
+    def connection_guard(self, conn: sqlite3.Connection, *, deadline: float | None = None):
         if conn is None:
             raise DatabaseClosedError("SQLite connection is closed")
         lock = self._get_conn_lock(conn)
         with observe("connection_guard", resource=f"{self.db_path}:{id(conn)}", database=self.db_path,
                      connection=conn, mutex=lock, stage="connection_guard_wait") as diagnostic:
-            with lock:
+            acquired = lock.acquire() if deadline is None else lock.acquire(timeout=max(0.0, deadline - time.perf_counter()))
+            if not acquired:
+                raise QueuedWriteDeadlineExceeded("Write budget exhausted waiting for the connection")
+            try:
                 diagnostic.stage("connection_guard_held")
                 yield
+            finally:
+                lock.release()
 
     @staticmethod
     def _write_metric_context(options: dict[str, Any], *, interactive: bool) -> dict[str, Any]:
@@ -1875,6 +1888,8 @@ class SQLiteWriteController:
             **metric_context,
             **_lock_holder_metric_fields(holder),
         )
+        if options.get("write_budget_ms") is not None:
+            raise QueuedWriteDeadlineExceeded(f"Write budget exhausted before commit ({source}, {phase})") from exc
         raise OpBlockInteractiveWriteBusyTimeout(
             operation_name=source,
             source=source,
@@ -1919,6 +1934,15 @@ class SQLiteWriteController:
             if is_interactive_write
             else None
         )
+        budget_ms = options.get("write_budget_ms")
+        if budget_ms is not None:
+            budget_ms = max(1, min(30000, int(budget_ms)))
+            timeout_ms = min(timeout_ms, budget_ms) if is_interactive_write else budget_ms
+            budget_deadline = lock_wait_started + timeout_ms / 1000.0
+            absolute_deadline = options.get("write_deadline_monotonic")
+            if isinstance(absolute_deadline, (int, float)):
+                budget_deadline = min(budget_deadline, absolute_deadline)
+            deadline = min(deadline, budget_deadline) if deadline is not None else budget_deadline
         return _WriteTransactionState(
             source=source,
             options=options,
@@ -1938,7 +1962,7 @@ class SQLiteWriteController:
         conn: sqlite3.Connection,
         state: _WriteTransactionState,
     ) -> tuple[int | None, bool]:
-        if not state.is_interactive_write:
+        if not state.is_bounded_write:
             return None, False
         try:
             row = conn.execute("PRAGMA busy_timeout").fetchone()
@@ -1947,7 +1971,7 @@ class SQLiteWriteController:
             original_busy_timeout_ms = SQLITE_BUSY_TIMEOUT_MS
         begin_busy_timeout_ms = min(
             max(100, int(self.retry_delay_sec * 1000.0)),
-            state.timeout_ms,
+            state.timeout_ms, max(0, int(self._remaining_ms(state.deadline))),
         )
         conn.execute(f"PRAGMA busy_timeout = {begin_busy_timeout_ms}")
         return original_busy_timeout_ms, True
@@ -1970,7 +1994,7 @@ class SQLiteWriteController:
         state: _WriteTransactionState,
     ) -> None:
         if (
-            not state.is_interactive_write
+            not state.is_bounded_write
             or self._remaining_ms(state.deadline) > 0
         ):
             return
@@ -2053,7 +2077,7 @@ class SQLiteWriteController:
         return active_payload, total_wait_ms
 
     def _retry_wait_ms(self, state: _WriteTransactionState) -> float:
-        if state.is_interactive_write:
+        if state.is_bounded_write:
             return round(
                 min(
                     self.retry_delay_sec * 1000.0,
@@ -2105,7 +2129,7 @@ class SQLiteWriteController:
             **_lock_holder_metric_fields(holder),
         )
         if (
-            state.is_interactive_write
+            state.is_bounded_write
             and self._remaining_ms(state.deadline) <= 0
         ):
             self._raise_interactive_timeout(
@@ -2236,11 +2260,11 @@ class SQLiteWriteController:
                 )
             self._release_failed_begin_lock(conn, state)
             if retryable and (
-                state.is_interactive_write or state.attempt < self.max_retries
+                state.is_bounded_write or state.attempt < self.max_retries
             ):
                 holder = self._record_begin_retry(state, exc)
                 if (
-                    state.is_interactive_write
+                    state.is_bounded_write
                     and self._remaining_ms(state.deadline) <= 0
                 ):
                     self._raise_interactive_timeout(
@@ -2257,7 +2281,7 @@ class SQLiteWriteController:
                     )
                 self._sleep_before_retry(state.deadline)
                 return None
-            if state.is_interactive_write and retryable:
+            if state.is_bounded_write and retryable:
                 holder = describe_sqlite_lock_holder(self.lock_path)
                 self._raise_interactive_timeout(
                     source=state.source,
@@ -2295,7 +2319,7 @@ class SQLiteWriteController:
         state: _WriteTransactionState,
     ) -> None:
         holder = describe_sqlite_lock_holder(self.lock_path)
-        if state.is_interactive_write:
+        if state.is_bounded_write:
             phase = (
                 "begin_immediate_timeout"
                 if state.last_exc is not None and self._is_retryable(state.last_exc)
@@ -2347,7 +2371,7 @@ class SQLiteWriteController:
         while True:
             state.attempt += 1
             if (
-                not state.is_interactive_write
+                not state.is_bounded_write
                 and state.attempt > self.max_retries
             ):
                 break
@@ -2397,7 +2421,7 @@ class SQLiteWriteController:
         conn: sqlite3.Connection,
         state: _WriteTransactionState,
     ) -> None:
-        if not state.is_interactive_write:
+        if not state.is_bounded_write:
             conn.execute("COMMIT")
             return
 
@@ -2509,9 +2533,13 @@ class SQLiteWriteController:
             raise DatabaseClosedError(f"SQLite connection is closed for {source}")
         started = time.perf_counter()
         status = "error"
+        state = self._make_write_transaction_state(source, write_options)
         with observe(source, resource=f"{self.db_path}:{id(conn)}", database=self.db_path,
-                     connection=conn, stage="connection_guard_wait") as diagnostic, self.connection_guard(conn):
+                     connection=conn, stage="connection_guard_wait") as diagnostic, self.connection_guard(conn, deadline=state.deadline):
             diagnostic.stage("connection_guard_acquired")
+            # Deadline starts before mutex acquisition; diagnostic ownership is
+            # bound only once the observed connection scope has been entered.
+            state.metric_context = self._write_metric_context(state.options, interactive=state.is_interactive_write)
             if conn.in_transaction:
                 cursor = conn.cursor()
                 try:
@@ -2527,7 +2555,6 @@ class SQLiteWriteController:
                         nested=True,
                     )
 
-            state = self._make_write_transaction_state(source, write_options)
             committed = False
             original_busy_timeout_ms = None
             busy_timeout_overridden = False
@@ -2545,6 +2572,8 @@ class SQLiteWriteController:
                 )
                 diagnostic.stage("transaction_body")
                 yield cursor
+                if state.options.get("write_budget_ms") is not None and self._remaining_ms(state.deadline) <= 0:
+                    raise QueuedWriteDeadlineExceeded("Write budget exhausted before commit")
                 diagnostic.stage("commit")
                 self._commit_transaction(conn, state)
                 diagnostic.stage("committed")
@@ -2591,6 +2620,7 @@ class QueuedWriteTask:
     retries_left: int = 10
     enqueued_at: float = field(default_factory=time.perf_counter)
     diagnostic_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    deadline: float | None = None
 
 
 class LocalWriteQueue:
@@ -2614,6 +2644,7 @@ class LocalWriteQueue:
         on_error: Optional[Callable[[Exception], None]] = None,
         retryable: bool = True,
         retries_left: int = 10,
+        deadline: float | None = None,
     ):
         with self._accepting_lock:
             if not self._accepting:
@@ -2631,6 +2662,7 @@ class LocalWriteQueue:
                     on_error=on_error,
                     retryable=retryable,
                     retries_left=retries_left,
+                    deadline=deadline,
                 )
             )
 
@@ -2696,6 +2728,8 @@ class LocalWriteQueue:
                     while True:
                         try:
                             diagnostic.stage("task_execute")
+                            if task.deadline is not None and time.perf_counter() >= task.deadline:
+                                raise QueuedWriteDeadlineExceeded("Queued write budget exhausted before execution")
                             result = task.func()
                             diagnostic.stage("success_callback")
                             if task.on_success:
@@ -2711,7 +2745,10 @@ class LocalWriteQueue:
                                 diagnostic.retry()
                                 diagnostic.stage("task_retry_backoff")
                                 task.retries_left -= 1
-                                time.sleep(random.uniform(0.10, 0.30))
+                                delay = random.uniform(0.10, 0.30)
+                                if task.deadline is not None:
+                                    delay = min(delay, max(0.0, task.deadline - time.perf_counter()))
+                                time.sleep(delay)
                                 continue
                             diagnostic.stage("task_failed")
                             if task.on_error:

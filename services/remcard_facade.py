@@ -261,6 +261,29 @@ class RemCardService(QObject):
                 or sync_actions.get("beds_refresh")
             ):
                 self._patients.invalidate_outcome_release_schedule()
+            if (
+                changed_entities.intersection({"admissions", "patient_status_events"})
+                or sync_actions.get("full_refresh_required")
+                or sync_actions.get("status_refresh")
+            ):
+                invalidate_initial = getattr(
+                    self.status_service,
+                    "invalidate_initial_status_cache",
+                    None,
+                )
+                if callable(invalidate_initial):
+                    relevant_ids = {
+                        int(change.get("admission_id"))
+                        for change in ((payload or {}).get("changes") or [])
+                        if change.get("admission_id") is not None
+                        and str(change.get("entity_name") or "")
+                        in {"admissions", "patient_status_events"}
+                    }
+                    if relevant_ids:
+                        for admission_id in sorted(relevant_ids):
+                            invalidate_initial(admission_id)
+                    else:
+                        invalidate_initial()
             if "vital_settings" in changed_entities or sync_actions.get("full_refresh_required"):
                 self._vitals.invalidate_cache()
                 logger.info(
@@ -622,6 +645,49 @@ class RemCardService(QObject):
             return None
         return self.status_service.get_current_status(admission_id)
 
+    def _enqueue_initial_status_for_snapshot(
+        self,
+        admission_id: int,
+        shift_start: datetime,
+        admission_datetime: Optional[datetime],
+    ) -> bool:
+        status_service = self.status_service
+        enqueue = getattr(status_service, "enqueue_initial_status", None) if status_service else None
+        if not callable(enqueue):
+            logger.warning(
+                "Initial status queue is unavailable for snapshot admission_id=%s",
+                admission_id,
+            )
+            return False
+
+        def on_success(_outcome) -> None:
+            coordinator = getattr(self, "read_coordinator", None)
+            for method_name in (
+                "invalidate_patient_vitals_for_admission",
+                "invalidate_patient_card_for_admission",
+            ):
+                invalidate = getattr(coordinator, method_name, None)
+                if callable(invalidate):
+                    invalidate(admission_id, reason="initial_status_committed")
+
+        try:
+            return bool(
+                enqueue(
+                    admission_id,
+                    shift_start,
+                    admission_datetime,
+                    on_success=on_success,
+                )
+            )
+        except Exception as exc:
+            logger.error(
+                "Initial status queue submission failed for admission_id=%s: %s",
+                admission_id,
+                exc,
+                exc_info=True,
+            )
+            return False
+
     @read_scoped_snapshot
     def build_vitals_snapshot(
         self,
@@ -634,9 +700,14 @@ class RemCardService(QObject):
         start_dt, end_dt = self.get_day_period(date)
         patient = self.get_patient(admission_id)
 
+        initial_status_write_queued = False
         if ensure_initial_status and self.status_service:
             admission_dt = getattr(patient, "admission_datetime", None) if patient else None
-            self.status_service.ensure_initial_status(admission_id, start_dt, admission_dt)
+            initial_status_write_queued = self._enqueue_initial_status_for_snapshot(
+                admission_id,
+                start_dt,
+                admission_dt,
+            )
 
         current_status = self.get_current_status(admission_id)
         effective_bounds = self._vitals.get_effective_bounds_for_patient(
@@ -686,6 +757,7 @@ class RemCardService(QObject):
             "end_dt": end_dt,
             "patient": patient,
             "status": current_status,
+            "initial_status_write_queued": initial_status_write_queued,
             "vitals": vitals,
             "vitals_extended": vitals_extended,
             "latest_values": latest_values,
@@ -2789,30 +2861,39 @@ class RemCardService(QObject):
         on_success: Optional[Callable[[Any], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
         write_metadata: Optional[dict[str, Any]] = None,
+        on_settled: Optional[Callable[[str, Any], None]] = None,
     ):
         """
         РђСЃРёРЅС…СЂРѕРЅРЅР°СЏ Р·Р°РїРёСЃСЊ СЃ Р»РѕРєР°Р»СЊРЅРѕР№ РѕС‡РµСЂРµРґСЊСЋ.
         UI РїРѕР»СѓС‡Р°РµС‚ СЂРµР·СѓР»СЊС‚Р°С‚ С‡РµСЂРµР· on_success/on_error, РЅРµ СЂР°Р±РѕС‚Р°СЏ СЃ lock/retry РЅР°РїСЂСЏРјСѓСЋ.
         """
         if self.data_service:
-            self.data_service.enqueue_write(
+            return self.data_service.enqueue_write(
                 description=description,
                 operation=operation,
                 on_success=on_success,
                 on_error=on_error,
+                on_settled=on_settled,
                 write_metadata=write_metadata,
             )
-            return
 
         try:
             result = operation()
-            if on_success:
-                on_success(result)
         except Exception as exc:
             if on_error:
                 on_error(exc)
-            else:
+            if on_settled:
+                on_settled("failed", exc)
+            if not on_error:
                 raise
+            return False
+        try:
+            if on_success:
+                on_success(result)
+        finally:
+            if on_settled:
+                on_settled("committed", result)
+        return True
 
     # --- Ventilation Service Methods ---
     def _require_ventilation(self) -> VentilationService:

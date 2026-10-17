@@ -432,9 +432,9 @@ def _acquire_lock_with_wait(
     baza_dir: str,
 ) -> tuple[FileWriteLock, _LockHeartbeat]:
     lock = FileWriteLock(lock_path, stale_timeout_sec=stale_timeout_sec)
-    deadline = time.time() + max(1.0, wait_sec)
+    deadline = time.monotonic() + max(1.0, wait_sec)
     last_log = 0.0
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         _remove_stale_startup_lock_if_needed(
             lock_path,
             stale_timeout_sec=stale_timeout_sec,
@@ -461,7 +461,7 @@ def _acquire_lock_with_wait(
                 role=role,
                 details={"lock_path": lock_path},
             )
-        time.sleep(2.0)
+        time.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
     raise TimeoutError(f"Could not acquire {source} lock: {lock_path}")
 
 
@@ -473,36 +473,18 @@ def _remove_stale_startup_lock_if_needed(
     role: Optional[str],
     baza_dir: str,
 ):
-    try:
-        with open(lock_path, "r", encoding="utf-8") as fh:
-            payload = json.load(fh)
-    except FileNotFoundError:
-        return
-    except Exception:
-        return
-
-    ts = payload.get("timestamp")
-    if not isinstance(ts, (int, float)):
-        stale = True
-    else:
-        stale = (time.time() - ts) > stale_timeout_sec
-    if not stale:
-        return
-
-    try:
-        os.remove(lock_path)
-    except FileNotFoundError:
-        return
-    except Exception:
-        return
-
-    event = "stale_recovery_lock_removed" if source == "recovery" else f"stale_{source}_lock_removed"
-    write_audit_event(
-        event,
-        baza_dir=baza_dir,
-        role=role,
-        details={"lock_path": lock_path, "stale_payload": payload},
+    # A stale heartbeat is an anomaly, not proof that a remote writer stopped.
+    # The shared implementation rechecks the owner before removing a dead local
+    # process's lock. Unreadable files and unverifiable remote owners stay busy.
+    lock = FileWriteLock(
+        lock_path, stale_timeout_sec=stale_timeout_sec,
+        allow_expired_lease_cleanup=False, allow_legacy_replica_cleanup=False,
     )
+    if lock.cleanup_abandoned(source=f"startup:{source}"):
+        write_audit_event(
+            f"abandoned_{source}_lock_recovered", baza_dir=baza_dir, role=role,
+            details={"lock_path": lock_path, "policy": "verified_dead_local_owner"},
+        )
 
 
 def _release_lock(lock: Optional[FileWriteLock], heartbeat: Optional[_LockHeartbeat]):

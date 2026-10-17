@@ -1280,9 +1280,28 @@ class DataService(QObject):
         on_success: Optional[Callable[[Any], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
         write_metadata: Optional[dict[str, Any]] = None,
+        on_settled: Optional[Callable[[str, Any], None]] = None,
     ):
+        # Internal lifecycle callback: no Qt access, runs on the terminal owner
+        # thread, including shutdown when UI callbacks are deliberately skipped.
+        settled_lock = threading.Lock()
+        settled = False
+
+        def settle(state, payload):
+            nonlocal settled
+            with settled_lock:
+                if settled:
+                    return
+                settled = True
+            if on_settled:
+                try:
+                    on_settled(state, payload)
+                except Exception:
+                    logger.exception("Write lifecycle callback failed for %s", description)
+
         if not DataService._begin_write_submission(self):
             exc = RuntimeError("Application is shutting down; queued write rejected")
+            settle("failed", exc)
             logger.info("Queued write rejected during shutdown for %s", description)
             self.write_failed.emit(f"{description}: {exc}")
             if on_error:
@@ -1297,6 +1316,7 @@ class DataService(QObject):
                     exc = EmergencyWorkPausedError(
                         "Аварийные фоновые записи временно приостановлены до завершения подтверждения."
                     )
+                    settle("failed", exc)
                     if on_error:
                         self._error_callback_requested.emit(on_error, exc)
                     return False
@@ -1304,6 +1324,7 @@ class DataService(QObject):
                     exc = RuntimeNetworkOutageWriteBlockedError(
                         "Сетевая база недоступна; запись заблокирована до перезапуска."
                     )
+                    settle("failed", exc)
                     logger.warning("Queued write rejected after runtime network outage for %s", description)
                     self.write_failed.emit(f"{description}: {exc}")
                     if on_error:
@@ -1313,12 +1334,17 @@ class DataService(QObject):
                 try:
                     operation_uuid = self._record_operblock_write_intent(description)
                 except Exception as exc:
+                    settle("failed", exc)
                     self.write_failed.emit(f"{description}: {exc}")
                     if on_error:
                         self._error_callback_requested.emit(on_error, exc)
                     return False
 
                 metadata = self._opblock_interactive_write_metadata(description, write_metadata)
+                queue_deadline = None
+                if metadata.get("queue_deadline_sec") is not None:
+                    queue_deadline = time.perf_counter() + max(0.001, min(60.0, float(metadata["queue_deadline_sec"])))
+                    metadata["write_deadline_monotonic"] = queue_deadline
                 accepted_write_id = DataService._register_accepted_write(self, description)
                 metadata["accepted_write_id"] = accepted_write_id
                 metadata.setdefault("session_id", str(getattr(self, "_runtime_session_id", "") or ""))
@@ -1332,6 +1358,7 @@ class DataService(QObject):
 
                 def handle_success(result):
                     DataService._set_write_outcome(self, accepted_write_id, "committed")
+                    settle("committed", result)
                     self._mark_operblock_write_remote_committed(operation_uuid, description)
                     if self._shutting_down:
                         logger.info("Queued write success callbacks skipped during shutdown for %s", description)
@@ -1360,12 +1387,14 @@ class DataService(QObject):
                     )
 
                 def handle_error(exc: Exception):
+                    state = DataService._terminal_write_state(exc)
                     DataService._set_write_outcome(
                         self,
                         accepted_write_id,
-                        DataService._terminal_write_state(exc),
+                        state,
                         exc,
                     )
+                    settle(state, exc)
                     logger.error("Queued write failed for %s: %s", description, exc)
                     self._mark_operblock_write_outcome(operation_uuid, description, exc)
                     self._handle_database_access_failure(exc, source=description, write_description=description)
@@ -1380,6 +1409,7 @@ class DataService(QObject):
                         on_error=handle_error,
                         retryable=bool(metadata.get("queue_retryable", True)),
                         retries_left=max(0, int(metadata.get("queue_retries_left", 10))),
+                        **({"deadline": queue_deadline} if queue_deadline is not None else {}),
                     )
                 except Exception as exc:
                     handle_error(exc)

@@ -193,7 +193,7 @@ def test_commit_retry_cannot_start_after_deadline_or_exceed_remaining_budget(tmp
             raise sqlite3.OperationalError("database is locked")
 
     controller = SQLiteWriteController(str(tmp_path / "db"), str(tmp_path / "lock"), "test", retry_delay_ms=50)
-    state = SimpleNamespace(deadline=0.3, source="test", metric_context={}, timeout_ms=300, is_interactive_write=True)
+    state = SimpleNamespace(deadline=0.3, source="test", metric_context={}, timeout_ms=300, is_interactive_write=True, is_bounded_write=True)
     with (
         patch.object(sqlite_shared, "time", SimpleNamespace(perf_counter=lambda: clock.now, sleep=sleep)),
         patch.object(sqlite_shared, "record_metric") as metric,

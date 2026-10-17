@@ -111,7 +111,10 @@
     "tests/test_service_write_dispatch.py",
     "tests/test_order_read_bounds.py",
     "tests/test_settings_file_storage.py",
-    "tests/test_rework_guardrails.py"
+    "tests/test_rework_guardrails.py",
+    "tests/test_initial_status_queue.py",
+    "tests/test_order_latest_admin_index.py",
+    "tests/test_daily_backup_scheduler.py"
   ],
   "ui": [
     "tests/test_sector_ivl_event_edit.py",

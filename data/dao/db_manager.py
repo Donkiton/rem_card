@@ -33,6 +33,11 @@ from rem_card.app.db_availability import (
     is_database_unavailable_error,
     notify_database_unavailable,
 )
+from rem_card.app.daily_backup_scheduler import (
+    DailyBackupScheduler,
+    daily_backup_enabled_from_environment,
+    normalize_backup_role,
+)
 from rem_card.app.client_identity import get_client_id
 from rem_card.app.foreground_activity import foreground_activity_snapshot, should_defer_background_io
 from rem_card.app.logger import logger
@@ -75,6 +80,7 @@ from rem_card.app.unified_db_schema import (
 )
 from rem_card.app.sqlite_shared import (
     FileWriteLock,
+    QueuedWriteDeadlineExceeded,
     NETWORK_SAFE_DB_PROFILE,
     SQLiteWriteController,
     backup_connection,
@@ -396,6 +402,12 @@ class DatabaseManager:
         self._last_heavy_maintenance_ts = 0.0
         self._last_heavy_maintenance_source = ""
         self._maintenance_deferred_since: dict[str, float] = {}
+        self._daily_backup_scheduler: DailyBackupScheduler | None = None
+        self._daily_backup_probe_state: dict[str, Any] = {
+            "enabled": False,
+            "running": False,
+            "status": "not_started",
+        }
 
         owner_id = f"{socket.gethostname()}:{os.getpid()}:rem_card"
         self.write_controller = SQLiteWriteController(
@@ -418,6 +430,7 @@ class DatabaseManager:
         self._start_local_replica_sync()
         self._start_integrity_monitor()
         self._start_startup_quickcheck_updater()
+        self._start_daily_backup_scheduler()
         if CHANGELOG_LIVE_TRIM_ON_STARTUP:
             self._maybe_trim_change_log_live(force=True)
 
@@ -743,7 +756,14 @@ class DatabaseManager:
                      stage="central_io_wait") as diagnostic:
             started = time.perf_counter()
             lock = self._central_io_lock
-            lock.acquire()
+            metadata = getattr(getattr(self, "_thread_state", None), "write_metadata", None) or {}
+            deadline = metadata.get("write_deadline_monotonic")
+            acquired = (
+                lock.acquire(timeout=max(0.0, deadline - time.perf_counter()))
+                if isinstance(deadline, (int, float)) else lock.acquire()
+            )
+            if not acquired:
+                raise QueuedWriteDeadlineExceeded("Write budget exhausted waiting for central IO")
             diagnostic.stage("central_io_held")
             wait_ms = (time.perf_counter() - started) * 1000.0
             if wait_ms >= CENTRAL_IO_LOCK_WAIT_WARN_MS:
@@ -3698,6 +3718,81 @@ class DatabaseManager:
         self._network_write_worker = None
         return True
 
+    def _daily_backup_idle_probe(self) -> tuple[bool, str]:
+        reason, _fields = self._maintenance_defer_reason(
+            "daily_central_backup",
+            source="daily_central_backup",
+            idle_window_sec=HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC,
+            startup_grace=True,
+            check_writes=True,
+            cooldown_source="daily_central_backup",
+        )
+        return reason is None, str(reason or "idle")
+
+    def _start_daily_backup_scheduler(self) -> bool:
+        role = normalize_backup_role(getattr(self, "_runtime_role", ""))
+        runtime_context = getattr(self, "runtime_context", None)
+        is_network = bool(
+            getattr(runtime_context, "is_network", False)
+            and str(getattr(runtime_context, "mode", "") or "") == "network"
+        )
+        if not daily_backup_enabled_from_environment():
+            self._daily_backup_probe_state = {
+                "enabled": False,
+                "running": False,
+                "status": "disabled_by_environment",
+                "role": role,
+            }
+            logger.info("Daily central backup scheduler is explicitly disabled by environment")
+            return False
+        if not is_network or role not in {"doctor", "nurse"}:
+            self._daily_backup_probe_state = {
+                "enabled": False,
+                "running": False,
+                "status": "disabled_runtime_scope",
+                "role": role,
+                "runtime_mode": str(getattr(runtime_context, "mode", "") or ""),
+            }
+            return False
+        scheduler = DailyBackupScheduler(
+            database_path=self.db_path,
+            backup_dir=self.medical_backups_valid_dir,
+            health_dir=self.medical_backup_health_dir,
+            invalid_dir=self.medical_invalid_backups_dir,
+            database_lock_path=self.medical_db_lock_path,
+            role=role,
+            idle_probe=self._daily_backup_idle_probe,
+            target_hour=int(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_HOUR", "3")),
+            window_hours=float(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_WINDOW_HOURS", "4")),
+            startup_delay_sec=float(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_START_DELAY_SEC", "20")),
+            check_interval_sec=float(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_CHECK_SEC", "60")),
+            deferred_retry_sec=float(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_DEFER_SEC", "300")),
+            failure_retry_sec=float(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_FAILURE_RETRY_SEC", "1800")),
+            worker_timeout_sec=float(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_TIMEOUT_SEC", "15")),
+            retention_days=int(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_RETENTION_DAYS", "35")),
+            max_count=int(os.environ.get("REMCARD_DAILY_CENTRAL_BACKUP_MAX_COUNT", "35")),
+        )
+        self._daily_backup_scheduler = scheduler
+        started = scheduler.start()
+        self._daily_backup_probe_state = scheduler.get_probe()
+        return started
+
+    def _stop_daily_backup_scheduler(self, timeout_sec: float = 2.0) -> bool:
+        scheduler = getattr(self, "_daily_backup_scheduler", None)
+        if scheduler is None:
+            return True
+        stopped = scheduler.stop(timeout_sec=timeout_sec)
+        self._daily_backup_probe_state = scheduler.get_probe()
+        if stopped:
+            self._daily_backup_scheduler = None
+        return stopped
+
+    def get_daily_backup_probe(self) -> dict[str, Any]:
+        scheduler = getattr(self, "_daily_backup_scheduler", None)
+        if scheduler is not None:
+            return scheduler.get_probe()
+        return dict(getattr(self, "_daily_backup_probe_state", {}) or {})
+
     def _shutdown_resources_stopped(self) -> bool:
         for thread_attr in ("_startup_quickcheck_thread", "_integrity_thread", "_outbox_thread"):
             thread = getattr(self, thread_attr, None)
@@ -3706,7 +3801,8 @@ class DatabaseManager:
             if thread is not None:
                 return False
         return bool(
-            getattr(self, "_local_replica", None) is None
+            getattr(self, "_daily_backup_scheduler", None) is None
+            and getattr(self, "_local_replica", None) is None
             and getattr(self, "_outbox", None) is None
             and getattr(self, "_network_write_worker", None) is None
             and not getattr(self, "_central_read_conns", {})
@@ -3733,12 +3829,13 @@ class DatabaseManager:
         logger.info("Database shutdown started")
         try:
             self._cancel_periodic_backup()
-            background_ok = self._stop_shutdown_thread(
+            background_ok = self._stop_daily_backup_scheduler(worker_timeout_sec)
+            background_ok = bool(self._stop_shutdown_thread(
                 "_startup_quickcheck_thread",
                 "_startup_quickcheck_stop_evt",
                 "Startup quick_check thread",
                 timeout_sec=worker_timeout_sec,
-            )
+            ) and background_ok)
             background_ok = bool(
                 self._stop_shutdown_thread(
                     "_integrity_thread",

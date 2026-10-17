@@ -908,7 +908,9 @@ def test_file_identity_detects_same_size_same_mtime_replacement(isolated_cache, 
     fingerprint = cache._path_fingerprint(path)
     replacement = tmp_path / "replacement.tmp"
     replacement.write_bytes(b"new!")
-    os.replace(replacement, path)
+    # Use the established bounded Windows sharing-violation retry for fixture
+    # publication; this assertion tests file identity, not antivirus timing.
+    cache._replace_with_retry(replacement, path)
     os.utime(
         path,
         ns=(int(original_stat.st_atime_ns), int(original_stat.st_mtime_ns)),

@@ -1,0 +1,950 @@
+"""Bounded once-per-day backup of the central SQLite database.
+
+The scheduler itself never opens the clinical database or touches the network
+backup directories.  Those operations run in a spawned child process so a
+blocked SMB/SQLite call can be terminated after a hard deadline.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import multiprocessing
+import os
+import re
+import socket
+import sqlite3
+import threading
+import time
+import uuid
+from datetime import datetime, timedelta
+from typing import Any, Callable
+
+from rem_card.app.local_metrics import record_metric
+from rem_card.app.logger import logger
+
+
+DAILY_BACKUP_ENV = "REMCARD_DAILY_CENTRAL_BACKUP_ENABLED"
+DAILY_BACKUP_SOURCE = "daily_central_backup_reservation"
+DAILY_DATABASE_LOCK_SOURCE = "daily_central_backup_copy"
+DAILY_BACKUP_KIND = "daily_central"
+_DAILY_NAME_RE = re.compile(r"^daily_.+_(\d{4}-\d{2}-\d{2})\.db$")
+
+
+class DailyBackupDeferred(RuntimeError):
+    """Expected coordination refusal; keep the short retry cadence."""
+
+
+def daily_backup_enabled_from_environment() -> bool:
+    """Default on; only an explicit false-like value disables the backup."""
+    value = os.environ.get(DAILY_BACKUP_ENV)
+    if value is None or not value.strip():
+        return True
+    return value.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+def normalize_backup_role(role: str | None) -> str:
+    normalized = str(role or "").strip().lower()
+    if normalized in {"doctor", "врач"} or "doctor" in normalized or "врач" in normalized:
+        return "doctor"
+    if normalized in {"nurse", "медсестра"} or "nurse" in normalized or "мед" in normalized:
+        return "nurse"
+    return normalized
+
+
+def _atomic_json(path: str, payload: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = os.path.join(
+        os.path.dirname(path),
+        f".{os.path.basename(path)}.{socket.gethostname()}_{os.getpid()}_{uuid.uuid4().hex}.tmp",
+    )
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _daily_paths(config: dict[str, Any]) -> dict[str, str]:
+    db_stem = os.path.splitext(os.path.basename(str(config["database_path"])))[0]
+    safe_stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in db_stem) or "database"
+    backup_date = str(config["backup_date"])
+    backup_name = f"daily_{safe_stem}_{backup_date}.db"
+    backup_path = os.path.join(str(config["backup_dir"]), backup_name)
+    health_dir = str(config["health_dir"])
+    return {
+        "backup": backup_path,
+        "done": os.path.join(health_dir, f"daily_central_backup_{backup_date}.done.json"),
+        "reservation": os.path.join(health_dir, f"daily_central_backup_{backup_date}.lock"),
+        "staging": os.path.join(
+            str(config["backup_dir"]),
+            f".{backup_name}.{config['job_token']}.staging",
+        ),
+    }
+
+
+def _validated_daily_backup(path: str, *, backup_date: str, source_path: str) -> tuple[bool, str, dict[str, Any]]:
+    from rem_card.app.sqlite_shared import backup_meta_path, validate_sqlite_file
+
+    if not os.path.isfile(path):
+        return False, "missing", {}
+    meta_path = backup_meta_path(path)
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+    except FileNotFoundError:
+        return False, "metadata_missing", {}
+    except Exception as exc:
+        return False, f"metadata_unreadable:{type(exc).__name__}", {}
+    if not isinstance(metadata, dict):
+        return False, "metadata_not_object", {}
+    if metadata.get("backup_kind") != DAILY_BACKUP_KIND:
+        return False, "metadata_kind", metadata
+    if str(metadata.get("backup_date") or "") != backup_date:
+        return False, "metadata_date", metadata
+    if os.path.normcase(os.path.abspath(str(metadata.get("source_db_path") or ""))) != os.path.normcase(
+        os.path.abspath(source_path)
+    ):
+        return False, "metadata_source", metadata
+    try:
+        if int(metadata.get("size_bytes") or -1) != os.path.getsize(path):
+            return False, "metadata_size", metadata
+    except (OSError, TypeError, ValueError):
+        return False, "metadata_size", metadata
+    expected_sha = str(metadata.get("sha256") or "")
+    if len(expected_sha) != 64 or _sha256(path) != expected_sha:
+        return False, "metadata_sha256", metadata
+    ok, reason = validate_sqlite_file(path)
+    if not ok:
+        return False, f"sqlite_validation:{reason}", metadata
+    return True, "ok", metadata
+
+
+def _write_daily_metadata(path: str, *, config: dict[str, Any], sha256: str) -> dict[str, Any]:
+    from rem_card.app.sqlite_shared import NETWORK_SAFE_DB_PROFILE, backup_meta_path
+
+    metadata = {
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "backup_path": path,
+        "size_bytes": os.path.getsize(path),
+        "sha256": sha256,
+        "quick_check": "ok",
+        "integrity_check": "ok",
+        "db_profile": NETWORK_SAFE_DB_PROFILE,
+        "backup_kind": DAILY_BACKUP_KIND,
+        "backup_date": str(config["backup_date"]),
+        "source_db_path": os.path.abspath(str(config["database_path"])),
+        "role": str(config.get("role") or ""),
+        "job_token": str(config["job_token"]),
+    }
+    meta_path = backup_meta_path(path)
+    _atomic_json(meta_path, metadata)
+    return metadata
+
+
+def _bounded_sqlite_copy(config: dict[str, Any], staging_path: str) -> None:
+    """Copy under the shared DB lock, releasing it before validation and hashing."""
+    from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
+    from rem_card.app.sqlite_uri import build_sqlite_file_uri
+
+    database_path = str(config["database_path"])
+    owner_id = f"daily-backup-job:{config['job_token']}"
+    uri = build_sqlite_file_uri(database_path, mode="ro")
+    source = sqlite3.connect(
+        uri,
+        uri=True,
+        check_same_thread=False,
+        isolation_level=None,
+        timeout=max(0.1, float(config.get("sqlite_timeout_sec", 1.0))),
+    )
+    target = None
+    database_lock = FileWriteLock(
+        str(config["database_lock_path"]),
+        stale_timeout_sec=10 * 60,
+        logger=logger,
+    )
+    acquired = False
+    try:
+        configure_connection(source, readonly=True)
+        lock_deadline = time.monotonic() + max(0.1, float(config.get("database_lock_wait_sec", 1.5)))
+        while not database_lock.acquire(owner_id, DAILY_DATABASE_LOCK_SOURCE):
+            if time.monotonic() >= lock_deadline:
+                raise DailyBackupDeferred("central_database_lock_busy")
+            time.sleep(0.05)
+        acquired = True
+        try:
+            os.remove(staging_path)
+        except FileNotFoundError:
+            pass
+        target = sqlite3.connect(staging_path, check_same_thread=False, isolation_level=None, timeout=1.0)
+        copy_deadline = time.monotonic() + max(0.25, float(config.get("copy_budget_sec", 8.0)))
+
+        def _progress(_status: int, _remaining: int, _total: int) -> None:
+            if time.monotonic() >= copy_deadline:
+                raise TimeoutError("daily SQLite copy exceeded its copy budget")
+
+        source.backup(
+            target,
+            pages=max(16, int(config.get("copy_pages", 256))),
+            progress=_progress,
+            sleep=0.01,
+        )
+    finally:
+        if target is not None:
+            try:
+                target.close()
+            except Exception:
+                pass
+        if acquired:
+            database_lock.release()
+        source.close()
+
+
+def _quarantine_failed_staging(staging_path: str, invalid_dir: str, reason: str) -> str:
+    if not os.path.exists(staging_path):
+        return ""
+    os.makedirs(invalid_dir, exist_ok=True)
+    reason_token = "".join(ch if ch.isalnum() else "_" for ch in reason)[:40] or "invalid"
+    target = os.path.join(
+        invalid_dir,
+        f"daily_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{reason_token}.db",
+    )
+    try:
+        os.replace(staging_path, target)
+        return target
+    except OSError:
+        return ""
+
+
+def _lightweight_daily_metadata(path: str, *, backup_date: str, source_path: str) -> tuple[bool, dict[str, Any]]:
+    from rem_card.app.sqlite_shared import backup_meta_path
+
+    try:
+        with open(backup_meta_path(path), "r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        if not isinstance(metadata, dict):
+            return False, {}
+        if metadata.get("backup_kind") != DAILY_BACKUP_KIND:
+            return False, metadata
+        if str(metadata.get("backup_date") or "") != backup_date:
+            return False, metadata
+        if os.path.normcase(os.path.abspath(str(metadata.get("source_db_path") or ""))) != os.path.normcase(
+            os.path.abspath(source_path)
+        ):
+            return False, metadata
+        if int(metadata.get("size_bytes") or -1) != os.path.getsize(path):
+            return False, metadata
+        if len(str(metadata.get("sha256") or "")) != 64:
+            return False, metadata
+        if metadata.get("quick_check") != "ok" or metadata.get("integrity_check") != "ok":
+            return False, metadata
+        return True, metadata
+    except Exception:
+        return False, {}
+
+
+def _daily_digest_matches(path: str, *, backup_date: str, source_path: str) -> tuple[bool, dict[str, Any]]:
+    """Verify today's immutable validated metadata and SHA without another integrity scan."""
+    valid, metadata = _lightweight_daily_metadata(
+        path,
+        backup_date=backup_date,
+        source_path=source_path,
+    )
+    if not valid:
+        return False, metadata
+    try:
+        return _sha256(path) == str(metadata.get("sha256") or ""), metadata
+    except OSError:
+        return False, metadata
+
+
+def _prune_validated_daily_backups(config: dict[str, Any], protected_path: str) -> dict[str, int]:
+    """Bounded pruning using already validated metadata; never rescan every DB."""
+    backup_dir = str(config["backup_dir"])
+    retention_days = max(1, int(config.get("retention_days", 35)))
+    max_count = max(2, int(config.get("max_count", 35)))
+    cutoff = datetime.now() - timedelta(days=retention_days)
+    validated: list[tuple[float, str]] = []
+    try:
+        names = os.listdir(backup_dir)
+    except OSError:
+        return {"deleted": 0, "validated": 0}
+
+    for name in names:
+        match = _DAILY_NAME_RE.match(name)
+        if not match:
+            continue
+        path = os.path.join(backup_dir, name)
+        ok, metadata = _lightweight_daily_metadata(
+            path,
+            backup_date=match.group(1),
+            source_path=str(config["database_path"]),
+        )
+        if not ok or metadata.get("backup_kind") != DAILY_BACKUP_KIND:
+            continue
+        try:
+            validated.append((os.path.getmtime(path), path))
+        except OSError:
+            continue
+
+    validated.sort(reverse=True)
+    if not validated:
+        return {"deleted": 0, "validated": 0}
+    # The just-created protected copy has already passed full SHA, quick_check,
+    # and integrity_check.  Older copies are trusted only for pruning eligibility
+    # when their immutable validation metadata and current size still agree.
+    keep = {os.path.abspath(protected_path), os.path.abspath(validated[0][1])}
+    deleted = 0
+    for index, (mtime, path) in enumerate(validated):
+        if os.path.abspath(path) in keep:
+            continue
+        too_many = index >= max_count
+        too_old = datetime.fromtimestamp(mtime) < cutoff
+        if not (too_many or too_old):
+            continue
+        from rem_card.app.sqlite_shared import backup_meta_path
+
+        try:
+            os.remove(path)
+            try:
+                os.remove(backup_meta_path(path))
+            except FileNotFoundError:
+                pass
+            deleted += 1
+        except OSError:
+            continue
+        if deleted >= 2:
+            break
+    return {"deleted": deleted, "validated": len(validated)}
+
+
+def _lock_heartbeat(lock: Any, stop_event: threading.Event, interval_sec: float, job_token: str) -> None:
+    while not stop_event.wait(max(0.25, interval_sec)):
+        if not lock.refresh(metadata={"heartbeat_job_token": job_token}):
+            return
+
+
+def _perform_daily_backup(config: dict[str, Any]) -> dict[str, Any]:
+    from rem_card.app.sqlite_shared import FileWriteLock, validate_sqlite_file
+
+    paths = _daily_paths(config)
+    backup_path = paths["backup"]
+    os.makedirs(str(config["backup_dir"]), exist_ok=True)
+    os.makedirs(str(config["health_dir"]), exist_ok=True)
+
+    valid, _metadata = _daily_digest_matches(
+        backup_path,
+        backup_date=str(config["backup_date"]),
+        source_path=str(config["database_path"]),
+    )
+    if valid:
+        return {"status": "success", "reason": "already_done", "backup_path": backup_path}
+
+    owner_id = f"daily-backup-job:{config['job_token']}"
+    reservation = FileWriteLock(paths["reservation"], stale_timeout_sec=24 * 60 * 60, logger=logger)
+    if not reservation.acquire(owner_id, DAILY_BACKUP_SOURCE):
+        return {"status": "deferred", "reason": "reservation_busy", "backup_path": backup_path}
+
+    heartbeat_stop = threading.Event()
+    heartbeat = threading.Thread(
+        target=_lock_heartbeat,
+        args=(reservation, heartbeat_stop, float(config.get("heartbeat_sec", 2.0)), str(config["job_token"])),
+        name="RemCardDailyBackupHeartbeat",
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        # Recheck after acquiring the cross-client reservation.
+        valid, _metadata = _daily_digest_matches(
+            backup_path,
+            backup_date=str(config["backup_date"]),
+            source_path=str(config["database_path"]),
+        )
+        if valid:
+            return {"status": "success", "reason": "already_done", "backup_path": backup_path}
+
+        database_path = str(config["database_path"])
+        if not os.path.isfile(database_path):
+            return {"status": "failure", "reason": "source_missing", "backup_path": backup_path}
+        staging_path = paths["staging"]
+        try:
+            _bounded_sqlite_copy(config, staging_path)
+        except Exception:
+            try:
+                os.remove(staging_path)
+            except OSError:
+                pass
+            raise
+
+        valid, reason = validate_sqlite_file(staging_path)
+        if not valid:
+            invalid_path = _quarantine_failed_staging(staging_path, str(config["invalid_dir"]), reason)
+            return {
+                "status": "failure",
+                "reason": "staging_validation_failed",
+                "detail": reason,
+                "invalid_path": invalid_path,
+                "backup_path": backup_path,
+            }
+        sha256 = _sha256(staging_path)
+        os.replace(staging_path, backup_path)
+        metadata = _write_daily_metadata(backup_path, config=config, sha256=sha256)
+        valid, metadata = _lightweight_daily_metadata(
+            backup_path,
+            backup_date=str(config["backup_date"]),
+            source_path=database_path,
+        )
+        if not valid:
+            return {
+                "status": "failure",
+                "reason": "published_validation_failed",
+                "detail": "published metadata or size mismatch",
+                "backup_path": backup_path,
+            }
+        _atomic_json(
+            paths["done"],
+            {
+                "status": "success",
+                "backup_date": str(config["backup_date"]),
+                "completed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "backup_path": backup_path,
+                "sha256": metadata.get("sha256"),
+                "size_bytes": metadata.get("size_bytes"),
+                "host": socket.gethostname(),
+                "pid": os.getpid(),
+            },
+        )
+        prune = _prune_validated_daily_backups(config, backup_path)
+        return {
+            "status": "success",
+            "reason": "created",
+            "backup_path": backup_path,
+            "pruned": prune.get("deleted", 0),
+        }
+    finally:
+        heartbeat_stop.set()
+        heartbeat.join(timeout=1.0)
+        reservation.release()
+
+
+def _daily_backup_worker(config: dict[str, Any], result_connection: Any) -> None:
+    try:
+        result = _perform_daily_backup(config)
+    except DailyBackupDeferred as exc:
+        result = {"status": "deferred", "reason": str(exc)}
+    except BaseException as exc:
+        result = {
+            "status": "failure",
+            "reason": "worker_exception",
+            "error_class": type(exc).__name__,
+            "error": str(exc)[:500],
+        }
+    try:
+        result_connection.send(result)
+    except Exception:
+        pass
+    finally:
+        try:
+            result_connection.close()
+        except Exception:
+            pass
+
+
+def _read_lock_payload(path: str) -> tuple[bytes, dict[str, Any]] | None:
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        return raw, payload
+    except Exception:
+        return None
+
+
+def cleanup_confirmed_dead_worker_reservation(
+    lock_path: str,
+    *,
+    worker_pid: int,
+    job_token: str,
+    owner_source: str = DAILY_BACKUP_SOURCE,
+) -> bool:
+    """Remove only this job's local dead-child lock; never clean by age."""
+    from rem_card.app.sqlite_shared import is_local_pid_alive
+
+    if worker_pid <= 0 or is_local_pid_alive(worker_pid) is not False:
+        return False
+    first = _read_lock_payload(lock_path)
+    if first is None:
+        return False
+    raw, payload = first
+    if str(payload.get("host") or "").casefold() != socket.gethostname().casefold():
+        return False
+    try:
+        if int(payload.get("pid")) != int(worker_pid):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if str(payload.get("source") or "") != owner_source:
+        return False
+    if str(payload.get("user_id") or "") != f"daily-backup-job:{job_token}":
+        return False
+    if not str(payload.get("lock_token") or ""):
+        return False
+    second = _read_lock_payload(lock_path)
+    if second is None or second[0] != raw:
+        return False
+    try:
+        os.remove(lock_path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+def _cleanup_dead_worker_artifacts(
+    *,
+    reservation_path: str,
+    database_lock_path: str,
+    staging_path: str,
+    worker_pid: int,
+    job_token: str,
+) -> dict[str, bool]:
+    from rem_card.app.sqlite_shared import is_local_pid_alive
+
+    results = {
+        "reservation": False,
+        "database_lock": False,
+        "staging": False,
+    }
+    # Staging belongs to the same child job, but deleting it is still unsafe
+    # while that process may be publishing or validating it.
+    if worker_pid <= 0 or is_local_pid_alive(worker_pid) is not False:
+        return results
+    results.update(
+        reservation=cleanup_confirmed_dead_worker_reservation(
+            reservation_path,
+            worker_pid=worker_pid,
+            job_token=job_token,
+            owner_source=DAILY_BACKUP_SOURCE,
+        ),
+        database_lock=cleanup_confirmed_dead_worker_reservation(
+            database_lock_path,
+            worker_pid=worker_pid,
+            job_token=job_token,
+            owner_source=DAILY_DATABASE_LOCK_SOURCE,
+        ),
+    )
+    try:
+        os.remove(staging_path)
+        results["staging"] = True
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+    return results
+
+
+def _cleanup_dead_worker_entry(arguments: dict[str, Any], result_connection: Any) -> None:
+    try:
+        result_connection.send(_cleanup_dead_worker_artifacts(**arguments))
+    except Exception:
+        pass
+    finally:
+        try:
+            result_connection.close()
+        except Exception:
+            pass
+
+
+class DailyBackupScheduler:
+    """Small coordinator around one bounded spawned worker at a time."""
+
+    def __init__(
+        self,
+        *,
+        database_path: str,
+        backup_dir: str,
+        health_dir: str,
+        invalid_dir: str,
+        database_lock_path: str,
+        role: str,
+        idle_probe: Callable[[], Any] | None = None,
+        target_hour: int = 3,
+        window_hours: float = 4.0,
+        startup_delay_sec: float = 20.0,
+        check_interval_sec: float = 60.0,
+        deferred_retry_sec: float = 300.0,
+        failure_retry_sec: float = 1800.0,
+        worker_timeout_sec: float = 15.0,
+        retention_days: int = 35,
+        max_count: int = 35,
+    ) -> None:
+        self.database_path = os.path.abspath(str(database_path))
+        self.backup_dir = os.path.abspath(str(backup_dir))
+        self.health_dir = os.path.abspath(str(health_dir))
+        self.invalid_dir = os.path.abspath(str(invalid_dir))
+        self.database_lock_path = os.path.abspath(str(database_lock_path))
+        self.role = normalize_backup_role(role)
+        self.idle_probe = idle_probe
+        self.target_hour = min(23, max(0, int(target_hour)))
+        self.window_hours = max(0.25, float(window_hours))
+        self.startup_delay_sec = max(0.0, float(startup_delay_sec))
+        self.check_interval_sec = max(0.05, float(check_interval_sec))
+        self.deferred_retry_sec = max(0.05, float(deferred_retry_sec))
+        self.failure_retry_sec = max(0.05, float(failure_retry_sec))
+        self.worker_timeout_sec = max(0.25, float(worker_timeout_sec))
+        self.retention_days = max(1, int(retention_days))
+        self.max_count = max(2, int(max_count))
+        self._stop_event = threading.Event()
+        self._wakeup = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._process_lock = threading.Lock()
+        self._process: Any = None
+        self._process_job: dict[str, Any] | None = None
+        self._state_lock = threading.Lock()
+        self._probe: dict[str, Any] = {
+            "enabled": True,
+            "running": False,
+            "status": "not_started",
+            "role": self.role,
+        }
+        self._completed_date = ""
+
+    def start(self) -> bool:
+        if self.role not in {"doctor", "nurse"}:
+            self._update_probe(status="disabled_role", running=False)
+            return False
+        if self._thread is not None and self._thread.is_alive():
+            return True
+        self._stop_event.clear()
+        self._wakeup.clear()
+        self._thread = threading.Thread(target=self._run, name="RemCardDailyBackupScheduler", daemon=True)
+        self._thread.start()
+        self._update_probe(status="scheduled", running=True)
+        return True
+
+    def stop(self, timeout_sec: float = 2.0) -> bool:
+        self._stop_event.set()
+        self._wakeup.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(0.1, float(timeout_sec)))
+            if thread.is_alive():
+                self._signal_current_process_stop()
+                thread.join(timeout=0.5)
+        thread_stopped = thread is None or not thread.is_alive()
+        process_stopped = self._terminate_current_process() if thread_stopped else False
+        stopped = thread_stopped and process_stopped
+        if stopped:
+            self._thread = None
+        self._update_probe(status="stopped" if stopped else "stop_timeout", running=not stopped)
+        return stopped
+
+    def get_probe(self) -> dict[str, Any]:
+        with self._state_lock:
+            probe = dict(self._probe)
+        thread = self._thread
+        probe["thread_alive"] = bool(thread and thread.is_alive())
+        with self._process_lock:
+            process = self._process
+            try:
+                probe["worker_alive"] = bool(process and process.is_alive())
+            except (ValueError, OSError):
+                probe["worker_alive"] = False
+            probe["worker_pid"] = getattr(process, "pid", None) if process else None
+        return probe
+
+    def _update_probe(self, **values: Any) -> None:
+        with self._state_lock:
+            self._probe.update(values)
+            self._probe["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+
+    def _due(self, now: datetime) -> tuple[str, str]:
+        target = now.replace(hour=self.target_hour, minute=0, second=0, microsecond=0)
+        if now < target:
+            target -= timedelta(days=1)
+        window_end = target + timedelta(hours=self.window_hours)
+        reason = "night_window" if now < window_end else "idle_catchup"
+        return target.date().isoformat(), reason
+
+    def _idle(self) -> tuple[bool, str]:
+        if self.idle_probe is None:
+            return True, "idle"
+        try:
+            result = self.idle_probe()
+        except Exception as exc:
+            return False, f"idle_probe_error:{type(exc).__name__}"
+        if isinstance(result, tuple):
+            return bool(result[0]), str(result[1] if len(result) > 1 else "")
+        return bool(result), "idle" if result else "busy"
+
+    def _run(self) -> None:
+        wait_sec = self.startup_delay_sec
+        try:
+            while not self._stop_event.wait(wait_sec):
+                backup_date, schedule_reason = self._due(datetime.now())
+                if backup_date == self._completed_date:
+                    wait_sec = self.check_interval_sec
+                    continue
+                idle, idle_reason = self._idle()
+                if not idle:
+                    result = {"status": "deferred", "reason": idle_reason, "backup_date": backup_date}
+                    self._record_result(result, schedule_reason=schedule_reason)
+                    wait_sec = self.deferred_retry_sec
+                    continue
+                result = self._run_worker(backup_date)
+                self._record_result(result, schedule_reason=schedule_reason)
+                if result.get("status") == "success":
+                    self._completed_date = backup_date
+                    wait_sec = self.check_interval_sec
+                elif result.get("status") == "deferred":
+                    wait_sec = self.deferred_retry_sec
+                else:
+                    wait_sec = self.failure_retry_sec
+        finally:
+            self._terminate_current_process()
+            self._update_probe(running=False)
+
+    def _worker_config(self, backup_date: str, job_token: str) -> dict[str, Any]:
+        return {
+            "database_path": self.database_path,
+            "backup_dir": self.backup_dir,
+            "health_dir": self.health_dir,
+            "invalid_dir": self.invalid_dir,
+            "database_lock_path": self.database_lock_path,
+            "backup_date": backup_date,
+            "role": self.role,
+            "job_token": job_token,
+            "retention_days": self.retention_days,
+            "max_count": self.max_count,
+        }
+
+    def _run_worker(self, backup_date: str) -> dict[str, Any]:
+        job_token = uuid.uuid4().hex
+        config = self._worker_config(backup_date, job_token)
+        paths = _daily_paths(config)
+        reservation_path = paths["reservation"]
+        context = multiprocessing.get_context("spawn")
+        receiving, sending = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_daily_backup_worker,
+            args=(config, sending),
+            name="RemCardDailyBackupWorker",
+            daemon=True,
+        )
+        try:
+            process.start()
+        except Exception as exc:
+            receiving.close()
+            sending.close()
+            return {
+                "status": "failure",
+                "reason": "worker_start_failed",
+                "error_class": type(exc).__name__,
+            }
+        sending.close()
+        with self._process_lock:
+            self._process = process
+            self._process_job = {
+                "reservation_path": reservation_path,
+                "database_lock_path": self.database_lock_path,
+                "staging_path": paths["staging"],
+                "worker_pid": int(process.pid or 0),
+                "job_token": job_token,
+            }
+        self._update_probe(status="worker_running", backup_date=backup_date, worker_pid=process.pid)
+        deadline = time.monotonic() + self.worker_timeout_sec
+        result: dict[str, Any] | None = None
+        try:
+            while time.monotonic() < deadline and not self._stop_event.is_set():
+                if receiving.poll(0.1):
+                    try:
+                        result = receiving.recv()
+                    except EOFError:
+                        result = None
+                    break
+                if not process.is_alive():
+                    break
+            if result is None and self._stop_event.is_set():
+                result = {"status": "deferred", "reason": "stopping"}
+            elif result is None and time.monotonic() >= deadline:
+                result = {"status": "failure", "reason": "worker_timeout"}
+            elif result is None:
+                result = {
+                    "status": "failure",
+                    "reason": "worker_exited_without_result",
+                    "exitcode": process.exitcode,
+                }
+        finally:
+            receiving.close()
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=1.0)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=1.0)
+            worker_stopped = not process.is_alive()
+            if worker_stopped:
+                needs_cleanup = str((result or {}).get("reason") or "") in {
+                    "stopping",
+                    "worker_timeout",
+                    "worker_exited_without_result",
+                }
+                if needs_cleanup:
+                    self._bounded_dead_worker_cleanup(
+                        {
+                            "reservation_path": reservation_path,
+                            "database_lock_path": self.database_lock_path,
+                            "staging_path": paths["staging"],
+                            "worker_pid": int(process.pid or 0),
+                            "job_token": job_token,
+                        }
+                    )
+                try:
+                    process.close()
+                except Exception:
+                    pass
+                with self._process_lock:
+                    if self._process is process:
+                        self._process = None
+                        self._process_job = None
+            else:
+                result = {
+                    "status": "failure",
+                    "reason": "worker_termination_failed",
+                }
+                self._stop_event.set()
+        result["backup_date"] = backup_date
+        return result
+
+    def _terminate_current_process(self) -> bool:
+        with self._process_lock:
+            process = self._process
+            job = self._process_job
+        if process is None:
+            return True
+        try:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=1.0)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=1.0)
+        except Exception:
+            return False
+        try:
+            if process.is_alive():
+                return False
+        except Exception:
+            return False
+        if job:
+            self._bounded_dead_worker_cleanup(job)
+        try:
+            process.close()
+        except Exception:
+            pass
+        with self._process_lock:
+            if self._process is process:
+                self._process = None
+                self._process_job = None
+        return True
+
+    def _signal_current_process_stop(self) -> bool:
+        """Stop the child but leave cleanup/close ownership to its scheduler thread."""
+        with self._process_lock:
+            process = self._process
+        if process is None:
+            return True
+        try:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=0.5)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=0.5)
+            return not process.is_alive()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _bounded_dead_worker_cleanup(arguments: dict[str, Any], timeout_sec: float = 2.0) -> dict[str, bool]:
+        """Run SMB cleanup out of process so shutdown cannot block indefinitely."""
+        context = multiprocessing.get_context("spawn")
+        receiving, sending = context.Pipe(duplex=False)
+        cleanup = context.Process(
+            target=_cleanup_dead_worker_entry,
+            args=(dict(arguments), sending),
+            name="RemCardDailyBackupCleanup",
+            daemon=True,
+        )
+        try:
+            cleanup.start()
+        except Exception as exc:
+            receiving.close()
+            sending.close()
+            logger.warning("Daily backup dead-worker cleanup could not start: %s", exc)
+            return {}
+        sending.close()
+        result: dict[str, bool] = {}
+        try:
+            if receiving.poll(max(0.1, float(timeout_sec))):
+                try:
+                    result = dict(receiving.recv() or {})
+                except EOFError:
+                    result = {}
+        finally:
+            receiving.close()
+            if cleanup.is_alive():
+                cleanup.terminate()
+            cleanup.join(timeout=0.5)
+            if cleanup.is_alive() and hasattr(cleanup, "kill"):
+                cleanup.kill()
+                cleanup.join(timeout=0.5)
+            try:
+                cleanup.close()
+            except Exception:
+                pass
+        if not result:
+            logger.warning("Daily backup dead-worker cleanup did not complete within its bounded window")
+        return result
+
+    def _record_result(self, result: dict[str, Any], *, schedule_reason: str) -> None:
+        status = str(result.get("status") or "failure")
+        reason = str(result.get("reason") or "unknown")
+        fields = {
+            "status": status,
+            "reason": reason,
+            "role": self.role,
+            "backup_date": str(result.get("backup_date") or ""),
+            "schedule_reason": schedule_reason,
+            "backup_path": str(result.get("backup_path") or ""),
+        }
+        record_metric("daily_central_backup_result", 1, **fields)
+        self._update_probe(**fields)
+        if status == "success":
+            logger.info("Daily central backup result: %s", fields)
+        elif status == "deferred":
+            logger.info("Daily central backup deferred: %s", fields)
+        else:
+            logger.warning("Daily central backup failed: %s", {**fields, "error": result.get("error", "")})

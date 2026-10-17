@@ -1148,39 +1148,37 @@ class OrderService:
             return []
 
         params: List[object] = []
-        join_filter_main = ""
-        join_filter_sub = ""
+        source_filter = ""
 
         if order_ids is not None:
             placeholders = ",".join("?" for _ in order_ids)
-            join_filter_main = f" AND a.order_id IN ({placeholders})"
-            join_filter_sub = f" AND a2.order_id IN ({placeholders})"
+            source_filter = f" AND a2.order_id IN ({placeholders})"
             params.extend(order_ids)
         else:
-            join_filter_main = " AND o.admission_id = ?"
-            join_filter_sub = " AND o2.admission_id = ?"
+            source_filter = " AND o2.admission_id = ?"
             params.append(admission_id)
 
         query = f"""
-            SELECT a.*
-            FROM administrations a
-            JOIN orders o ON a.order_id = o.id
-            WHERE DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
-            {join_filter_main}
-            AND a.id IN (
-                SELECT MAX(a2.id)
+            WITH latest_admin_ids AS (
+                SELECT MAX(a2.id) AS id
                 FROM administrations a2
                 JOIN orders o2 ON a2.order_id = o2.id
-                WHERE DATETIME(a2.planned_time) >= DATETIME(?) AND DATETIME(a2.planned_time) < DATETIME(?)
-                {join_filter_sub}
+                WHERE DATETIME(a2.planned_time) >= DATETIME(?)
+                  AND DATETIME(a2.planned_time) < DATETIME(?)
+                  {source_filter}
         """
 
         if only_committed:
             query += " AND a2.is_committed = 1"
-        query += " GROUP BY a2.order_id, DATETIME(a2.planned_time) )"
-
-        if only_committed:
-            query += " AND a.is_committed = 1"
+        query += """
+                GROUP BY a2.order_id, DATETIME(a2.planned_time)
+            )
+            SELECT a.*
+            FROM latest_admin_ids latest
+            JOIN administrations a ON a.id = latest.id
+            JOIN orders o ON a.order_id = o.id
+            WHERE 1 = 1
+        """
         if not include_deleted:
             query += " AND COALESCE(a.status, '') != 'deleted'"
         if not include_cancelled:
@@ -1206,7 +1204,7 @@ class OrderService:
         else:
             query += " ORDER BY DATETIME(a.planned_time) ASC, a.id ASC"
 
-        final_params: List[object] = [start_dt.isoformat(), end_dt.isoformat(), *params, start_dt.isoformat(), end_dt.isoformat(), *params]
+        final_params: List[object] = [start_dt.isoformat(), end_dt.isoformat(), *params]
         if updated_after is not None:
             final_params.extend([updated_after_ts, updated_after_ts, int(updated_after_id)])
         return self.dao.db.fetch_all_remcard(query, tuple(final_params), cancel_check=cancel_check)

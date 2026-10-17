@@ -105,6 +105,98 @@ def test_stale_native_session_creates_one_native_report_without_generic_duplicat
     assert r"C:\Users" not in json.dumps(payloads, ensure_ascii=False)
 
 
+def test_stale_session_report_keeps_marker_subject_metadata(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(spool))
+    monkeypatch.setattr(crash_reports, "_pid_is_running", lambda _pid: False)
+    marker = spool / "sessions" / "old.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "old-session",
+                "pid": 4242,
+                "host": "old-workstation",
+                "role": "nurse",
+                "app_version": "0.9.7",
+                "started_at": "2026-10-01T08:00:00+10:00",
+                "native_path": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    crash_reports._process_stale_sessions()
+
+    payload = _payloads(spool / "outbox")[0]
+    assert payload["session_id"] == "old-session"
+    assert payload["pid"] == 4242
+    assert payload["host"] == "old-workstation"
+    assert payload["role"] == "nurse"
+    assert payload["app_version"] == "0.9.7"
+    assert payload["timestamp_source"] == "detected_on_next_start"
+    assert payload["subject_session_started_at"] == "2026-10-01T08:00:00+10:00"
+    assert payload["reported_at"] == payload["occurred_at"]
+    assert payload["reporter_pid"] == os.getpid()
+
+
+def test_stale_session_keeps_marker_and_native_trace_when_report_save_fails(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(spool))
+    monkeypatch.setattr(crash_reports, "_pid_is_running", lambda _pid: False)
+    native_path = spool / "native" / "old.log"
+    native_path.parent.mkdir(parents=True)
+    native_path.write_text("Fatal Python error", encoding="utf-8")
+    marker = spool / "sessions" / "old.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "session_id": "old-session",
+                "pid": 4242,
+                "role": "doctor",
+                "app_version": "0.9.7",
+                "native_path": str(native_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(crash_reports, "capture_crash_event", lambda *_args, **_kwargs: None)
+
+    crash_reports._process_stale_sessions()
+
+    assert marker.is_file()
+    assert native_path.read_text(encoding="utf-8") == "Fatal Python error"
+
+
+def test_active_session_role_update_is_atomic(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(spool))
+    monkeypatch.setattr(crash_reports.faulthandler, "enable", lambda **_kwargs: None)
+    monkeypatch.setattr(crash_reports.faulthandler, "disable", lambda: None)
+    session_id = crash_reports.initialize_crash_session(role="unified")
+    marker_path = spool / "sessions" / f"{session_id}.json"
+    try:
+        assert crash_reports.update_crash_session_role("doctor") is True
+        assert json.loads(marker_path.read_text(encoding="utf-8"))["role"] == "doctor"
+        assert crash_reports._CURRENT_ROLE == "doctor"
+        report_path = crash_reports.capture_crash_event("previous_session_unclean")
+        assert report_path is not None
+        assert json.loads(report_path.read_text(encoding="utf-8"))["role"] == "doctor"
+
+        original = marker_path.read_bytes()
+        monkeypatch.setattr(
+            crash_reports,
+            "_atomic_write_json",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        assert crash_reports.update_crash_session_role("nurse") is False
+        assert marker_path.read_bytes() == original
+        assert crash_reports._CURRENT_ROLE == "doctor"
+    finally:
+        crash_reports.finalize_crash_session(exit_code=0)
+
+
 def test_database_outage_is_deduplicated_per_process(tmp_path, monkeypatch):
     monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(tmp_path / "spool"))
     monkeypatch.setattr(crash_reports.time, "monotonic", lambda: 15.0)

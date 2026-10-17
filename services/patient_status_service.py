@@ -1,12 +1,19 @@
+import threading
+from collections import OrderedDict
 from typing import Dict, List, Tuple, Optional, Callable, Any, Sequence
 from datetime import datetime, timedelta
-from ..data.dao.patient_status_dao import PatientStatusDAO
+from ..data.dao.patient_status_dao import InitialStatusOutcome, PatientStatusDAO
 from ..data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
 from .ventilation_service import VentilationService
 from rem_card.app.logger import logger
 from rem_card.services.operblock_handoff_service import OperBlockHandoffService
 
 class PatientStatusService:
+    INITIAL_STATUS_QUEUE_DEADLINE_SEC = 15.0
+    INITIAL_STATUS_WRITE_BUDGET_MS = 3000
+    INITIAL_STATUS_RETRIES = 2
+    INITIAL_STATUS_COMPLETED_CACHE_SIZE = 512
+
     def __init__(
         self,
         status_dao: PatientStatusDAO,
@@ -24,6 +31,9 @@ class PatientStatusService:
             self.ventilation_service = VentilationService(ventilation_dao, data_service=data_service)
         else:
             self.ventilation_service = None
+        self._initial_status_lock = threading.Lock()
+        self._initial_status_pending: set[tuple[int, str, str]] = set()
+        self._initial_status_completed: OrderedDict[tuple[int, str, str], None] = OrderedDict()
 
     def change_status(self, admission_id: int, new_status: PatientStatus, 
                       reason_type: Optional[str] = None, reason_text: Optional[str] = None, 
@@ -145,9 +155,107 @@ class PatientStatusService:
             self._sync_ventilation_for_admission(admission_id)
         return ok
 
-    def ensure_initial_status(self, admission_id: int, shift_start: datetime, admission_datetime: Optional[datetime], user_id: str = "SYSTEM"):
+    def ensure_initial_status(
+        self,
+        admission_id: int,
+        shift_start: datetime,
+        admission_datetime: Optional[datetime],
+        user_id: str = "SYSTEM",
+    ) -> InitialStatusOutcome:
         """РћР±РµСЃРїРµС‡РёРІР°РµС‚ РЅР°Р»РёС‡РёРµ РЅР°С‡Р°Р»СЊРЅРѕРіРѕ СЃС‚Р°С‚СѓСЃР°."""
         return self.status_dao.ensure_initial_status(admission_id, shift_start, admission_datetime, user_id)
+
+    @staticmethod
+    def _initial_status_key(
+        admission_id: int,
+        shift_start: datetime,
+        admission_datetime: Optional[datetime],
+    ) -> tuple[int, str, str]:
+        normalized_shift = shift_start.replace(microsecond=0).isoformat(timespec="seconds")
+        normalized_admission = (
+            admission_datetime.replace(microsecond=0).isoformat(timespec="seconds")
+            if admission_datetime is not None
+            else ""
+        )
+        return int(admission_id), normalized_shift, normalized_admission
+
+    def invalidate_initial_status_cache(self, admission_id: Optional[int] = None) -> None:
+        """Сбрасывает completed-key после внешних изменений статуса или госпитализации."""
+        with self._initial_status_lock:
+            if admission_id is None:
+                self._initial_status_completed.clear()
+                return
+            target = int(admission_id)
+            for key in list(self._initial_status_completed):
+                if key[0] == target:
+                    self._initial_status_completed.pop(key, None)
+
+    def enqueue_initial_status(
+        self,
+        admission_id: int,
+        shift_start: datetime,
+        admission_datetime: Optional[datetime],
+        user_id: str = "SYSTEM",
+        *,
+        on_success: Optional[Callable[[InitialStatusOutcome], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+        on_settled: Optional[Callable[[str, Any], None]] = None,
+    ) -> bool:
+        """Ставит начальный статус в bounded write queue без ожидания из read path."""
+        if self.data_service is None:
+            logger.info(
+                "[StatusService] Initial status write skipped without DataService admission_id=%s",
+                admission_id,
+            )
+            return False
+
+        key = self._initial_status_key(admission_id, shift_start, admission_datetime)
+        with self._initial_status_lock:
+            if key in self._initial_status_pending or key in self._initial_status_completed:
+                return False
+            self._initial_status_pending.add(key)
+
+        def operation() -> InitialStatusOutcome:
+            return self.ensure_initial_status(
+                admission_id,
+                shift_start,
+                admission_datetime,
+                user_id,
+            )
+
+        def settled(state: str, payload: Any) -> None:
+            with self._initial_status_lock:
+                self._initial_status_pending.discard(key)
+                if state == "committed" and isinstance(payload, InitialStatusOutcome):
+                    self._initial_status_completed[key] = None
+                    self._initial_status_completed.move_to_end(key)
+                    while len(self._initial_status_completed) > self.INITIAL_STATUS_COMPLETED_CACHE_SIZE:
+                        self._initial_status_completed.popitem(last=False)
+            if on_settled:
+                on_settled(state, payload)
+
+        try:
+            accepted = self.data_service.enqueue_write(
+                description=f"ensure_initial_patient_status:{int(admission_id)}",
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+                on_settled=settled,
+                write_metadata={
+                    "queue_deadline_sec": self.INITIAL_STATUS_QUEUE_DEADLINE_SEC,
+                    "write_budget_ms": self.INITIAL_STATUS_WRITE_BUDGET_MS,
+                    "queue_retries_left": self.INITIAL_STATUS_RETRIES,
+                },
+            )
+        except Exception:
+            with self._initial_status_lock:
+                self._initial_status_pending.discard(key)
+            raise
+        if accepted is False:
+            # DataService guarantees that on_settled already ran for rejection.
+            with self._initial_status_lock:
+                self._initial_status_pending.discard(key)
+        return bool(accepted)
 
     def get_current_status(self, admission_id: int) -> Optional[PatientStatusEventDTO]:
         """Р’РѕР·РІСЂР°С‰Р°РµС‚ С‚РµРєСѓС‰РёР№ Р°РєС‚РёРІРЅС‹Р№ СЃС‚Р°С‚СѓСЃ РїР°С†РёРµРЅС‚Р°."""

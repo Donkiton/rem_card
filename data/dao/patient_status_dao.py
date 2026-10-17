@@ -1,4 +1,5 @@
 import json
+from enum import Enum
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from ..dto.remcard_dto import PatientStatus, PatientStatusEventDTO
@@ -12,6 +13,17 @@ CVC_OUTCOME_STATUS_BY_PATIENT_STATUS = {
 }
 CPR_REASON_TYPE = "cpr"
 LATE_CARD_OUTCOME_WINDOW = timedelta(hours=2)
+
+
+class InitialStatusOutcome(str, Enum):
+    """Явный результат идемпотентного создания начального статуса."""
+
+    CREATED = "created"
+    BRIDGED = "bridged"
+    REPAIRED = "repaired"
+    ALREADY_COVERED = "already_covered"
+    SKIPPED_OUTSIDE_SHIFT = "skipped_outside_shift"
+    NO_CHANGE = "no_change"
 
 class PatientStatusDAO:
     def __init__(self, db_manager):
@@ -1867,91 +1879,114 @@ class PatientStatusDAO:
             logger.error(f"[StatusDAO] Error rolling back status for admission {admission_id}: {e}")
             return False
 
-    def ensure_initial_status(self, admission_id: int, shift_start: datetime, admission_datetime: Optional[datetime], user_id: str = "SYSTEM"):
+    def ensure_initial_status(
+        self,
+        admission_id: int,
+        shift_start: datetime,
+        admission_datetime: Optional[datetime],
+        user_id: str = "SYSTEM",
+    ) -> InitialStatusOutcome:
         """
         Обеспечивает наличие начального статуса для карты.
         Учитывает время поступления и преемственность с прошлыми сутками.
         """
-        try:
-            with self.db.remcard_transaction() as cursor:
-                # 1. Проверяем, есть ли события вообще
-                cursor.execute("SELECT count(*) as cnt FROM patient_status_events WHERE admission_id = ?", (admission_id,))
-                total_cnt = cursor.fetchone()['cnt']
-                
-                # Минимально разрешенное время (время поступления)
-                min_allowed = admission_datetime if admission_datetime else shift_start
-                # Очищаем от микросекунд для сравнения в SQLite
-                min_allowed_str = min_allowed.replace(microsecond=0).isoformat()
-                shift_start_str = shift_start.replace(microsecond=0).isoformat()
-                shift_end = shift_start.replace(microsecond=0) + timedelta(days=1)
-                if admission_datetime and min_allowed.replace(microsecond=0) >= shift_end:
-                    logger.info(
-                        "[StatusDAO] Skip initial status for admission %s: admission time %s is outside current shift %s - %s",
+        with self.db.remcard_transaction() as cursor:
+            cursor.execute(
+                "SELECT count(*) as cnt FROM patient_status_events WHERE admission_id = ?",
+                (admission_id,),
+            )
+            total_cnt = cursor.fetchone()["cnt"]
+
+            min_allowed = admission_datetime if admission_datetime else shift_start
+            min_allowed_str = min_allowed.replace(microsecond=0).isoformat()
+            shift_start_str = shift_start.replace(microsecond=0).isoformat()
+            shift_end = shift_start.replace(microsecond=0) + timedelta(days=1)
+            if admission_datetime and min_allowed.replace(microsecond=0) >= shift_end:
+                logger.info(
+                    "[StatusDAO] Skip initial status for admission %s: admission time %s is outside current shift %s - %s",
+                    admission_id,
+                    min_allowed_str,
+                    shift_start_str,
+                    shift_end.isoformat(),
+                )
+                return InitialStatusOutcome.SKIPPED_OUTSIDE_SHIFT
+
+            if total_cnt == 0:
+                cursor.execute(
+                    """
+                    INSERT INTO patient_status_events
+                    (admission_id, status, start_time, created_by, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
                         admission_id,
+                        PatientStatus.ACTIVE.value,
                         min_allowed_str,
-                        shift_start_str,
-                        shift_end.isoformat(),
-                    )
-                    return
-
-                if total_cnt == 0:
-                    # САМАЯ ПЕРВАЯ ЗАПИСЬ СТАТУСА для пациента в системе
-                    # Таймлайн должен начинаться С МОМЕНТА ПОСТУПЛЕНИЯ
-                    cursor.execute("""
-                        INSERT INTO patient_status_events 
-                        (admission_id, status, start_time, created_by, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (admission_id, PatientStatus.ACTIVE.value, min_allowed_str, user_id, min_allowed_str, min_allowed_str))
-                    logger.info(f"[StatusDAO] Created first status for {admission_id} at {min_allowed_str}")
-                    return
-
-                # 2. Проверяем, покрыто ли начало текущей смены (shift_start)
-                # Ищем событие, которое началось <= shift_start и (не закончилось ИЛИ закончилось >= shift_start)
-                # Используем DATETIME() для надежного сравнения разных форматов SQLite
-                cursor.execute("""
-                    SELECT id FROM patient_status_events 
-                    WHERE admission_id = ? 
-                    AND DATETIME(start_time) <= DATETIME(?) 
-                    AND (end_time IS NULL OR DATETIME(end_time) >= DATETIME(?))
-                    LIMIT 1
-                """, (admission_id, shift_start_str, shift_start_str))
-                
-                if cursor.fetchone():
-                    return # Начало смены уже покрыто историей
-
-                # 3. Если не покрыто, ищем последнее событие СТРОГО ДО начала смены
-                cursor.execute("""
-                    SELECT status, end_time FROM patient_status_events 
-                    WHERE admission_id = ? AND DATETIME(start_time) < DATETIME(?) 
-                    ORDER BY DATETIME(start_time) DESC, id DESC LIMIT 1
-                """, (admission_id, shift_start_str))
-                last_before = cursor.fetchone()
-                
-                if last_before:
-                    # Проверяем, не существует ли уже записи на это точное время (мостик)
-                    cursor.execute("SELECT 1 FROM patient_status_events WHERE admission_id = ? AND DATETIME(start_time) = DATETIME(?)", (admission_id, shift_start_str))
-                    if not cursor.fetchone():
-                        cursor.execute("""
-                            INSERT INTO patient_status_events 
-                            (admission_id, status, start_time, created_by, created_at, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, (admission_id, last_before['status'], shift_start_str, user_id, shift_start_str, shift_start_str))
-                        logger.info(f"[StatusDAO] Bridged status for {admission_id} at {shift_start_str}")
-                else:
-                    # Событий ДО начала смены нет. Это значит, что все существующие события
-                    # начинаются ПОЗЖЕ shift_start (например, пациент поступил сегодня в 10:40).
-                    # В этом случае НИКАКИХ мостиков на 08:00 строить нельзя. Но если первый
-                    # ACTIVE начинается позже уже исправленного времени поступления, это след
-                    # неудачной попытки создать карту при ошибочной будущей дате поступления.
-                    self._repair_future_initial_active_status(
-                        cursor,
-                        admission_id,
-                        min_allowed.replace(second=0, microsecond=0),
                         user_id,
-                    )
+                        min_allowed_str,
+                        min_allowed_str,
+                    ),
+                )
+                logger.info("[StatusDAO] Created first status for %s at %s", admission_id, min_allowed_str)
+                return InitialStatusOutcome.CREATED
 
-        except Exception as e:
-            logger.error(f"[StatusDAO] Error ensuring initial status for {admission_id}: {e}")
+            cursor.execute(
+                """
+                SELECT id FROM patient_status_events
+                WHERE admission_id = ?
+                  AND DATETIME(start_time) <= DATETIME(?)
+                  AND (end_time IS NULL OR DATETIME(end_time) >= DATETIME(?))
+                LIMIT 1
+                """,
+                (admission_id, shift_start_str, shift_start_str),
+            )
+            if cursor.fetchone():
+                return InitialStatusOutcome.ALREADY_COVERED
+
+            cursor.execute(
+                """
+                SELECT status, end_time FROM patient_status_events
+                WHERE admission_id = ? AND DATETIME(start_time) < DATETIME(?)
+                ORDER BY DATETIME(start_time) DESC, id DESC LIMIT 1
+                """,
+                (admission_id, shift_start_str),
+            )
+            last_before = cursor.fetchone()
+            if last_before:
+                cursor.execute(
+                    """
+                    SELECT 1 FROM patient_status_events
+                    WHERE admission_id = ? AND DATETIME(start_time) = DATETIME(?)
+                    """,
+                    (admission_id, shift_start_str),
+                )
+                if cursor.fetchone():
+                    return InitialStatusOutcome.ALREADY_COVERED
+                cursor.execute(
+                    """
+                    INSERT INTO patient_status_events
+                    (admission_id, status, start_time, created_by, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        admission_id,
+                        last_before["status"],
+                        shift_start_str,
+                        user_id,
+                        shift_start_str,
+                        shift_start_str,
+                    ),
+                )
+                logger.info("[StatusDAO] Bridged status for %s at %s", admission_id, shift_start_str)
+                return InitialStatusOutcome.BRIDGED
+
+            repaired = self._repair_future_initial_active_status(
+                cursor,
+                admission_id,
+                min_allowed.replace(second=0, microsecond=0),
+                user_id,
+            )
+            return InitialStatusOutcome.REPAIRED if repaired else InitialStatusOutcome.NO_CHANGE
 
     def _repair_future_initial_active_status(
         self,

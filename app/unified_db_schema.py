@@ -5,8 +5,8 @@ from typing import Optional
 from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 26
-SCHEMA_MIN_MIGRATION_VERSION = 26
+SCHEMA_FASTPATH_REV = 27
+SCHEMA_MIN_MIGRATION_VERSION = 27
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -156,6 +156,7 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_orders_admission_updated_id",
     "idx_status_admission_updated_id",
     "idx_admin_committed_order_planned_id",
+    "idx_admin_committed_planned_expr_order_id",
     "idx_transfusions_source_admin",
     "idx_orders_admission_status_committed_time",
     "idx_active_status",
@@ -1748,6 +1749,10 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_big_chain ON administrations(big_chain_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_order_planned_id ON administrations(order_id, planned_time, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_committed_order_planned_id ON administrations(is_committed, order_id, planned_time, id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_admin_committed_planned_expr_order_id "
+        "ON administrations(is_committed, DATETIME(planned_time), order_id, id)"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_planned_status_id ON administrations(planned_time, status, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_admission_status_committed_time ON orders(admission_id, status, is_committed, datetime)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_status_admission_time ON patient_status_events(admission_id, start_time)")
@@ -2279,6 +2284,6 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(
         conn,
         SCHEMA_MIN_MIGRATION_VERSION,
-        "single change-log event for timestamped row updates",
+        "expression index for latest committed administrations by normalized planned time",
     )
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

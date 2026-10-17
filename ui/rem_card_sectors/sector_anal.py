@@ -11,6 +11,7 @@ from typing import Any
 
 from PySide6.QtCore import QSettings, QTimer, Qt, QSize, Slot
 from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen, QPixmap
+from shiboken6 import isValid
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -943,6 +944,9 @@ class SectorAnal(BaseSectorWidget):
         return normalized[: len(self.HEADERS)]
 
     def _fit_columns_to_viewport(self):
+        # A queued Python singleShot can outlive parent-owned Qt destruction.
+        if not isValid(self) or not isValid(getattr(self, "table", None)):
+            return
         if self._restoring_header or self._constraining_header or not hasattr(self, "table"):
             return
         if not self.table.isVisible():
