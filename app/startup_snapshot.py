@@ -209,7 +209,8 @@ def check_direct_admission(path: str, progress=None) -> tuple[bool, str, bool]:
 
 
 def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183.0,
-                   progress: Callable[[dict], None] | None = None) -> tuple[bool, str, bool]:
+                   progress: Callable[[dict], None] | None = None,
+                   use_cache: bool = True) -> tuple[bool, str, bool]:
     """Run in a killable child; never migrate, recover or write clinical data."""
     from rem_card.app.local_replica_worker import (
         _sync_snapshot_with_network_lease, LocalReplicaWriterBusy,
@@ -237,7 +238,7 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
         cached = startup_snapshot_cache.load(
             path, ttl_sec=ADMISSION_TTL_SEC,
             destination_path=os.path.join(workspace, "cache_baseline.db"),
-        )
+        ) if use_cache else None
         if cached is not None and (
                 cached.get("admission") != before
                 or cached.get("state", {}).get("db_cycle") != original_state.get("db_cycle")
@@ -265,21 +266,6 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
                 sync_message,
                 progress_callback=stage, backup_progress_callback=pages,
             )
-            cache_mode = str(result.get("sync_mode") or "full")
-            if cached is not None and cache_mode in {"cache", "delta", "unchanged"}:
-                cache_age = time.time() - float(cached["full_checked_at_epoch"])
-                if not 0 <= cache_age < ADMISSION_TTL_SEC:
-                    stage("cache_expired")
-                    full_message = {key: value for key, value in sync_message.items()
-                                    if key not in {"local_db_path", "local_state",
-                                                   "baseline_source_identity",
-                                                   "baseline_source_stamp", "baseline_state",
-                                                   "require_snapshot"}}
-                    result = _sync_snapshot_with_network_lease(
-                        full_message,
-                        progress_callback=stage, backup_progress_callback=pages,
-                    )
-                    cached = None
         # Backup API already quick_checked, checkpointed, closed and fsynced the
         # local snapshot. Verify its schema/cycle against the live source too.
         stage("source_confirmation")
@@ -315,6 +301,12 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
                         "state": result["state"], "fingerprint": _fingerprint(snapshot_path),
                         "sha256": _digest(snapshot_path), "sync_mode": sync_mode,
                         "source_stamp": result.get("source_stamp")}
+        # Hashing/persistence can cross the TTL boundary too. Retry once with
+        # cache disabled, after all potentially expensive local preparation.
+        if cached is not None and not 0 <= time.time() - full_checked_at_epoch < ADMISSION_TTL_SEC:
+            stage("cache_expired")
+            return check_snapshot(path, workspace, lease_duration_sec=lease_duration_sec,
+                                  progress=progress, use_cache=False)
         return True, json.dumps({"admission": after, "snapshot": manifest,
                                  "full_checked_at_epoch": full_checked_at_epoch,
                                  "sync_mode": sync_mode}), False

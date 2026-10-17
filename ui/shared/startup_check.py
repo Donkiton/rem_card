@@ -96,7 +96,7 @@ def role_startup_check_runner(cancel, preparing):
         check.admission_receipt = None
         check.full_checked_at_epoch = None
         check.discard_snapshot()
-        outcome = probe(path, "snapshot")
+        outcome = probe(path, "direct_admission" if check.force_full_scan else "snapshot")
         if outcome[0] and outcome[1] != "ok":
             payload = json.loads(outcome[1])
             check.admission_receipt = payload["admission"]
@@ -119,6 +119,7 @@ def role_startup_check_runner(cancel, preparing):
     check.startup_snapshot = None
     check.full_checked_at_epoch = None
     check.requires_confirmation = False
+    check.force_full_scan = False
     def discard_snapshot():
         from rem_card.app.startup_snapshot import discard
         discard(check.startup_snapshot)

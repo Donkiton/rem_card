@@ -102,6 +102,61 @@ def test_original_ttl_is_not_renewed_by_cache_reuse(source, monkeypatch):
     assert checked(source)["sync_mode"] == "full"
 
 
+def test_ttl_expiring_during_final_persistence_retries_full_snapshot(source, monkeypatch):
+    first = checked(source)
+    snapshots.discard(first["snapshot"])
+    clock = [first["full_checked_at_epoch"] + ADMISSION_TTL_SEC - 1]
+    monkeypatch.setattr(cache.time, "time", lambda: clock[0])
+    original_store = cache.store
+    calls = []
+
+    def store_then_expire(*args, **kwargs):
+        result = original_store(*args, **kwargs)
+        calls.append(kwargs["full_checked_at_epoch"])
+        if len(calls) == 1:
+            clock[0] += 2
+        return result
+
+    monkeypatch.setattr(cache, "store", store_then_expire)
+    result = checked(source)
+    assert result["sync_mode"] == "full"
+    assert result["full_checked_at_epoch"] == clock[0]
+    assert len(calls) == 2
+
+
+def test_guard_retries_full_scan_if_cache_expires_after_child_returns(monkeypatch):
+    from types import SimpleNamespace
+    from rem_card.app import startup_db_guard as guard
+    original = 1000.0
+    clock = original + ADMISSION_TTL_SEC
+    monkeypatch.setattr(cache.time, "time", lambda: clock)
+    runner = SimpleNamespace(full_checked_at_epoch=original, force_full_scan=False)
+    calls = []
+
+    def full_check(path, **kwargs):
+        assert runner.force_full_scan
+        calls.append(path)
+        runner.full_checked_at_epoch = None
+        return True, "ok", False
+
+    monkeypatch.setattr(guard, "_check_quick_with_retries", full_check)
+    retry, checked_monotonic, checked_epoch = guard._startup_full_check_times(
+        runner, "synthetic.db", baza_dir="synthetic", role="doctor")
+    assert retry == (True, "ok", False)
+    assert checked_epoch == clock and checked_monotonic <= guard.time.monotonic()
+    assert calls == ["synthetic.db"] and runner.force_full_scan is False
+
+
+def test_guard_never_renews_an_expired_receipt_if_runner_ignores_full_retry(monkeypatch):
+    from types import SimpleNamespace
+    from rem_card.app import startup_db_guard as guard
+    runner = SimpleNamespace(full_checked_at_epoch=1000.0)
+    monkeypatch.setattr(cache.time, "time", lambda: 1000.0 + ADMISSION_TTL_SEC)
+    monkeypatch.setattr(guard, "_check_quick_with_retries", lambda *a, **k: (True, "ok", False))
+    retry, _, _ = guard._startup_full_check_times(runner, "synthetic.db", baza_dir="synthetic", role="doctor")
+    assert retry[0] is False
+
+
 @pytest.mark.parametrize("change", ["identity", "schema", "migration", "cycle", "quarantine"])
 def test_live_source_safety_change_denies_cache_reuse(source, change):
     first = checked(source)

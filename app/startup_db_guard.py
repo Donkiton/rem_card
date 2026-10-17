@@ -604,6 +604,30 @@ def _publish_startup_quickcheck_result(db_path: str, *, check_mode="full", full_
         os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
 
 
+def _startup_full_check_times(runner, db_path, *, baza_dir, role):
+    """An expired cached receipt requests a real full scan, not a login error."""
+    original = getattr(runner, "full_checked_at_epoch", None)
+    if original is None:
+        return None, time.monotonic(), time.time()
+    try:
+        checked_epoch = float(original)
+        return None, role_admission.monotonic_full_check_time(checked_epoch), checked_epoch
+    except (ValueError, TypeError):
+        previous = getattr(runner, "force_full_scan", False)
+        runner.force_full_scan = True
+        try:
+            outcome = _check_quick_with_retries(db_path, baza_dir=baza_dir, role=role)
+        finally:
+            runner.force_full_scan = previous
+        after = getattr(runner, "full_checked_at_epoch", None)
+        if outcome[0] and after is not None:
+            try:
+                return outcome, role_admission.monotonic_full_check_time(float(after)), float(after)
+            except (ValueError, TypeError):
+                outcome = (False, "expired startup receipt after full-check retry", False)
+        return outcome, time.monotonic(), time.time()
+
+
 def _remember_startup_admission(runner, db_path, admission_probe, *, generation,
                                 checked_monotonic, checked_at_epoch):
     state = getattr(runner, "admission_receipt", None)
@@ -1345,14 +1369,10 @@ def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGua
             full_checked_monotonic = receipt["checked_monotonic"]
             full_checked_at_epoch = receipt["checked_at_epoch"]
         else:
-            original_checked_epoch = getattr(runner, "full_checked_at_epoch", None)
-            if original_checked_epoch is None:
-                full_checked_monotonic = time.monotonic()
-                full_checked_at_epoch = time.time()
-            else:
-                full_checked_at_epoch = float(original_checked_epoch)
-                full_checked_monotonic = role_admission.monotonic_full_check_time(
-                    full_checked_at_epoch)
+            retry, full_checked_monotonic, full_checked_at_epoch = _startup_full_check_times(
+                runner, db_path, baza_dir=baza_dir, role=role)
+            if retry is not None:
+                ok, result, confirmed_corruption = retry
         check_startup_cancelled()
         if ok:
             profile = _apply_network_safe_profile_with_lock(
