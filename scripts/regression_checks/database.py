@@ -1893,7 +1893,7 @@ def _check_schema_migration_failure_rolls_back(temp_root: str) -> tuple[bool, st
         _seed_legacy_patients_table(conn)
         controller = SQLiteWriteController(db_path=db_path, lock_path=paths["lock_path"], owner_id="migration_failure")
 
-        def broken_migration(target_conn, logger=None):
+        def broken_migration(target_conn, logger=None, *, allow_local_schema_upgrades=False):
             target_conn.execute("CREATE TABLE should_rollback(id INTEGER PRIMARY KEY)")
             raise RuntimeError("forced migration failure")
 

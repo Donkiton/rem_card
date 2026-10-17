@@ -39,7 +39,54 @@ def _crash_session():
 
 
 def _compiled_smoke_child() -> None:
-    """Importable no-op target that requires a real multiprocessing worker."""
+    """Exercise the shipped snapshot path in a real, isolated frozen worker."""
+    import json
+    import sqlite3
+    import tempfile
+    from pathlib import Path
+    from contextlib import closing
+
+    with tempfile.TemporaryDirectory(prefix="remcard_snapshot_smoke_", ignore_cleanup_errors=True) as temporary:
+        root = Path(temporary)
+        central = root / "central"
+        source = central / "archiv" / "rao_journal.db"
+        source.parent.mkdir(parents=True)
+        config = root / "data_path.json"
+        config.write_text(json.dumps({"baza_dir": str(central)}), encoding="utf-8")
+        os.environ.update({
+            "REMCARD_DATA_PATH_CONFIG": str(config), "REMCARD_BAZA_DIR": str(central),
+            "REMCARD_DEV_DATABASE_CONFIG": str(config),
+            "REMCARD_LOCAL_LOGS_DIR": str(root / "logs"),
+            "LOCALAPPDATA": str(root / "profile" / "local"),
+            "APPDATA": str(root / "profile" / "roaming"),
+            "PROGRAMDATA": str(root / "profile" / "programdata"),
+            "USERPROFILE": str(root / "profile" / "user"),
+            "REMCARD_LOCAL_METRICS_ENABLED": "0", "REMCARD_LOG_STORAGE_ENABLED": "0",
+        })
+        with closing(sqlite3.connect(source)) as conn, conn:
+            conn.executescript("""
+                CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+                INSERT INTO meta VALUES ('db_cycle_started_at', 'synthetic-smoke');
+                CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY);
+                INSERT INTO schema_migrations VALUES (26);
+                CREATE TABLE change_log(id INTEGER PRIMARY KEY);
+                INSERT INTO change_log VALUES (1);
+                CREATE TABLE example(value TEXT);
+                INSERT INTO example VALUES ('synthetic');
+            """)
+        before = source.read_bytes()
+        workspace = root / "snapshot"
+        workspace.mkdir()
+        from rem_card.app.startup_snapshot import check_snapshot
+        ok, payload, corrupt = check_snapshot(str(source), str(workspace))
+        if not ok or corrupt or not json.loads(payload).get("snapshot"):
+            raise RuntimeError(f"Compiled startup snapshot failed: {payload}")
+        if source.read_bytes() != before:
+            raise RuntimeError("Compiled startup snapshot changed its source")
+        import logging
+        from rem_card.app.runtime_log_retention import stop_log_maintenance
+        stop_log_maintenance()
+        logging.shutdown()
 
 
 def _run_compiled_worker_smoke(

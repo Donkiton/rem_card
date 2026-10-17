@@ -49,7 +49,7 @@ from rem_card.services.local_replica_health import (
     LocalReplicaRoleHealth,
     build_local_replica_health_path,
 )
-from rem_card.app.local_replica_worker import DEFAULT_REPLICA_SYNC_TIMEOUT_SEC
+from rem_card.app.local_replica_worker import DEFAULT_REPLICA_SYNC_TIMEOUT_SEC, MAX_REPLICA_SYNC_TIMEOUT_SEC
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
 from rem_card.app.network_maintenance import find_active_network_sessions, network_maintenance_lock
@@ -162,7 +162,7 @@ LOCAL_REPLICA_MAX_STALE_SEC = max(
 LOCAL_REPLICA_SYNC_TIMEOUT_SEC = max(
     2.0,
     min(
-        15.0,
+        MAX_REPLICA_SYNC_TIMEOUT_SEC,
         float(
             os.environ.get(
                 "REMCARD_LOCAL_REPLICA_SYNC_TIMEOUT_SEC",
@@ -1463,7 +1463,7 @@ class DatabaseManager:
         age_sec = max(0.0, time.time() - checked_at)
         if age_sec > STARTUP_GUARD_QUICKCHECK_MAX_AGE_SEC:
             return False, age_sec
-        if state.get("check_mode") == "recent":
+        if state.get("check_mode") in {"recent", "snapshot", "admission"}:
             from rem_card.app.role_admission import recent_admission, admission_still_valid
             receipt, _ = recent_admission(str(fingerprint.get("db_path_norm") or ""))
             if (not receipt or not admission_still_valid(receipt)
@@ -1649,6 +1649,7 @@ class DatabaseManager:
             logger=logger,
             controller=self.write_controller,
             source="schema_init",
+            runtime_context=getattr(self, "runtime_context", None),
         )
 
     def _ensure_cycle_meta_initialized(self):
@@ -1727,6 +1728,7 @@ class DatabaseManager:
             self._local_replica.set_failure_callback(
                 self._local_replica_failure_callback
             )
+            self._seed_local_replica_from_startup()
             self._local_replica.start()
             logger.info(
                 "Local-first sync enabled (interval=%ss timeout=%ss local=%s)",
@@ -1737,6 +1739,30 @@ class DatabaseManager:
         except Exception as exc:
             self._local_replica = None
             logger.warning("Failed to enable local-first sync replica: %s", exc)
+
+    def _seed_local_replica_from_startup(self):
+        """Reuse checked bytes, but let the replica worker confirm freshness."""
+        from rem_card.app.role_admission import recent_admission
+        from rem_card.app.startup_snapshot import copy_for_replica
+        candidate = None
+        try:
+            receipt, _ = recent_admission(self.db_path)
+            if not receipt:
+                return
+            candidate = copy_for_replica(receipt, self._local_replica_path)
+            if candidate:
+                self._local_replica.install_startup_snapshot(candidate)
+                self._record_startup_metric("local_replica_startup_seed", 1)
+        except Exception as exc:
+            # Seeding is an optimization. Normal async synchronization can use
+            # the previous generation and must remain enabled on local failure.
+            logger.warning("Startup replica seed unavailable; normal sync will continue: %s", exc)
+        finally:
+            if candidate:
+                try:
+                    os.remove(candidate)
+                except FileNotFoundError:
+                    pass
 
     def _stop_local_replica_sync(self, timeout_sec: float = 2.0) -> bool:
         replica = self._local_replica

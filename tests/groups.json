@@ -114,7 +114,8 @@
     "tests/test_rework_guardrails.py",
     "tests/test_initial_status_queue.py",
     "tests/test_order_latest_admin_index.py",
-    "tests/test_daily_backup_scheduler.py"
+    "tests/test_daily_backup_scheduler.py",
+    "tests/test_startup_snapshot.py"
   ],
   "ui": [
     "tests/test_sector_ivl_event_edit.py",

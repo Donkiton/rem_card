@@ -7,6 +7,9 @@ from rem_card.app.client_build_profile import database_upgrades_disabled, requir
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
 SCHEMA_FASTPATH_REV = 27
 SCHEMA_MIN_MIGRATION_VERSION = 27
+# Migration 27 only adds a query optimization. A client built without database
+# upgrades can use the complete version 26 storage contract without that index.
+SCHEMA_NO_UPGRADE_MIN_MIGRATION_VERSION = 26
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -322,7 +325,9 @@ def _schema_contract_satisfied(conn: sqlite3.Connection, deep_column_check: bool
     if not _all_sqlite_master_objects_exist(conn, "table", _FASTPATH_REQUIRED_TABLES):
         return False
 
-    if not _schema_migration_applied(conn, SCHEMA_MIN_MIGRATION_VERSION):
+    no_upgrades = database_upgrades_disabled()
+    min_version = SCHEMA_NO_UPGRADE_MIN_MIGRATION_VERSION if no_upgrades else SCHEMA_MIN_MIGRATION_VERSION
+    if not _schema_migration_applied(conn, min_version):
         return False
 
     # Version 26 introduced explicit zero-intake facts.  Some databases had
@@ -333,6 +338,8 @@ def _schema_contract_satisfied(conn: sqlite3.Connection, deep_column_check: bool
         return False
 
     required_indexes = list(_FASTPATH_REQUIRED_INDEXES)
+    if no_upgrades:
+        required_indexes.remove("idx_admin_committed_planned_expr_order_id")
     if _table_exists(conn, "operation_cases"):
         required_indexes.append("idx_operation_cases_started_at_id")
     if not _all_sqlite_master_objects_exist(conn, "index", tuple(required_indexes)):
@@ -762,8 +769,10 @@ def _create_medical_audit_triggers(
     )
 
 
-def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Logger] = None):
-    if database_upgrades_disabled():
+def ensure_unified_schema(
+    conn: sqlite3.Connection, logger: Optional[logging.Logger] = None, *, allow_local_schema_upgrades: bool = False,
+):
+    if database_upgrades_disabled() and not allow_local_schema_upgrades:
         require_compatible_schema(is_unified_schema_ready(conn))
         return
     logger = logger or logging.getLogger(__name__)

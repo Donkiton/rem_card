@@ -282,10 +282,38 @@ def test_actual_qt_role_runner_uses_child_and_keeps_timers_alive(database):
     timer.start()
     try:
         runner = role_startup_check_runner(threading.Event(), preparing.append)
-        assert _enter(runner).ok
+        result = _enter(runner)
+        assert result.ok, result.technical_reason
         assert _enter(runner, "nurse").ok
-        assert preparing == ["Проверка целостности базы…", "Проверка доступности базы…"]
+        assert preparing[0] == "Создание проверенной копии базы…"
+        assert preparing[-1] == "Проверка доступности базы…"
         assert len(ticks) > 10
     finally:
         timer.stop()
+        app.processEvents()
+
+
+def test_busy_snapshot_fallback_keeps_a_live_admission_without_seed(database):
+    from PySide6.QtWidgets import QApplication
+    from rem_card.app.local_replica_worker import replica_snapshot_gate_path
+    from rem_card.app.sqlite_shared import FileWriteLock
+    from rem_card.ui.shared.startup_check import role_startup_check_runner
+    from rem_card.data.dao.db_manager import DatabaseManager
+    app = QApplication.instance() or QApplication([])
+    gate = FileWriteLock(replica_snapshot_gate_path(str(database)))
+    assert gate.acquire(f"synthetic:{os.getpid()}:other_copy", "synthetic")
+    try:
+        runner = role_startup_check_runner(threading.Event(), lambda text: None)
+        result = _enter(runner)
+        assert result.ok, result.technical_reason
+        receipt, _ = admission.recent_admission(str(database))
+        assert receipt and receipt["snapshot"] is None
+        handoff = json.loads(os.environ[admission.HANDOFF_ENV])
+        assert handoff["check_mode"] == "admission"
+        manager = DatabaseManager.__new__(DatabaseManager)
+        assert manager._startup_guard_quickcheck_matches(handoff)[0]
+        assert _enter(runner, "nurse").ok
+        assert admission.recent_admission(str(database))[0] is receipt
+    finally:
+        gate.release()
         app.processEvents()

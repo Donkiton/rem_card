@@ -185,10 +185,10 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
     return bool(row and int(row[0] or 0) == 2)
 
 
-def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
+def _apply_operblock_schema(cursor: sqlite3.Cursor, *, allow_local_schema_upgrades: bool = False) -> None:
     conn = cursor.connection
     from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
-    if database_upgrades_disabled():
+    if database_upgrades_disabled() and not allow_local_schema_upgrades:
         require_compatible_schema(is_operblock_schema_ready(conn))
         return
 
@@ -742,11 +742,14 @@ def ensure_operblock_schema(db_manager: Any) -> OperBlockSchemaResult:
     if conn is None or controller is None:
         raise RuntimeError("Соединение с БД оперблока не готово.")
 
+    from rem_card.app.client_build_profile import local_operblock_schema_upgrades_allowed
     with controller.connection_guard(conn):
+        allow_local_schema_upgrades = local_operblock_schema_upgrades_allowed(
+            conn, getattr(db_manager, 'runtime_context', None))
         if is_operblock_schema_ready(conn):
             return OperBlockSchemaResult(migrated=False)
         from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
-        if database_upgrades_disabled():
+        if database_upgrades_disabled() and not allow_local_schema_upgrades:
             require_compatible_schema(False)
 
     backup_path = ""
@@ -756,7 +759,10 @@ def ensure_operblock_schema(db_manager: Any) -> OperBlockSchemaResult:
     if not backup_path:
         raise RuntimeError("Не удалось создать backup перед миграцией схемы оперблока.")
 
-    db_manager.run_write_operation(_apply_operblock_schema, source="operblock_schema_migration")
+    db_manager.run_write_operation(
+        lambda cursor: _apply_operblock_schema(cursor, allow_local_schema_upgrades=allow_local_schema_upgrades),
+        source="operblock_schema_migration",
+    )
 
     with controller.connection_guard(conn):
         if not is_operblock_schema_ready(conn):
