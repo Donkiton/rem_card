@@ -93,11 +93,11 @@ def main() -> None:
         raise RuntimeError("First-run chooser unexpectedly required a central database")
     if not all(
         first.welcome.role_buttons[role].isEnabled()
-        for role in ("operblock_planned", "operblock_emergency")
+        for role in ("doctor", "nurse", "operblock_planned", "operblock_emergency")
     ):
-        raise RuntimeError("First-run chooser did not keep local operblock available")
+        raise RuntimeError("First-run chooser did not keep all role cards available")
     # A central role requests configuration only when the user selects it.
-    first.enter_role("doctor")
+    first.welcome.role_buttons["doctor"].click()
     wait_until(app, lambda: errors or bool(first.root))
     if errors:
         raise RuntimeError(f"First-run central configuration failed: {errors}")

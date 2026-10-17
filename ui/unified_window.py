@@ -140,19 +140,22 @@ class UnifiedWindow(QMainWindow):
         if self.role_window:
             return self.role_window.hide_loading_indicator(*args, **kwargs)
 
-    def _error(self, exc):
+    def _error(self, exc, *, database_setup=False):
         self.welcome.set_preparing()
-        if isinstance(exc, CentralUnavailable):
-            self._central_unavailable = True
-            self._compatibility_error = ""
-        elif isinstance(exc, CompatibilityError):
-            self._compatibility_error = str(exc)
-            self._check_updates()
+        # A rejected candidate is not the configured database. Keep the
+        # configuration actions available so another folder can be selected.
+        if not database_setup:
+            if isinstance(exc, CentralUnavailable):
+                self._central_unavailable = True
+                self._compatibility_error = ""
+            elif isinstance(exc, CompatibilityError):
+                self._compatibility_error = str(exc)
+                self._check_updates()
         self._busy = False
         if self.container is None and self.lease is None:
             self._entry_cancel = None
         self.loading.set_error(str(exc))
-        local_allowed = self._central_unavailable and not self._compatibility_error
+        local_allowed = database_setup or (self._central_unavailable and not self._compatibility_error)
         self._set_welcome_access_state(str(exc), not local_allowed)
         self.stack.setCurrentWidget(self.welcome)
         lifecycle_event("unified_operation_failed", session_id=self.session_id, role=self.role,
@@ -191,9 +194,9 @@ class UnifiedWindow(QMainWindow):
         self.stack.setCurrentWidget(self.welcome)
         startup_diagnostics.event("chooser_ready")
         self._set_welcome_access_state(
-            "Основная база ещё не настроена. Оперблок доступен локально; "
-            "для врача, медсестры и настроек укажите общую базу.",
-            True,
+            "Основная база ещё не настроена. Выберите врача, медсестру или настройки "
+            "для подключения. Оперблок доступен локально.",
+            False,
         )
         self._dispatch_startup_role()
 
@@ -1412,9 +1415,9 @@ class UnifiedWindow(QMainWindow):
         if not accepted:
             if first_run:
                 self._set_welcome_access_state(
-                    "Для врача, медсестры и настроек выберите папку общей базы. "
-                    "Оперблок продолжает работать локально.",
-                    True,
+                    "Выберите врача, медсестру или настройки, чтобы подключить общую базу. "
+                    "Оперблок доступен локально.",
+                    False,
                 )
                 self.stack.setCurrentWidget(self.welcome)
             return
@@ -1452,7 +1455,7 @@ class UnifiedWindow(QMainWindow):
             elif QMessageBox.question(self, "Путь сохранён", "Перезапустить RemCard для подключения к выбранной базе?") == QMessageBox.Yes:
                 self._restart = True
                 self.close()
-        self._async(validate, saved)
+        self._async(validate, saved, lambda exc: self._error(exc, database_setup=first_run))
 
     def edit_institution(self):
         if self.container is None or self._leaving:

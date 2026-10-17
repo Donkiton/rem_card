@@ -204,6 +204,21 @@ def test_role_preparation_stays_on_chooser_and_error_restores_controls(shell, mo
     assert shell.welcome.theme_switch.isEnabled() == shell.welcome.theme_switch.runtime_enabled
 
 
+def test_configured_database_compatibility_error_still_blocks_central_roles(shell, monkeypatch, tmp_path):
+    from rem_card.app.unified_runtime import CompatibilityError
+
+    shell.root = str(tmp_path)
+    updates = []
+    monkeypatch.setattr(shell, '_check_updates', lambda: updates.append(True))
+    shell._error(CompatibilityError('Требуется обновление RemCard'))
+    assert shell._compatibility_error == 'Требуется обновление RemCard'
+    assert updates == [True]
+    assert not shell.welcome.role_buttons['doctor'].isEnabled()
+    assert not shell.welcome.role_buttons['nurse'].isEnabled()
+    assert shell.welcome.role_buttons['operblock_planned'].isEnabled()
+    assert shell.welcome.role_buttons['operblock_emergency'].isEnabled()
+
+
 def test_entry_theme_updates_chrome_loading_and_survives_resize(shell):
     for mode in ('light', 'dark', 'light'):
         shell.welcome.set_theme(mode)
