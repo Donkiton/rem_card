@@ -579,11 +579,14 @@ def _check_quick_with_retries(
 def _publish_startup_quickcheck_result(db_path: str, *, check_mode="full", full_checked_at_epoch=None) -> None:
     try:
         stat_result = os.stat(db_path)
+        checked_at_epoch = time.time()
+        if full_checked_at_epoch is None and check_mode == "full":
+            full_checked_at_epoch = checked_at_epoch
         os.environ[STARTUP_GUARD_QUICKCHECK_ENV] = json.dumps(
             {
                 "result": "ok",
                 "pid": os.getpid(),
-                "checked_at_epoch": time.time(),
+                "checked_at_epoch": checked_at_epoch,
                 "check_mode": check_mode,
                 "full_checked_at_epoch": full_checked_at_epoch,
                 "db_path_norm": os.path.normcase(os.path.abspath(db_path)),
