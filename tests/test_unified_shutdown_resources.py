@@ -4,6 +4,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -30,17 +31,21 @@ class _ControlledThread:
 
 
 class _Replica:
-    def __init__(self, thread):
+    def __init__(self, thread, *, stop_result=True):
         self._thread = thread
         self._stop_evt = threading.Event()
         self._fast_sync_evt = threading.Event()
         self.stop_calls = 0
+        self.stop_result = stop_result
 
     def set_failure_callback(self, _callback) -> None:
         pass
 
-    def stop(self) -> None:
+    def stop(self, *, timeout_sec=2.0) -> bool:
         self.stop_calls += 1
+        self._stop_evt.set()
+        self._fast_sync_evt.set()
+        return self.stop_result and not self._thread.is_alive()
 
 
 class _NetworkWorker:
@@ -134,11 +139,11 @@ def test_replica_is_not_force_closed_while_its_thread_is_alive(tmp_path, monkeyp
     assert manager.close(timeout_sec=0.1) is False
     assert manager._local_replica is replica
     assert replica._stop_evt.is_set() and replica._fast_sync_evt.is_set()
-    assert replica.stop_calls == 0
+    assert replica.stop_calls == 1
 
     thread.alive = False
     assert manager.close(timeout_sec=0.1) is True
-    assert replica.stop_calls == 1
+    assert replica.stop_calls == 2
     assert manager._local_replica is None
 
 
@@ -156,6 +161,81 @@ def test_busy_network_writer_is_retained_instead_of_terminated(tmp_path, monkeyp
     assert manager.close(timeout_sec=0.1) is True
     assert worker.close_calls == 1
     assert manager._network_write_worker is None
+
+
+def test_replica_process_stop_failure_retains_owner_after_thread_exits(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    replica = _Replica(_ControlledThread(alive=False), stop_result=False)
+    manager._local_replica = replica
+
+    assert manager.close(timeout_sec=0.1) is False
+    assert replica.stop_calls == 1
+    assert manager._local_replica is replica
+    assert manager._remcard_conn.execute("SELECT 1").fetchone() == (1,)
+
+    replica.stop_result = True
+    assert manager.close(timeout_sec=0.1) is True
+    assert replica.stop_calls == 2
+    assert manager._local_replica is None
+
+
+@pytest.mark.parametrize("operation,lifecycle", [
+    ("rotate_database_manually", "rotate_database_now"),
+    ("cancel_manual_rotation", "cancel_manual_rotation"),
+])
+def test_rotation_retains_unfinished_replica_and_only_restarts_after_successful_stop(
+    tmp_path, monkeypatch, operation, lifecycle,
+) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    manager.runtime_context = SimpleNamespace(mode="network")
+    manager.active_rotation_role_locks = lambda _context=None: []
+    manager.active_rotation_emergency_sessions = lambda: []
+    manager._rotation_blocking_role_lock_paths = lambda: {}
+    manager._rotation_blocking_emergency_roots = lambda: []
+    manager._rotation_ignored_lock_nonces = lambda _context=None: {}
+    manager._init_connections = Mock()
+    manager._close_central_read_connection = Mock()
+    manager._start_local_replica_sync = Mock()
+    events = []
+    manager.set_rotation_quiesce_hooks(
+        lambda: events.append("paused") or {"ok": True},
+        lambda _token: events.append("resumed"),
+    )
+    replica = _Replica(_ControlledThread(alive=False), stop_result=False)
+    manager._local_replica = replica
+    connection = manager._remcard_conn
+    rotation = Mock(return_value={"status": "db_lock_busy"})
+    monkeypatch.setattr(dbm, lifecycle, rotation)
+
+    result = getattr(manager, operation)()
+
+    assert result == {"status": "rotation_quiesce_failed", "reason": "local_replica_stop_failed"}
+    assert manager._local_replica is replica
+    assert connection.execute("SELECT 1").fetchone() == (1,)
+    rotation.assert_not_called()
+    manager._start_local_replica_sync.assert_not_called()
+    manager._close_central_read_connection.assert_not_called()
+    assert events == ["paused", "resumed"]
+
+    replica.stop_result = True
+    assert getattr(manager, operation)() == {"status": "db_lock_busy"}
+    rotation.assert_called_once()
+    manager._start_local_replica_sync.assert_called_once()
+    assert replica.stop_calls == 2
+    assert manager._local_replica is None
+    assert events == ["paused", "resumed", "paused", "resumed"]
+
+
+def test_start_never_replaces_retained_replica_owner(tmp_path, monkeypatch) -> None:
+    manager = _manager(tmp_path, monkeypatch)
+    replica = object()
+    manager._local_replica = replica
+    constructor = Mock(side_effect=AssertionError("must retain existing owner"))
+    monkeypatch.setattr(dbm, "LocalReplicaSync", constructor)
+    manager._start_local_replica_sync()
+    assert manager._local_replica is replica
+    constructor.assert_not_called()
+    manager._remcard_conn.close()
 
 
 def test_outbox_and_failed_read_connection_remain_visible_until_closed(tmp_path, monkeypatch) -> None:

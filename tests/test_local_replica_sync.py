@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import shutil
 import socket
 import sqlite3
 import threading
@@ -22,6 +23,7 @@ from rem_card.app.local_replica_worker import (
     LocalReplicaSnapshotBusy,
     LocalReplicaWriterBusy,
     LocalReplicaWorkerClient,
+    LocalReplicaWorkerError,
     LocalReplicaWorkerTimeout,
     _open_central_readonly,
     _sync_snapshot,
@@ -341,6 +343,325 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertFalse(temp_path.exists())
         self.assertFalse(list(lease_dir.glob("*.lock")))
 
+    def test_worker_mutex_wait_obeys_same_hard_deadline(self):
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            timeout_sec=0.2,
+        )
+        self.assertTrue(client._mutex.acquire(timeout=0.1))
+        started = time.monotonic()
+        try:
+            with self.assertRaises(LocalReplicaWorkerTimeout) as captured:
+                client.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / "mutex-timeout.sync_tmp.db"),
+                )
+        finally:
+            client._mutex.release()
+        self.assertEqual(captured.exception.stage, "mutex_wait")
+        self.assertLess(time.monotonic() - started, 0.7)
+        self.assertIsNone(client._process)
+
+    def test_progress_storm_cannot_extend_worker_deadline(self):
+        class ProgressPipe:
+            def send(self, _message):
+                return None
+
+            def poll(self, _timeout):
+                return True
+
+            def recv(self):
+                return {"progress": "backup"}
+
+            def close(self):
+                return None
+
+        class StoppableProcess:
+            pid = None
+
+            def __init__(self):
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive
+
+            def terminate(self):
+                self.alive = False
+
+            def kill(self):
+                self.alive = False
+
+            def join(self, timeout=None):
+                del timeout
+
+            def close(self):
+                return None
+
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            timeout_sec=0.2,
+        )
+        client._process = StoppableProcess()
+        client._pipe = ProgressPipe()
+        started = time.monotonic()
+        with self.assertRaises(LocalReplicaWorkerTimeout) as captured:
+            client.sync(
+                local_state={},
+                temp_db_path=str(self.root / "progress-storm.sync_tmp.db"),
+            )
+        self.assertEqual(captured.exception.stage, "backup")
+        self.assertLess(time.monotonic() - started, 0.7)
+
+    def test_failed_termination_retains_and_fences_worker_handles(self):
+        class StubbornProcess:
+            pid = 987654
+
+            def __init__(self):
+                self.alive = True
+                self.terminate_calls = 0
+                self.kill_calls = 0
+
+            def is_alive(self):
+                return self.alive
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+
+            def join(self, timeout=None):
+                del timeout
+
+        process = StubbornProcess()
+        pipe = SimpleNamespace(close=lambda: None)
+        client = LocalReplicaWorkerClient(central_db_path=str(self.central_path))
+        active_temp = self.root / "still-owned.sync_tmp.db"
+        active_temp.write_bytes(b"protected partial snapshot")
+        sidecar = Path(f"{active_temp}-wal")
+        sidecar.write_bytes(b"protected WAL")
+        client._process = process
+        client._pipe = pipe
+        client._active_temp_path = str(active_temp)
+
+        self.assertFalse(client.can_cleanup_temp_path(str(active_temp)))
+        self.assertFalse(client._terminate())
+        self.assertIs(client._process, process)
+        self.assertIs(client._pipe, pipe)
+        self.assertTrue(client._fenced)
+        self.assertFalse(client.can_cleanup_temp_path(str(active_temp)))
+        self.assertTrue(active_temp.exists())
+        self.assertTrue(sidecar.exists())
+        with self.assertRaises(LocalReplicaWorkerError):
+            client._ensure_started()
+        self.assertEqual(process.terminate_calls, 2)
+        self.assertEqual(process.kill_calls, 2)
+        process.alive = False
+        with patch.object(
+            client,
+            "_bounded_cleanup_stopped_worker_locks",
+            return_value=True,
+        ):
+            self.assertTrue(client._terminate())
+        self.assertIsNone(client._process)
+        self.assertIsNone(client._pipe)
+        self.assertFalse(active_temp.exists())
+        self.assertFalse(sidecar.exists())
+        self.assertEqual(client._active_temp_path, "")
+
+    def test_failed_stopped_snapshot_unlink_retains_path_for_retry(self):
+        client = LocalReplicaWorkerClient(central_db_path=str(self.central_path))
+        active_temp = self.root / "stopped-unlink-denied.sync_tmp.db"
+        active_temp.write_bytes(b"stopped snapshot")
+        client._active_temp_path = str(active_temp)
+        original_remove = os.remove
+
+        def deny_snapshot_unlink(path):
+            if os.path.abspath(path) == os.path.abspath(active_temp):
+                raise PermissionError("snapshot temporarily held by antivirus")
+            return original_remove(path)
+
+        with patch("rem_card.app.local_replica_worker.os.remove", side_effect=deny_snapshot_unlink):
+            self.assertFalse(client._terminate())
+        self.assertEqual(client._active_temp_path, str(active_temp))
+        self.assertTrue(active_temp.exists())
+        self.assertTrue(client._terminate())
+        self.assertFalse(active_temp.exists())
+        self.assertEqual(client._active_temp_path, "")
+
+    def test_liveness_probe_error_is_not_treated_as_process_death(self):
+        class UnknownProcess:
+            pid = 987654
+
+            def is_alive(self):
+                raise OSError("liveness unavailable")
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+            def join(self, timeout=None):
+                del timeout
+
+        process = UnknownProcess()
+        pipe = SimpleNamespace(close=lambda: None)
+        client = LocalReplicaWorkerClient(central_db_path=str(self.central_path))
+        client._process = process
+        client._pipe = pipe
+
+        self.assertFalse(client._terminate())
+        self.assertIs(client._process, process)
+        self.assertIs(client._pipe, pipe)
+        self.assertTrue(client._fenced)
+
+    def test_unconfirmed_cleanup_is_retained_and_coalesced(self):
+        class UnknownCleanup:
+            def is_alive(self):
+                return True
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+            def join(self, timeout=None):
+                del timeout
+
+        cleanup = UnknownCleanup()
+        pipe = SimpleNamespace(close=lambda: None, poll=lambda _timeout: False)
+        client = LocalReplicaWorkerClient(central_db_path=str(self.central_path))
+        client._cleanup_process = cleanup
+        client._cleanup_pipe = pipe
+        client._cleanup_required_pid = 987654
+
+        with patch("rem_card.app.local_replica_worker.multiprocessing.get_context") as context:
+            self.assertFalse(client._bounded_cleanup_stopped_worker_locks(987654))
+            self.assertFalse(client._bounded_cleanup_stopped_worker_locks(987654))
+
+        context.assert_not_called()
+        self.assertIs(client._cleanup_process, cleanup)
+        self.assertIs(client._cleanup_pipe, pipe)
+
+    def test_stopped_worker_cleanup_is_coalesced_without_daemon_threads(self):
+        class StopsOnTerminate:
+            pid = 987654
+
+            def __init__(self):
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive
+
+            def terminate(self):
+                self.alive = False
+
+            def join(self, timeout=None):
+                del timeout
+
+            def close(self):
+                return None
+
+        client = LocalReplicaWorkerClient(central_db_path=str(self.central_path))
+        client._process = StopsOnTerminate()
+        client._pipe = SimpleNamespace(close=lambda: None)
+        with (
+            patch.object(client, "_bounded_cleanup_stopped_worker_locks") as cleanup,
+            patch("rem_card.app.local_replica_worker.threading.Thread") as thread_factory,
+        ):
+            self.assertTrue(client._terminate())
+            self.assertTrue(client._terminate())
+
+        cleanup.assert_called_once_with(987654, deadline=None)
+        thread_factory.assert_not_called()
+
+    def test_close_cancels_concurrent_sync_without_racing_pipe(self):
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            snapshot_lease_dir=str(self.root / "close-race-leases"),
+            timeout_sec=3.0,
+        )
+        result = {}
+
+        def run_sync():
+            try:
+                client.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / "close-race.sync_tmp.db"),
+                    debug_delay_sec=1.0,
+                )
+            except Exception as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=run_sync, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 2.0
+        while client._process is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNotNone(client._process)
+        self.assertTrue(client.close(timeout_sec=2.0))
+        thread.join(timeout=2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertIsInstance(result.get("error"), LocalReplicaWorkerError)
+        self.assertIsNone(client._process)
+        self.assertIsNone(client._pipe)
+
+    def test_snapshot_progress_names_real_io_stages(self):
+        stages = []
+        temp_path = self.root / "progress-stages.sync_tmp.db"
+        result = _sync_snapshot_with_network_lease(
+            {
+                "central_db_path": str(self.central_path),
+                "temp_db_path": str(temp_path),
+                "local_state": {},
+                "snapshot_lease_path": str(self.root / "stage-leases" / "reader.lock"),
+                "snapshot_gate_path": str(self.root / "stage-gate.lock"),
+                "writer_lock_path": str(self.root / "db.lock"),
+                "lease_duration_sec": 15.0,
+            },
+            progress_callback=stages.append,
+        )
+        self.assertEqual(result["status"], "snapshot_ready")
+        for stage in (
+            "lease_acquire",
+            "central_probe",
+            "central_open",
+            "state_read",
+            "snapshot_gate_acquire",
+            "backup",
+            "checkpoint",
+            "quick_check",
+            "fsync",
+            "snapshot_gate_release",
+            "lease_release",
+        ):
+            self.assertIn(stage, stages)
+        self.assertLess(stages.index("backup"), stages.index("quick_check"))
+        self.assertLess(stages.index("quick_check"), stages.index("fsync"))
+
+    def test_release_progress_failure_cannot_leave_snapshot_locks(self):
+        for failed_stage in ("snapshot_gate_release", "lease_release"):
+            with self.subTest(failed_stage=failed_stage):
+                gate = self.root / f"{failed_stage}.gate.lock"
+                lease = self.root / f"{failed_stage}.lease.lock"
+
+                def broken_progress(stage):
+                    if stage == failed_stage:
+                        raise BrokenPipeError("diagnostic IPC closed during release")
+
+                result = _sync_snapshot_with_network_lease(
+                    {"central_db_path": str(self.central_path), "local_state": {},
+                     "temp_db_path": str(self.root / f"{failed_stage}.tmp.db"),
+                     "snapshot_gate_path": str(gate), "snapshot_lease_path": str(lease),
+                     "writer_lock_path": str(self.root / "db.lock")},
+                    progress_callback=broken_progress,
+                )
+                self.assertEqual(result["status"], "snapshot_ready")
+                self.assertFalse(gate.exists())
+                self.assertFalse(lease.exists())
+
     def test_failed_sync_keeps_recent_local_replica_until_it_is_stale(self):
         self.replica = LocalReplicaSync(
             central_db_path=str(self.central_path),
@@ -371,6 +692,298 @@ class LocalReplicaSyncTest(unittest.TestCase):
         )
         self.assertTrue(self.replica.sync_once())
         self.assertTrue(self.replica.is_ready(max_stale_sec=10.0))
+
+    def test_failed_new_generation_open_rolls_back_previous_valid_replica(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_interval_sec=60.0,
+        )
+        self.assertTrue(self.replica.sync_once())
+        previous_health = self.replica.health_snapshot()
+        previous_rows = self.replica.fetch_all(
+            "SELECT value FROM replica_items ORDER BY id"
+        )
+        conn = sqlite3.connect(self.central_path)
+        try:
+            cursor = conn.execute(
+                "INSERT INTO replica_items(value) VALUES ('new-generation')"
+            )
+            conn.execute(
+                "INSERT INTO change_log(entity_name, entity_id, admission_id, action) "
+                "VALUES ('replica_items', ?, 1, 'insert')",
+                (cursor.lastrowid,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        original_open = self.replica._open_validated_local
+        calls = 0
+
+        def fail_new_generation_once(path):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise sqlite3.DatabaseError("simulated promoted generation open failure")
+            return original_open(path)
+
+        with patch.object(
+            self.replica,
+            "_open_validated_local",
+            side_effect=fail_new_generation_once,
+        ):
+            self.assertFalse(self.replica.sync_once())
+
+        self.assertEqual(
+            self.replica.fetch_all("SELECT value FROM replica_items ORDER BY id"),
+            previous_rows,
+        )
+        health = self.replica.health_snapshot()
+        self.assertEqual(health["last_sync_ok_ts"], previous_health["last_sync_ok_ts"])
+        self.assertEqual(health["state"], previous_health["state"])
+        self.assertTrue(health["degraded"])
+        self.assertFalse(list(self.root.glob("local.db.rollback.*")))
+
+    def test_rollback_copy_failure_reopens_previous_generation(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_interval_sec=60.0,
+        )
+        self.assertTrue(self.replica.sync_once())
+        previous_rows = self.replica.fetch_all(
+            "SELECT value FROM replica_items ORDER BY id"
+        )
+        replacement = self.root / "valid-new-generation.db"
+        _create_central_database(
+            replacement,
+            cycle="cycle-b",
+            values=["replacement"],
+        )
+
+        with (
+            patch("rem_card.app.local_replica_sync.os.link", side_effect=OSError("link denied")),
+            patch("rem_card.app.local_replica_sync.shutil.copy2", side_effect=OSError("copy denied")),
+        ):
+            with self.assertRaises(OSError):
+                self.replica._swap_local_replica(str(replacement))
+
+        self.assertEqual(
+            self.replica.fetch_all("SELECT value FROM replica_items ORDER BY id"),
+            previous_rows,
+        )
+
+    def test_partial_rollback_copy_cannot_overwrite_intact_previous_generation(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path), local_db_path=str(self.local_path),
+        )
+        self.assertTrue(self.replica.sync_once())
+        previous_bytes = self.local_path.read_bytes()
+        replacement = self.root / "partial-copy-generation.db"
+        _create_central_database(replacement, cycle="cycle-b", values=["replacement"])
+
+        def fail_after_partial_copy(_source, destination):
+            Path(destination).write_bytes(b"incomplete rollback")
+            raise OSError("disk full after a partial copy")
+
+        with (
+            patch("rem_card.app.local_replica_sync.os.link", side_effect=OSError("no hardlinks")),
+            patch("rem_card.app.local_replica_sync.shutil.copy2", side_effect=fail_after_partial_copy),
+        ):
+            with self.assertRaises(OSError):
+                self.replica._swap_local_replica(str(replacement))
+
+        self.assertEqual(self.local_path.read_bytes(), previous_bytes)
+        self.assertEqual(
+            [tuple(row) for row in self.replica.fetch_all("SELECT value FROM replica_items ORDER BY id")],
+            [("one",), ("two",)],
+        )
+        self.assertFalse(list(self.root.glob("local.db.rollback.*")))
+
+    def test_promotion_replace_failure_reopens_previous_generation(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_interval_sec=60.0,
+        )
+        self.assertTrue(self.replica.sync_once())
+        previous_rows = self.replica.fetch_all(
+            "SELECT value FROM replica_items ORDER BY id"
+        )
+        replacement = self.root / "replace-failure-generation.db"
+        _create_central_database(
+            replacement,
+            cycle="cycle-b",
+            values=["replacement"],
+        )
+        original_replace = os.replace
+
+        def fail_promotion(source, target):
+            if os.path.abspath(source) == os.path.abspath(replacement):
+                raise PermissionError("simulated atomic promotion failure")
+            return original_replace(source, target)
+
+        with patch(
+            "rem_card.app.local_replica_sync.os.replace",
+            side_effect=fail_promotion,
+        ):
+            with self.assertRaises(PermissionError):
+                self.replica._swap_local_replica(str(replacement))
+
+        self.assertEqual(
+            self.replica.fetch_all("SELECT value FROM replica_items ORDER BY id"),
+            previous_rows,
+        )
+        self.assertTrue(replacement.exists())
+
+    def test_restart_recovers_validated_rollback_artifact(self):
+        rollback = Path(f"{self.local_path}.rollback.recovery")
+        shutil.copy2(self.central_path, rollback)
+        self.local_path.write_bytes(b"broken promoted generation")
+        replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_interval_sec=60.0,
+            worker_client=_FailingWorkerClient(),
+        )
+
+        try:
+            replica._ensure_local_conn()
+
+            self.assertEqual(
+                [
+                    tuple(row)
+                    for row in replica.fetch_all(
+                        "SELECT value FROM replica_items ORDER BY id"
+                    )
+                ],
+                [("one",), ("two",)],
+            )
+            self.assertFalse(rollback.exists())
+            self.assertEqual(replica.health_snapshot()["last_sync_ok_ts"], 0.0)
+        finally:
+            replica._close_local_conn()
+
+    def test_stop_before_worker_response_prevents_late_publication(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        class DelayedSnapshotWorker:
+            def sync(worker_self, **kwargs):
+                shutil.copy2(self.central_path, kwargs["temp_db_path"])
+                started.set()
+                release.wait(2.0)
+                return {
+                    "status": "snapshot_ready",
+                    "state": {
+                        "db_cycle": "cycle-a",
+                        "change_cursor": 2,
+                        "schema_revision": "23",
+                    },
+                    "temp_db_path": kwargs["temp_db_path"],
+                }
+
+            def close(worker_self, **_kwargs):
+                release.set()
+                return True
+
+        replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_interval_sec=60.0,
+            worker_client=DelayedSnapshotWorker(),
+        )
+        result = {}
+        thread = threading.Thread(
+            target=lambda: result.setdefault("sync", replica.sync_once()),
+            daemon=True,
+        )
+        replica._thread = thread
+        thread.start()
+        self.assertTrue(started.wait(1.0))
+        self.assertTrue(replica.stop(timeout_sec=2.0))
+        self.assertFalse(result.get("sync"))
+        self.assertFalse(self.local_path.exists())
+        self.assertEqual(replica.health_snapshot()["last_sync_ok_ts"], 0.0)
+
+    def test_stop_serializes_with_publication_and_preserves_its_deadline(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path), local_db_path=str(self.local_path),
+        )
+        self.assertTrue(self.replica.sync_once())
+        self.assertTrue(self.replica._worker_client.close(timeout_sec=1.0))
+        replacement = self.root / "publication-race.db"
+        _create_central_database(replacement, cycle="cycle-new", values=["new generation"])
+        opened, release = threading.Event(), threading.Event()
+        original_open = self.replica._open_validated_local
+
+        class SnapshotWorker:
+            def sync(worker_self, **kwargs):
+                shutil.copy2(replacement, kwargs["temp_db_path"])
+                return {"status": "snapshot_ready", "temp_db_path": kwargs["temp_db_path"],
+                        "state": {"db_cycle": "cycle-new"}}
+
+            def close(worker_self, **_kwargs):
+                return True
+
+        def pause_before_publication(path):
+            connection = original_open(path)
+            opened.set()
+            if not release.wait(2.0):
+                connection.close()
+                raise TimeoutError("publication test did not release")
+            return connection
+
+        self.replica._worker_client = SnapshotWorker()
+        result = {}
+        thread = threading.Thread(target=lambda: result.setdefault("ok", self.replica.sync_once()))
+        self.replica._thread = thread
+        with patch.object(self.replica, "_open_validated_local", side_effect=pause_before_publication):
+            thread.start()
+            try:
+                self.assertTrue(opened.wait(1.0))
+                started = time.monotonic()
+                self.assertFalse(self.replica.stop(timeout_sec=0.03))
+                self.assertLess(time.monotonic() - started, 0.7)
+                self.assertFalse(self.replica._stop_evt.is_set())
+                self.assertIs(self.replica._thread, thread)
+            finally:
+                release.set()
+                thread.join(2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(result["ok"], "publication completed before stop was accepted")
+        self.assertEqual(self.replica.last_state, {"db_cycle": "cycle-new"})
+        self.assertTrue(self.replica.stop(timeout_sec=1.0))
+        self.assertTrue(self.replica._stop_evt.is_set())
+
+    def test_stop_timeout_retains_unfinished_thread_and_local_connection(self):
+        class UnfinishedThread:
+            def is_alive(self):
+                return True
+
+            def join(self, timeout=None):
+                del timeout
+
+        class UnfinishedWorker:
+            def close(self, **_kwargs):
+                return False
+
+        replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            worker_client=UnfinishedWorker(),
+        )
+        shutil.copy2(self.central_path, self.local_path)
+        replica._ensure_local_conn()
+        retained_conn = replica._local_conn
+        retained_thread = UnfinishedThread()
+        replica._thread = retained_thread
+
+        self.assertFalse(replica.stop(timeout_sec=0.01))
+        self.assertIs(replica._thread, retained_thread)
+        self.assertIs(replica._local_conn, retained_conn)
+        replica._close_local_conn()
 
     def test_snapshot_uses_reader_lease_without_creating_rotation_lock(self):
         rotation_lock_path = self.root / "db_rotation.lock"
@@ -551,37 +1164,14 @@ class LocalReplicaSyncTest(unittest.TestCase):
                 daemon=True,
             ),
         ]
-        cleanup_finished = [threading.Event(), threading.Event()]
-
-        def observed_cleanup(client, finished):
-            original = client._cleanup_stopped_worker_locks
-
-            def cleanup(worker_pid):
-                try:
-                    original(worker_pid)
-                finally:
-                    finished.set()
-
-            return cleanup
-
-        with (
-            patch.object(first, "_cleanup_stopped_worker_locks", side_effect=observed_cleanup(first, cleanup_finished[0])),
-            patch.object(second, "_cleanup_stopped_worker_locks", side_effect=observed_cleanup(second, cleanup_finished[1])),
-        ):
-            try:
-                for thread in threads:
-                    thread.start()
-                for thread in threads:
-                    thread.join(timeout=5.0)
-            finally:
-                first.close()
-                second.close()
-
-            # close() intentionally cleans dead-worker locks asynchronously.
-            # Finish those reads before deleting the fixture's foreign gate;
-            # Windows refuses unlink while a cleanup thread has it open.
-            for finished in cleanup_finished:
-                self.assertTrue(finished.wait(5.0), "Dead-worker lock cleanup did not finish")
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5.0)
+        finally:
+            self.assertTrue(first.close())
+            self.assertTrue(second.close())
 
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(len(outcomes), 2)
@@ -673,8 +1263,9 @@ class LocalReplicaSyncTest(unittest.TestCase):
 
             def backup(self, target, *, pages, progress, sleep):
                 backup_calls.append((pages, sleep))
+                progress(sqlite3.SQLITE_OK, 2, 2)
                 writer_lock_path.write_text("writer pending", encoding="utf-8")
-                progress(0, 1, 2)
+                progress(sqlite3.SQLITE_BUSY, 1, 2)
 
         def open_interruptible(path):
             return InterruptibleConnection(_open_central_readonly(path))
@@ -697,7 +1288,7 @@ class LocalReplicaSyncTest(unittest.TestCase):
         finally:
             writer_lock_path.unlink(missing_ok=True)
 
-        self.assertEqual(backup_calls, [(32, 0.01)])
+        self.assertEqual(backup_calls, [(256, 0.01)])
         self.assertFalse(temp_path.exists())
 
     def test_rotation_busy_keeps_last_good_replica_available(self):
@@ -998,7 +1589,7 @@ class LocalReplicaSyncTest(unittest.TestCase):
 
         self.assertLess(time.monotonic() - started, 1.5)
 
-    def test_expired_legacy_replica_lock_is_recovered_safely(self):
+    def test_expired_foreign_legacy_replica_lock_is_preserved(self):
         rotation_lock_path = self.root / "db_rotation.lock"
         rotation_lock_path.write_text(
             json.dumps(
@@ -1019,9 +1610,40 @@ class LocalReplicaSyncTest(unittest.TestCase):
             timeout_sec=2.0,
         )
         try:
+            with self.assertRaises(LocalReplicaRotationBusy):
+                client.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / "foreign-preserved.sync_tmp.db"),
+                )
+        finally:
+            client.close()
+
+        self.assertTrue(rotation_lock_path.exists())
+
+    def test_expired_local_dead_legacy_replica_lock_is_recovered_safely(self):
+        rotation_lock_path = self.root / "db_rotation.lock"
+        rotation_lock_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": time.time() - 120.0,
+                    "pid": 999999,
+                    "host": socket.gethostname(),
+                    "user_id": "old-local-client",
+                    "source": "local_replica_sync",
+                    "thread_id": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            rotation_lock_path=str(rotation_lock_path),
+            timeout_sec=2.0,
+        )
+        try:
             result = client.sync(
                 local_state={},
-                temp_db_path=str(self.root / "recovered.sync_tmp.db"),
+                temp_db_path=str(self.root / "local-dead-recovered.sync_tmp.db"),
             )
         finally:
             client.close()
@@ -1053,6 +1675,30 @@ class LocalReplicaSyncTest(unittest.TestCase):
             health = self.replica.health_snapshot()
             self.assertEqual(health["retry_backoff_sec"], expected)
             self.assertGreater(health["retry_after_sec"], 0.0)
+
+    def test_fast_refresh_requests_do_not_bypass_failure_backoff(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path), local_db_path=str(self.local_path),
+            worker_client=_FailingWorkerClient(),
+        )
+        self.assertFalse(self.replica.sync_once())
+        self.replica.trigger_fast_sync()
+        started = time.monotonic()
+        with patch("rem_card.app.local_replica_sync.os.path.exists", side_effect=AssertionError("network probe")):
+            self.assertFalse(self.replica._wait_for_retry(0.06, "LocalReplicaWorkerTimeout"))
+        self.assertGreaterEqual(time.monotonic() - started, 0.05)
+        self.assertFalse(self.replica._fast_sync_evt.is_set())
+
+    def test_stop_interrupts_failure_backoff_without_network_probe(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path), local_db_path=str(self.local_path),
+            worker_client=_FailingWorkerClient(),
+        )
+        self.assertFalse(self.replica.sync_once())
+        self.replica._stop_evt.set()
+        started = time.monotonic()
+        self.assertFalse(self.replica._wait_for_retry(30.0, "LocalReplicaWorkerTimeout"))
+        self.assertLess(time.monotonic() - started, 0.5)
 
     def test_local_path_is_stable_and_scoped_by_role_and_database(self):
         kwargs = {

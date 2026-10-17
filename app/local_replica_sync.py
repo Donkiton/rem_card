@@ -4,10 +4,12 @@ import hashlib
 import logging
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
@@ -22,6 +24,10 @@ from rem_card.app.local_replica_worker import (
 from rem_card.app.sqlite_shared import configure_connection
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.services.local_replica_health import LocalReplicaRoleHealth
+
+
+class _LocalReplicaStopping(RuntimeError):
+    pass
 
 
 def build_local_replica_path(
@@ -133,20 +139,58 @@ class LocalReplicaSync:
         self._start_worker()
         self.trigger_fast_sync()
 
-    def stop(self) -> None:
-        self._stop_evt.set()
+    def stop(self, *, timeout_sec: float = 2.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        # Publication and cancellation share one linearization point. If a
+        # local promotion is already committing, it completes before stop is
+        # accepted; a timed-out caller retains the owner and can retry.
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return False
+        try:
+            self._stop_evt.set()
+            self._failure_callback = None
+        finally:
+            self._lock.release()
         self._fast_sync_evt.set()
-        self._worker_client.close()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
-        self._thread = None
-        self._close_local_conn()
-        # Do not wait for a concurrent attempt just to finalize diagnostics.
-        if self._sync_lock.acquire(blocking=False):
+        worker_stopped = self._close_worker_client(
+            timeout_sec=min(0.5, max(0.0, deadline - time.monotonic()))
+        )
+        thread = self._thread
+        if thread and thread is not threading.current_thread() and thread.is_alive():
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        thread_stopped = thread is None or not thread.is_alive()
+        if thread_stopped and not worker_stopped:
+            worker_stopped = self._close_worker_client(
+                timeout_sec=max(0.0, deadline - time.monotonic())
+            )
+        if not (thread_stopped and worker_stopped):
+            return False
+        # A manually-triggered sync_once() may not be represented by _thread.
+        # Preserve its connection and lifecycle references until that attempt
+        # releases the same synchronization lock.
+        if not self._sync_lock.acquire(blocking=False):
+            return False
+        try:
+            if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                return False
             try:
+                self._thread = None
+                self._close_local_conn_locked()
                 self._reset_snapshot_blocked(outcome="stopped")
             finally:
-                self._sync_lock.release()
+                self._lock.release()
+        finally:
+            self._sync_lock.release()
+        return True
+
+    def _close_worker_client(self, *, timeout_sec: float) -> bool:
+        try:
+            result = self._worker_client.close(timeout_sec=timeout_sec)
+        except TypeError:
+            # Test doubles and older injected clients may not yet expose the
+            # bounded-close argument.  Their close remains synchronous.
+            result = self._worker_client.close()
+        return result is not False
 
     def trigger_fast_sync(self) -> None:
         self._fast_sync_evt.set()
@@ -229,6 +273,8 @@ class LocalReplicaSync:
             yield self
 
     def sync_once(self) -> bool:
+        if self._stop_evt.is_set():
+            return False
         if not self._sync_lock.acquire(blocking=False):
             return False
         with self._lock:
@@ -245,11 +291,13 @@ class LocalReplicaSync:
             )
             status = str(response.get("status") or "")
             state = dict(response.get("state") or {})
-            if status == "snapshot_ready":
-                self._swap_local_replica(str(response.get("temp_db_path") or temp_path))
-            elif status != "unchanged":
-                raise RuntimeError(f"Unexpected local replica worker status: {status}")
             with self._lock:
+                if self._stop_evt.is_set():
+                    raise _LocalReplicaStopping()
+                if status == "snapshot_ready":
+                    self._swap_local_replica(str(response.get("temp_db_path") or temp_path))
+                elif status != "unchanged":
+                    raise RuntimeError(f"Unexpected local replica worker status: {status}")
                 if self._local_conn is None:
                     raise RuntimeError(
                         "Local replica worker confirmed state without a valid local copy"
@@ -290,6 +338,9 @@ class LocalReplicaSync:
                 )
             self._reset_snapshot_blocked(outcome=status)
             return True
+        except _LocalReplicaStopping:
+            self._reset_snapshot_blocked(outcome="stopped")
+            return False
         except (
             LocalReplicaRotationBusy,
             LocalReplicaSnapshotBusy,
@@ -416,7 +467,8 @@ class LocalReplicaSync:
             return False
         finally:
             try:
-                self._remove_replica_with_sidecars(temp_path)
+                if self._can_cleanup_temp_path(temp_path):
+                    self._remove_replica_with_sidecars(temp_path)
                 if self._stop_evt.is_set():
                     self._reset_snapshot_blocked(outcome="stopped")
             finally:
@@ -505,29 +557,17 @@ class LocalReplicaSync:
         return max(0.0, minimum_gap - (time.monotonic() - self._last_attempt_finished))
 
     def _wait_for_retry(self, delay_sec: float, last_error_class: str) -> bool:
-        deadline = time.monotonic() + max(0.0, float(delay_sec))
-        while not self._stop_evt.is_set():
-            remaining = max(0.0, deadline - time.monotonic())
-            if remaining <= 0:
-                return False
-            if self._fast_sync_evt.wait(min(1.0, remaining)):
-                self._fast_sync_evt.clear()
-                if not last_error_class:
-                    return True
-                if (
-                    last_error_class == LocalReplicaRotationBusy.__name__
-                    and self.rotation_lock_path
-                    and not os.path.exists(self.rotation_lock_path)
-                ):
-                    return True
-                continue
-            if (
-                last_error_class == LocalReplicaRotationBusy.__name__
-                and self.rotation_lock_path
-                and not os.path.exists(self.rotation_lock_path)
-            ):
-                return True
-        return False
+        if last_error_class and self.consecutive_failures > 0:
+            # UI reads may request a fresh copy repeatedly. Real failures keep
+            # their backoff; only stop may interrupt this wait. Coalesce all
+            # accumulated requests without probing a network path here.
+            self._stop_evt.wait(max(0.0, float(delay_sec)))
+            self._fast_sync_evt.clear()
+            return False
+        triggered = self._fast_sync_evt.wait(max(0.0, float(delay_sec)))
+        if triggered:
+            self._fast_sync_evt.clear()
+        return triggered
 
     @staticmethod
     def _should_report_failure(failure_count: int) -> bool:
@@ -549,22 +589,69 @@ class LocalReplicaSync:
         with self._lock:
             if self._local_conn is not None:
                 return
+            primary_error: Exception | None = None
             if (
-                not os.path.isfile(self.local_db_path)
-                or os.path.getsize(self.local_db_path) <= 0
+                os.path.isfile(self.local_db_path)
+                and os.path.getsize(self.local_db_path) > 0
             ):
-                return
-            conn = self._open_local_readonly(self.local_db_path)
-            try:
-                row = conn.execute("PRAGMA quick_check").fetchone()
-                if not row or str(row[0] or "").lower() != "ok":
-                    raise sqlite3.DatabaseError(
-                        f"local replica quick_check failed: {row[0] if row else 'empty'}"
+                try:
+                    self._local_conn = self._open_validated_local(
+                        self.local_db_path
                     )
+                except Exception as exc:
+                    primary_error = exc
+            if self._local_conn is None:
+                self._restore_rollback_after_restart_locked()
+            if self._local_conn is not None:
+                self._discard_rollback_artifacts_locked()
+                return
+            if primary_error is not None:
+                raise primary_error
+
+    def _restore_rollback_after_restart_locked(self) -> None:
+        candidates = self._rollback_artifact_paths()
+        for rollback_path in candidates:
+            try:
+                probe = self._open_validated_local(rollback_path)
+                probe.close()
             except Exception:
-                conn.close()
-                raise
-            self._local_conn = conn
+                continue
+            try:
+                os.replace(rollback_path, self.local_db_path)
+                self._remove_replica_sidecars(self.local_db_path)
+                self._local_conn = self._open_validated_local(
+                    self.local_db_path
+                )
+                return
+            except Exception:
+                # If replace succeeded but reopen was transiently blocked, the
+                # validated file now lives at the stable path and the next
+                # startup can retry it.
+                self._local_conn = None
+                return
+
+    def _rollback_artifact_paths(self) -> list[str]:
+        directory = os.path.dirname(self.local_db_path)
+        prefix = f"{os.path.basename(self.local_db_path)}.rollback."
+        try:
+            names = [name for name in os.listdir(directory) if name.startswith(prefix)]
+        except OSError:
+            return []
+        paths = [os.path.join(directory, name) for name in names]
+        def modified_at(path: str) -> float:
+            try:
+                return os.path.getmtime(path) if os.path.isfile(path) else 0.0
+            except OSError:
+                return 0.0
+        return sorted(
+            paths,
+            key=modified_at,
+            reverse=True,
+        )
+
+    def _discard_rollback_artifacts_locked(self) -> None:
+        for rollback_path in self._rollback_artifact_paths():
+            self._remove_replica_with_sidecars(rollback_path)
 
     @staticmethod
     def _open_local_readonly(db_path: str) -> sqlite3.Connection:
@@ -575,8 +662,12 @@ class LocalReplicaSync:
             isolation_level=None,
             timeout=1.0,
         )
-        configure_connection(conn, readonly=True, profile="local_replica")
-        return conn
+        try:
+            configure_connection(conn, readonly=True, profile="local_replica")
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
     def _read_local_state(self) -> dict[str, Any]:
         with self._lock:
@@ -621,11 +712,86 @@ class LocalReplicaSync:
         if not temp_path or not os.path.isfile(temp_path):
             raise FileNotFoundError(f"Local replica snapshot is missing: {temp_path}")
         with self._lock:
+            if self._stop_evt.is_set():
+                raise _LocalReplicaStopping()
+            had_previous = bool(
+                self._local_conn is not None
+                and os.path.isfile(self.local_db_path)
+                and os.path.getsize(self.local_db_path) > 0
+            )
             self._close_local_conn_locked()
             self._remove_replica_sidecars(self.local_db_path)
-            os.replace(temp_path, self.local_db_path)
-            self._remove_replica_sidecars(temp_path)
-            self._local_conn = self._open_local_readonly(self.local_db_path)
+            rollback_path = (
+                f"{self.local_db_path}.rollback.{uuid.uuid4().hex}"
+                if had_previous
+                else ""
+            )
+            promoted = False
+            try:
+                if rollback_path:
+                    self._create_rollback_copy(self.local_db_path, rollback_path)
+                if self._stop_evt.is_set():
+                    raise _LocalReplicaStopping()
+                os.replace(temp_path, self.local_db_path)
+                promoted = True
+                self._remove_replica_sidecars(temp_path)
+                new_conn = self._open_validated_local(self.local_db_path)
+                if self._stop_evt.is_set():
+                    new_conn.close()
+                    raise _LocalReplicaStopping()
+                self._local_conn = new_conn
+            except Exception:
+                self._local_conn = None
+                if promoted:
+                    self._remove_replica_with_sidecars(self.local_db_path)
+                if promoted and rollback_path and os.path.isfile(rollback_path):
+                    try:
+                        os.replace(rollback_path, self.local_db_path)
+                        self._local_conn = self._open_validated_local(
+                            self.local_db_path
+                        )
+                    except Exception:
+                        # Keep the rollback artifact if restoration itself
+                        # fails; deleting the last validated generation would
+                        # turn a recoverable promotion error into data loss.
+                        self.logger.exception(
+                            "Failed to restore previous local replica generation: %s",
+                            rollback_path,
+                        )
+                elif had_previous and os.path.isfile(self.local_db_path):
+                    try:
+                        self._local_conn = self._open_validated_local(
+                            self.local_db_path
+                        )
+                    except Exception:
+                        self.logger.exception(
+                            "Failed to reopen previous local replica after promotion error"
+                        )
+                raise
+            finally:
+                if rollback_path and self._local_conn is not None:
+                    self._remove_replica_with_sidecars(rollback_path)
+
+    @staticmethod
+    def _create_rollback_copy(source_path: str, rollback_path: str) -> None:
+        try:
+            os.link(source_path, rollback_path)
+        except OSError:
+            shutil.copy2(source_path, rollback_path)
+
+    @classmethod
+    def _open_validated_local(cls, db_path: str) -> sqlite3.Connection:
+        conn = cls._open_local_readonly(db_path)
+        try:
+            row = conn.execute("PRAGMA quick_check").fetchone()
+            if not row or str(row[0] or "").lower() != "ok":
+                raise sqlite3.DatabaseError(
+                    f"local replica quick_check failed: {row[0] if row else 'empty'}"
+                )
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
     def _close_local_conn(self) -> None:
         with self._lock:
@@ -657,3 +823,12 @@ class LocalReplicaSync:
         except OSError:
             pass
         cls._remove_replica_sidecars(db_path)
+
+    def _can_cleanup_temp_path(self, temp_path: str) -> bool:
+        probe = getattr(self._worker_client, "can_cleanup_temp_path", None)
+        if not callable(probe):
+            return True
+        try:
+            return bool(probe(temp_path))
+        except Exception:
+            return False

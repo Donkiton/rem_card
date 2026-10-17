@@ -20,7 +20,11 @@ from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
 DEFAULT_REPLICA_SYNC_TIMEOUT_SEC = 6.0
-LOCAL_REPLICA_BACKUP_PAGES = 32
+LOCAL_REPLICA_BACKUP_PAGES = 256
+WRITER_LOCK_PROBE_INTERVAL_SEC = 0.1
+WORKER_POLL_SLICE_SEC = 0.05
+WORKER_STOP_WAIT_SEC = 0.5
+STOPPED_WORKER_CLEANUP_TIMEOUT_SEC = 0.5
 
 
 class LocalReplicaWorkerError(RuntimeError):
@@ -97,7 +101,8 @@ def _safe_lease_component(value: str) -> str:
     return cleaned[:80] or "client"
 
 
-def _remove_with_sidecars(db_path: str) -> None:
+def _remove_with_sidecars(db_path: str) -> bool:
+    removed = True
     for candidate in (
         db_path,
         f"{db_path}-wal",
@@ -105,10 +110,12 @@ def _remove_with_sidecars(db_path: str) -> None:
         f"{db_path}-journal",
     ):
         try:
-            if os.path.isfile(candidate):
-                os.remove(candidate)
-        except OSError:
+            os.remove(candidate)
+        except FileNotFoundError:
             pass
+        except OSError:
+            removed = False
+    return removed
 
 
 def _read_database_state(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -157,9 +164,13 @@ def _open_central_readonly(db_path: str) -> sqlite3.Connection:
         isolation_level=None,
         timeout=0.25,
     )
-    configure_connection(conn, readonly=True, profile="network")
-    conn.execute("PRAGMA busy_timeout = 250")
-    return conn
+    try:
+        configure_connection(conn, readonly=True, profile="network")
+        conn.execute("PRAGMA busy_timeout = 250")
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _open_temp_replica(db_path: str) -> sqlite3.Connection:
@@ -169,14 +180,19 @@ def _open_temp_replica(db_path: str) -> sqlite3.Connection:
         isolation_level=None,
         timeout=1.0,
     )
-    configure_connection(conn, profile="local_replica")
-    return conn
+    try:
+        configure_connection(conn, profile="local_replica")
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 def _sync_snapshot(
     message: dict[str, Any],
     *,
     before_backup: Callable[[], None] | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     central_db_path = os.path.abspath(str(message.get("central_db_path") or ""))
     temp_db_path = os.path.abspath(str(message.get("temp_db_path") or ""))
@@ -188,6 +204,8 @@ def _sync_snapshot(
             or database_write_lock_path(central_db_path)
         )
     )
+    if progress_callback is not None:
+        progress_callback("central_probe")
     if not os.path.isfile(central_db_path):
         raise FileNotFoundError(f"central DB missing: {central_db_path}")
 
@@ -196,9 +214,13 @@ def _sync_snapshot(
     failed = False
     _remove_with_sidecars(temp_db_path)
     try:
+        if progress_callback is not None:
+            progress_callback("central_open")
         central_conn = _open_central_readonly(central_db_path)
         bind_connection(central_conn)
         mark_stage("replica_state_read")
+        if progress_callback is not None:
+            progress_callback("state_read")
         central_state = _read_database_state(central_conn)
         if _states_match(central_state, expected_state):
             return {
@@ -215,9 +237,13 @@ def _sync_snapshot(
         if writer_lock_path and os.path.exists(writer_lock_path):
             raise LocalReplicaWriterBusy()
 
+        if progress_callback is not None:
+            progress_callback("central_open")
         central_conn = _open_central_readonly(central_db_path)
         bind_connection(central_conn)
         mark_stage("replica_state_read")
+        if progress_callback is not None:
+            progress_callback("state_read")
         central_state = _read_database_state(central_conn)
         if _states_match(central_state, expected_state):
             return {
@@ -228,23 +254,41 @@ def _sync_snapshot(
         os.makedirs(os.path.dirname(temp_db_path), exist_ok=True)
         temp_conn = _open_temp_replica(temp_db_path)
 
+        last_writer_probe = 0.0
+
         def yield_to_writer(_status: int, _remaining: int, _total: int) -> None:
+            nonlocal last_writer_probe
+            now = time.monotonic()
+            sqlite_busy = _status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            if (
+                not sqlite_busy
+                and now - last_writer_probe < WRITER_LOCK_PROBE_INTERVAL_SEC
+            ):
+                return
+            last_writer_probe = now
             if writer_lock_path and os.path.exists(writer_lock_path):
                 raise LocalReplicaWriterBusy()
 
         mark_stage("replica_backup")
+        if progress_callback is not None:
+            progress_callback("backup")
         central_conn.backup(
             temp_conn,
             pages=LOCAL_REPLICA_BACKUP_PAGES,
             progress=yield_to_writer,
             sleep=0.01,
         )
-        mark_stage("replica_validate")
+        mark_stage("replica_checkpoint")
+        if progress_callback is not None:
+            progress_callback("checkpoint")
         checkpoint_row = temp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if checkpoint_row and int(checkpoint_row[0] or 0) not in (0,):
             raise sqlite3.OperationalError(
                 f"local replica WAL checkpoint failed: {tuple(checkpoint_row)}"
             )
+        mark_stage("replica_quick_check")
+        if progress_callback is not None:
+            progress_callback("quick_check")
         quick_row = temp_conn.execute("PRAGMA quick_check").fetchone()
         if not quick_row or str(quick_row[0] or "").lower() != "ok":
             raise sqlite3.DatabaseError(
@@ -253,6 +297,9 @@ def _sync_snapshot(
         snapshot_state = _read_database_state(temp_conn)
         temp_conn.close()
         temp_conn = None
+        mark_stage("replica_fsync")
+        if progress_callback is not None:
+            progress_callback("fsync")
         with open(temp_db_path, "r+b") as fh:
             fh.flush()
             os.fsync(fh.fileno())
@@ -415,15 +462,29 @@ def _sync_snapshot_with_network_lease_observed(
 
         if progress_callback is not None:
             progress_callback("snapshot")
-        result = _sync_snapshot(message, before_backup=acquire_snapshot_gate)
+        result = _sync_snapshot(
+            message,
+            before_backup=acquire_snapshot_gate,
+            progress_callback=progress_callback,
+        )
         return result
     finally:
-        if snapshot_gate_acquired:
-            snapshot_gate.release()
-        if snapshot_lease_acquired:
-            if progress_callback is not None:
-                progress_callback("lease_release")
-            snapshot_lease.release()
+        try:
+            if snapshot_gate_acquired:
+                try:
+                    if progress_callback is not None:
+                        progress_callback("snapshot_gate_release")
+                except Exception:
+                    pass  # IPC diagnostics must never prevent lock release.
+                snapshot_gate.release()
+        finally:
+            if snapshot_lease_acquired:
+                try:
+                    if progress_callback is not None:
+                        progress_callback("lease_release")
+                except Exception:
+                    pass
+                snapshot_lease.release()
 
 
 def _send_error(pipe, exc: Exception) -> None:
@@ -438,6 +499,33 @@ def _send_error(pipe, exc: Exception) -> None:
         )
     except Exception:
         pass
+
+
+def _cleanup_stopped_worker_entry(
+    pipe,
+    paths_and_sources: tuple[tuple[str, str], ...],
+    worker_pid: int,
+) -> None:
+    result: dict[str, bool] = {}
+    try:
+        for path, source in paths_and_sources:
+            try:
+                result[source] = bool(
+                    FileWriteLock(path).cleanup_stopped_local_owner(
+                        owner_pid=worker_pid,
+                        owner_source=source,
+                    )
+                )
+            except Exception:
+                result[source] = False
+        pipe.send(result)
+    except Exception:
+        pass
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
 
 
 def _worker_main(pipe) -> None:
@@ -504,83 +592,289 @@ class LocalReplicaWorkerClient:
         )
         self.timeout_sec = max(0.2, min(30.0, float(timeout_sec)))
         self._mutex = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._closing = threading.Event()
         self._process = None
         self._pipe = None
+        self._fenced = False
+        self._active_temp_path = ""
+        self._cleanup_process = None
+        self._cleanup_pipe = None
+        self._cleanup_required_pid: int | None = None
+        self._cleanup_completed_pid: int | None = None
 
     def _ensure_started(self) -> None:
-        if (
-            self._process is not None
-            and self._process.is_alive()
-            and self._pipe is not None
-        ):
-            return
-        self._terminate()
-        context = multiprocessing.get_context("spawn")
-        parent_pipe, child_pipe = context.Pipe(duplex=True)
-        process = context.Process(
-            target=_worker_main,
-            args=(child_pipe,),
-            name="RemCardLocalReplicaWorker",
-            daemon=True,
-        )
-        process.start()
-        child_pipe.close()
-        self._process = process
-        self._pipe = parent_pipe
+        with self._state_lock:
+            if self._closing.is_set():
+                raise LocalReplicaWorkerError("Процесс локальной реплики останавливается")
+            if self._fenced:
+                if not self._terminate_locked():
+                    raise LocalReplicaWorkerError(
+                        "Предыдущий процесс локальной реплики не завершён; новый запуск запрещён"
+                    )
+            if not self._reap_cleanup_locked():
+                raise LocalReplicaWorkerError(
+                    "Очистка предыдущего процесса локальной реплики не завершена"
+                )
+            if (
+                self._process is not None
+                and self._is_alive(self._process)
+                and self._pipe is not None
+            ):
+                return
+            if not self._terminate_locked():
+                raise LocalReplicaWorkerError(
+                    "Предыдущий процесс локальной реплики не удалось завершить"
+                )
+            context = multiprocessing.get_context("spawn")
+            parent_pipe, child_pipe = context.Pipe(duplex=True)
+            process = context.Process(
+                target=_worker_main,
+                args=(child_pipe,),
+                name="RemCardLocalReplicaWorker",
+                daemon=True,
+            )
+            try:
+                process.start()
+            except Exception:
+                parent_pipe.close()
+                child_pipe.close()
+                raise
+            child_pipe.close()
+            self._process = process
+            self._pipe = parent_pipe
+            # Process IDs may be reused. A new worker must never inherit the
+            # previous owner's completed cleanup marker.
+            self._cleanup_completed_pid = None
 
-    def _terminate(self) -> None:
+    @staticmethod
+    def _is_alive(process) -> bool:
+        try:
+            return bool(process is not None and process.is_alive())
+        except (OSError, ValueError):
+            # A failed liveness probe is not proof of death.  Keep the handle
+            # fenced until a later probe can confirm that the process exited.
+            return process is not None
+
+    @staticmethod
+    def _remaining(deadline: float | None, cap: float) -> float:
+        if deadline is None:
+            return max(0.0, float(cap))
+        return max(0.0, min(float(cap), deadline - time.monotonic()))
+
+    def _terminate(self, *, deadline: float | None = None) -> bool:
+        with self._state_lock:
+            return self._terminate_locked(deadline=deadline)
+
+    def _discard_stopped_temp_locked(self) -> bool:
+        if not self._active_temp_path:
+            return True
+        if not _remove_with_sidecars(self._active_temp_path):
+            # The child is dead, but Windows/AV may still deny unlink. Retain
+            # the only reference and retry before allowing a replacement worker.
+            return False
+        self._active_temp_path = ""
+        return True
+
+    def _terminate_locked(self, *, deadline: float | None = None) -> bool:
         process = self._process
         pipe = self._pipe
-        self._process = None
-        self._pipe = None
+        if process is None:
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+            self._pipe = None
+            self._fenced = False
+            temp_removed = self._discard_stopped_temp_locked()
+            if self._cleanup_required_pid is not None:
+                cleanup_ok = self._bounded_cleanup_stopped_worker_locks(
+                    self._cleanup_required_pid,
+                    deadline=deadline,
+                )
+                if cleanup_ok:
+                    self._cleanup_required_pid = None
+                return cleanup_ok and temp_removed
+            return self._reap_cleanup_locked(deadline=deadline) and temp_removed
+
+        worker_pid = process.pid
+        forced = self._is_alive(process)
+        if forced and worker_pid is not None:
+            self._cleanup_required_pid = int(worker_pid)
+        try:
+            if self._is_alive(process):
+                process.terminate()
+                process.join(
+                    timeout=self._remaining(deadline, WORKER_STOP_WAIT_SEC)
+                )
+            if self._is_alive(process):
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                process.join(
+                    timeout=self._remaining(deadline, WORKER_STOP_WAIT_SEC)
+                )
+        except Exception:
+            self._fenced = True
+            return False
+
+        if self._is_alive(process):
+            # Keep both handles: the child may still write its current temp
+            # snapshot or publish a delayed pipe response.  A replacement
+            # worker must not start until death is confirmed.
+            self._fenced = True
+            return False
+
         if pipe is not None:
             try:
                 pipe.close()
             except Exception:
                 pass
-        if process is None:
-            return
-        worker_pid = process.pid
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=0.5)
-        if process.is_alive():
-            try:
-                process.kill()
-            except Exception:
-                pass
-            process.join(timeout=0.5)
-        stopped = not process.is_alive()
-        if stopped and worker_pid is not None:
-            # Terminate/kill bypass the child's finally blocks. Only reclaim
-            # this confirmed-stopped local owner; never use lease age to take
-            # over a foreign worker. SMB cleanup must not extend the hard sync
-            # timeout, so perform it outside the caller's critical path.
-            threading.Thread(
-                target=self._cleanup_stopped_worker_locks,
-                args=(worker_pid,),
-                name="RemCardReplicaLockCleanup",
-                daemon=True,
-            ).start()
+        cleanup_ok = True
+        cleanup_pid = self._cleanup_required_pid
+        if cleanup_pid is not None:
+            cleanup_ok = self._bounded_cleanup_stopped_worker_locks(
+                cleanup_pid,
+                deadline=deadline,
+            )
         try:
             process.close()
         except Exception:
             pass
+        if self._process is process:
+            self._process = None
+            self._pipe = None
+        self._fenced = False
+        temp_removed = self._discard_stopped_temp_locked()
+        if cleanup_ok:
+            self._cleanup_required_pid = None
+        return cleanup_ok and temp_removed
 
-    def _cleanup_stopped_worker_locks(self, worker_pid: int) -> None:
-        for path, source in (
+    def _bounded_cleanup_stopped_worker_locks(
+        self,
+        worker_pid: int,
+        *,
+        deadline: float | None = None,
+    ) -> bool:
+        if not self._reap_cleanup_locked(
+            stop_if_alive=False,
+            deadline=deadline,
+        ):
+            return False
+        if self._cleanup_completed_pid == worker_pid:
+            return True
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        if deadline is not None and deadline - time.monotonic() < 0.05:
+            return False
+        self._cleanup_completed_pid = None
+        paths_and_sources = (
             (self.snapshot_gate_path, "local_replica_snapshot_gate"),
             (self.snapshot_lease_path, "local_replica_snapshot"),
-        ):
+        )
+        context = multiprocessing.get_context("spawn")
+        receiving, sending = context.Pipe(duplex=False)
+        cleanup = context.Process(
+            target=_cleanup_stopped_worker_entry,
+            args=(sending, paths_and_sources, worker_pid),
+            name="RemCardReplicaLockCleanup",
+            daemon=True,
+        )
+        try:
+            cleanup.start()
+        except Exception:
+            receiving.close()
+            sending.close()
+            logging.getLogger(__name__).warning(
+                "Failed to start bounded replica lock cleanup (pid=%s)",
+                worker_pid,
+                exc_info=True,
+            )
+            return False
+        sending.close()
+        self._cleanup_process = cleanup
+        self._cleanup_pipe = receiving
+        try:
+            receiving.poll(
+                self._remaining(deadline, STOPPED_WORKER_CLEANUP_TIMEOUT_SEC)
+            )
+        except Exception:
+            pass
+        reaped = self._reap_cleanup_locked(
+            stop_if_alive=True,
+            deadline=deadline,
+        )
+        return reaped and self._cleanup_completed_pid == worker_pid
+
+    def _reap_cleanup_locked(
+        self,
+        *,
+        stop_if_alive: bool = True,
+        deadline: float | None = None,
+    ) -> bool:
+        cleanup = self._cleanup_process
+        receiving = self._cleanup_pipe
+        if cleanup is None:
+            if receiving is not None:
+                try:
+                    receiving.close()
+                except Exception:
+                    pass
+                self._cleanup_pipe = None
+            return True
+        if receiving is not None:
             try:
-                FileWriteLock(path).cleanup_stopped_local_owner(
-                    owner_pid=worker_pid, owner_source=source,
-                )
+                if receiving.poll(0):
+                    receiving.recv()
+                    self._cleanup_completed_pid = self._cleanup_required_pid
+            except (EOFError, OSError):
+                pass
+        if self._is_alive(cleanup) and stop_if_alive:
+            try:
+                cleanup.terminate()
+                cleanup.join(timeout=self._remaining(deadline, 0.2))
+                if self._is_alive(cleanup):
+                    cleanup.kill()
+                    cleanup.join(timeout=self._remaining(deadline, 0.2))
             except Exception:
-                logging.getLogger(__name__).warning(
-                    "Failed to clean stopped replica worker lock (pid=%s source=%s)",
-                    worker_pid, source, exc_info=True,
-                )
+                pass
+        if self._is_alive(cleanup):
+            # Retain the handle and coalesce future requests into this cleanup
+            # attempt.  Subsequent lifecycle calls can reap it once death is
+            # observable; they never spawn an overlapping cleanup process.
+            return False
+        if receiving is not None and self._cleanup_completed_pid is None:
+            try:
+                if receiving.poll(0):
+                    receiving.recv()
+                    self._cleanup_completed_pid = self._cleanup_required_pid
+            except (EOFError, OSError):
+                pass
+        if receiving is not None:
+            try:
+                receiving.close()
+            except Exception:
+                pass
+        try:
+            cleanup.close()
+        except Exception:
+            pass
+        if self._cleanup_process is cleanup:
+            self._cleanup_process = None
+            self._cleanup_pipe = None
+        return True
+
+    def can_cleanup_temp_path(self, temp_db_path: str) -> bool:
+        candidate = os.path.abspath(temp_db_path)
+        with self._state_lock:
+            return not (
+                self._active_temp_path
+                and os.path.abspath(self._active_temp_path) == candidate
+                and self._process is not None
+                and self._is_alive(self._process)
+            )
 
     @observed_call("replica_worker_mutex_wait")
     def sync(
@@ -597,16 +891,29 @@ class LocalReplicaWorkerClient:
             min(30.0, float(timeout_sec or self.timeout_sec)),
         )
         deadline = time.monotonic() + effective_timeout
-        with self._mutex:
+        mutex_remaining = deadline - time.monotonic()
+        if mutex_remaining <= 0 or not self._mutex.acquire(timeout=mutex_remaining):
+            raise LocalReplicaWorkerTimeout(effective_timeout, stage="mutex_wait")
+        try:
             last_stage = "worker_start"
             mark_stage(last_stage)
             try:
                 self._ensure_started()
+                if time.monotonic() >= deadline:
+                    raise LocalReplicaWorkerTimeout(effective_timeout, stage=last_stage)
                 diagnostic = current_operation()
                 if diagnostic is not None:
                     diagnostic.worker(self._process.pid)
                 mark_stage("replica_worker_wait")
-                self._pipe.send(
+                temp_db_path = os.path.abspath(temp_db_path)
+                with self._state_lock:
+                    if self._fenced or self._closing.is_set():
+                        raise LocalReplicaWorkerError(
+                            "Процесс локальной реплики останавливается"
+                        )
+                    pipe = self._pipe
+                    self._active_temp_path = temp_db_path
+                pipe.send(
                     {
                         "cmd": "sync",
                         "central_db_path": self.central_db_path,
@@ -629,13 +936,29 @@ class LocalReplicaWorkerClient:
                     }
                 )
                 while True:
-                    remaining = max(0.0, deadline - time.monotonic())
-                    if not self._pipe.poll(remaining):
+                    if self._closing.is_set():
+                        stopped = self._terminate()
+                        if stopped:
+                            _remove_with_sidecars(temp_db_path)
+                        raise LocalReplicaWorkerError(
+                            "Обновление локальной реплики остановлено"
+                        )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         raise LocalReplicaWorkerTimeout(
                             effective_timeout,
                             stage=last_stage,
                         )
-                    response = self._pipe.recv()
+                    if not pipe.poll(min(remaining, WORKER_POLL_SLICE_SEC)):
+                        continue
+                    # A stream of progress messages must not move the hard
+                    # deadline: validate it again before consuming each one.
+                    if time.monotonic() >= deadline:
+                        raise LocalReplicaWorkerTimeout(
+                            effective_timeout,
+                            stage=last_stage,
+                        )
+                    response = pipe.recv()
                     progress = str(response.get("progress") or "")
                     if progress:
                         last_stage = progress
@@ -643,16 +966,18 @@ class LocalReplicaWorkerClient:
                         continue
                     break
             except LocalReplicaWorkerTimeout:
-                self._terminate()
-                _remove_with_sidecars(temp_db_path)
+                if self._terminate():
+                    _remove_with_sidecars(temp_db_path)
                 raise
             except (EOFError, OSError) as exc:
-                self._terminate()
-                _remove_with_sidecars(temp_db_path)
+                if self._terminate():
+                    _remove_with_sidecars(temp_db_path)
                 raise LocalReplicaWorkerError(
                     f"Процесс локальной реплики завершился без результата: {exc}"
                 ) from exc
 
+            with self._state_lock:
+                self._active_temp_path = ""
             if not response.get("ok"):
                 _remove_with_sidecars(temp_db_path)
                 remote_error_class = str(response.get("error_class") or "")
@@ -667,23 +992,30 @@ class LocalReplicaWorkerClient:
                     remote_error_class=remote_error_class,
                 )
             return dict(response)
+        finally:
+            self._mutex.release()
 
-    def close(self, *, timeout_sec: float = 0.5) -> None:
-        acquired = self._mutex.acquire(timeout=max(0.0, float(timeout_sec)))
+    def close(self, *, timeout_sec: float = 0.5) -> bool:
+        self._closing.set()
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        acquired = self._mutex.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
         if not acquired:
-            self._terminate()
-            return
+            return False
         try:
             if (
                 self._pipe is not None
                 and self._process is not None
-                and self._process.is_alive()
+                and self._is_alive(self._process)
             ):
                 try:
                     self._pipe.send({"cmd": "shutdown"})
-                    self._process.join(timeout=0.5)
+                    self._process.join(
+                        timeout=self._remaining(deadline, WORKER_STOP_WAIT_SEC)
+                    )
                 except Exception:
                     pass
-            self._terminate()
+            return self._terminate(deadline=deadline)
         finally:
             self._mutex.release()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import json
+import socket
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ import pytest
 from rem_card.data.dao import db_manager as db_manager_module
 from rem_card.data.dao.db_manager import DatabaseManager
 from rem_card.app.db_lifecycle import (
+    _wait_for_replica_snapshot_leases,
     cancel_manual_rotation,
     find_active_rotation_role_locks,
     manual_rotation_undo_status,
@@ -169,6 +171,28 @@ def test_rotation_waits_for_active_replica_snapshot_lease(tmp_path, reader_count
     thread.join(timeout=5.0)
     assert result["status"] == "rotated"
     assert not (archive_dir / "db_rotation.lock").exists()
+
+
+@pytest.mark.parametrize("local,alive,expect_active", [
+    (False, False, True), (True, True, True), (True, None, True), (True, False, False),
+])
+def test_expired_snapshot_lease_blocks_rotation_until_owner_is_confirmed_dead(
+    tmp_path, local, alive, expect_active,
+):
+    db_path = tmp_path / "archiv" / "rao_journal.db"
+    lease_path = tmp_path / "locks" / "replica_snapshots" / "doctor.lock"
+    lease_path.parent.mkdir(parents=True)
+    lease_path.write_text(json.dumps({
+        "host": socket.gethostname() if local else "another-workstation",
+        "pid": 12345, "source": "local_replica_snapshot", "lock_token": "reader",
+        "timestamp": time.time() - 7200, "lease_expires_at": time.time() - 3600,
+    }), encoding="utf-8")
+    with patch("rem_card.app.sqlite_shared.is_local_pid_alive", return_value=alive):
+        active = _wait_for_replica_snapshot_leases(
+            str(db_path), logger=db_manager_module.logger, timeout_sec=0,
+        )
+    assert bool(active) is expect_active
+    assert lease_path.exists() is expect_active
 
 
 def test_not_due_auto_rotation_does_not_create_rotation_lock(tmp_path):

@@ -946,10 +946,12 @@ class DatabaseManager:
                 **quiesce_token,
             }
 
-        restart_local_replica = bool(self._local_replica)
-        if restart_local_replica:
-            self._stop_local_replica_sync()
+        restart_local_replica = False
         try:
+            if self._local_replica is not None:
+                if not self._stop_local_replica_sync():
+                    return {"status": "rotation_quiesce_failed", "reason": "local_replica_stop_failed"}
+                restart_local_replica = True
             with self._central_io_lock:
                 self._close_central_read_connection()
                 if self._remcard_conn:
@@ -1003,10 +1005,12 @@ class DatabaseManager:
                 "status": "rotation_quiesce_failed",
                 **quiesce_token,
             }
-        restart_local_replica = bool(self._local_replica)
-        if restart_local_replica:
-            self._stop_local_replica_sync()
+        restart_local_replica = False
         try:
+            if self._local_replica is not None:
+                if not self._stop_local_replica_sync():
+                    return {"status": "rotation_quiesce_failed", "reason": "local_replica_stop_failed"}
+                restart_local_replica = True
             with self._central_io_lock:
                 self._close_central_read_connection()
                 if self._remcard_conn:
@@ -1681,6 +1685,9 @@ class DatabaseManager:
         self._integrity_thread.start()
 
     def _start_local_replica_sync(self):
+        if self._local_replica is not None:
+            logger.warning("Local replica owner is retained; refusing to replace it")
+            return
         if not self._local_first_enabled:
             logger.info(
                 "Local-first sync is disabled (runtime=%s env=%s)",
@@ -1736,26 +1743,12 @@ class DatabaseManager:
         if replica is None:
             return True
         try:
-            replica.set_failure_callback(None)
-            # LocalReplicaSync.stop() closes its worker client immediately.  Do
-            # not call it while sync_once may still own that client: request a
-            # cooperative stop and retain the replica until its thread exits.
-            stop_evt = getattr(replica, "_stop_evt", None)
-            fast_sync_evt = getattr(replica, "_fast_sync_evt", None)
-            if stop_evt is not None:
-                stop_evt.set()
-            if fast_sync_evt is not None:
-                fast_sync_evt.set()
-            thread = getattr(replica, "_thread", None)
-            if thread is not None and thread.is_alive():
-                if thread is threading.current_thread():
-                    logger.warning("Local replica sync cannot join its own worker thread")
-                    return False
-                thread.join(timeout=max(0.0, float(timeout_sec)))
-                if thread.is_alive():
-                    logger.warning("Local replica sync did not stop before shutdown timeout")
-                    return False
-            replica.stop()
+            # The replica owns cancellation/publication synchronization. Do not
+            # set its private event outside that protocol or discard its owner
+            # until both thread and isolated processes are confirmed stopped.
+            if replica.stop(timeout_sec=max(0.0, float(timeout_sec))) is False:
+                logger.warning("Local replica resources did not stop before shutdown timeout")
+                return False
         except Exception as exc:
             logger.warning("Failed to stop local replica sync: %s", exc)
             return False

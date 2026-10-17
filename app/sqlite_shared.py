@@ -883,6 +883,8 @@ class FileWriteLock:
             if lease_duration_sec is None
             else max(1.0, float(lease_duration_sec))
         )
+        # Retained for callers using the old constructor. Expiry is diagnostic
+        # metadata, never proof that a local or remote SQLite reader has stopped.
         self.allow_expired_lease_cleanup = bool(allow_expired_lease_cleanup)
         self.allow_legacy_replica_cleanup = bool(allow_legacy_replica_cleanup)
         self.allow_malformed_cleanup = bool(allow_malformed_cleanup)
@@ -1019,11 +1021,6 @@ class FileWriteLock:
                     exc,
                 )
         if self._cleanup_local_dead_pid_lock(
-            source=source,
-            metric_context=metric_context,
-        ):
-            return True
-        if self._cleanup_expired_replica_lease(
             source=source,
             metric_context=metric_context,
         ):
@@ -1377,84 +1374,6 @@ class FileWriteLock:
         )
         return True
 
-    def _cleanup_expired_replica_lease(
-        self,
-        *,
-        source: str,
-        metric_context: dict[str, Any] | None = None,
-    ) -> bool:
-        if not self.allow_expired_lease_cleanup:
-            return False
-        started = time.perf_counter()
-        snapshot = self._read_lock_snapshot()
-        if not snapshot.exists or not snapshot.readable:
-            return False
-        payload = dict(snapshot.payload or {})
-        if str(payload.get("source") or "") not in {
-            "local_replica_sync",
-            "local_replica_snapshot",
-        }:
-            return False
-
-        now = time.time()
-        lease_expires_at = payload.get("lease_expires_at")
-        lease_expired = isinstance(lease_expires_at, (int, float)) and float(
-            lease_expires_at
-        ) <= now
-        legacy_age_expired = (
-            self.allow_legacy_replica_cleanup
-            and lease_expires_at is None
-            and isinstance(payload.get("timestamp"), (int, float))
-            and (now - float(payload["timestamp"])) > self.stale_timeout_sec
-        )
-        if not lease_expired and not legacy_age_expired:
-            return False
-
-        latest = self._read_lock_snapshot()
-        if not self._same_lock_snapshot(snapshot, latest):
-            self._record_cleanup_skipped(
-                "changed_during_lease_cleanup",
-                latest if latest.exists else snapshot,
-                source=source,
-                metric_context=metric_context,
-            )
-            return False
-        try:
-            os.remove(self.lock_path)
-        except FileNotFoundError:
-            return False
-        except Exception as exc:
-            self._record_cleanup_failed(
-                "expired_lease_delete_failed",
-                snapshot,
-                source=source,
-                metric_context=metric_context,
-                exc=exc,
-            )
-            return False
-
-        reason = "expired_lease" if lease_expired else "legacy_replica_timeout"
-        record_metric(
-            "sqlite_write_lock_stale_removed",
-            1,
-            reason=reason,
-            lock_content_hash=snapshot.content_hash,
-            elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
-            **self._cleanup_metric_fields(
-                snapshot,
-                source=source,
-                metric_context=metric_context,
-            ),
-        )
-        self.logger.warning(
-            "Removed expired local-replica lease at %s (reason=%s holder=%s:%s)",
-            self.lock_path,
-            reason,
-            payload.get("host"),
-            payload.get("pid"),
-        )
-        return True
-
     def cleanup_stopped_local_owner(self, *, owner_pid: int, owner_source: str) -> bool:
         """Clean only this dead local owner's lock, never a replacement owner."""
         return self._cleanup_local_dead_pid_lock(
@@ -1475,12 +1394,7 @@ class FileWriteLock:
             metric_context=metric_context,
         ):
             return True
-        if self._cleanup_local_dead_pid_lock(
-            source=source,
-            metric_context=metric_context,
-        ):
-            return True
-        return self._cleanup_expired_replica_lease(
+        return self._cleanup_local_dead_pid_lock(
             source=source,
             metric_context=metric_context,
         )
