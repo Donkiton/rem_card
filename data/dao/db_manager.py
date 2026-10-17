@@ -946,10 +946,12 @@ class DatabaseManager:
                 **quiesce_token,
             }
 
-        restart_local_replica = bool(self._local_replica)
-        if restart_local_replica:
-            self._stop_local_replica_sync()
+        restart_local_replica = False
         try:
+            if self._local_replica is not None:
+                if not self._stop_local_replica_sync():
+                    return {"status": "rotation_quiesce_failed", "reason": "local_replica_stop_failed"}
+                restart_local_replica = True
             with self._central_io_lock:
                 self._close_central_read_connection()
                 if self._remcard_conn:
@@ -1003,10 +1005,12 @@ class DatabaseManager:
                 "status": "rotation_quiesce_failed",
                 **quiesce_token,
             }
-        restart_local_replica = bool(self._local_replica)
-        if restart_local_replica:
-            self._stop_local_replica_sync()
+        restart_local_replica = False
         try:
+            if self._local_replica is not None:
+                if not self._stop_local_replica_sync():
+                    return {"status": "rotation_quiesce_failed", "reason": "local_replica_stop_failed"}
+                restart_local_replica = True
             with self._central_io_lock:
                 self._close_central_read_connection()
                 if self._remcard_conn:
@@ -1681,6 +1685,9 @@ class DatabaseManager:
         self._integrity_thread.start()
 
     def _start_local_replica_sync(self):
+        if self._local_replica is not None:
+            logger.warning("Local replica owner is retained; refusing to replace it")
+            return
         if not self._local_first_enabled:
             logger.info(
                 "Local-first sync is disabled (runtime=%s env=%s)",
