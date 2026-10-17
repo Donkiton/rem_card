@@ -1742,27 +1742,11 @@ class DatabaseManager:
         replica = self._local_replica
         if replica is None:
             return True
-        deadline = time.monotonic() + max(0.0, float(timeout_sec))
         try:
-            replica.set_failure_callback(None)
-            # Request cooperative cancellation first. Retain the owner until
-            # both its thread and any isolated processes are confirmed stopped.
-            stop_evt = getattr(replica, "_stop_evt", None)
-            fast_sync_evt = getattr(replica, "_fast_sync_evt", None)
-            if stop_evt is not None:
-                stop_evt.set()
-            if fast_sync_evt is not None:
-                fast_sync_evt.set()
-            thread = getattr(replica, "_thread", None)
-            if thread is not None and thread.is_alive():
-                if thread is threading.current_thread():
-                    logger.warning("Local replica sync cannot join its own worker thread")
-                    return False
-                thread.join(timeout=max(0.0, deadline - time.monotonic()))
-                if thread.is_alive():
-                    logger.warning("Local replica sync did not stop before shutdown timeout")
-                    return False
-            if replica.stop(timeout_sec=max(0.0, deadline - time.monotonic())) is False:
+            # The replica owns cancellation/publication synchronization. Do not
+            # set its private event outside that protocol or discard its owner
+            # until both thread and isolated processes are confirmed stopped.
+            if replica.stop(timeout_sec=max(0.0, float(timeout_sec))) is False:
                 logger.warning("Local replica resources did not stop before shutdown timeout")
                 return False
         except Exception as exc:

@@ -140,9 +140,18 @@ class LocalReplicaSync:
         self.trigger_fast_sync()
 
     def stop(self, *, timeout_sec: float = 2.0) -> bool:
-        self._stop_evt.set()
-        self._fast_sync_evt.set()
         deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        # Publication and cancellation share one linearization point. If a
+        # local promotion is already committing, it completes before stop is
+        # accepted; a timed-out caller retains the owner and can retry.
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return False
+        try:
+            self._stop_evt.set()
+            self._failure_callback = None
+        finally:
+            self._lock.release()
+        self._fast_sync_evt.set()
         worker_stopped = self._close_worker_client(
             timeout_sec=min(0.5, max(0.0, deadline - time.monotonic()))
         )
@@ -162,9 +171,14 @@ class LocalReplicaSync:
         if not self._sync_lock.acquire(blocking=False):
             return False
         try:
-            self._thread = None
-            self._close_local_conn()
-            self._reset_snapshot_blocked(outcome="stopped")
+            if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                return False
+            try:
+                self._thread = None
+                self._close_local_conn_locked()
+                self._reset_snapshot_blocked(outcome="stopped")
+            finally:
+                self._lock.release()
         finally:
             self._sync_lock.release()
         return True
@@ -277,15 +291,13 @@ class LocalReplicaSync:
             )
             status = str(response.get("status") or "")
             state = dict(response.get("state") or {})
-            if self._stop_evt.is_set():
-                raise _LocalReplicaStopping()
-            if status == "snapshot_ready":
-                self._swap_local_replica(str(response.get("temp_db_path") or temp_path))
-            elif status != "unchanged":
-                raise RuntimeError(f"Unexpected local replica worker status: {status}")
             with self._lock:
                 if self._stop_evt.is_set():
                     raise _LocalReplicaStopping()
+                if status == "snapshot_ready":
+                    self._swap_local_replica(str(response.get("temp_db_path") or temp_path))
+                elif status != "unchanged":
+                    raise RuntimeError(f"Unexpected local replica worker status: {status}")
                 if self._local_conn is None:
                     raise RuntimeError(
                         "Local replica worker confirmed state without a valid local copy"

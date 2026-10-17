@@ -43,7 +43,9 @@ class _Replica:
 
     def stop(self, *, timeout_sec=2.0) -> bool:
         self.stop_calls += 1
-        return self.stop_result
+        self._stop_evt.set()
+        self._fast_sync_evt.set()
+        return self.stop_result and not self._thread.is_alive()
 
 
 class _NetworkWorker:
@@ -137,11 +139,11 @@ def test_replica_is_not_force_closed_while_its_thread_is_alive(tmp_path, monkeyp
     assert manager.close(timeout_sec=0.1) is False
     assert manager._local_replica is replica
     assert replica._stop_evt.is_set() and replica._fast_sync_evt.is_set()
-    assert replica.stop_calls == 0
+    assert replica.stop_calls == 1
 
     thread.alive = False
     assert manager.close(timeout_sec=0.1) is True
-    assert replica.stop_calls == 1
+    assert replica.stop_calls == 2
     assert manager._local_replica is None
 
 

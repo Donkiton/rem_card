@@ -613,6 +613,27 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertLess(stages.index("backup"), stages.index("quick_check"))
         self.assertLess(stages.index("quick_check"), stages.index("fsync"))
 
+    def test_release_progress_failure_cannot_leave_snapshot_locks(self):
+        for failed_stage in ("snapshot_gate_release", "lease_release"):
+            with self.subTest(failed_stage=failed_stage):
+                gate = self.root / f"{failed_stage}.gate.lock"
+                lease = self.root / f"{failed_stage}.lease.lock"
+
+                def broken_progress(stage):
+                    if stage == failed_stage:
+                        raise BrokenPipeError("diagnostic IPC closed during release")
+
+                result = _sync_snapshot_with_network_lease(
+                    {"central_db_path": str(self.central_path), "local_state": {},
+                     "temp_db_path": str(self.root / f"{failed_stage}.tmp.db"),
+                     "snapshot_gate_path": str(gate), "snapshot_lease_path": str(lease),
+                     "writer_lock_path": str(self.root / "db.lock")},
+                    progress_callback=broken_progress,
+                )
+                self.assertEqual(result["status"], "snapshot_ready")
+                self.assertFalse(gate.exists())
+                self.assertFalse(lease.exists())
+
     def test_failed_sync_keeps_recent_local_replica_until_it_is_stale(self):
         self.replica = LocalReplicaSync(
             central_db_path=str(self.central_path),
@@ -857,6 +878,56 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertFalse(result.get("sync"))
         self.assertFalse(self.local_path.exists())
         self.assertEqual(replica.health_snapshot()["last_sync_ok_ts"], 0.0)
+
+    def test_stop_serializes_with_publication_and_preserves_its_deadline(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path), local_db_path=str(self.local_path),
+        )
+        self.assertTrue(self.replica.sync_once())
+        self.assertTrue(self.replica._worker_client.close(timeout_sec=1.0))
+        replacement = self.root / "publication-race.db"
+        _create_central_database(replacement, cycle="cycle-new", values=["new generation"])
+        opened, release = threading.Event(), threading.Event()
+        original_open = self.replica._open_validated_local
+
+        class SnapshotWorker:
+            def sync(worker_self, **kwargs):
+                shutil.copy2(replacement, kwargs["temp_db_path"])
+                return {"status": "snapshot_ready", "temp_db_path": kwargs["temp_db_path"],
+                        "state": {"db_cycle": "cycle-new"}}
+
+            def close(worker_self, **_kwargs):
+                return True
+
+        def pause_before_publication(path):
+            connection = original_open(path)
+            opened.set()
+            if not release.wait(2.0):
+                connection.close()
+                raise TimeoutError("publication test did not release")
+            return connection
+
+        self.replica._worker_client = SnapshotWorker()
+        result = {}
+        thread = threading.Thread(target=lambda: result.setdefault("ok", self.replica.sync_once()))
+        self.replica._thread = thread
+        with patch.object(self.replica, "_open_validated_local", side_effect=pause_before_publication):
+            thread.start()
+            try:
+                self.assertTrue(opened.wait(1.0))
+                started = time.monotonic()
+                self.assertFalse(self.replica.stop(timeout_sec=0.03))
+                self.assertLess(time.monotonic() - started, 0.7)
+                self.assertFalse(self.replica._stop_evt.is_set())
+                self.assertIs(self.replica._thread, thread)
+            finally:
+                release.set()
+                thread.join(2.0)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(result["ok"], "publication completed before stop was accepted")
+        self.assertEqual(self.replica.last_state, {"db_cycle": "cycle-new"})
+        self.assertTrue(self.replica.stop(timeout_sec=1.0))
+        self.assertTrue(self.replica._stop_evt.is_set())
 
     def test_stop_timeout_retains_unfinished_thread_and_local_connection(self):
         class UnfinishedThread:

@@ -466,14 +466,22 @@ def _sync_snapshot_with_network_lease_observed(
         )
         return result
     finally:
-        if snapshot_gate_acquired:
-            if progress_callback is not None:
-                progress_callback("snapshot_gate_release")
-            snapshot_gate.release()
-        if snapshot_lease_acquired:
-            if progress_callback is not None:
-                progress_callback("lease_release")
-            snapshot_lease.release()
+        try:
+            if snapshot_gate_acquired:
+                try:
+                    if progress_callback is not None:
+                        progress_callback("snapshot_gate_release")
+                except Exception:
+                    pass  # IPC diagnostics must never prevent lock release.
+                snapshot_gate.release()
+        finally:
+            if snapshot_lease_acquired:
+                try:
+                    if progress_callback is not None:
+                        progress_callback("lease_release")
+                except Exception:
+                    pass
+                snapshot_lease.release()
 
 
 def _send_error(pipe, exc: Exception) -> None:
