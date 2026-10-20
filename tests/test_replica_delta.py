@@ -148,6 +148,51 @@ def test_delta_matches_full_backup_after_two_commits_and_all_mutation_kinds():
         apply_delta(local, package)
 
 
+def test_streamed_reconciliation_uses_sqlite_binary_key_order_and_detects_deletions():
+    source = make_database()
+    source.executescript("CREATE TABLE mixed_keys(a, b, body, PRIMARY KEY(a,b));")
+    source.executemany("INSERT INTO mixed_keys VALUES(?,?,?)", [
+        (0, "one", "zero"), (1, "one", "integer"), (1.5, "one", "real"),
+        ("a", "one", "text"), (b"a", "one", "blob"), ("A", "two", "binary"),
+    ])
+    source.commit()
+    local = clone(source)
+    source.execute("UPDATE mixed_keys SET body='updated' WHERE a=0")
+    source.execute("DELETE FROM mixed_keys WHERE a=?", (b"a",))
+    source.execute("UPDATE mixed_keys SET a='Z' WHERE a='a'")
+    source.commit()
+    package = collect_delta(source, local, max_fraction=1)
+    assert package["status"] == "delta", package
+    apply_delta(local, package)
+    assert logical_dump(local) == logical_dump(source)
+
+
+@pytest.mark.parametrize("limit,reason", [
+    ({"max_scan_rows": 1}, "reconciliation_scan_limit"),
+    ({"max_scan_bytes": 1}, "reconciliation_byte_limit"),
+])
+def test_reconciliation_scan_budgets_preserve_baseline_and_table_diagnostics(limit, reason):
+    source = make_database()
+    local = clone(source)
+    before = logical_dump(local)
+    result = collect_delta(source, local, max_fraction=1, **limit)
+    assert result["status"] == "full_required"
+    assert result["reason"] == reason
+    assert result["metrics"]["table"]
+    assert result["metrics"]["source_rows"] >= 0
+    assert logical_dump(local) == before
+
+
+def test_reconciliation_refuses_unsafe_nullable_primary_key():
+    source = make_database()
+    source.executescript("CREATE TABLE nullable_keys(a, b, PRIMARY KEY(a,b));"
+                         "INSERT INTO nullable_keys VALUES(NULL,'x');"
+                         "INSERT INTO nullable_keys VALUES(NULL,'x');")
+    local = clone(source)
+    result = collect_delta(source, local, max_fraction=1)
+    assert (result["status"], result["reason"]) == ("full_required", "unsupported_table_shape")
+
+
 def test_untracked_composite_update_is_seen_without_cursor_change():
     source = make_database()
     local = clone(source)
@@ -318,3 +363,27 @@ def test_full_unified_synthetic_schema_is_supported_without_runtime_database_pat
         "change_cursor": 0,
         "schema_revision": "27",
     }
+
+
+@pytest.mark.parametrize("mutate_untracked", [False, True])
+def test_large_untracked_history_reconciles_small_changes_without_full_copy(mutate_untracked):
+    source = make_database()
+    source.executemany(
+        "INSERT INTO audit_rows(item_id, action) VALUES(1, ?)",
+        [(f"historical-{index}",) for index in range(6001)],
+    )
+    source.commit()
+    local = clone(source)
+    source.execute("UPDATE items SET code='new-value' WHERE id=1")
+    if mutate_untracked:
+        source.execute("UPDATE audit_rows SET action='corrected' WHERE id=17")
+        source.execute("DELETE FROM audit_rows WHERE id=19")
+        source.execute("INSERT INTO audit_rows(item_id, action) VALUES(1, 'new-tail')")
+    source.commit()
+
+    result = collect_delta(source, local, max_fraction=1.0)
+
+    assert result["status"] == "delta", result
+    assert result["metrics"]["row_count"] < 30
+    apply_delta(local, result)
+    assert logical_dump(local) == logical_dump(source)

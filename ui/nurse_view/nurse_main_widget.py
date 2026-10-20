@@ -168,6 +168,7 @@ class NurseMainWidget(QWidget):
         self._snapshot_pending = None
         self._snapshot_request_id = 0
         self._card_snapshot_cache = None
+        self._card_snapshot_context = None
         self._balance_runtime_cache = None
         self._is_closing = False
         self.diet_intake_widget = None
@@ -393,6 +394,7 @@ class NurseMainWidget(QWidget):
         request = {
             "admission_id": int(admission_id),
             "shift_date": shift_date,
+            "patient_open_generation": self._patient_open_generation,
             "ensure_initial_status": False,
             "load_scope": load_scope,
             "context_key": self._current_snapshot_context_key(
@@ -621,6 +623,7 @@ class NurseMainWidget(QWidget):
             "request_id": self._snapshot_request_id,
             "admission_id": int(adm_id),
             "shift_date": self._current_date,
+            "patient_open_generation": self._patient_open_generation,
             "ensure_initial_status": ensure_initial_status,
             "load_scope": str(load_scope or "full"),
             "context_key": self._current_snapshot_context_key(load_scope=load_scope),
@@ -808,6 +811,15 @@ class NurseMainWidget(QWidget):
                 self._snapshot_request_id,
             )
             return
+        request_generation = request.get("patient_open_generation")
+        if request_generation != self._patient_open_generation:
+            logger.info(
+                "NurseMainWidget discarded stale snapshot generation=%s current_generation=%s admission_id=%s",
+                request_generation,
+                self._patient_open_generation,
+                request.get("admission_id"),
+            )
+            return
         adm_id = getattr(self.layout_manager, "current_admission_id", None)
         if int(request["admission_id"]) != int(adm_id or 0) or request["shift_date"] != self._current_date:
             return
@@ -826,12 +838,18 @@ class NurseMainWidget(QWidget):
         snapshot = dict(request.get("snapshot") or {})
         previous_snapshot = self._card_snapshot_cache or {}
         snapshot = self._balance_snapshot_sync.merge_card_snapshot(snapshot)
+        snapshot_context = (
+            int(request["admission_id"]),
+            request["shift_date"],
+            request_generation,
+        )
         snapshot_signature = self._card_snapshot_apply_signature(snapshot)
         if (
             snapshot_signature is not None
             and snapshot_signature == self._last_applied_card_snapshot_signature
         ):
             self._card_snapshot_cache = snapshot
+            self._card_snapshot_context = snapshot_context
             self._balance_runtime_cache = snapshot.get("balance_runtime")
             self._last_change_id = max(
                 int(self._last_change_id or 0),
@@ -860,6 +878,7 @@ class NurseMainWidget(QWidget):
             )
             return
         self._card_snapshot_cache = snapshot
+        self._card_snapshot_context = snapshot_context
         self._last_applied_card_snapshot_signature = snapshot_signature
         self._balance_runtime_cache = snapshot.get("balance_runtime")
         effective_bounds = snapshot.get("effective_bounds")
@@ -1204,12 +1223,11 @@ class NurseMainWidget(QWidget):
 
     def _refresh_status_from_db(self) -> None:
         try:
-            if hasattr(self.layout_manager, "set_current_status_dto"):
-                self.layout_manager.set_current_status_dto(None)
-            if hasattr(self.layout_manager, "refresh_current_status"):
-                self.layout_manager.refresh_current_status()
             events_sector = getattr(self.layout_manager, "sector_events", None)
             if events_sector is not None and hasattr(events_sector, "refresh"):
+                # SectorEvents loads its snapshot in AsyncCallThread.  The
+                # card status itself arrives with the guarded card snapshot
+                # requested by _on_data_changes below.
                 events_sector.refresh(force=True)
         except Exception:
             logger.exception("Nurse status partial refresh failed")
@@ -1470,7 +1488,8 @@ class NurseMainWidget(QWidget):
         if full_refresh_required or card_snapshot_required:
             self._request_card_snapshot()
         elif vitals_snapshot_required:
-            if self._current_status_is_outcome():
+            status_changed = bool(sync_actions.get("status_refresh"))
+            if not status_changed and self._current_status_is_outcome():
                 logger.info(
                     "NurseMainWidget skipped vitals snapshot after outcome admission_id=%s sources=%s entities=%s",
                     getattr(self.layout_manager, "current_admission_id", None),
@@ -1977,14 +1996,26 @@ class NurseMainWidget(QWidget):
 
     def _current_status_is_outcome(self) -> bool:
         snapshot = self._card_snapshot_cache or {}
+        admission_id = getattr(getattr(self, "layout_manager", None), "current_admission_id", None)
+        try:
+            expected_context = (
+                int(admission_id),
+                self._current_date,
+                self._patient_open_generation,
+            )
+        except (TypeError, ValueError):
+            expected_context = None
+        if (
+            expected_context is None
+            or getattr(self, "_card_snapshot_context", None) != expected_context
+        ):
+            # Unknown or stale state must trigger a guarded background
+            # snapshot; treating it as an outcome would suppress that refresh.
+            return False
+
         status_dto = snapshot.get("status")
         status_value = getattr(status_dto, "status", None)
         if status_dto and getattr(status_value, "is_outcome", lambda: False)():
-            return True
-
-        layout_status = getattr(getattr(self, "layout_manager", None), "_current_status_dto", None)
-        layout_status_value = getattr(layout_status, "status", None)
-        if layout_status and getattr(layout_status_value, "is_outcome", lambda: False)():
             return True
 
         patient = snapshot.get("patient")
@@ -1995,19 +2026,6 @@ class NurseMainWidget(QWidget):
         ):
             return True
 
-        admission_id = getattr(getattr(self, "layout_manager", None), "current_admission_id", None)
-        if (
-            admission_id
-            and getattr(self, "remcard_service", None)
-            and hasattr(self.remcard_service, "get_current_status")
-        ):
-            try:
-                current_status = self.remcard_service.get_current_status(admission_id)
-            except Exception:
-                current_status = None
-            current_status_value = getattr(current_status, "status", None)
-            if current_status and getattr(current_status_value, "is_outcome", lambda: False)():
-                return True
         return False
 
     def _schedule_chart_init(self, delay_ms: int = CHART_LAZY_INIT_DELAY_MS):
@@ -2261,6 +2279,7 @@ class NurseMainWidget(QWidget):
         self._balance_snapshot_sync.reset()
         self.current_date = date
         self._card_snapshot_cache = None
+        self._card_snapshot_context = None
         self._balance_runtime_cache = None
         self._update_emergency_notice_sector()
         
