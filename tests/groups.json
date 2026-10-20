@@ -120,7 +120,8 @@
     "tests/test_initial_status_queue.py",
     "tests/test_order_latest_admin_index.py",
     "tests/test_daily_backup_scheduler.py",
-    "tests/test_startup_snapshot.py"
+    "tests/test_startup_snapshot.py",
+    "tests/test_update_launcher_startup.py"
   ],
   "ui": [
     "tests/test_sector_ivl_event_edit.py",
@@ -216,6 +217,7 @@
     "tests/test_w1_layout_handoff.py",
     "tests/test_chart_presentation.py",
     "tests/test_graph_infographics.py",
-    "tests/test_infographic_renderer.py"
+    "tests/test_infographic_renderer.py",
+    "tests/test_update_dialogs.py"
   ]
 }

@@ -76,6 +76,9 @@ class UnifiedWindow(QMainWindow):
         self._restart_resume_role = None
         self._candidate = None
         self._update_requested = False
+        self._update_launch_in_flight = False
+        self._update_launch_ready = False
+        self._update_launch_dialog = None
         self._exit_update_checked = False
         self._suppress_exit_update = False
         self._maintenance_mutating = False
@@ -1506,11 +1509,63 @@ class UnifiedWindow(QMainWindow):
         if candidate is not None:
             # Waiting for an answer is not a stuck shutdown.
             self._cancel_exit_deadline()
-            self._update_requested = QMessageBox.question(
-                self, "Обновление RemCard", f"Доступна версия {candidate.version}. Обновить перед выходом?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes) == QMessageBox.Yes
+            from rem_card.ui.shared.update_dialogs import UpdatePromptDialog
+            self._update_requested = UpdatePromptDialog.ask(self, candidate.version)
             self._begin_application_exit()
         self.close()
+
+    def _start_update_launch(self):
+        from rem_card.app.update_launcher import launch_unified_update
+        from rem_card.ui.shared.update_dialogs import UpdateLaunchDialog
+
+        self._update_launch_in_flight = True
+        candidate = self._candidate
+        self._update_launch_dialog = UpdateLaunchDialog(candidate.version, self)
+        self._update_launch_dialog.show()
+        self._update_launch_dialog.raise_()
+        self._set_exit_stage("update_launcher", "Запуск программы обновления…")
+
+        def completed(launched):
+            self._update_launch_in_flight = False
+            self._update_launch_ready = bool(launched)
+            if not launched:
+                self._update_launch_failed()
+                return
+            self.close()
+
+        def failed(exc):
+            lifecycle_event("unified_update_launch_failed", error_class=type(exc).__name__)
+            completed(False)
+
+        self._async(lambda: launch_unified_update(candidate, wait_for_parent=True, wait_for_window=True),
+                    completed, failed)
+
+    def _hide_update_launch_dialog(self):
+        if self._update_launch_dialog is not None:
+            self._update_launch_dialog.hide()
+            self._update_launch_dialog.deleteLater()
+            self._update_launch_dialog = None
+
+    def _update_launch_failed(self):
+        self._hide_update_launch_dialog()
+        self._cancel_exit_deadline()
+        self._closing = self._restart = self._update_requested = self._pending_exit = False
+        self._update_launch_ready = False
+        self.stack.setEnabled(True)
+        self.entry_chrome.set_role_mode(False)
+        self._status_timer.start()
+        self.show_roles()
+        self.show()
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        dialog = CustomMessageBox(
+            "Обновление RemCard",
+            "Не удалось запустить обновление. Программа остаётся открытой. Повторите попытку позже.",
+            parent=self,
+        )
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def _exit_update_failed(self, exc):
         lifecycle_event("unified_exit_update_check_failed", error_class=type(exc).__name__)
@@ -1669,6 +1724,9 @@ class UnifiedWindow(QMainWindow):
             self._begin_application_exit()
             return
         self._begin_application_exit()
+        if self._update_launch_in_flight:
+            event.ignore()
+            return
         if (self.root and not self._exit_update_checked and not self._update_requested
                 and not self._restart and not self._suppress_exit_update and not self._central_unavailable):
             event.ignore()
@@ -1709,8 +1767,11 @@ class UnifiedWindow(QMainWindow):
             else:
                 launched = _launch_requested_restart()
         elif self._candidate and self._update_requested:
-            from rem_card.app.update_launcher import launch_unified_update
-            launched = launch_unified_update(self._candidate, wait_for_parent=True)
+            if not self._update_launch_ready:
+                event.ignore()
+                self._start_update_launch()
+                return
+            launched = True
         else:
             launched = True
         if not launched:
@@ -1724,6 +1785,7 @@ class UnifiedWindow(QMainWindow):
             self.show()
             QMessageBox.warning(self, "RemCard", "Не удалось запустить перезапуск или обновление. Программа остаётся открытой.")
             return
+        self._hide_update_launch_dialog()
         event.accept()
         QApplication.quit()
 

@@ -1282,6 +1282,7 @@ def test_drain_exception_retains_resources_and_allows_retry(shell, monkeypatch):
 
 
 def test_update_question_suspends_exit_deadline_and_rearms_after_answer(shell, monkeypatch):
+    from rem_card.ui.shared.update_dialogs import UpdatePromptDialog
     guard = shell._exit_guard = _ExitGuard()
     shell._begin_application_exit()
     observed = []
@@ -1290,12 +1291,72 @@ def test_update_question_suspends_exit_deadline_and_rearms_after_answer(shell, m
 
     def answer(*args):
         observed.append((guard.disarmed, shell._exit_started))
-        return QMessageBox.No
+        return False
 
-    monkeypatch.setattr(QMessageBox, 'question', answer)
+    monkeypatch.setattr(UpdatePromptDialog, 'ask', answer)
     shell._exit_update_found(SimpleNamespace(version='test'))
     assert observed == [(1, None)] and guard.arms == ['shutdown', 'shutdown']
     assert not shell._update_requested
+
+
+def test_update_launch_is_async_responsive_and_not_duplicated(shell, monkeypatch):
+    from rem_card.app import update_launcher
+    from PySide6.QtCore import QTimer
+    started, release = threading.Event(), threading.Event()
+    gui_thread = threading.get_ident()
+    launches, closed, ticks = [], [], []
+
+    def launch(candidate, **kwargs):
+        launches.append((candidate, kwargs, threading.get_ident()))
+        started.set()
+        assert release.wait(2)
+        return True
+
+    shell._candidate = SimpleNamespace(version='5.1.11')
+    shell._update_requested = True
+    monkeypatch.setattr(update_launcher, 'launch_unified_update', launch)
+    monkeypatch.setattr(shell, 'close', lambda: closed.append(True))
+    event = SimpleNamespace(ignore=lambda: None, spontaneous=lambda: False)
+    try:
+        shell.closeEvent(event)
+        assert started.wait(1)
+        assert shell._update_launch_in_flight
+        assert shell._update_launch_dialog.isVisible()
+        shell.closeEvent(event)
+        assert len(launches) == 1 and launches[0][2] != gui_thread
+        assert launches[0][1] == {'wait_for_parent': True, 'wait_for_window': True}
+        QTimer.singleShot(0, lambda: ticks.append(True))
+        _wait_for(lambda: bool(ticks))
+        assert not closed
+    finally:
+        release.set()
+        _wait_for(lambda: not shell._workers)
+        shell._hide_update_launch_dialog()
+    assert closed == [True] and shell._update_launch_ready
+
+
+@pytest.mark.parametrize('raises', [False, True])
+def test_update_launch_failure_restores_application(shell, monkeypatch, raises):
+    from rem_card.app import update_launcher
+    from rem_card.ui.shared.custom_message_box import CustomMessageBox
+    warnings = []
+
+    def launch(*args, **kwargs):
+        if raises:
+            raise OSError('synthetic launch failure')
+        return False
+
+    shell._candidate = SimpleNamespace(version='5.1.11')
+    shell._update_requested = True
+    monkeypatch.setattr(update_launcher, 'launch_unified_update', launch)
+    monkeypatch.setattr(shell, 'show_roles', lambda: None)
+    monkeypatch.setattr(CustomMessageBox, 'exec', lambda dialog: warnings.append(dialog.parent()))
+    shell._start_update_launch()
+    _wait_for(lambda: not shell._workers)
+    assert shell.isVisible() and shell.stack.isEnabled()
+    assert not shell._pending_exit and not shell._update_requested
+    assert not shell._update_launch_in_flight and not shell._update_launch_ready
+    assert shell._update_launch_dialog is None and warnings == [shell]
 
 
 def test_unified_doctor_outage_does_not_wait_for_monitor_in_gui(monkeypatch):
