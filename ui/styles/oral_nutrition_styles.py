@@ -322,6 +322,9 @@ QTableWidget#OralScheduleTable {{
 QTableWidget#OralScheduleTable::item {{
     padding: 4px 6px;
 }}
+QTableWidget#OralScheduleTable QLineEdit {{
+    padding: 0px 4px;
+}}
 QTableWidget#OralScheduleTable QHeaderView::section {{
     background-color: #d9e2ec;
     color: #243b53;
