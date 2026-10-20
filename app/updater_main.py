@@ -20,7 +20,7 @@ if __package__ in (None, ""):
 
     bootstrap_local_rem_card()
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -54,59 +54,7 @@ from rem_card.app.update_checker import (
     update_lock_scope_id,
 )
 
-# Обновлятор запускается из пакета в UPD. Общую тему приложения сюда не
-# импортируем: runtime-настройки живут в central settings DB, а не в JSON рядом с exe.
-BG_LIGHT = "#e9ecef"
-COLOR_PRIMARY = "#6c757d"
-COLOR_PRIMARY_DARK = "#5c6770"
-CUSTOM_DIALOG_BORDER = "#bdc3c7"
-CUSTOM_DIALOG_RADIUS = "5px"
-TEXT_PRIMARY = "#2c3e50"
-TEXT_SECONDARY = "#495057"
-STYLE_CUSTOM_DIALOG = f"""
-    QDialog {{ background-color: transparent; }}
-    QFrame#DialogMainFrame {{
-        background-color: #ffffff;
-        border: 1px solid {CUSTOM_DIALOG_BORDER};
-        border-radius: {CUSTOM_DIALOG_RADIUS};
-    }}
-    QFrame#DialogTitleBar {{
-        background-color: {BG_LIGHT};
-        border-top-left-radius: {CUSTOM_DIALOG_RADIUS};
-        border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
-        border-bottom: 1px solid {CUSTOM_DIALOG_BORDER};
-    }}
-    QLabel#DialogTitleText {{
-        color: {TEXT_PRIMARY};
-        font-weight: bold;
-        font-size: 14px;
-        padding-left: 5px;
-        background-color: transparent;
-    }}
-    QPushButton#DialogCloseBtn {{
-        background-color: transparent;
-        color: {TEXT_PRIMARY};
-        font-weight: bold;
-        font-size: 14px;
-        border: none;
-        padding: 2px 10px;
-        border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
-    }}
-    QPushButton#DialogCloseBtn:hover {{
-        background-color: #e74c3c;
-        color: white;
-    }}
-    QPushButton#DialogOkBtn {{
-        background-color: {BG_LIGHT};
-        color: {TEXT_PRIMARY};
-        font-size: 13px;
-        font-weight: bold;
-        padding: 6px 20px;
-        border: 1px solid {CUSTOM_DIALOG_BORDER};
-        border-radius: {CUSTOM_DIALOG_RADIUS};
-    }}
-    QPushButton#DialogOkBtn:hover {{ background-color: #d8dde2; }}
-"""
+from rem_card.ui.shared.update_dialogs import UpdateDialog, STYLE_UPDATE_DIALOG
 
 
 READY_FILE_NAME = "ready.ok"
@@ -1284,7 +1232,7 @@ def _show_custom_notice(parent, title: str, message: str):
     dialog.setAttribute(Qt.WA_TranslucentBackground)
     dialog.setModal(True)
     dialog.setFixedWidth(390)
-    dialog.setStyleSheet(STYLE_CUSTOM_DIALOG)
+    dialog.setStyleSheet(STYLE_UPDATE_DIALOG)
 
     root = QVBoxLayout(dialog)
     root.setContentsMargins(0, 0, 0, 0)
@@ -1332,15 +1280,13 @@ def _show_custom_notice(parent, title: str, message: str):
     dialog.exec()
 
 
-class UpdateWindow(QDialog):
+class UpdateWindow(UpdateDialog):
     def __init__(self, args: argparse.Namespace):
-        super().__init__()
+        super().__init__(standalone=True)
         self.args = args
         self._finished = False
         self._thread: Optional[QThread] = None
         self._worker: Optional[UpdateWorker] = None
-        self._is_dragging = False
-        self._drag_pos = QPoint()
         self._started_at = 0.0
         self._target_progress = 1
         self._displayed_progress = 1
@@ -1354,80 +1300,7 @@ class UpdateWindow(QDialog):
             self.finished.connect(app.quit)
 
     def _setup_ui(self):
-        self.setWindowTitle("Обновление РЕМКАРТА")
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedWidth(460)
-        self.setStyleSheet(
-            STYLE_CUSTOM_DIALOG
-            + f"""
-            QLabel#UpdateTitle {{
-                color: {TEXT_PRIMARY};
-                font-size: 15px;
-                font-weight: bold;
-                background-color: transparent;
-            }}
-            QLabel#UpdateStatus {{
-                color: {TEXT_PRIMARY};
-                font-size: 13px;
-                font-weight: bold;
-                background-color: transparent;
-            }}
-            QLabel#UpdateHint {{
-                color: {TEXT_SECONDARY};
-                font-size: 12px;
-                background-color: transparent;
-            }}
-            QProgressBar#UpdateProgress {{
-                border: 1px solid {CUSTOM_DIALOG_BORDER};
-                border-radius: {CUSTOM_DIALOG_RADIUS};
-                height: 18px;
-                text-align: center;
-                color: {TEXT_PRIMARY};
-                background-color: {BG_LIGHT};
-                font-weight: bold;
-            }}
-            QProgressBar#UpdateProgress::chunk {{
-                background-color: {COLOR_PRIMARY};
-                border-radius: {CUSTOM_DIALOG_RADIUS};
-            }}
-            QProgressBar#UpdateProgress::chunk:hover {{
-                background-color: {COLOR_PRIMARY_DARK};
-            }}
-            """
-        )
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-
-        card = QFrame(self)
-        card.setObjectName("DialogMainFrame")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(0, 0, 0, 0)
-        card_layout.setSpacing(0)
-
-        self.title_bar = QFrame(card)
-        self.title_bar.setObjectName("DialogTitleBar")
-        self.title_bar.setFixedHeight(30)
-        self.title_bar.installEventFilter(self)
-        title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(5, 0, 0, 0)
-        title_layout.setSpacing(0)
-        window_title = QLabel("Обновление РЕМКАРТА")
-        window_title.setObjectName("DialogTitleText")
-        self.window_close_button = QPushButton("✕")
-        self.window_close_button.setObjectName("DialogCloseBtn")
-        self.window_close_button.setFixedSize(30, 30)
-        self.window_close_button.clicked.connect(self.close)
-        title_layout.addWidget(window_title)
-        title_layout.addStretch()
-        title_layout.addWidget(self.window_close_button)
-
-        content = QFrame(card)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
-
+        layout = self.content_layout
         self.title_label = QLabel("Обновление РЕМКАРТА")
         self.title_label.setObjectName("UpdateTitle")
         self.status_label = QLabel("Подготовка...")
@@ -1450,9 +1323,6 @@ class UpdateWindow(QDialog):
         layout.addWidget(self.progress)
         layout.addWidget(self.hint_label)
         layout.addWidget(self.close_button, 0, Qt.AlignRight)
-        card_layout.addWidget(self.title_bar)
-        card_layout.addWidget(content)
-        root.addWidget(card)
 
     def start(self):
         self._started_at = time.time()
@@ -1480,20 +1350,6 @@ class UpdateWindow(QDialog):
             "Закрывать окно во время обновления нельзя. Дождитесь завершения процесса.",
         )
         event.ignore()
-
-    def eventFilter(self, obj, event):
-        if obj is getattr(self, "title_bar", None):
-            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-                self._is_dragging = True
-                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-                return True
-            if event.type() == QEvent.MouseMove and self._is_dragging:
-                self.move(event.globalPosition().toPoint() - self._drag_pos)
-                return True
-            if event.type() == QEvent.MouseButtonRelease:
-                self._is_dragging = False
-                return True
-        return super().eventFilter(obj, event)
 
     def _tick_progress(self):
         if not self._started_at:

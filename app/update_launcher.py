@@ -25,6 +25,7 @@ LEGACY_STARTING_LOCK_STALE_SEC = 15
 UPDATER_EXE_NAME = "RemCardUpdater.exe"
 UNIFIED_APP_EXE_NAME = "RemCard.exe"
 LOCAL_UPDATE_STARTING_LOCK_NAME = ".remcard_update_starting.lock"
+UPDATER_WINDOW_WAIT_MS = 15_000
 
 
 def _read_lock_payload(lock_path: str) -> Optional[dict[str, Any]]:
@@ -241,9 +242,6 @@ def get_local_update_starting_lock_path(target_dir: str) -> str:
 
 
 def _write_starting_lock(path: str, candidate: UpdateCandidate, target_dir: str) -> bool:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    if _is_lock_active(path, UPDATE_STARTING_LOCK_STALE_SEC, target_dir=target_dir):
-        return False
     payload = {
         "timestamp": time.time(),
         "started_at": _now_text(),
@@ -257,27 +255,46 @@ def _write_starting_lock(path: str, candidate: UpdateCandidate, target_dir: str)
         "target_version": candidate.version,
     }
     raw = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8")
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    # The usual case needs only the atomic creation. In particular, do not
+    # mkdir/stat/read a missing network lock before every successful launch.
+    # Existing locks still go through the same stale/owner checks.
+    for attempt in range(2):
         try:
-            os.write(fd, raw)
-        finally:
-            os.close(fd)
-        return True
-    except FileExistsError:
-        return False
-    except Exception:
-        return False
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, raw)
+            finally:
+                os.close(fd)
+            return True
+        except FileNotFoundError:
+            if attempt:
+                return False
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+            except Exception:
+                return False
+        except FileExistsError:
+            if attempt or _is_lock_active(path, UPDATE_STARTING_LOCK_STALE_SEC, target_dir=target_dir):
+                return False
+        except Exception:
+            return False
+    return False
 
 
 def _mark_starting_lock_updater_pid(path: str, pid: Any) -> None:
     try:
-        payload = _read_lock_payload(path) or {}
-        payload["updater_pid"] = int(pid or 0)
-        payload["state"] = "starting"
-        payload["timestamp"] = time.time()
-        with open(path, "w", encoding="utf-8") as fh:
+        # A fast updater may already have consumed this lock. Opening r+
+        # avoids recreating it after the updater has removed it.
+        with open(path, "r+", encoding="utf-8") as fh:
+            payload = json.load(fh)
+            if not isinstance(payload, dict):
+                return
+            payload["updater_pid"] = int(pid or 0)
+            payload["state"] = "starting"
+            payload["timestamp"] = time.time()
+            fh.seek(0)
             json.dump(payload, fh, ensure_ascii=True, indent=2)
+            fh.truncate()
     except Exception:
         pass
 
@@ -291,11 +308,34 @@ def _remove_lock_quietly(path: str):
         pass
 
 
+def _wait_for_updater_window(process: Any) -> None:
+    """Best-effort GUI handoff, including updaters from older full packages.
+
+    This runs on the caller's launch worker. A timeout is not a failed update:
+    Windows/SMB may still be loading the executable and its Qt runtime.
+    """
+    if os.name != "nt":
+        return
+    handle = getattr(process, "_handle", None)
+    if not handle:
+        return
+    try:
+        wait_for_input_idle = ctypes.windll.user32.WaitForInputIdle
+        wait_for_input_idle.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        wait_for_input_idle.restype = ctypes.c_ulong
+        wait_for_input_idle(int(handle), UPDATER_WINDOW_WAIT_MS)
+    except Exception:
+        # Non-GUI processes and platforms without this API still retain the
+        # normal launch/early-exit checks below.
+        pass
+
+
 def launch_update(
     candidate: UpdateCandidate,
     *,
     restart_exe: Optional[str] = None,
     wait_for_parent: bool = True,
+    wait_for_window: bool = False,
 ) -> bool:
     if not is_compiled():
         return False
@@ -355,6 +395,12 @@ def launch_update(
                 _remove_lock_quietly(starting_lock_path)
                 _remove_lock_quietly(local_starting_lock_path)
                 return False
+        if wait_for_window:
+            _wait_for_updater_window(process)
+            if callable(poll) and poll() is not None:
+                _remove_lock_quietly(starting_lock_path)
+                _remove_lock_quietly(local_starting_lock_path)
+                return False
         return True
     except Exception:
         _remove_lock_quietly(starting_lock_path)
@@ -366,12 +412,15 @@ def launch_unified_update(
     candidate: UpdateCandidate,
     *,
     wait_for_parent: bool = True,
+    wait_for_window: bool = False,
 ) -> bool:
     """Launch an update and return to the single RemCard entry afterwards."""
+    window_options = {"wait_for_window": True} if wait_for_window else {}
     return launch_update(
         candidate,
         restart_exe=UNIFIED_APP_EXE_NAME,
         wait_for_parent=wait_for_parent,
+        **window_options,
     )
 
 
