@@ -5,10 +5,12 @@ import threading
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QSettings, Qt, QTimer, Signal  # noqa: E402
-from PySide6.QtGui import QMouseEvent, QWindow  # noqa: E402
+from PySide6.QtGui import QFont, QMouseEvent, QWindow  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
@@ -16,6 +18,9 @@ from PySide6.QtWidgets import (  # noqa: E402
     QDialogButtonBox,
     QFrame,
     QLabel,
+    QLineEdit,
+    QStyle,
+    QStyleOptionFrame,
     QTableWidgetItem,
     QWidget,
     QWidgetItem,
@@ -434,6 +439,52 @@ def test_diet_assignment_dialog_is_resizable_and_restores_saved_geometry(tmp_pat
     assert restored_dialog.geometry().y() == 40
     assert restored_dialog.geometry().width() == 820
     assert restored_dialog.geometry().height() == 740
+
+
+@pytest.mark.parametrize("font_size", [13, 18])
+def test_diet_schedule_editors_fit_all_columns_without_shrinking_font(tmp_path, monkeypatch, font_size):
+    app = _application()
+    settings = QSettings(str(tmp_path / "diet-editor-layout.ini"), QSettings.IniFormat)
+    monkeypatch.setattr(DietAssignmentDialog, "_settings", lambda self: settings)
+    dialog = DietAssignmentDialog([])
+    table = dialog.schedule_table
+    font = QFont("Segoe UI")
+    font.setPixelSize(font_size)
+    table.setFont(font)
+    dialog._add_schedule_row("Первый завтрак", "08:00", 250, "После процедуры")
+    dialog.show()
+    app.processEvents()
+    assert table.rowHeight(0) == 32
+    assert dialog.minimumHeight() == 680
+
+    values = ("Обед", "12:30", "1250", "Дробно")
+    for column, value in enumerate(values):
+        item = table.item(0, column)
+        table.setCurrentItem(item)
+        table.editItem(item)
+        app.processEvents()
+        editor = app.focusWidget()
+        assert isinstance(editor, QLineEdit)
+        assert table.visualItemRect(item).contains(editor.geometry())
+        assert editor.height() >= editor.sizeHint().height()
+        assert editor.font().pixelSize() == font_size
+
+        option = QStyleOptionFrame()
+        editor.initStyleOption(option)
+        content_rect = editor.style().subElementRect(QStyle.SE_LineEditContents, option, editor)
+        assert content_rect.height() >= editor.fontMetrics().height() + 2
+        assert content_rect.width() >= editor.fontMetrics().horizontalAdvance(editor.text()) + 4
+
+        editor.setText(value)
+        QTest.keyClick(editor, Qt.Key_Return)
+        app.processEvents()
+        assert item.text() == value
+
+    schedule = dialog.data()["schedule_json"]
+    assert schedule[0]["meal"] == "Обед"
+    assert schedule[0]["time"] == "12:30"
+    assert schedule[0]["amount"] == 1250
+    assert schedule[0]["note"] == "Дробно"
 
 
 def test_existing_diet_assignment_dialog_offers_confirmed_delete(monkeypatch):

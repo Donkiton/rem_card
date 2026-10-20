@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -63,6 +64,19 @@ def _dialog_section(title: str) -> tuple[QFrame, QVBoxLayout]:
     title_label.setObjectName("OralDialogSectionTitle")
     layout.addWidget(title_label)
     return frame, layout
+
+
+class _DietScheduleDelegate(QStyledItemDelegate):
+    """Размещает редактор в ячейке без дополнительных отступов таблицы."""
+
+    def createEditor(self, parent, option, index):
+        editor = super().createEditor(parent, option, index)
+        if editor is not None:
+            editor.setFont(option.font)
+        return editor
+
+    def updateEditorGeometry(self, editor, option, index):
+        editor.setGeometry(option.rect.adjusted(1, 0, -1, 0))
 
 
 class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
@@ -158,6 +172,7 @@ class DietAssignmentDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.schedule_frame, schedule_layout = _dialog_section("Приёмы пищи в медицинские сутки 08:00–08:00")
         self.schedule_table = QTableWidget(0, 4)
         self.schedule_table.setObjectName("OralScheduleTable")
+        self.schedule_table.setItemDelegate(_DietScheduleDelegate(self.schedule_table))
         self.schedule_table.setAlternatingRowColors(True)
         self.schedule_table.verticalHeader().hide()
         self.schedule_table.setHorizontalHeaderLabels(["Приём пищи", "Время", "План, мл", "Примечание"])
