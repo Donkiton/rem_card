@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
@@ -27,6 +28,7 @@ from rem_card.app.logger import logger
 DAILY_BACKUP_ENV = "REMCARD_DAILY_CENTRAL_BACKUP_ENABLED"
 DAILY_BACKUP_SOURCE = "daily_central_backup_reservation"
 DAILY_DATABASE_LOCK_SOURCE = "daily_central_backup_copy"
+DAILY_SNAPSHOT_LEASE_SOURCE = "daily_central_backup_snapshot"
 DAILY_BACKUP_KIND = "daily_central"
 _DAILY_NAME_RE = re.compile(r"^daily_.+_(\d{4}-\d{2}-\d{2})\.db$")
 
@@ -91,15 +93,57 @@ def _daily_paths(config: dict[str, Any]) -> dict[str, str]:
     backup_name = f"daily_{safe_stem}_{backup_date}.db"
     backup_path = os.path.join(str(config["backup_dir"]), backup_name)
     health_dir = str(config["health_dir"])
+    local_staging_dir = str(
+        config.get("local_staging_dir")
+        or os.path.join(tempfile.gettempdir(), "remcard_daily_backup")
+    )
+    source_key = hashlib.sha256(
+        os.path.normcase(os.path.abspath(str(config["database_path"]))).encode("utf-8")
+    ).hexdigest()[:16]
+    local_staging = os.path.join(
+        local_staging_dir,
+        f"daily_{source_key}_{backup_date}_{config['job_token']}.db",
+    )
+    publication_staging = os.path.join(
+        str(config["backup_dir"]),
+        f".{backup_name}.{config['job_token']}.publishing",
+    )
+    snapshot_lease = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(str(config["database_path"])))),
+        "locks",
+        "replica_snapshots",
+        f"daily_{config['job_token']}.lock",
+    )
     return {
         "backup": backup_path,
         "done": os.path.join(health_dir, f"daily_central_backup_{backup_date}.done.json"),
         "reservation": os.path.join(health_dir, f"daily_central_backup_{backup_date}.lock"),
-        "staging": os.path.join(
-            str(config["backup_dir"]),
-            f".{backup_name}.{config['job_token']}.staging",
-        ),
+        # Keep the legacy key for cleanup callers while making its local-disk
+        # ownership explicit. Publication staging always lives beside backup.
+        "staging": local_staging,
+        "local_staging": local_staging,
+        "publication_staging": publication_staging,
+        "snapshot_lease": snapshot_lease,
     }
+
+
+def _emit_progress(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    stage: str,
+    state: str,
+    **fields: Any,
+) -> None:
+    """Report bounded, non-clinical stage telemetry without affecting backup."""
+    payload = {"stage": stage, "state": state, **fields}
+    try:
+        record_metric("daily_backup_stage", 1, **payload)
+    except Exception:
+        pass
+    if progress_callback is not None:
+        try:
+            progress_callback(payload)
+        except Exception:
+            pass
 
 
 def _validated_daily_backup(path: str, *, backup_date: str, source_path: str) -> tuple[bool, str, dict[str, Any]]:
@@ -161,21 +205,20 @@ def _write_daily_metadata(path: str, *, config: dict[str, Any], sha256: str) -> 
     return metadata
 
 
-def _bounded_sqlite_copy(config: dict[str, Any], staging_path: str) -> None:
-    """Copy under the shared DB lock, releasing it before validation and hashing."""
+def _bounded_sqlite_copy(
+    config: dict[str, Any],
+    staging_path: str,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> None:
+    """Copy to local disk under the shared DB lock, then release it promptly."""
     from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
     from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
     database_path = str(config["database_path"])
     owner_id = f"daily-backup-job:{config['job_token']}"
     uri = build_sqlite_file_uri(database_path, mode="ro")
-    source = sqlite3.connect(
-        uri,
-        uri=True,
-        check_same_thread=False,
-        isolation_level=None,
-        timeout=max(0.1, float(config.get("sqlite_timeout_sec", 1.0))),
-    )
+    source = None
     target = None
     database_lock = FileWriteLock(
         str(config["database_lock_path"]),
@@ -183,30 +226,74 @@ def _bounded_sqlite_copy(config: dict[str, Any], staging_path: str) -> None:
         logger=logger,
     )
     acquired = False
+    read_started = time.monotonic()
+    _emit_progress(progress_callback, "read_wait", "started")
     try:
+        source = sqlite3.connect(
+            uri,
+            uri=True,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=max(0.1, float(config.get("sqlite_timeout_sec", 1.0))),
+        )
         configure_connection(source, readonly=True)
         lock_deadline = time.monotonic() + max(0.1, float(config.get("database_lock_wait_sec", 1.5)))
         while not database_lock.acquire(owner_id, DAILY_DATABASE_LOCK_SOURCE):
             if time.monotonic() >= lock_deadline:
+                _emit_progress(
+                    progress_callback,
+                    "read_wait",
+                    "deferred",
+                    elapsed_ms=round((time.monotonic() - read_started) * 1000, 3),
+                )
                 raise DailyBackupDeferred("central_database_lock_busy")
             time.sleep(0.05)
         acquired = True
+        _emit_progress(
+            progress_callback,
+            "read_wait",
+            "completed",
+            elapsed_ms=round((time.monotonic() - read_started) * 1000, 3),
+        )
+        os.makedirs(os.path.dirname(staging_path), exist_ok=True)
         try:
             os.remove(staging_path)
         except FileNotFoundError:
             pass
         target = sqlite3.connect(staging_path, check_same_thread=False, isolation_level=None, timeout=1.0)
         copy_deadline = time.monotonic() + max(0.25, float(config.get("copy_budget_sec", 8.0)))
+        copy_started = time.monotonic()
+        last_progress = copy_started
+        _emit_progress(progress_callback, "copy", "started")
 
-        def _progress(_status: int, _remaining: int, _total: int) -> None:
-            if time.monotonic() >= copy_deadline:
+        def _progress(_status: int, remaining: int, total: int) -> None:
+            nonlocal last_progress
+            now = time.monotonic()
+            if now >= copy_deadline:
                 raise TimeoutError("daily SQLite copy exceeded its copy budget")
+            if now - last_progress >= 0.5 or remaining == 0:
+                last_progress = now
+                _emit_progress(
+                    progress_callback,
+                    "copy",
+                    "progress",
+                    elapsed_ms=round((now - copy_started) * 1000, 3),
+                    pages_remaining=max(0, int(remaining)),
+                    pages_total=max(0, int(total)),
+                )
 
         source.backup(
             target,
             pages=max(16, int(config.get("copy_pages", 256))),
             progress=_progress,
             sleep=0.01,
+        )
+        _emit_progress(
+            progress_callback,
+            "copy",
+            "completed",
+            elapsed_ms=round((time.monotonic() - copy_started) * 1000, 3),
+            size_bytes=os.path.getsize(staging_path),
         )
     finally:
         if target is not None:
@@ -216,7 +303,64 @@ def _bounded_sqlite_copy(config: dict[str, Any], staging_path: str) -> None:
                 pass
         if acquired:
             database_lock.release()
-        source.close()
+        if source is not None:
+            source.close()
+
+
+def _upload_local_staging(
+    local_path: str,
+    publication_path: str,
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> None:
+    """Upload a completed local snapshot to a same-volume publication file."""
+    os.makedirs(os.path.dirname(publication_path), exist_ok=True)
+    try:
+        os.remove(publication_path)
+    except FileNotFoundError:
+        pass
+    started = time.monotonic()
+    last_progress = started
+    copied = 0
+    total = os.path.getsize(local_path)
+    _emit_progress(progress_callback, "upload", "started", size_bytes=total)
+    try:
+        with open(local_path, "rb") as source, open(publication_path, "xb") as target:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                target.write(chunk)
+                copied += len(chunk)
+                now = time.monotonic()
+                if now - last_progress >= 0.5 or copied == total:
+                    last_progress = now
+                    _emit_progress(
+                        progress_callback,
+                        "upload",
+                        "progress",
+                        elapsed_ms=round((now - started) * 1000, 3),
+                        bytes_copied=copied,
+                        size_bytes=total,
+                    )
+            target.flush()
+            try:
+                os.fsync(target.fileno())
+            except OSError:
+                pass
+    except Exception:
+        try:
+            os.remove(publication_path)
+        except OSError:
+            pass
+        raise
+    _emit_progress(
+        progress_callback,
+        "upload",
+        "completed",
+        elapsed_ms=round((time.monotonic() - started) * 1000, 3),
+        size_bytes=copied,
+    )
 
 
 def _quarantine_failed_staging(staging_path: str, invalid_dir: str, reason: str) -> str:
@@ -343,7 +487,11 @@ def _lock_heartbeat(lock: Any, stop_event: threading.Event, interval_sec: float,
             return
 
 
-def _perform_daily_backup(config: dict[str, Any]) -> dict[str, Any]:
+def _perform_daily_backup(
+    config: dict[str, Any],
+    *,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     from rem_card.app.sqlite_shared import FileWriteLock, validate_sqlite_file
 
     paths = _daily_paths(config)
@@ -385,19 +533,37 @@ def _perform_daily_backup(config: dict[str, Any]) -> dict[str, Any]:
         database_path = str(config["database_path"])
         if not os.path.isfile(database_path):
             return {"status": "failure", "reason": "source_missing", "backup_path": backup_path}
-        staging_path = paths["staging"]
+        local_staging_path = paths["local_staging"]
+        publication_staging_path = paths["publication_staging"]
+        snapshot_lease = FileWriteLock(
+            paths["snapshot_lease"],
+            stale_timeout_sec=60.0,
+            logger=logger,
+        )
+        snapshot_lease_acquired = False
         try:
-            _bounded_sqlite_copy(config, staging_path)
-        except Exception:
-            try:
-                os.remove(staging_path)
-            except OSError:
-                pass
-            raise
+            os.makedirs(os.path.dirname(paths["snapshot_lease"]), exist_ok=True)
+            if not snapshot_lease.acquire(owner_id, DAILY_SNAPSHOT_LEASE_SOURCE):
+                raise DailyBackupDeferred("snapshot_lease_busy")
+            snapshot_lease_acquired = True
+            _bounded_sqlite_copy(
+                config,
+                local_staging_path,
+                progress_callback=progress_callback,
+            )
+        finally:
+            if snapshot_lease_acquired:
+                snapshot_lease.release()
 
-        valid, reason = validate_sqlite_file(staging_path)
+        verify_started = time.monotonic()
+        _emit_progress(progress_callback, "verify_local", "started")
+        valid, reason = validate_sqlite_file(local_staging_path)
         if not valid:
-            invalid_path = _quarantine_failed_staging(staging_path, str(config["invalid_dir"]), reason)
+            invalid_path = _quarantine_failed_staging(
+                local_staging_path,
+                str(config["invalid_dir"]),
+                reason,
+            )
             return {
                 "status": "failure",
                 "reason": "staging_validation_failed",
@@ -405,8 +571,34 @@ def _perform_daily_backup(config: dict[str, Any]) -> dict[str, Any]:
                 "invalid_path": invalid_path,
                 "backup_path": backup_path,
             }
-        sha256 = _sha256(staging_path)
-        os.replace(staging_path, backup_path)
+        sha256 = _sha256(local_staging_path)
+        _emit_progress(
+            progress_callback,
+            "verify_local",
+            "completed",
+            elapsed_ms=round((time.monotonic() - verify_started) * 1000, 3),
+            size_bytes=os.path.getsize(local_staging_path),
+        )
+
+        _upload_local_staging(
+            local_staging_path,
+            publication_staging_path,
+            progress_callback=progress_callback,
+        )
+        verify_upload_started = time.monotonic()
+        _emit_progress(progress_callback, "verify_upload", "started")
+        uploaded_sha256 = _sha256(publication_staging_path)
+        if uploaded_sha256 != sha256:
+            raise OSError("daily backup upload digest mismatch")
+        _emit_progress(
+            progress_callback,
+            "verify_upload",
+            "completed",
+            elapsed_ms=round((time.monotonic() - verify_upload_started) * 1000, 3),
+            size_bytes=os.path.getsize(publication_staging_path),
+        )
+        _emit_progress(progress_callback, "publish", "started")
+        os.replace(publication_staging_path, backup_path)
         metadata = _write_daily_metadata(backup_path, config=config, sha256=sha256)
         valid, metadata = _lightweight_daily_metadata(
             backup_path,
@@ -420,6 +612,12 @@ def _perform_daily_backup(config: dict[str, Any]) -> dict[str, Any]:
                 "detail": "published metadata or size mismatch",
                 "backup_path": backup_path,
             }
+        _emit_progress(
+            progress_callback,
+            "publish",
+            "completed",
+            size_bytes=int(metadata.get("size_bytes") or 0),
+        )
         _atomic_json(
             paths["done"],
             {
@@ -441,14 +639,28 @@ def _perform_daily_backup(config: dict[str, Any]) -> dict[str, Any]:
             "pruned": prune.get("deleted", 0),
         }
     finally:
+        for owned_staging in (
+            paths.get("local_staging", ""),
+            paths.get("publication_staging", ""),
+        ):
+            if not owned_staging:
+                continue
+            try:
+                os.remove(owned_staging)
+            except OSError:
+                pass
         heartbeat_stop.set()
         heartbeat.join(timeout=1.0)
         reservation.release()
 
 
 def _daily_backup_worker(config: dict[str, Any], result_connection: Any) -> None:
+    def report_progress(payload: dict[str, Any]) -> None:
+        if config.get("emit_progress"):
+            result_connection.send({"message_type": "progress", **payload})
+
     try:
-        result = _perform_daily_backup(config)
+        result = _perform_daily_backup(config, progress_callback=report_progress)
     except DailyBackupDeferred as exc:
         result = {"status": "deferred", "reason": str(exc)}
     except BaseException as exc:
@@ -529,6 +741,8 @@ def _cleanup_dead_worker_artifacts(
     staging_path: str,
     worker_pid: int,
     job_token: str,
+    publication_staging_path: str = "",
+    snapshot_lease_path: str = "",
 ) -> dict[str, bool]:
     from rem_card.app.sqlite_shared import is_local_pid_alive
 
@@ -555,13 +769,23 @@ def _cleanup_dead_worker_artifacts(
             owner_source=DAILY_DATABASE_LOCK_SOURCE,
         ),
     )
-    try:
-        os.remove(staging_path)
-        results["staging"] = True
-    except FileNotFoundError:
-        pass
-    except OSError:
-        pass
+    if snapshot_lease_path:
+        cleanup_confirmed_dead_worker_reservation(
+            snapshot_lease_path,
+            worker_pid=worker_pid,
+            job_token=job_token,
+            owner_source=DAILY_SNAPSHOT_LEASE_SOURCE,
+        )
+    for owned_staging in (staging_path, publication_staging_path):
+        if not owned_staging:
+            continue
+        try:
+            os.remove(owned_staging)
+            results["staging"] = True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
     return results
 
 
@@ -738,6 +962,7 @@ class DailyBackupScheduler:
             "job_token": job_token,
             "retention_days": self.retention_days,
             "max_count": self.max_count,
+            "emit_progress": True,
         }
 
     def _run_worker(self, backup_date: str) -> dict[str, Any]:
@@ -770,26 +995,57 @@ class DailyBackupScheduler:
                 "reservation_path": reservation_path,
                 "database_lock_path": self.database_lock_path,
                 "staging_path": paths["staging"],
+                "publication_staging_path": paths["publication_staging"],
+                "snapshot_lease_path": paths["snapshot_lease"],
                 "worker_pid": int(process.pid or 0),
                 "job_token": job_token,
             }
         self._update_probe(status="worker_running", backup_date=backup_date, worker_pid=process.pid)
         deadline = time.monotonic() + self.worker_timeout_sec
         result: dict[str, Any] | None = None
+        current_stage = "worker_start"
+        stage_state = "started"
+        stage_elapsed_ms: Any = None
         try:
             while time.monotonic() < deadline and not self._stop_event.is_set():
                 if receiving.poll(0.1):
                     try:
-                        result = receiving.recv()
+                        message = receiving.recv()
                     except EOFError:
                         result = None
+                        break
+                    if isinstance(message, dict) and message.get("message_type") == "progress":
+                        current_stage = str(message.get("stage") or current_stage)
+                        stage_state = str(message.get("state") or stage_state)
+                        stage_elapsed_ms = message.get("elapsed_ms")
+                        self._update_probe(
+                            status="worker_running",
+                            backup_date=backup_date,
+                            worker_pid=process.pid,
+                            current_stage=current_stage,
+                            stage_state=stage_state,
+                            stage_elapsed_ms=stage_elapsed_ms,
+                        )
+                        continue
+                    result = dict(message) if isinstance(message, dict) else None
                     break
                 if not process.is_alive():
                     break
             if result is None and self._stop_event.is_set():
-                result = {"status": "deferred", "reason": "stopping"}
+                result = {
+                    "status": "deferred",
+                    "reason": "stopping",
+                    "stage": current_stage,
+                    "stage_state": stage_state,
+                }
             elif result is None and time.monotonic() >= deadline:
-                result = {"status": "failure", "reason": "worker_timeout"}
+                result = {
+                    "status": "failure",
+                    "reason": "worker_timeout",
+                    "stage": current_stage,
+                    "stage_state": stage_state,
+                    "stage_elapsed_ms": stage_elapsed_ms,
+                }
             elif result is None:
                 result = {
                     "status": "failure",
@@ -817,6 +1073,8 @@ class DailyBackupScheduler:
                             "reservation_path": reservation_path,
                             "database_lock_path": self.database_lock_path,
                             "staging_path": paths["staging"],
+                            "publication_staging_path": paths["publication_staging"],
+                            "snapshot_lease_path": paths["snapshot_lease"],
                             "worker_pid": int(process.pid or 0),
                             "job_token": job_token,
                         }
@@ -939,6 +1197,9 @@ class DailyBackupScheduler:
             "backup_date": str(result.get("backup_date") or ""),
             "schedule_reason": schedule_reason,
             "backup_path": str(result.get("backup_path") or ""),
+            "stage": str(result.get("stage") or ""),
+            "stage_state": str(result.get("stage_state") or ""),
+            "stage_elapsed_ms": result.get("stage_elapsed_ms"),
         }
         record_metric("daily_central_backup_result", 1, **fields)
         self._update_probe(**fields)

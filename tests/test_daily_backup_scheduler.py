@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -77,21 +78,154 @@ def test_database_lock_is_released_before_validation_hash_and_pruning(tmp_path: 
 
     _make_database(tmp_path / "medical.db")
     db_lock = tmp_path / "db.lock"
+    config = _config(tmp_path, backup_date="2026-10-17")
+    snapshot_lease = Path(daily._daily_paths(config)["snapshot_lease"])
     original_validate = sqlite_shared.validate_sqlite_file
     original_sha = daily._sha256
+    original_copy = daily._bounded_sqlite_copy
+
+    def checked_copy(*args, **kwargs):
+        assert snapshot_lease.exists(), "rotation reader lease must cover the live SQLite read"
+        return original_copy(*args, **kwargs)
 
     def checked_validate(path: str):
         assert not db_lock.exists(), "central DB lock leaked into backup validation"
+        assert not snapshot_lease.exists(), "rotation reader lease leaked into local validation"
         return original_validate(path)
 
     def checked_sha(path: str):
         assert not db_lock.exists(), "central DB lock leaked into backup hashing"
         return original_sha(path)
 
+    monkeypatch.setattr(daily, "_bounded_sqlite_copy", checked_copy)
     monkeypatch.setattr(sqlite_shared, "validate_sqlite_file", checked_validate)
     monkeypatch.setattr(daily, "_sha256", checked_sha)
-    result = daily._perform_daily_backup(_config(tmp_path, backup_date="2026-10-17"))
+    result = daily._perform_daily_backup(config)
     assert result["status"] == "success"
+
+
+def test_local_snapshot_and_network_publication_use_separate_staging_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _make_database(tmp_path / "medical.db")
+    config = _config(tmp_path, backup_date="2026-10-17")
+    config["local_staging_dir"] = str(tmp_path / "local-worker-staging")
+    observed: dict[str, Path] = {}
+    original_copy = daily._bounded_sqlite_copy
+    original_upload = daily._upload_local_staging
+
+    def capture_copy(copy_config, staging_path, **kwargs):
+        observed["local"] = Path(staging_path)
+        return original_copy(copy_config, staging_path, **kwargs)
+
+    def capture_upload(local_path, publication_path, **kwargs):
+        observed["upload_source"] = Path(local_path)
+        observed["publication"] = Path(publication_path)
+        return original_upload(local_path, publication_path, **kwargs)
+
+    monkeypatch.setattr(daily, "_bounded_sqlite_copy", capture_copy)
+    monkeypatch.setattr(daily, "_upload_local_staging", capture_upload)
+
+    result = daily._perform_daily_backup(config)
+
+    assert result["status"] == "success"
+    assert observed["local"].parent == Path(config["local_staging_dir"])
+    assert observed["upload_source"] == observed["local"]
+    assert observed["publication"].parent == Path(config["backup_dir"])
+    assert observed["local"].parent != observed["publication"].parent
+    assert not observed["local"].exists()
+    assert not observed["publication"].exists()
+
+
+def test_progress_distinguishes_read_copy_upload_and_verify_without_record_data(tmp_path: Path) -> None:
+    _make_database(tmp_path / "medical.db", "sensitive row is never telemetry")
+    progress: list[dict] = []
+
+    result = daily._perform_daily_backup(
+        _config(tmp_path, backup_date="2026-10-17"),
+        progress_callback=progress.append,
+    )
+
+    assert result["status"] == "success"
+    started = [item["stage"] for item in progress if item["state"] == "started"]
+    assert started == ["read_wait", "copy", "verify_local", "upload", "verify_upload", "publish"]
+    assert all("sensitive row" not in repr(item) for item in progress)
+    assert all("path" not in key for item in progress for key in item)
+
+
+def test_clinical_writer_can_commit_while_completed_snapshot_is_uploaded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "medical.db"
+    _make_database(source, "before")
+    upload_started = threading.Event()
+    allow_upload = threading.Event()
+    original_upload = daily._upload_local_staging
+
+    def paused_upload(local_path, publication_path, **kwargs):
+        upload_started.set()
+        assert allow_upload.wait(5.0)
+        return original_upload(local_path, publication_path, **kwargs)
+
+    monkeypatch.setattr(daily, "_upload_local_staging", paused_upload)
+    result_holder: dict[str, dict] = {}
+    backup_thread = threading.Thread(
+        target=lambda: result_holder.setdefault(
+            "result", daily._perform_daily_backup(_config(tmp_path, backup_date="2026-10-17"))
+        )
+    )
+    backup_thread.start()
+    assert upload_started.wait(5.0)
+
+    writer_lock = FileWriteLock(str(tmp_path / "db.lock"))
+    assert writer_lock.acquire("clinical", "clinical_write")
+    try:
+        with sqlite3.connect(source) as connection:
+            connection.execute("INSERT INTO records VALUES ('during upload')")
+    finally:
+        writer_lock.release()
+        allow_upload.set()
+    backup_thread.join(timeout=10.0)
+
+    assert not backup_thread.is_alive()
+    assert result_holder["result"]["status"] == "success"
+    with sqlite3.connect(result_holder["result"]["backup_path"]) as connection:
+        assert connection.execute("SELECT value FROM records").fetchall() == [("before",)]
+    with sqlite3.connect(source) as connection:
+        assert connection.execute("SELECT value FROM records").fetchall() == [
+            ("before",),
+            ("during upload",),
+        ]
+
+
+def test_publication_failure_keeps_last_good_backup_and_cleans_owned_staging(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "medical.db"
+    _make_database(source, "last good")
+    previous = daily._perform_daily_backup(_config(tmp_path, backup_date="2026-10-16"))
+    previous_path = Path(previous["backup_path"])
+    previous_sha = _sha(previous_path)
+    config = _config(tmp_path, backup_date="2026-10-17")
+    config["local_staging_dir"] = str(tmp_path / "local-worker-staging")
+    paths = daily._daily_paths(config)
+    real_replace = os.replace
+
+    def fail_publication(source_path, destination_path):
+        if Path(source_path) == Path(paths["publication_staging"]) and Path(destination_path) == Path(paths["backup"]):
+            raise OSError("simulated network loss during publication")
+        return real_replace(source_path, destination_path)
+
+    monkeypatch.setattr(daily.os, "replace", fail_publication)
+    capture = _CaptureConnection()
+    daily._daily_backup_worker(config, capture)
+
+    assert capture.value["status"] == "failure"
+    assert previous_path.exists() and _sha(previous_path) == previous_sha
+    assert validate_sqlite_file(str(previous_path)) == (True, "ok")
+    assert not Path(paths["backup"]).exists()
+    assert not Path(paths["local_staging"]).exists()
+    assert not Path(paths["publication_staging"]).exists()
 
 
 def test_live_database_writer_defers_backup_without_deleting_its_lock(tmp_path: Path) -> None:
@@ -231,6 +365,7 @@ def test_hard_timeout_terminates_blocked_worker_and_cleans_only_its_reservation(
         gate.release()
 
     assert result["status"] == "failure" and result["reason"] == "worker_timeout"
+    assert result["stage"] == "read_wait"
     assert not list((tmp_path / "health").glob("daily_central_backup_*.lock"))
     assert scheduler.get_probe()["worker_alive"] is False
 
@@ -317,16 +452,39 @@ def test_dead_worker_cleanup_preserves_foreign_or_replacement_owner(tmp_path: Pa
 
 def test_cleanup_refuses_to_remove_staging_while_worker_is_alive(tmp_path: Path) -> None:
     staging = tmp_path / ".daily.staging"
+    publication = tmp_path / ".daily.publishing"
     staging.write_bytes(b"in progress")
+    publication.write_bytes(b"upload in progress")
     result = daily._cleanup_dead_worker_artifacts(
         reservation_path=str(tmp_path / "reservation.lock"),
         database_lock_path=str(tmp_path / "db.lock"),
         staging_path=str(staging),
+        publication_staging_path=str(publication),
         worker_pid=os.getpid(),
         job_token="current",
     )
     assert result == {"reservation": False, "database_lock": False, "staging": False}
     assert staging.exists()
+    assert publication.exists()
+
+    context = multiprocessing.get_context("spawn")
+    worker = context.Process(target=time.sleep, args=(0.01,))
+    worker.start()
+    dead_pid = int(worker.pid)
+    worker.join(timeout=5.0)
+    assert worker.exitcode == 0
+    worker.close()
+    result = daily._cleanup_dead_worker_artifacts(
+        reservation_path=str(tmp_path / "reservation.lock"),
+        database_lock_path=str(tmp_path / "db.lock"),
+        staging_path=str(staging),
+        publication_staging_path=str(publication),
+        worker_pid=dead_pid,
+        job_token="current",
+    )
+    assert result["staging"] is True
+    assert not staging.exists()
+    assert not publication.exists()
 
 
 def test_termination_failure_retains_worker_and_refuses_cleanup(tmp_path: Path, monkeypatch) -> None:

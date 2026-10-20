@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha1
@@ -176,6 +177,35 @@ class OrdersCachedDeltaResult:
     delta_failure_reason: str = "0"
     delta_time_ms: float = 0.0
     delta_base: str = "none"
+    required_version: int = 0
+
+
+class OrdersDeltaUnavailable(ValueError):
+    def __init__(self, required_version: int, reason: str):
+        self.required_version = int(required_version)
+        super().__init__(reason)
+
+
+@dataclass
+class OrdersLoadPhaseTimings:
+    cache_lookup_ms: float = 0.0
+    version_probe_ms: float = 0.0
+    delta_attempt_ms: float = 0.0
+    load_slot_wait_ms: float = 0.0
+    full_build_ms: float = 0.0
+    finalize_ms: float = 0.0
+    apply_handoff_ms: float = 0.0
+
+    def metric_fields(self) -> Dict[str, float]:
+        return {
+            "cache_lookup_ms": round(max(0.0, self.cache_lookup_ms), 3),
+            "version_probe_ms": round(max(0.0, self.version_probe_ms), 3),
+            "delta_attempt_ms": round(max(0.0, self.delta_attempt_ms), 3),
+            "load_slot_wait_ms": round(max(0.0, self.load_slot_wait_ms), 3),
+            "full_build_ms": round(max(0.0, self.full_build_ms), 3),
+            "finalize_ms": round(max(0.0, self.finalize_ms), 3),
+            "apply_handoff_ms": round(max(0.0, self.apply_handoff_ms), 3),
+        }
 
 
 @dataclass
@@ -416,6 +446,9 @@ class ReadCoordinator:
         self._orders_cache_index: dict[int, OrderedDict[str, None]] = {}
         self._orders_stale_versions: dict[tuple[str, int, str, str, str, str, str], int] = {}
         self._orders_stale_snapshots: dict[tuple[str, int, str, str, str, str, str], MappingProxyType] = {}
+        self._orders_cache_epochs: dict[tuple[str, int, str, str, str, str, str], int] = {}
+        self._orders_reads_inflight: dict[tuple, int] = {}
+        self._orders_cache_lock = threading.RLock()
         self._change_log_applier = ChangeLogApplier(remcard_service)
 
         self._load_condition = threading.Condition()
@@ -978,7 +1011,7 @@ class ReadCoordinator:
             priority=priority,
             step_state=step_state,
         )
-        with foreground_read(
+        with self._orders_cache_read(context.cache_key()), foreground_read(
             "orders",
             admission_id=context.admission_id,
             source=request_source,
@@ -1102,6 +1135,7 @@ class ReadCoordinator:
         source = self._normalize_orders_request_source(source)
         started = time.perf_counter()
         cache_key = context.cache_key()
+        phase_timings = OrdersLoadPhaseTimings()
         step_state = step_state or self._new_orders_step_state()
         done_event = done_event or threading.Event()
         self._raise_if_orders_refresh_cancelled(
@@ -1125,6 +1159,7 @@ class ReadCoordinator:
             trace_id=trace_id,
             context_hash=context_hash,
             cache_key=cache_key,
+            phase_timings=phase_timings,
         )
         if delta_result.snapshot is not None:
             return delta_result.snapshot
@@ -1132,10 +1167,13 @@ class ReadCoordinator:
         delta_applied = delta_result.delta_applied
         delta_failure_reason = delta_result.delta_failure_reason
         delta_time_ms = delta_result.delta_time_ms
+        required_version = int(delta_result.required_version or 0)
 
         fallback_used = 0
-        stale_version = int(self._orders_stale_versions.get(cache_key) or 0)
-        stale_snapshot_for_validation = self._orders_stale_snapshots.get(cache_key)
+        with self._orders_cache_lock:
+            stale_version = int(self._orders_stale_versions.get(cache_key) or 0)
+            stale_snapshot_for_validation = self._orders_stale_snapshots.get(cache_key)
+            full_cache_epoch = int(self._orders_cache_epochs.get(cache_key) or 0)
         active_guard = self._begin_orders_refresh(
             context=context,
             context_hash=context_hash,
@@ -1152,6 +1190,7 @@ class ReadCoordinator:
                 priority=priority,
                 started=started,
                 request_id=trace_id,
+                required_version=required_version,
             )
             if coalesced is not None:
                 return coalesced
@@ -1173,6 +1212,7 @@ class ReadCoordinator:
                 step="before_build_orders_snapshot",
                 cancel_check=cancel_check,
             )
+            load_slot_wait_started = time.perf_counter()
             with self._load_slot(
                 priority=priority,
                 scope="orders",
@@ -1181,6 +1221,9 @@ class ReadCoordinator:
                 timeout_sec=timeout_sec,
                 trace_id=trace_id,
             ):
+                phase_timings.load_slot_wait_ms = (
+                    time.perf_counter() - load_slot_wait_started
+                ) * 1000.0
                 try:
                     self._raise_if_orders_refresh_cancelled(
                         context=context,
@@ -1223,6 +1266,7 @@ class ReadCoordinator:
                             include_change_cursor=True,
                         )
                     build_elapsed_ms = (time.perf_counter() - build_started) * 1000.0
+                    phase_timings.full_build_ms += build_elapsed_ms
                     logger.info(
                         "[ReadCoordinator] build_orders_snapshot_time_ms=%.2f path=read_coordinator admission_id=%s source=%s context_hash=%s trace_id=%s generation=%s",
                         build_elapsed_ms,
@@ -1248,6 +1292,7 @@ class ReadCoordinator:
                     raise
                 except Exception:
                     failed_elapsed_ms = (time.perf_counter() - build_started) * 1000.0 if "build_started" in locals() else 0.0
+                    phase_timings.full_build_ms += failed_elapsed_ms
                     record_metric(
                         "build_orders_snapshot_time_ms",
                         round(failed_elapsed_ms, 3),
@@ -1311,6 +1356,7 @@ class ReadCoordinator:
                             include_change_cursor=True,
                         )
                     fallback_elapsed_ms = (time.perf_counter() - fallback_started) * 1000.0
+                    phase_timings.full_build_ms += fallback_elapsed_ms
                     record_metric(
                         "build_orders_snapshot_time_ms",
                         round(fallback_elapsed_ms, 3),
@@ -1428,6 +1474,7 @@ class ReadCoordinator:
             generation=generation,
             cache_key=cache_key,
         )
+        phase_timings.finalize_ms += (time.perf_counter() - internal_step_started) * 1000.0
 
         retired_refresh = self._is_orders_refresh_retired(trace_id)
         retired_status = str((retired_refresh or {}).get("status") or "")
@@ -1473,6 +1520,7 @@ class ReadCoordinator:
                 base="late_ignored",
                 version=int(frozen_snapshot.get("version") or 0),
                 generation=generation,
+                phase_timings=phase_timings,
             )
             self._raise_if_orders_refresh_cancelled(
                 context=context,
@@ -1513,7 +1561,7 @@ class ReadCoordinator:
                         trace_id,
                     )
 
-        self._orders_stale_versions.pop(cache_key, None)
+        apply_handoff_started = time.perf_counter()
         self._raise_if_orders_refresh_cancelled(
             context=context,
             cache_key=cache_key,
@@ -1528,7 +1576,23 @@ class ReadCoordinator:
         )
         try:
             if context.mode == "live":
-                self._store_orders_tab(context, frozen_snapshot)
+                stored = self._store_orders_tab(
+                    context,
+                    frozen_snapshot,
+                    expected_epoch=full_cache_epoch,
+                    refresh_request_id=trace_id,
+                    required_version=required_version,
+                )
+                if not stored:
+                    newer_snapshot = self.get_cached_tab(context)
+                    if (
+                        newer_snapshot is None
+                        or int(newer_snapshot.get("version") or 0) < required_version
+                    ):
+                        raise OrdersRefreshCancelled(
+                            f"orders snapshot rejected below required version context_hash={context_hash}"
+                        )
+                    frozen_snapshot = newer_snapshot
         except Exception:
             self._expire_orders_refresh(
                 cache_key,
@@ -1537,10 +1601,14 @@ class ReadCoordinator:
                 context_hash=context_hash,
             )
             raise
+        phase_timings.apply_handoff_ms = (
+            time.perf_counter() - apply_handoff_started
+        ) * 1000.0
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
+        phase_fields = phase_timings.metric_fields()
         logger.info(
-            "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=0 orders_source=%s orders_fallback=%s orders_delta_applied=%s orders_delta_failed=%s orders_delta_time_ms=%.2f orders_fallback_after_delta=%s context_hash=%s trace_id=%s priority=%s version=%s",
+            "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=0 orders_source=%s orders_fallback=%s orders_delta_applied=%s orders_delta_failed=%s orders_delta_time_ms=%.2f orders_fallback_after_delta=%s context_hash=%s trace_id=%s priority=%s version=%s cache_lookup_ms=%.2f version_probe_ms=%.2f delta_attempt_ms=%.2f load_slot_wait_ms=%.2f full_build_ms=%.2f finalize_ms=%.2f apply_handoff_ms=%.2f",
             elapsed_ms,
             source,
             fallback_used,
@@ -1552,6 +1620,13 @@ class ReadCoordinator:
             trace_id,
             self._normalize_priority(priority),
             frozen_snapshot.get("version"),
+            phase_fields["cache_lookup_ms"],
+            phase_fields["version_probe_ms"],
+            phase_fields["delta_attempt_ms"],
+            phase_fields["load_slot_wait_ms"],
+            phase_fields["full_build_ms"],
+            phase_fields["finalize_ms"],
+            phase_fields["apply_handoff_ms"],
         )
         self._record_orders_load_telemetry(
             source=source,
@@ -1569,6 +1644,7 @@ class ReadCoordinator:
             base="fresh",
             version=int(frozen_snapshot.get("version") or 0),
             generation=generation,
+            phase_timings=phase_timings,
         )
         self._finish_orders_refresh(context.cache_key(), request_id=trace_id)
         return frozen_snapshot
@@ -1584,7 +1660,10 @@ class ReadCoordinator:
         trace_id: str,
         context_hash: str,
         cache_key: Tuple[Any, ...],
+        phase_timings: OrdersLoadPhaseTimings,
     ) -> OrdersCachedDeltaResult:
+        cache_epoch = self._capture_orders_cache_epoch(cache_key)
+        cache_lookup_started = time.perf_counter()
         base_snapshot, delta_base = self._orders_base_snapshot(
             context=context,
             force_refresh=force_refresh,
@@ -1592,21 +1671,58 @@ class ReadCoordinator:
             context_hash=context_hash,
             trace_id=trace_id,
         )
+        phase_timings.cache_lookup_ms = (
+            time.perf_counter() - cache_lookup_started
+        ) * 1000.0
         if base_snapshot is None or force_refresh:
             return OrdersCachedDeltaResult(delta_base=delta_base)
 
+        # Keep cache lookup memory-only and perform exactly one authoritative
+        # freshness probe for this early path.  The result is reused as the
+        # delta cursor floor and is never replaced by a monitor cursor.
+        version_probe_started = time.perf_counter()
         current_change_id = self._get_orders_current_change_id(context)
+        phase_timings.version_probe_ms = (
+            time.perf_counter() - version_probe_started
+        ) * 1000.0
         base_version = int(base_snapshot.get("version") or 0)
         if current_change_id <= base_version:
+            accepted_snapshot = self._resolve_orders_early_snapshot(
+                context,
+                base_snapshot,
+                expected_epoch=cache_epoch,
+            )
+            if accepted_snapshot is None:
+                return OrdersCachedDeltaResult(
+                    delta_failure_reason="cache_epoch_changed",
+                    delta_base=delta_base,
+                    required_version=current_change_id,
+                )
+            if context.mode == "live" and delta_base != "cache":
+                stored = self._store_orders_tab(
+                    context,
+                    accepted_snapshot,
+                    expected_epoch=cache_epoch,
+                )
+                if not stored:
+                    accepted_snapshot = self.get_cached_tab(context)
+                    if accepted_snapshot is None:
+                        return OrdersCachedDeltaResult(
+                            delta_failure_reason="cache_epoch_changed",
+                            delta_base=delta_base,
+                            required_version=current_change_id,
+                        )
             return self._orders_current_base_result(
                 context=context,
-                base_snapshot=base_snapshot,
+                base_snapshot=accepted_snapshot,
                 delta_base=delta_base,
                 source=source,
                 priority=priority,
                 started=started,
                 trace_id=trace_id,
                 context_hash=context_hash,
+                phase_timings=phase_timings,
+                required_version=current_change_id,
             )
 
         stale_age_sec = self._snapshot_age_sec(base_snapshot)
@@ -1625,9 +1741,10 @@ class ReadCoordinator:
                 delta_attempted=True,
                 delta_failure_reason=stale_skip_reason,
                 delta_base=delta_base,
+                required_version=current_change_id,
             )
 
-        return self._try_orders_delta_result(
+        result = self._try_orders_delta_result(
             context=context,
             base_snapshot=base_snapshot,
             current_change_id=current_change_id,
@@ -1637,7 +1754,20 @@ class ReadCoordinator:
             started=started,
             trace_id=trace_id,
             context_hash=context_hash,
+            expected_epoch=cache_epoch,
+            phase_timings=phase_timings,
         )
+        if result.required_version <= 0:
+            result = OrdersCachedDeltaResult(
+                snapshot=result.snapshot,
+                delta_attempted=result.delta_attempted,
+                delta_applied=result.delta_applied,
+                delta_failure_reason=result.delta_failure_reason,
+                delta_time_ms=result.delta_time_ms,
+                delta_base=result.delta_base,
+                required_version=current_change_id,
+            )
+        return result
 
     def _orders_base_snapshot(
         self,
@@ -1655,7 +1785,8 @@ class ReadCoordinator:
         if cached is not None:
             return cached, "cache"
 
-        stale = self._orders_stale_snapshots.get(cache_key)
+        with self._orders_cache_lock:
+            stale = self._orders_stale_snapshots.get(cache_key)
         if stale is not None:
             logger.info(
                 "[ReadCoordinator] orders_cache_lookup hit=0 stale_base=1 context_hash=%s trace_id=%s",
@@ -1676,13 +1807,14 @@ class ReadCoordinator:
         started: float,
         trace_id: str,
         context_hash: str,
+        phase_timings: OrdersLoadPhaseTimings,
+        required_version: int,
     ) -> OrdersCachedDeltaResult:
-        if context.mode == "live" and delta_base != "cache":
-            self._store_orders_tab(context, base_snapshot)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         result_trace_id = base_snapshot.get("load_trace_id") or trace_id
+        phase_fields = phase_timings.metric_fields()
         logger.info(
-            "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=1 orders_source=%s orders_fallback=0 orders_delta_applied=0 orders_delta_failed=0 orders_delta_time_ms=0.00 orders_fallback_after_delta=0 context_hash=%s trace_id=%s priority=%s base=%s version=%s",
+            "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=1 orders_source=%s orders_fallback=0 orders_delta_applied=0 orders_delta_failed=0 orders_delta_time_ms=0.00 orders_fallback_after_delta=0 context_hash=%s trace_id=%s priority=%s base=%s version=%s cache_lookup_ms=%.2f version_probe_ms=%.2f delta_attempt_ms=%.2f load_slot_wait_ms=%.2f full_build_ms=%.2f finalize_ms=%.2f apply_handoff_ms=%.2f",
             elapsed_ms,
             source,
             context_hash,
@@ -1690,6 +1822,13 @@ class ReadCoordinator:
             self._normalize_priority(priority),
             delta_base,
             base_snapshot.get("version"),
+            phase_fields["cache_lookup_ms"],
+            phase_fields["version_probe_ms"],
+            phase_fields["delta_attempt_ms"],
+            phase_fields["load_slot_wait_ms"],
+            phase_fields["full_build_ms"],
+            phase_fields["finalize_ms"],
+            phase_fields["apply_handoff_ms"],
         )
         self._record_orders_load_telemetry(
             source=source,
@@ -1702,12 +1841,18 @@ class ReadCoordinator:
             admission_id=context.admission_id,
             context_hash=context_hash,
             trace_id=result_trace_id,
+            request_id=trace_id,
             priority=priority,
             fallback_used=0,
             base=delta_base,
             version=int(base_snapshot.get("version") or 0),
+            phase_timings=phase_timings,
         )
-        return OrdersCachedDeltaResult(snapshot=base_snapshot, delta_base=delta_base)
+        return OrdersCachedDeltaResult(
+            snapshot=base_snapshot,
+            delta_base=delta_base,
+            required_version=required_version,
+        )
 
     def _orders_delta_stale_skip_reason(self, delta_base: str, stale_age_sec: Optional[float]) -> str:
         if delta_base != "stale_base" or stale_age_sec is None:
@@ -1728,15 +1873,19 @@ class ReadCoordinator:
         started: float,
         trace_id: str,
         context_hash: str,
+        expected_epoch: int,
+        phase_timings: OrdersLoadPhaseTimings,
     ) -> OrdersCachedDeltaResult:
         delta_started = time.perf_counter()
         try:
-            delta_snapshot = self._try_apply_orders_delta(
+            delta_snapshot, delta_published = self._try_apply_orders_delta(
                 context=context,
                 base_snapshot=base_snapshot,
                 current_change_id=current_change_id,
                 source=source,
                 trace_id=trace_id,
+                expected_epoch=expected_epoch,
+                phase_timings=phase_timings,
             )
         except Exception as exc:
             return self._orders_delta_failure_result(
@@ -1746,44 +1895,62 @@ class ReadCoordinator:
                 priority=priority,
                 trace_id=trace_id,
                 context_hash=context_hash,
+                phase_timings=phase_timings,
             )
 
         delta_time_ms = (time.perf_counter() - delta_started) * 1000.0
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         result_trace_id = delta_snapshot.get("load_trace_id") or trace_id
+        delta_applied = int(bool(delta_published))
+        delta_failure_reason = "0"
+        metric_base = delta_base if delta_published else "accepted_newer"
+        phase_fields = phase_timings.metric_fields()
         logger.info(
-            "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=1 orders_source=%s orders_fallback=0 orders_delta_applied=1 orders_delta_failed=0 orders_delta_time_ms=%.2f orders_fallback_after_delta=0 context_hash=%s trace_id=%s priority=%s base=%s version=%s",
+            "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=1 orders_source=%s orders_fallback=0 orders_delta_applied=%s orders_delta_failed=%s orders_delta_time_ms=%.2f orders_fallback_after_delta=0 context_hash=%s trace_id=%s priority=%s base=%s version=%s cache_lookup_ms=%.2f version_probe_ms=%.2f delta_attempt_ms=%.2f load_slot_wait_ms=%.2f full_build_ms=%.2f finalize_ms=%.2f apply_handoff_ms=%.2f",
             elapsed_ms,
             source,
+            delta_applied,
+            delta_failure_reason,
             delta_time_ms,
             context_hash,
             result_trace_id,
             self._normalize_priority(priority),
-            delta_base,
+            metric_base,
             delta_snapshot.get("version"),
+            phase_fields["cache_lookup_ms"],
+            phase_fields["version_probe_ms"],
+            phase_fields["delta_attempt_ms"],
+            phase_fields["load_slot_wait_ms"],
+            phase_fields["full_build_ms"],
+            phase_fields["finalize_ms"],
+            phase_fields["apply_handoff_ms"],
         )
         self._record_orders_load_telemetry(
             source=source,
             cache_hit=True,
-            delta_applied=True,
-            delta_failure_reason="0",
+            delta_applied=bool(delta_applied),
+            delta_failure_reason=delta_failure_reason,
             delta_time_ms=delta_time_ms,
             elapsed_ms=elapsed_ms,
             fallback_after_delta=False,
             admission_id=context.admission_id,
             context_hash=context_hash,
             trace_id=result_trace_id,
+            request_id=trace_id,
             priority=priority,
             fallback_used=0,
-            base=delta_base,
+            base=metric_base,
             version=int(delta_snapshot.get("version") or 0),
+            phase_timings=phase_timings,
         )
         return OrdersCachedDeltaResult(
             snapshot=delta_snapshot,
             delta_attempted=True,
-            delta_applied=1,
+            delta_applied=delta_applied,
+            delta_failure_reason="0",
             delta_time_ms=delta_time_ms,
-            delta_base=delta_base,
+            delta_base=metric_base,
+            required_version=current_change_id,
         )
 
     def _orders_delta_failure_result(
@@ -1795,8 +1962,11 @@ class ReadCoordinator:
         priority: str,
         trace_id: str,
         context_hash: str,
+        phase_timings: Optional[OrdersLoadPhaseTimings] = None,
     ) -> OrdersCachedDeltaResult:
         delta_time_ms = (time.perf_counter() - delta_started) * 1000.0
+        if phase_timings is not None and phase_timings.delta_attempt_ms <= 0:
+            phase_timings.delta_attempt_ms = delta_time_ms
         delta_failure_reason = str(exc) or exc.__class__.__name__
         logger.log(
             self._orders_delta_fallback_log_level(delta_failure_reason),
@@ -1813,18 +1983,21 @@ class ReadCoordinator:
             delta_failure_reason=delta_failure_reason,
             delta_time_ms=delta_time_ms,
             delta_base=delta_base,
+            required_version=int(getattr(exc, "required_version", 0)),
         )
 
     def get_cached_tab(self, context: OrdersContext, *, allow_stale: bool = False):
         cache_key = context.cache_key()
-        snapshot = self._orders_tab_cache.get(cache_key)
+        with self._orders_cache_lock:
+            snapshot = self._orders_tab_cache.get(cache_key)
+            if snapshot is not None:
+                self._orders_tab_cache.move_to_end(cache_key)
         if snapshot is None:
             logger.info(
                 "[ReadCoordinator] orders_cache_lookup hit=0 stale=0 context_hash=%s",
                 context.hash(),
             )
             return None
-        self._orders_tab_cache.move_to_end(cache_key)
         is_stale = bool(snapshot.get("stale"))
         logger.info(
             "[ReadCoordinator] orders_cache_lookup hit=1 stale=%s context_hash=%s trace_id=%s",
@@ -1836,11 +2009,83 @@ class ReadCoordinator:
             return None
         return snapshot
 
+    def _capture_orders_cache_epoch(self, cache_key) -> int:
+        with self._orders_cache_lock:
+            return int(self._orders_cache_epochs.get(cache_key) or 0)
+
+    @contextmanager
+    def _orders_cache_read(self, cache_key):
+        # Early cache/delta work precedes active-refresh registration. Keep its
+        # fence alive through LRU eviction until the whole load has settled.
+        with self._orders_cache_lock:
+            self._orders_reads_inflight[cache_key] = self._orders_reads_inflight.get(cache_key, 0) + 1
+        try:
+            yield
+        finally:
+            with self._orders_cache_lock:
+                remaining = self._orders_reads_inflight[cache_key] - 1
+                if remaining:
+                    self._orders_reads_inflight[cache_key] = remaining
+                else:
+                    self._orders_reads_inflight.pop(cache_key, None)
+                    if cache_key not in self._orders_tab_cache and cache_key not in self._orders_stale_snapshots:
+                        self._orders_cache_epochs.pop(cache_key, None)
+                        self._orders_stale_versions.pop(cache_key, None)
+
+    def _evict_orders_cache_state_unlocked(self, cache_key, snapshot) -> None:
+        self._orders_stale_snapshots.pop(cache_key, None)
+        if self._orders_reads_inflight.get(cache_key, 0):
+            self._orders_stale_versions[cache_key] = max(
+                int(self._orders_stale_versions.get(cache_key) or 0),
+                int((snapshot or {}).get("version") or 0),
+            )
+        else:
+            self._orders_stale_versions.pop(cache_key, None)
+            self._orders_cache_epochs.pop(cache_key, None)
+
+    def _bump_orders_cache_epoch_unlocked(self, cache_key) -> int:
+        next_epoch = int(self._orders_cache_epochs.get(cache_key) or 0) + 1
+        self._orders_cache_epochs[cache_key] = next_epoch
+        return next_epoch
+
+    def _resolve_orders_early_snapshot(
+        self,
+        context: OrdersContext,
+        candidate,
+        *,
+        expected_epoch: int,
+    ):
+        cache_key = context.cache_key()
+        candidate_version = int((candidate or {}).get("version") or 0)
+        with self._orders_cache_lock:
+            current_epoch = int(self._orders_cache_epochs.get(cache_key) or 0)
+            current = self._orders_tab_cache.get(cache_key)
+            current_version = int((current or {}).get("version") or 0)
+            required_version = max(
+                current_version,
+                int(self._orders_stale_versions.get(cache_key) or 0),
+            )
+            if current_epoch != int(expected_epoch) or candidate_version < required_version:
+                if current is not None and current_version >= candidate_version:
+                    logger.info(
+                        "[ReadCoordinator] orders_early_result_fenced context_hash=%s "
+                        "candidate_version=%s accepted_version=%s expected_epoch=%s current_epoch=%s",
+                        context.hash(),
+                        candidate_version,
+                        current_version,
+                        expected_epoch,
+                        current_epoch,
+                    )
+                    return current
+                return None
+            return candidate
+
     def get_cached_or_stale_orders_tab(self, context: OrdersContext):
         cached = self.get_cached_tab(context, allow_stale=True)
         if cached is not None:
             return cached
-        stale = self._orders_stale_snapshots.get(context.cache_key())
+        with self._orders_cache_lock:
+            stale = self._orders_stale_snapshots.get(context.cache_key())
         if stale is not None:
             logger.info(
                 "[ReadCoordinator] orders_cache_lookup hit=0 stale_base=1 context_hash=%s trace_id=%s",
@@ -1851,13 +2096,15 @@ class ReadCoordinator:
 
     def invalidate_tab(self, context: OrdersContext, reason: str) -> None:
         cache_key = context.cache_key()
-        snapshot = self._orders_tab_cache.pop(cache_key, None)
-        if snapshot is not None:
-            self._orders_stale_snapshots[cache_key] = snapshot
-        old_version = int((snapshot or {}).get("version") or self._orders_stale_versions.get(cache_key) or 0)
-        if old_version > 0:
-            self._orders_stale_versions[cache_key] = old_version
-        self._drop_orders_cache_index(context)
+        with self._orders_cache_lock:
+            self._bump_orders_cache_epoch_unlocked(cache_key)
+            snapshot = self._orders_tab_cache.pop(cache_key, None)
+            if snapshot is not None:
+                self._orders_stale_snapshots[cache_key] = snapshot
+            old_version = int((snapshot or {}).get("version") or self._orders_stale_versions.get(cache_key) or 0)
+            if old_version > 0:
+                self._orders_stale_versions[cache_key] = old_version
+            self._drop_orders_cache_index(context)
         logger.info(
             "[ReadCoordinator] orders_invalidate reason=%s old_version=%s context_hash=%s cache_present=%s stale_base_saved=%s",
             str(reason or "unknown"),
@@ -1888,8 +2135,10 @@ class ReadCoordinator:
         if shift_date is not None:
             normalized_shift_key = OrdersContext._normalize_shift_date(shift_date).isoformat(timespec="seconds")
 
-        all_keys = set(self._orders_tab_cache)
-        all_keys.update(self._orders_stale_snapshots)
+        with self._orders_cache_lock:
+            all_keys = set(self._orders_tab_cache)
+            all_keys.update(self._orders_stale_snapshots)
+            all_keys.update(self._orders_reads_inflight)
         with self._orders_refresh_lock:
             all_keys.update(self._orders_active_refreshes)
         matching_keys = {
@@ -1914,18 +2163,20 @@ class ReadCoordinator:
 
         invalidated = 0
         for cache_key in matching_keys:
-            snapshot = self._orders_tab_cache.pop(cache_key, None)
-            if snapshot is not None:
-                self._orders_stale_snapshots[cache_key] = snapshot
-                invalidated += 1
-            old_version = int(
-                (snapshot or {}).get("version")
-                or self._orders_stale_versions.get(cache_key)
-                or 0
-            )
-            if old_version > 0:
-                self._orders_stale_versions[cache_key] = old_version
-            self._drop_cache_index_by_key(self._orders_cache_index, cache_key)
+            with self._orders_cache_lock:
+                self._bump_orders_cache_epoch_unlocked(cache_key)
+                snapshot = self._orders_tab_cache.pop(cache_key, None)
+                if snapshot is not None:
+                    self._orders_stale_snapshots[cache_key] = snapshot
+                    invalidated += 1
+                old_version = int(
+                    (snapshot or {}).get("version")
+                    or self._orders_stale_versions.get(cache_key)
+                    or 0
+                )
+                if old_version > 0:
+                    self._orders_stale_versions[cache_key] = old_version
+                self._drop_cache_index_by_key(self._orders_cache_index, cache_key)
 
         logger.info(
             "[ReadCoordinator] orders_admission_invalidate admission_id=%s shift_key=%s reason=%s "
@@ -1942,13 +2193,11 @@ class ReadCoordinator:
     def invalidate_all_orders(self, *, reason: str) -> int:
         with self._orders_refresh_lock:
             active_keys = set(self._orders_active_refreshes)
+        with self._orders_cache_lock:
+            cached_keys = set(self._orders_tab_cache) | set(self._orders_stale_snapshots) | set(self._orders_reads_inflight)
         admission_ids = {
             int(cache_key[1])
-            for cache_key in (
-                set(self._orders_tab_cache)
-                | set(self._orders_stale_snapshots)
-                | active_keys
-            )
+            for cache_key in (cached_keys | active_keys)
             if len(cache_key) > 1
         }
         return sum(
@@ -1994,7 +2243,12 @@ class ReadCoordinator:
             invalidate_reason=None,
         )
         if context.mode == "live":
-            self._store_orders_tab(context, frozen_snapshot)
+            stored = self._store_orders_tab(context, frozen_snapshot)
+            if not stored:
+                current_snapshot = self.get_cached_tab(context)
+                if current_snapshot is None:
+                    raise ValueError("committed orders snapshot is below required cache version")
+                frozen_snapshot = current_snapshot
         logger.info(
             "[ReadCoordinator] orders_write_snapshot_accepted admission_id=%s role=%s version=%s "
             "context_hash=%s trace_id=%s",
@@ -2566,7 +2820,10 @@ class ReadCoordinator:
         current_change_id: int,
         source: str,
         trace_id: str,
+        expected_epoch: int,
+        phase_timings: OrdersLoadPhaseTimings,
     ):
+        delta_work_started = time.perf_counter()
         change_rows = self.remcard_service.get_changes_since(
             int((base_snapshot or {}).get("version") or 0),
             admission_id=context.admission_id,
@@ -2576,42 +2833,76 @@ class ReadCoordinator:
             base_snapshot=base_snapshot,
             change_rows=change_rows,
         )
-        if not delta_plan.get("apply"):
-            raise ValueError(delta_plan.get("reason") or "delta_not_safe")
-
-        updated_snapshot = self._change_log_applier.apply_orders_delta(
-            context=context,
-            base_snapshot=base_snapshot,
-            latest_change_id=int(current_change_id or delta_plan.get("latest_change_id") or 0),
+        required_version = max(
+            int(current_change_id or 0), int(delta_plan.get("latest_change_id") or 0),
         )
-        delta_snapshot = self._finalize_snapshot(
-            snapshot=updated_snapshot,
-            scope="orders_tab",
-            tab_name="orders",
-            cache_key=context.cache_key(),
-            context_hash=context.hash(),
-            role=context.role,
-            mode=context.mode,
-            source_db=context.source_db,
-            variant=context.variant,
-            load_strategy="orders_delta",
-            load_trace_id=trace_id,
-            source=source,
-            stale=False,
-            invalidate_reason=None,
-        )
-        if not self.validate_reload_version(
-            context=context,
-            previous_snapshot=base_snapshot,
-            new_snapshot=delta_snapshot,
-            scope="orders_delta",
-        ):
-            raise ValueError("version_violation_after_delta")
+        try:
+            if not delta_plan.get("apply"):
+                raise ValueError(delta_plan.get("reason") or "delta_not_safe")
 
-        self._orders_stale_versions.pop(context.cache_key(), None)
-        if context.mode == "live":
-            self._store_orders_tab(context, delta_snapshot)
-        return delta_snapshot
+            updated_snapshot = self._change_log_applier.apply_orders_delta(
+                context=context,
+                base_snapshot=base_snapshot,
+                latest_change_id=required_version,
+            )
+            phase_timings.delta_attempt_ms += (
+                time.perf_counter() - delta_work_started
+            ) * 1000.0
+            finalize_started = time.perf_counter()
+            try:
+                delta_snapshot = self._finalize_snapshot(
+                    snapshot=updated_snapshot,
+                    scope="orders_tab",
+                    tab_name="orders",
+                    cache_key=context.cache_key(),
+                    context_hash=context.hash(),
+                    role=context.role,
+                    mode=context.mode,
+                    source_db=context.source_db,
+                    variant=context.variant,
+                    load_strategy="orders_delta",
+                    load_trace_id=trace_id,
+                    source=source,
+                    stale=False,
+                    invalidate_reason=None,
+                )
+            finally:
+                phase_timings.finalize_ms += (
+                    time.perf_counter() - finalize_started
+                ) * 1000.0
+            if not self.validate_reload_version(
+                context=context,
+                previous_snapshot=base_snapshot,
+                new_snapshot=delta_snapshot,
+                scope="orders_delta",
+            ):
+                raise ValueError("version_violation_after_delta")
+
+            apply_handoff_started = time.perf_counter()
+            try:
+                if context.mode == "live":
+                    stored = self._store_orders_tab(
+                        context,
+                        delta_snapshot,
+                        expected_epoch=expected_epoch,
+                    )
+                    if not stored:
+                        accepted_snapshot = self.get_cached_tab(context)
+                        if (
+                            accepted_snapshot is None
+                            or int(accepted_snapshot.get("version") or 0) < required_version
+                        ):
+                            raise ValueError("orders_context_superseded")
+                        return accepted_snapshot, False
+            finally:
+                phase_timings.apply_handoff_ms += (
+                    time.perf_counter() - apply_handoff_started
+                ) * 1000.0
+            return delta_snapshot, True
+        except Exception as exc:
+            # Once change rows reveal a newer cursor, every full fallback must
+            # retain that floor, including unsupported/empty/failed deltas.
+            raise OrdersDeltaUnavailable(required_version, str(exc) or type(exc).__name__) from exc
 
     @staticmethod
     def _orders_delta_fallback_log_level(reason: str) -> int:
@@ -2770,22 +3061,65 @@ class ReadCoordinator:
                 logger.info("[ReadCoordinator] evicted patient_scope cache key=%s", evicted_key)
             return True
 
-    def _store_orders_tab(self, context: OrdersContext, snapshot) -> None:
+    def _store_orders_tab(
+        self,
+        context: OrdersContext,
+        snapshot,
+        *,
+        expected_epoch: Optional[int] = None,
+        required_version: int = 0,
+        refresh_request_id: Optional[str] = None,
+    ) -> bool:
         cache_key = context.cache_key()
-        self._orders_tab_cache[cache_key] = snapshot
-        self._orders_tab_cache.move_to_end(cache_key)
-        self._orders_stale_snapshots.pop(cache_key, None)
-        self._track_patient_cache_entry(self._orders_cache_index, context)
-        while len(self._orders_tab_cache) > self.max_cached_patients:
-            evicted_key, _ = self._orders_tab_cache.popitem(last=False)
-            self._drop_cache_index_by_key(self._orders_cache_index, evicted_key)
-            self._orders_stale_versions.pop(evicted_key, None)
-            self._orders_stale_snapshots.pop(evicted_key, None)
-            logger.info(
-                "[ReadCoordinator] evicted orders cache key=%s context_hash=%s",
-                evicted_key,
-                str(evicted_key[-1]),
+        candidate_version = int((snapshot or {}).get("version") or 0)
+        # Always acquire cache before refresh. Retirement and publication must
+        # be ordered atomically, including supersession without invalidation.
+        with self._orders_cache_lock, self._orders_refresh_lock:
+            if refresh_request_id is not None:
+                active = self._orders_active_refreshes.get(cache_key)
+                if (
+                    not active
+                    or active.get("request_id") != refresh_request_id
+                    or active.get("status") not in {"active", "stalled"}
+                ):
+                    raise OrdersRefreshCancelled(
+                        f"orders refresh retired before atomic store request_id={refresh_request_id}"
+                    )
+            current_epoch = int(self._orders_cache_epochs.get(cache_key) or 0)
+            current_version = int((self._orders_tab_cache.get(cache_key) or {}).get("version") or 0)
+            required_version = max(
+                int(required_version or 0),
+                current_version,
+                int(self._orders_stale_versions.get(cache_key) or 0),
             )
+            if expected_epoch is not None and current_epoch != int(expected_epoch):
+                return False
+            if required_version > 0 and candidate_version < required_version:
+                logger.warning(
+                    "[ReadCoordinator] orders_store_rejected context_hash=%s candidate_version=%s "
+                    "required_version=%s expected_epoch=%s current_epoch=%s",
+                    context.hash(),
+                    candidate_version,
+                    required_version,
+                    expected_epoch,
+                    current_epoch,
+                )
+                return False
+            self._orders_tab_cache[cache_key] = snapshot
+            self._orders_tab_cache.move_to_end(cache_key)
+            self._orders_stale_snapshots.pop(cache_key, None)
+            self._orders_stale_versions.pop(cache_key, None)
+            self._track_patient_cache_entry(self._orders_cache_index, context)
+            while len(self._orders_tab_cache) > self.max_cached_patients:
+                evicted_key, evicted_snapshot = self._orders_tab_cache.popitem(last=False)
+                self._drop_cache_index_by_key(self._orders_cache_index, evicted_key)
+                self._evict_orders_cache_state_unlocked(evicted_key, evicted_snapshot)
+                logger.info(
+                    "[ReadCoordinator] evicted orders cache key=%s context_hash=%s",
+                    evicted_key,
+                    str(evicted_key[-1]),
+                )
+        return True
 
     @classmethod
     def _snapshot_content_hash(cls, payload: Dict[str, Any]) -> str:
@@ -2942,10 +3276,10 @@ class ReadCoordinator:
             target_cache = self._orders_tab_cache
         for cache_key in list(target_cache.keys()):
             if int(cache_key[1]) == int(admission_id) and str(cache_key[-1]) == str(context_hash):
-                target_cache.pop(cache_key, None)
+                evicted_snapshot = target_cache.pop(cache_key, None)
                 self._drop_cache_validation(cache_key)
-                self._orders_stale_versions.pop(cache_key, None)
-                self._orders_stale_snapshots.pop(cache_key, None)
+                if target_cache is self._orders_tab_cache:
+                    self._evict_orders_cache_state_unlocked(cache_key, evicted_snapshot)
                 logger.info(
                     "[ReadCoordinator] evicted cached tab admission_id=%s context_hash=%s",
                     admission_id,
@@ -3046,14 +3380,17 @@ class ReadCoordinator:
         admission_id: Optional[int] = None,
         context_hash: Optional[str] = None,
         trace_id: Optional[str] = None,
+        request_id: Optional[str] = None,
         priority: Optional[str] = None,
         fallback_used: Optional[int] = None,
         base: Optional[str] = None,
         version: Optional[int] = None,
         generation: Optional[int] = None,
+        phase_timings: Optional[OrdersLoadPhaseTimings] = None,
     ) -> None:
         normalized_source = str(source or "refresh").strip().lower() or "refresh"
         metric_source = self._orders_metric_source(normalized_source, cache_hit=cache_hit)
+        phase_fields = (phase_timings or OrdersLoadPhaseTimings()).metric_fields()
         record_metric(
             "orders_load_time_ms",
             round(float(elapsed_ms or 0.0), 3),
@@ -3071,9 +3408,10 @@ class ReadCoordinator:
             version=version,
             context_hash=context_hash,
             trace_id=trace_id,
-            request_id=trace_id,
+            request_id=request_id or trace_id,
             generation=0 if generation is None else int(generation),
             priority=self._normalize_priority(priority or "HIGH"),
+            **phase_fields,
         )
         now = time.monotonic()
         with self._orders_telemetry_lock:
@@ -3841,11 +4179,25 @@ class ReadCoordinator:
         priority: str,
         started: float,
         request_id: str,
+        required_version: int = 0,
     ):
         active_done = active.get("done_event")
         if isinstance(active_done, threading.Event) and READ_ORDERS_COALESCE_WAIT_SEC > 0:
             active_done.wait(READ_ORDERS_COALESCE_WAIT_SEC)
         snapshot = self.get_cached_or_stale_orders_tab(context)
+        if snapshot is not None and int(snapshot.get("version") or 0) < int(required_version or 0):
+            logger.info(
+                "[ReadCoordinator] orders_refresh_coalesced_below_required_version "
+                "context_hash=%s request_id=%s version=%s required_version=%s",
+                context.hash(), request_id, snapshot.get("version"), required_version,
+            )
+            record_metric(
+                "orders_refresh_coalesced_below_required_version", 1,
+                admission_id=context.admission_id, context_hash=context.hash(),
+                request_id=request_id, active_request_id=active.get("request_id"),
+                version=int(snapshot.get("version") or 0), required_version=int(required_version),
+            )
+            return None
         if snapshot is None:
             logger.warning(
                 "[ReadCoordinator] orders_refresh_coalesced_no_snapshot admission_id=%s source=%s active_request_id=%s request_id=%s context_hash=%s",
@@ -3897,7 +4249,7 @@ class ReadCoordinator:
         )
         self.record_orders_ui_event("duplicate_load_prevented", role=context.role, context_hash=context.hash())
         self._record_orders_load_telemetry(
-            source="cache",
+            source=source,
             cache_hit=True,
             delta_applied=False,
             delta_failure_reason="0",
@@ -3907,6 +4259,7 @@ class ReadCoordinator:
             admission_id=context.admission_id,
             context_hash=context.hash(),
             trace_id=snapshot.get("load_trace_id") or active.get("request_id") or request_id,
+            request_id=request_id,
             priority=priority,
             fallback_used=0,
             base=base,

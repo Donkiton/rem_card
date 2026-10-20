@@ -1,4 +1,6 @@
+import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from typing import Dict, List, Tuple, Optional, Callable, Any, Sequence
 from datetime import datetime, timedelta
@@ -6,12 +8,14 @@ from ..data.dao.patient_status_dao import InitialStatusOutcome, PatientStatusDAO
 from ..data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
 from .ventilation_service import VentilationService
 from rem_card.app.logger import logger
+from rem_card.app.sqlite_shared import QueuedWriteDeadlineExceeded
 from rem_card.services.operblock_handoff_service import OperBlockHandoffService
 
 class PatientStatusService:
     INITIAL_STATUS_QUEUE_DEADLINE_SEC = 15.0
     INITIAL_STATUS_WRITE_BUDGET_MS = 3000
     INITIAL_STATUS_RETRIES = 2
+    INITIAL_STATUS_RETRY_DELAY_SEC = 0.1
     INITIAL_STATUS_COMPLETED_CACHE_SIZE = 512
 
     def __init__(
@@ -190,6 +194,31 @@ class PatientStatusService:
                 if key[0] == target:
                     self._initial_status_completed.pop(key, None)
 
+    @staticmethod
+    def _is_retryable_initial_status_failure(exc: Any) -> bool:
+        """Return true only for a commit timeout whose SQLite busy cause is known."""
+        if not isinstance(exc, QueuedWriteDeadlineExceeded):
+            return False
+        # This exact controller outcome is emitted after COMMIT fails and the
+        # transaction has rolled back. "before commit" is a different outcome.
+        if str(exc) != "Write budget exhausted at commit":
+            return False
+
+        current = exc.__cause__ or exc.__context__
+        seen: set[int] = set()
+        while isinstance(current, BaseException) and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, sqlite3.OperationalError):
+                message = str(current).lower()
+                if (
+                    "database is locked" in message
+                    or "database table is locked" in message
+                    or ("busy" in message and "sqlite" in message)
+                ):
+                    return True
+            current = current.__cause__ or current.__context__
+        return False
+
     def enqueue_initial_status(
         self,
         admission_id: int,
@@ -215,13 +244,36 @@ class PatientStatusService:
                 return False
             self._initial_status_pending.add(key)
 
+        retry_deadline = time.perf_counter() + self.INITIAL_STATUS_QUEUE_DEADLINE_SEC
+
         def operation() -> InitialStatusOutcome:
-            return self.ensure_initial_status(
-                admission_id,
-                shift_start,
-                admission_datetime,
-                user_id,
-            )
+            retries_left = self.INITIAL_STATUS_RETRIES
+            while True:
+                try:
+                    return self.ensure_initial_status(
+                        admission_id,
+                        shift_start,
+                        admission_datetime,
+                        user_id,
+                    )
+                except Exception as exc:
+                    remaining_sec = retry_deadline - time.perf_counter()
+                    if (
+                        retries_left <= 0
+                        or remaining_sec <= 0
+                        or not self._is_retryable_initial_status_failure(exc)
+                    ):
+                        raise
+                    retries_left -= 1
+                    logger.warning(
+                        "[StatusService] Retrying initial status after confirmed busy rollback "
+                        "admission_id=%s retries_left=%s",
+                        admission_id,
+                        retries_left,
+                    )
+                    time.sleep(min(self.INITIAL_STATUS_RETRY_DELAY_SEC, remaining_sec))
+                    if time.perf_counter() >= retry_deadline:
+                        raise
 
         def settled(state: str, payload: Any) -> None:
             with self._initial_status_lock:
@@ -242,9 +294,12 @@ class PatientStatusService:
                 on_error=on_error,
                 on_settled=settled,
                 write_metadata={
-                    "queue_deadline_sec": self.INITIAL_STATUS_QUEUE_DEADLINE_SEC,
+                    "queue_deadline_sec": max(0.001, retry_deadline - time.perf_counter()),
                     "write_budget_ms": self.INITIAL_STATUS_WRITE_BUDGET_MS,
-                    "queue_retries_left": self.INITIAL_STATUS_RETRIES,
+                    # The internal loop owns the narrow, rollback-confirmed
+                    # retries; the generic queue must not retry raw BUSY.
+                    "queue_retryable": False,
+                    "queue_retries_left": 0,
                 },
             )
         except Exception:

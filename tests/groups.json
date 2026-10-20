@@ -1,5 +1,6 @@
 {
   "core": [
+    "tests/test_concurrent_clinical_sync.py",
     "tests/test_ventilation_event_edit.py",
     "tests/test_dev_replica_isolation.py",
     "tests/test_local_operblock_startup.py",

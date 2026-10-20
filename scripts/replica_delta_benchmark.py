@@ -251,7 +251,7 @@ def _deterministic_text(index: int, size: int) -> str:
     return (prefix + seed * math.ceil(size / len(seed)))[:size]
 
 
-def _create_database(path: Path, target_mib: float) -> dict[str, Any]:
+def _create_database(path: Path, target_mib: float, history_rows: int = 0) -> dict[str, Any]:
     from rem_card.app.unified_db_schema import ensure_unified_schema
 
     connection = sqlite3.connect(path)
@@ -322,6 +322,12 @@ def _create_database(path: Path, target_mib: float) -> dict[str, Any]:
             "action_type,changed_by,before_json,after_json) "
             "VALUES('synthetic-seed','clinical_events',1,1,'seed','benchmark','{}','{}')"
         )
+        connection.executemany(
+            "INSERT INTO medical_audit_log(operation_id,table_name,row_id,admission_id,"
+            "action_type,changed_by,before_json,after_json) VALUES(?,?,?,?,?,?,?,?)",
+            ((f"synthetic-history-{index}", "clinical_events", 1, 1, "history", "benchmark", "{}", "{}")
+             for index in range(history_rows)),
+        )
         connection.commit()
         connection.execute("VACUUM")
         connection.execute("PRAGMA journal_mode=DELETE")
@@ -334,6 +340,7 @@ def _create_database(path: Path, target_mib: float) -> dict[str, Any]:
         "page_size": 4096,
         "synthetic_patient_rows": patient_count,
         "text_bytes_per_patient": payload_size,
+        "additional_untracked_history_rows": history_rows,
     }
 
 
@@ -602,7 +609,7 @@ def run_benchmark(args) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="remcard-replica-delta-") as temporary:
         owned_root = Path(temporary)
         template = owned_root / "synthetic_template.db"
-        database = _create_database(template, args.database_mib)
+        database = _create_database(template, args.database_mib, args.history_rows)
 
         first_full: list[dict[str, Any]] = []
         first_root = owned_root / "first_full"
@@ -715,9 +722,8 @@ def run_benchmark(args) -> dict[str, Any]:
             "apsw": apsw.apswversion(),
             "apsw_sqlite": apsw.sqlitelibversion(),
             "application_build_runtime_note": (
-                "This measured run uses repository-default Python 3.10 / SQLite 3.40.1. "
-                "The current application test/build runtime is Python 3.11 / SQLite 3.38.4; "
-                "absolute timings are therefore benchmark-runtime evidence, not a build-runtime claim."
+                "Source VFS uses the APSW SQLite version reported above. "
+                "These are synthetic latency-model measurements, not production SMB measurements."
             ),
         },
         "configuration": {
@@ -758,12 +764,13 @@ def _parse_args():
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--database-mib", type=float, default=16.0)
     parser.add_argument("--delay-ms", type=float, default=1.75)
+    parser.add_argument("--history-rows", type=int, default=0)
     parser.add_argument("--dependency-dir", type=Path, default=DEFAULT_DEPENDENCY_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
     if args.repeats < 3:
         parser.error("--repeats must be at least 3")
-    if args.database_mib <= 0 or args.delay_ms < 0:
+    if args.database_mib <= 0 or args.delay_ms < 0 or args.history_rows < 0:
         parser.error("database size must be positive and delay non-negative")
     args.delay_seconds = args.delay_ms / 1000.0
     return args

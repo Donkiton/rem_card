@@ -31,8 +31,12 @@ STOPPED_WORKER_CLEANUP_TIMEOUT_SEC = 0.5
 
 
 class LocalReplicaWorkerError(RuntimeError):
-    def __init__(self, message: str, *, remote_error_class: str = ""):
+    def __init__(self, message: str, *, remote_error_class: str = "", stage: str = "",
+                 sqlite_errorcode: int | None = None, sqlite_errorname: str = ""):
         self.remote_error_class = str(remote_error_class or "")
+        self.stage = str(stage or getattr(self, "stage", ""))
+        self.sqlite_errorcode = sqlite_errorcode
+        self.sqlite_errorname = str(sqlite_errorname or "")
         super().__init__(str(message or "Ошибка процесса локальной реплики"))
 
 
@@ -106,6 +110,29 @@ class LocalReplicaWriterBusy(LocalReplicaWorkerError):
             "Обновление локальной реплики отложено: клиническая запись "
             "имеет приоритет."
         )
+
+
+class LocalReplicaSourceBusy(LocalReplicaWriterBusy):
+    """SQLite refused a read while a concurrent source transaction was active."""
+
+
+class _ReplicaProgress:
+    def __init__(self, callback):
+        self.callback = callback
+        self.stage = "worker_start"
+
+    def __call__(self, stage: str) -> None:
+        self.stage = str(stage)
+        if self.callback is not None:
+            self.callback(stage)
+
+    def preserve_failure(self, exc: Exception) -> None:
+        if not getattr(exc, "stage", ""):
+            exc.stage = self.stage
+
+
+def _delta_fallback_details(result: dict) -> tuple[str, dict]:
+    return str(result.get("reason") or "delta_unavailable"), dict(result.get("metrics") or {})
 
 
 def replica_snapshot_lease_dir(central_db_path: str) -> str:
@@ -444,6 +471,8 @@ def _sync_snapshot_with_network_lease_observed(
     Keeping rotation checks, lease I/O and the database snapshot in this
     process lets the parent enforce one hard deadline for the complete sync.
     """
+    progress_reporter = _ReplicaProgress(progress_callback)
+    progress_callback = progress_reporter
     central_db_path = os.path.abspath(
         str(message.get("central_db_path") or "")
     )
@@ -566,6 +595,7 @@ def _sync_snapshot_with_network_lease_observed(
             progress_callback("snapshot")
         from rem_card.app.replica_refresh import incremental_enabled, try_incremental_snapshot
         fallback_reason = ""
+        fallback_metrics = {}
         if message.get("local_db_path") and incremental_enabled():
             acquire_snapshot_gate()
 
@@ -581,7 +611,7 @@ def _sync_snapshot_with_network_lease_observed(
             )
             if result["status"] != "full_required":
                 return result
-            fallback_reason = str(result.get("reason") or "delta_unavailable")
+            fallback_reason, fallback_metrics = _delta_fallback_details(result)
             # An untracked table can change without advancing the notification
             # cursor. A rejected delta therefore cannot use the old fast skip.
             message = {**message, "local_state": {}}
@@ -612,7 +642,12 @@ def _sync_snapshot_with_network_lease_observed(
         result["sync_mode"] = "full" if result["status"] == "snapshot_ready" else "unchanged"
         if fallback_reason:
             result["full_reason"] = fallback_reason
+            result["delta_metrics"] = fallback_metrics
         return result
+    except Exception as exc:
+        # Cleanup emits its own progress; preserve the operation that failed.
+        progress_reporter.preserve_failure(exc)
+        raise
     finally:
         try:
             if snapshot_gate_acquired:
@@ -632,7 +667,15 @@ def _sync_snapshot_with_network_lease_observed(
                 snapshot_lease.release()
 
 
-def _send_error(pipe, exc: Exception) -> None:
+def _send_error(pipe, exc: Exception, *, stage: str = "") -> None:
+    sqlite_error = exc
+    seen = set()
+    while not isinstance(sqlite_error, sqlite3.Error) and id(sqlite_error) not in seen:
+        seen.add(id(sqlite_error))
+        cause = sqlite_error.__cause__ or sqlite_error.__context__
+        if cause is None:
+            break
+        sqlite_error = cause
     try:
         pipe.send(
             {
@@ -640,10 +683,44 @@ def _send_error(pipe, exc: Exception) -> None:
                 "error_class": type(exc).__name__,
                 "error": str(exc),
                 "gate_diagnostics": getattr(exc, "gate_diagnostics", {}),
+                "failure_stage": str(getattr(exc, "stage", "") or stage),
+                "sqlite_errorcode": getattr(sqlite_error, "sqlite_errorcode", None),
+                "sqlite_errorname": str(getattr(sqlite_error, "sqlite_errorname", "") or ""),
             }
         )
     except Exception:
         pass
+
+
+def _worker_response_error(response: dict, last_stage: str) -> LocalReplicaWorkerError:
+    remote_class = str(response.get("error_class") or "")
+    if remote_class == LocalReplicaRotationBusy.__name__:
+        return LocalReplicaRotationBusy()
+    if remote_class == LocalReplicaSnapshotBusy.__name__:
+        return LocalReplicaSnapshotBusy(response.get("gate_diagnostics"))
+    if remote_class == LocalReplicaWriterBusy.__name__:
+        return LocalReplicaWriterBusy()
+    code = response.get("sqlite_errorcode")
+    message = str(response.get("error") or "Ошибка процесса локальной реплики")
+    stage = str(response.get("failure_stage") or last_stage)
+    primary_code = (code & 0xFF) if isinstance(code, int) else None
+    busy = primary_code in (5, 6) or (
+        remote_class == "OperationalError"
+        and message.casefold().startswith(("database is locked", "database table is locked"))
+    )
+    source_read_stage = stage in {"central_probe", "central_open", "state_read", "delta_collect", "backup", "snapshot"}
+    if busy and remote_class == "OperationalError" and source_read_stage:
+        error = LocalReplicaSourceBusy()
+        error.stage = stage
+        error.sqlite_errorcode = code
+        error.sqlite_errorname = str(response.get("sqlite_errorname") or "")
+        return error
+    return LocalReplicaWorkerError(
+        message, remote_error_class=remote_class,
+        stage=stage,
+        sqlite_errorcode=code if isinstance(code, int) else None,
+        sqlite_errorname=str(response.get("sqlite_errorname") or ""),
+    )
 
 
 def _cleanup_stopped_worker_entry(
@@ -685,15 +762,20 @@ def _worker_main(pipe) -> None:
         if command != "sync":
             _send_error(pipe, ValueError(f"Unsupported local replica command: {command}"))
             continue
+        last_stage = "worker_start"
+
+        def send_progress(stage):
+            nonlocal last_stage
+            last_stage = str(stage or "")
+            pipe.send({"progress": last_stage})
+
         try:
             pipe.send(
                 {
                     "ok": True,
                     **_sync_snapshot_with_network_lease(
                         message,
-                        progress_callback=lambda stage: pipe.send(
-                            {"progress": str(stage or "")}
-                        ),
+                        progress_callback=send_progress,
                         backup_progress_callback=lambda remaining, total: pipe.send(
                             {
                                 "progress": "backup",
@@ -705,7 +787,7 @@ def _worker_main(pipe) -> None:
                 }
             )
         except Exception as exc:
-            _send_error(pipe, exc)
+            _send_error(pipe, exc, stage=last_stage)
 
 
 class LocalReplicaWorkerClient:
@@ -1165,17 +1247,7 @@ class LocalReplicaWorkerClient:
                 self._active_temp_path = ""
             if not response.get("ok"):
                 _remove_with_sidecars(temp_db_path)
-                remote_error_class = str(response.get("error_class") or "")
-                if remote_error_class == LocalReplicaRotationBusy.__name__:
-                    raise LocalReplicaRotationBusy()
-                if remote_error_class == LocalReplicaSnapshotBusy.__name__:
-                    raise LocalReplicaSnapshotBusy(response.get("gate_diagnostics"))
-                if remote_error_class == LocalReplicaWriterBusy.__name__:
-                    raise LocalReplicaWriterBusy()
-                raise LocalReplicaWorkerError(
-                    str(response.get("error") or "Ошибка процесса локальной реплики"),
-                    remote_error_class=remote_error_class,
-                )
+                raise _worker_response_error(response, last_stage)
             return dict(response)
         finally:
             self._mutex.release()

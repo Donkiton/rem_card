@@ -19,6 +19,7 @@ from rem_card.app.local_replica_worker import (
     MAX_REPLICA_SYNC_TIMEOUT_SEC,
     LocalReplicaRotationBusy,
     LocalReplicaSnapshotBusy,
+    LocalReplicaSourceBusy,
     LocalReplicaWriterBusy,
     LocalReplicaWorkerCancelled,
     LocalReplicaWorkerClient,
@@ -416,6 +417,7 @@ class LocalReplicaSync:
                 LocalReplicaRotationBusy: "rotation_busy",
                 LocalReplicaSnapshotBusy: "snapshot_busy",
                 LocalReplicaWriterBusy: "writer_busy",
+                LocalReplicaSourceBusy: "writer_busy",
             }[type(exc)]
             with self._lock:
                 # A competing snapshot or clinical write is expected with two
@@ -480,6 +482,8 @@ class LocalReplicaSync:
                     force_flush=failure_count >= 2,
                     error_class=type(exc).__name__,
                     failure_stage=str(getattr(exc, "stage", "") or ""),
+                    sqlite_errorcode=getattr(exc, "sqlite_errorcode", None),
+                    sqlite_errorname=str(getattr(exc, "sqlite_errorname", "")),
                     consecutive_failures=failure_count,
                     retry_backoff_sec=self._current_backoff_sec,
                     duration_ms=round(

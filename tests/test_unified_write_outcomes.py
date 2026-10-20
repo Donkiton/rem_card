@@ -4,7 +4,9 @@ import threading
 import time
 import sqlite3
 import unittest
+import pytest
 from contextlib import nullcontext
+from datetime import datetime
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
@@ -12,6 +14,8 @@ from rem_card.app.network_write_worker import NetworkWriteWorkerTimeout
 from rem_card.app.sqlite_shared import LocalWriteQueue, QueuedWriteDeadlineExceeded
 from rem_card.services.data_service import DataService
 from rem_card.services.patient_service import PatientService
+from rem_card.services.patient_status_service import PatientStatusService
+from rem_card.data.dao.patient_status_dao import InitialStatusOutcome
 
 
 class _Signal:
@@ -103,6 +107,64 @@ def _wait_until(predicate, timeout: float = 1.0) -> bool:
             return True
         time.sleep(0.005)
     return bool(predicate())
+
+
+@pytest.mark.parametrize("failure_kind", ["raw_busy", "precommit_busy", "commit_busy", "unknown", "permanent"])
+def test_initial_status_has_one_retry_owner_through_real_data_service_queue(failure_kind):
+    data = _service_harness()
+    attempts, successes, errors, settled = [], [], [], []
+    done = threading.Event()
+
+    def ensure(*_args):
+        attempts.append(1)
+        if len(attempts) > 1:
+            return InitialStatusOutcome.CREATED
+        if failure_kind == "raw_busy":
+            raise sqlite3.OperationalError("database is locked")
+        if failure_kind in {"precommit_busy", "commit_busy"}:
+            try:
+                raise sqlite3.OperationalError("database is locked")
+            except sqlite3.OperationalError as cause:
+                message = ("Write budget exhausted at commit" if failure_kind == "commit_busy"
+                           else "Write budget exhausted before commit (status, begin_immediate_timeout)")
+                raise QueuedWriteDeadlineExceeded(message) from cause
+        if failure_kind == "unknown":
+            raise NetworkWriteWorkerTimeout(
+                operation_id="test-unknown", source="initial_status", timeout_sec=3,
+                phase="commit", outcome_unknown=True,
+            )
+        raise RuntimeError("permanent failure")
+
+    service = PatientStatusService(
+        SimpleNamespace(ensure_initial_status=ensure, db=SimpleNamespace()), data_service=data,
+    )
+
+    def terminal(state, payload):
+        settled.append((state, payload))
+
+    def success(result):
+        successes.append(result)
+        done.set()
+
+    def error(exc):
+        errors.append(exc)
+        done.set()
+
+    shift = datetime(2026, 10, 20, 8)
+    try:
+        assert service.enqueue_initial_status(7, shift, shift, on_success=success, on_error=error, on_settled=terminal)
+        assert done.wait(3.0)
+        assert len(settled) == 1
+        if failure_kind == "commit_busy":
+            assert attempts == [1, 1]
+            assert successes == [InitialStatusOutcome.CREATED] and errors == []
+            assert settled[0][0] == "committed"
+        else:
+            assert attempts == [1]
+            assert successes == [] and len(errors) == 1
+            assert settled[0][0] == ("unknown" if failure_kind == "unknown" else "failed")
+    finally:
+        assert data._queue.shutdown(timeout=3.0)
 
 
 def test_outcome_release_single_flight_survives_retry_backoff():
