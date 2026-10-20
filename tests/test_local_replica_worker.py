@@ -157,3 +157,66 @@ def test_bad_checkpoint_row_is_typed_local_destination_failure(
 
     assert isinstance(raised.value.__cause__, sqlite3.OperationalError)
     assert "WAL checkpoint failed" in str(raised.value)
+
+
+@pytest.mark.parametrize("code", [5, 6, 261, None])
+def test_remote_sqlite_busy_is_expected_contention_not_replica_failure(code):
+    error = worker._worker_response_error({
+        "error_class": "OperationalError", "error": "database is locked",
+        "sqlite_errorcode": code, "sqlite_errorname": "SQLITE_BUSY",
+        "failure_stage": "delta_collect",
+    }, "lease_release")
+    assert isinstance(error, worker.LocalReplicaSourceBusy)
+    assert error.stage == "delta_collect"
+
+
+@pytest.mark.parametrize("code", [5, 6, 261, None])
+def test_local_destination_busy_remains_replica_failure_over_ipc(code):
+    messages = []
+
+    class Pipe:
+        send = staticmethod(messages.append)
+
+    busy = sqlite3.OperationalError("database is locked")
+    if code is not None:
+        busy.sqlite_errorcode = code
+    busy.sqlite_errorname = "SQLITE_BUSY"
+    try:
+        raise busy
+    except sqlite3.OperationalError as cause:
+        error = worker.LocalReplicaDestinationError(str(cause))
+        error.__cause__ = cause
+    worker._send_error(Pipe(), error, stage="delta_local_clone")
+    received = worker._worker_response_error(messages[0], "lease_release")
+    assert not isinstance(received, worker.LocalReplicaSourceBusy)
+    assert received.remote_error_class == "LocalReplicaDestinationError"
+    assert received.sqlite_errorcode == code
+    assert received.stage == "delta_local_clone"
+
+
+@pytest.mark.parametrize("stage", ["delta_local_clone", "delta_apply", "checkpoint", "quick_check", "fsync", "unknown"])
+def test_busy_outside_known_source_read_stage_is_not_expected_source_contention(stage):
+    error = worker._worker_response_error({
+        "error_class": "OperationalError", "error": "database is locked",
+        "sqlite_errorcode": 5, "failure_stage": stage,
+    }, "lease_release")
+    assert not isinstance(error, worker.LocalReplicaSourceBusy)
+    assert error.stage == stage
+
+
+def test_readonly_error_preserves_sqlite_code_and_original_stage_over_ipc():
+    messages = []
+
+    class Pipe:
+        send = staticmethod(messages.append)
+
+    error = sqlite3.OperationalError("attempt to write a readonly database")
+    error.sqlite_errorcode = 776
+    error.sqlite_errorname = "SQLITE_READONLY_ROLLBACK"
+    error.stage = "central_open"
+    worker._send_error(Pipe(), error, stage="lease_release")
+    received = worker._worker_response_error(messages[0], "lease_release")
+    assert not isinstance(received, worker.LocalReplicaSourceBusy)
+    assert received.sqlite_errorcode == 776
+    assert received.sqlite_errorname == "SQLITE_READONLY_ROLLBACK"
+    assert received.stage == "central_open"

@@ -738,6 +738,8 @@ class LocalReplicaSyncTest(unittest.TestCase):
             force_flush=False,
             error_class="LocalReplicaWorkerError",
             failure_stage="",
+            sqlite_errorcode=None,
+            sqlite_errorname="",
             consecutive_failures=1,
             retry_backoff_sec=15.0,
             duration_ms=ANY,

@@ -48,13 +48,15 @@ def test_rejected_delta_forces_full_even_with_equal_cursor(databases, monkeypatc
     source, local, message = databases
     from rem_card.app import replica_refresh
     monkeypatch.setattr(replica_refresh, "try_incremental_snapshot",
-                        lambda *a, **k: {"status": "full_required", "reason": "untracked_limit"})
+                        lambda *a, **k: {"status": "full_required", "reason": "untracked_limit",
+                                         "metrics": {"table": "history", "source_rows": 9000, "local_rows": 8999}})
     with closing(sqlite3.connect(source)) as conn, conn:
         conn.execute("UPDATE patients SET name='central change without notification'")
     response = worker._sync_snapshot_with_network_lease(message)
     assert response["status"] == "snapshot_ready"
     assert response["sync_mode"] == "full"
     assert response["full_reason"] == "untracked_limit"
+    assert response["delta_metrics"] == {"table": "history", "source_rows": 9000, "local_rows": 8999}
     with closing(sqlite3.connect(response["temp_db_path"])) as conn:
         assert conn.execute("SELECT name FROM patients").fetchone()[0] == "central change without notification"
     with closing(sqlite3.connect(local)) as conn:

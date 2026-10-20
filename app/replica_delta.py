@@ -32,6 +32,12 @@ _KNOWN_ACTIONS = frozenset(("insert", "update", "delete"))
 # their logical identity (and may change after VACUUM).  Their journal events
 # are useful invalidations only; bounded full reconciliation uses their real PK.
 _FORCE_RECONCILE = frozenset(("vital_settings", "operating_tables"))
+# Inspected history and changed rows are separate budgets. A large, mostly
+# unchanged audit table must not force a network backup on every clinical edit.
+# These bounds include BOTH source and local rows/bytes; candidates remain
+# unpublished until the entire consistent reconciliation has completed.
+MAX_RECONCILIATION_SCAN_ROWS = 250_000
+MAX_RECONCILIATION_SCAN_BYTES = 32 * 1024 * 1024
 
 
 class ReplicaDeltaError(RuntimeError):
@@ -534,42 +540,122 @@ def _reconciled_table_change(
     scan_remaining: int,
     byte_remaining: int,
     check_cancel: Callable[[], Any] | None,
-) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]], int, int]:
+    scan_byte_remaining: int,
+) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]], int, int, int]:
     source_count = int(_scalar(source_conn, f"SELECT COUNT(*) FROM {_quote(table)}") or 0)
     local_count = int(_scalar(local_conn, f"SELECT COUNT(*) FROM {_quote(table)}") or 0)
-    if source_count > max_rows or local_count > max_rows:
-        raise ReplicaDeltaError(f"untracked_table_too_large:{table}:{source_count}:{local_count}")
     scanned = source_count + local_count
     if scanned > scan_remaining:
-        raise ReplicaDeltaError("reconciliation_scan_limit")
-    estimated = _estimate_source_bytes(
+        raise ReplicaDeltaError(f"reconciliation_scan_limit:{table}:{source_count}:{local_count}")
+    source_bytes = _estimate_source_bytes(
         source_conn, table, info, check_cancel=check_cancel
     )
-    if estimated > byte_remaining:
-        raise ReplicaDeltaError("payload_byte_limit")
-    source_rows = _all_rows(source_conn, table, info, check_cancel)
-    local_rows = _all_rows(local_conn, table, info, check_cancel)
-    source_map = {_row_key(row, info): row for row in source_rows}
-    local_map = {_row_key(row, info): row for row in local_rows}
-    if len(source_map) != len(source_rows) or len(local_map) != len(local_rows):
-        raise ReplicaDeltaError("non_unique_replica_key")
-    upserts = [row for key, row in source_map.items() if local_map.get(key) != row]
-    deletes = [key for key in local_map if key not in source_map]
-    return upserts, deletes, scanned, estimated
+    if source_bytes > scan_byte_remaining:
+        raise ReplicaDeltaError(f"reconciliation_byte_limit:{table}:{source_count}:{local_count}")
+    local_bytes = _estimate_source_bytes(local_conn, table, info, check_cancel=check_cancel)
+    if source_bytes + local_bytes > scan_byte_remaining:
+        raise ReplicaDeltaError(f"reconciliation_byte_limit:{table}:{source_count}:{local_count}")
+    upserts, deletes, estimated = _stream_table_difference(
+        source_conn, local_conn, table, info, max_rows, byte_remaining, check_cancel
+    )
+    return upserts, deletes, scanned, estimated, source_bytes + local_bytes
+
+
+def _ordered_table_rows(conn, table, info, check_cancel):
+    """Keep memory bounded while comparing every historical row, not just tails."""
+    order = ", ".join(f"{_quote(column)} COLLATE BINARY" for column in info["key_columns"])
+    cursor = conn.execute(f"SELECT {_select_list(info)} FROM {_quote(table)} ORDER BY {order}")
+    previous_key = None
+    try:
+        while True:
+            _cancel(check_cancel)
+            batch = cursor.fetchmany(128)
+            if not batch:
+                break
+            for row in batch:
+                row = tuple(row)
+                key = _row_key(row, info)
+                if any(value is None for value in key):
+                    # NULL does not participate in SQLite UNIQUE conflicts:
+                    # INSERT OR REPLACE could otherwise duplicate this row.
+                    raise ReplicaDeltaError("nullable_replica_key")
+                if key == previous_key:
+                    raise ReplicaDeltaError("non_unique_replica_key")
+                previous_key = key
+                yield row
+    finally:
+        close = getattr(cursor, "close", None)
+        if callable(close):
+            close()
+
+
+def _sqlite_key_order(key):
+    """SQLite BINARY ordering: NULL, number, text, blob, including mixed keys."""
+    result = []
+    for value in key:
+        if value is None:
+            result.append((0, 0))
+        elif isinstance(value, (int, float)):
+            result.append((1, value))
+        elif isinstance(value, str):
+            result.append((2, value))
+        elif isinstance(value, bytes):
+            result.append((3, value))
+        else:
+            raise ReplicaDeltaError("unsupported_change_key")
+    return tuple(result)
+
+
+def _stream_table_difference(source_conn, local_conn, table, info, max_rows, byte_remaining, check_cancel):
+    source_rows = _ordered_table_rows(source_conn, table, info, check_cancel)
+    local_rows = _ordered_table_rows(local_conn, table, info, check_cancel)
+    upserts, deletes = [], []
+    estimated = 0
+    try:
+        source = next(source_rows, None)
+        local = next(local_rows, None)
+        while source is not None or local is not None:
+            _cancel(check_cancel)
+            source_key = _sqlite_key_order(_row_key(source, info)) if source is not None else None
+            local_key = _sqlite_key_order(_row_key(local, info)) if local is not None else None
+            if source is not None and (local is None or source_key < local_key):
+                upserts.append(source)
+                estimated += _estimated_size(source)
+                source = next(source_rows, None)
+            elif local is not None and (source is None or local_key < source_key):
+                key = _row_key(local, info)
+                deletes.append(key)
+                estimated += _estimated_size(key)
+                local = next(local_rows, None)
+            else:
+                if source != local:
+                    upserts.append(source)
+                    estimated += _estimated_size(source)
+                source = next(source_rows, None)
+                local = next(local_rows, None)
+            if len(upserts) + len(deletes) > max_rows:
+                raise ReplicaDeltaError("row_limit")
+            if estimated > byte_remaining:
+                raise ReplicaDeltaError("payload_byte_limit")
+        return upserts, deletes, estimated
+    finally:
+        source_rows.close()
+        local_rows.close()
 
 
 def _table_error_result(exc: ReplicaDeltaError, state: dict[str, Any]) -> dict[str, Any]:
     detail = str(exc)
-    if detail.startswith("untracked_table_too_large:"):
-        _, table, source_rows, local_rows = detail.split(":")
+    if detail.startswith(("reconciliation_scan_limit:", "reconciliation_byte_limit:")):
+        reason, description = detail.split(":", 1)
+        table, source_rows, local_rows = description.rsplit(":", 2)
         return _full_required(
-            "untracked_table_too_large",
+            reason,
             state,
             {"table": table, "source_rows": int(source_rows), "local_rows": int(local_rows)},
         )
     reason = detail if detail in {
         "unsupported_change_key", "reconciliation_scan_limit", "non_unique_replica_key",
-        "payload_byte_limit",
+        "payload_byte_limit", "row_limit",
     } else "unsupported_table_shape"
     return _full_required("byte_limit" if reason == "payload_byte_limit" else reason, state)
 
@@ -581,10 +667,13 @@ def _collect_table_changes(
     max_rows: int,
     max_bytes: int,
     check_cancel: Callable[[], Any] | None,
+    max_scan_rows: int,
+    max_scan_bytes: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, int, int]:
     changes: dict[str, Any] = {}
     operations = len(context["event_rows"])
     scanned = 0
+    scanned_bytes = 0
     estimated_bytes = int(context["event_estimated_bytes"])
     for table in sorted(context["table_names"] - {"change_log"}):
         _cancel(check_cancel)
@@ -602,15 +691,18 @@ def _collect_table_changes(
                     check_cancel,
                 )
                 scanned_now = 0
+                scanned_bytes_now = 0
             else:
-                upserts, deletes, scanned_now, estimated_now = _reconciled_table_change(
-                    source_conn, local_conn, table, info, max_rows,
-                    max(2 * max_rows, 1) - scanned, max_bytes - estimated_bytes,
-                    check_cancel,
+                upserts, deletes, scanned_now, estimated_now, scanned_bytes_now = _reconciled_table_change(
+                    source_conn, local_conn, table, info, max_rows - operations,
+                    max_scan_rows - scanned, max_bytes - estimated_bytes,
+                    check_cancel, max_scan_bytes - scanned_bytes,
                 )
         except ReplicaDeltaError as exc:
             return None, _table_error_result(exc, context["source_state"]), operations, scanned
         scanned += scanned_now
+        scanned_bytes += scanned_bytes_now
+        context["reconciliation_bytes_scanned"] = scanned_bytes
         estimated_bytes += estimated_now
         operations += len(upserts) + len(deletes)
         if operations > max_rows:
@@ -672,6 +764,7 @@ def _build_delta_package(
         "table_count": len(table_changes), "reconciliation_rows_scanned": scanned_rows,
         "package_bytes": 0, "source_database_bytes": db_bytes, "payload_fraction": 0.0,
         "source_min_cursor": context["source_min"], "local_min_cursor": context["local_min"],
+        "reconciliation_bytes_scanned": int(context.get("reconciliation_bytes_scanned", 0)),
     }
     package["metrics"] = metrics
     for _ in range(2):
@@ -697,12 +790,16 @@ def collect_delta(
     max_bytes: int = 4 * 1024 * 1024,
     max_fraction: float = 0.30,
     check_cancel: Callable[[], Any] | None = None,
+    max_scan_rows: int = MAX_RECONCILIATION_SCAN_ROWS,
+    max_scan_bytes: int = MAX_RECONCILIATION_SCAN_BYTES,
 ) -> dict[str, Any]:
     """Collect a self-contained delta from one consistent source snapshot."""
 
     limits = (int(max_events), int(max_rows), int(max_bytes), float(max_fraction))
     if limits[0] < 0 or limits[1] < 0 or limits[2] < 0 or not 0 <= limits[3] <= 1:
         raise ValueError("Некорректные ограничения дельты")
+    if int(max_scan_rows) < 0 or int(max_scan_bytes) < 0:
+        raise ValueError("Некорректные ограничения сверки реплики")
 
     source_owned = not source_conn.in_transaction
     local_owned = not local_conn.in_transaction
@@ -720,7 +817,8 @@ def collect_delta(
         if error:
             return error
         table_changes, error, row_operations, scanned_rows = _collect_table_changes(
-            source_conn, local_conn, context, limits[1], limits[2], check_cancel
+            source_conn, local_conn, context, limits[1], limits[2], check_cancel,
+            int(max_scan_rows), int(max_scan_bytes),
         )
         if error:
             return error
