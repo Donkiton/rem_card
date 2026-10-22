@@ -10,7 +10,12 @@
 </p>
 
 <p align="center">
-  <code>Версия 5.1.9</code> · <code>Windows</code> · <code>Python 3.11</code> · <code>PySide6</code> · <code>SQLite</code> · <code>RemCard Proprietary Source License</code> · <code>Экспериментальный проект</code>
+  <code>Версия 5.1.10</code> · <code>Windows</code> · <code>Python 3.11</code> · <code>PySide6</code> · <code>SQLite</code> · <code>RemCard Proprietary Source License</code> · <code>Экспериментальный проект</code>
+</p>
+
+<p align="center">
+  <a href="https://cliniciansthatcode.com/directory/#p-vadim-bityutsky"><img src="docs/assets/readme/clinicians-that-code-verified.svg" width="260" height="28" alt="Clinicians That Code: verified builder — карточка автора RemCard"></a><br>
+  <sub>Автор RemCard представлен в каталоге Clinicians That Code.</sub>
 </p>
 
 <p align="center">
@@ -21,21 +26,22 @@
   <a href="#установленная-версия-и-обновления">Установка и обновления</a> ·
   <a href="docs/README.md">Документация</a> ·
   <a href="CHANGELOG.md">Изменения</a> ·
-  <a href="LICENSE">Лицензия</a>
+  <a href="LICENSE">Лицензия</a> ·
+  <a href="#english-overview">English overview</a>
 </p>
 
-Обзор **RemCard 5.1.9**, обновлён **17 октября 2026 года**. Единый `RemCard.exe` открывает выбор четырёх ролей; отдельный `RemCardUpdater.exe` устанавливает полные обновления. Номер версии исходников указан в [`VERSION`](VERSION), состав конкретной сборки — в её манифесте.
+Обзор **RemCard 5.1.10**, обновлён **22 октября 2026 года**. Единый `RemCard.exe` открывает выбор четырёх ролей; отдельный `RemCardUpdater.exe` устанавливает полные обновления. Номер версии исходников указан в [`VERSION`](VERSION), состав конкретной сборки — в её манифесте.
 
-В [релизе 5.1.9](https://github.com/Donkiton/rem_card/releases/tag/v5.1.9) сохранены ускоренный вход врача и медсестры и обновление локальной реплики изменёнными строками. Проверенный стартовый снимок переиспользуется между запусками в пределах исходного 30-минутного срока проверки; при несовместимости, потере истории или большом объёме изменений выполняется полное копирование. Штатная отмена фонового обновления при выходе больше не считается сбоем синхронизации. Подробности и ограничения — в [контракте реплики](docs/source_of_truth_and_sync_contract.md) и [методике замеров](docs/replica_delta_benchmark.md).
+В [релизе 5.1.10](https://github.com/Donkiton/rem_card/releases/tag/v5.1.10) небольшие изменения могут передаваться в локальную реплику дельтой даже при большой истории. Сетевое получение статуса пациента вынесено из интерфейса медсестры; поздние ответы защищены от замены более новых данных. Уточнены безопасные повторы сохранения начального статуса и загрузка ночной резервной копии после освобождения блокировки общей базы. Проверки совместной работы врача и медсестры описаны в [отчёте проверки синхронизации](docs/sync_responsiveness_validation.md); правила реплики и границы замеров — в [контракте реплики](docs/source_of_truth_and_sync_contract.md) и [методике замеров](docs/replica_delta_benchmark.md).
 
-Готовый пакет 5.1.9 собран с запретом миграций общей базы и повышения минимальной версии клиента. Это **необязательное обновление** для совместимых рабочих мест: устанавливать его на всех компьютерах одновременно не требуется. Первый полный снимок по-прежнему зависит от скорости сети и размера базы.
+Готовый пакет 5.1.10 собран с запретом миграций общей базы и повышения минимальной версии клиента. Это **необязательное обновление** для совместимых рабочих мест: устанавливать его на всех компьютерах одновременно не требуется. Первый полный снимок по-прежнему зависит от скорости сети и размера базы.
 
 > [!WARNING]
 > **Рем Карта не является медицинским изделием и не заменяет клинические протоколы, клинические решения или ответственный контроль специалиста.** Для реальной эксплуатации необходимы независимая техническая и клиническая проверка, приёмка в конкретной среде и резервный рабочий процесс.
 
 ## Система в работе
 
-Снимки интерфейса **RemCard 5.1.0** с демонстрационными пациентами; текущий релиз — **5.1.9**. Нажмите на изображение, чтобы открыть его в полном размере.
+Снимки интерфейса **RemCard 5.1.0** с демонстрационными пациентами; текущий релиз — **5.1.10**. Нажмите на изображение, чтобы открыть его в полном размере.
 
 ### Единый вход и выбор роли
 
@@ -242,6 +248,21 @@ git diff --check
 Команда `python scripts\run_ci_checks.py all` запускает весь pytest в одном процессе для проверки общей изоляции; она не заменяет отдельные `quality` и `regression`. Runner назначает временные пути БД и QSettings, отчёты сохраняет в `tmp/ci-reports/<группа>`. Для точечной проверки также доступен обычный `python -m pytest tests -q`. Подробнее — [проверки и CI](docs/testing.md).
 
 Сетевые стенды, restore drill, аварийный и offline-режимы читают или изменяют выбранную папку данных. Запускайте их только с осознанно заданной тестовой базой по [регламенту приёмки](docs/operational_acceptance.md) и [инструкции проверки резервных копий](docs/backup_restore_drill.md).
+
+## English overview
+
+**RemCard ICU** is an experimental Windows desktop application for ICU and operating-room charting, built by anaesthesiologist-intensivist Vadim Bityutsky.
+
+The current interface and main documentation are in Russian.
+
+- **One shared record:** medication orders and administration tracking, vital signs, fluid balance, ventilation, procedures, laboratory results and reports.
+- **Role-specific workspaces:** doctors, nurses, and planned and emergency operating-room teams work from one application.
+- **Local deployment:** a PySide6 desktop interface with a shared SQLite database on the organisation's local network. Routine workstation use does not require a separate web server.
+- **Source-available:** the [RemCard Proprietary Source License](LICENSE) permits non-commercial use by individuals. Institutional and commercial use require prior written permission from the author.
+
+Clinical use requires independent technical, security and clinical review, acceptance testing in the intended environment, and a backup workflow. The directory badge above identifies the author's listing; it does not establish clinical validation of the software.
+
+[Demo screenshots](#система-в-работе) · [Project website](https://donkiton.github.io/rem_site/#english) · [Releases](https://github.com/Donkiton/rem_card/releases)
 
 ## Документы, статус и связь
 
