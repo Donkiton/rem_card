@@ -8,7 +8,7 @@ reportlab==5.0.1
 pypdf==6.21.1
 matplotlib==3.11.2
 pandas==3.0.6
-pillow==12.3.0
+pillow==13.0.0
 
 # Windows integration used by shortcuts/window helpers
 pywin32==312; platform_system == "Windows"
