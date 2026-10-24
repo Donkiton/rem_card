@@ -18,6 +18,31 @@ class _ConnectionGuard:
         yield
 
 
+def test_role_shutdown_retains_settings_worker_and_retries_existing_owner():
+    from rem_card.app.main import _shutdown_window_resources
+    settings = SimpleNamespace(stop_deferred_release_retry=Mock(return_value=False))
+    participant = SimpleNamespace(release=Mock())
+    container = SimpleNamespace(settings_service=settings, emergency_participant=participant)
+    window = SimpleNamespace(iter_runtime_containers=lambda: [container])
+    assert _shutdown_window_resources(window, Mock()) is False
+    participant.release.assert_not_called()
+    settings.stop_deferred_release_retry.assert_called_once_with(timeout_sec=2.0)
+    settings.stop_deferred_release_retry.return_value = True
+    assert _shutdown_window_resources(window, Mock()) is True
+    assert settings.stop_deferred_release_retry.call_count == 2
+    participant.release.assert_called_once_with()
+
+
+def test_failed_bootstrap_keeps_settings_owner_until_its_child_stops():
+    settings = SimpleNamespace(stop_deferred_release_retry=Mock(return_value=False))
+    owner = SimpleNamespace(settings_service=settings, db_manager=None, data_service=None)
+    result = bootstrap_module._cleanup_failed_bootstrap(owner)
+    assert result["ok"] is False and result["settings_service"] is False
+    assert owner.settings_service is settings
+    settings.stop_deferred_release_retry.return_value = True
+    assert bootstrap_module._cleanup_failed_bootstrap(owner)["ok"] is True
+
+
 class _ControlledThread:
     def __init__(self, *, alive: bool = True):
         self.alive = alive

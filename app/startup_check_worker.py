@@ -146,14 +146,15 @@ def run_startup_probe(path: str, cancel: threading.Event, *, timeout=90.0,
                       _target=None, admission_mode=None, progress=None) -> tuple[bool, str, bool]:
     """Return only after the child has exited and released its SQLite handles."""
     context = multiprocessing.get_context("spawn")
-    from rem_card.app.startup_diagnostics import startup_context
+    from rem_card.app.startup_diagnostics import startup_context, startup_event, startup_span
     receiver, sender = context.Pipe(duplex=False)
     workspace = None
     if admission_mode == "snapshot":
         from rem_card.app.startup_snapshot import create_workspace
         try:
             workspace = create_workspace()
-        except OSError:
+        except OSError as exc:
+            startup_event("startup_snapshot_workspace_unavailable", error_class=type(exc).__name__)
             admission_mode = "direct_admission"
     process = context.Process(target=_target or _read_only_probe,
                               args=(path, sender) if _target else (path, sender, startup_context(), admission_mode, workspace, timeout),
@@ -163,10 +164,12 @@ def run_startup_probe(path: str, cancel: threading.Event, *, timeout=90.0,
         if cancel.is_set():
             raise StartupCheckAborted()
         deadline = time.monotonic() + timeout
-        process.start()
+        with startup_span("startup_worker_spawn", mode=admission_mode or "full"):
+            process.start()
         started = True
         sender.close()
-        result = _await_probe(process, receiver, cancel, deadline, progress)
+        with startup_span("startup_worker_wait", mode=admission_mode or "full"):
+            result = _await_probe(process, receiver, cancel, deadline, progress)
         keep_snapshot = _validated_snapshot_result(result, workspace, path,
                                                     admission_mode in {"snapshot", "direct_admission"})
         return result
@@ -174,7 +177,8 @@ def run_startup_probe(path: str, cancel: threading.Event, *, timeout=90.0,
         sender.close()
         receiver.close()
         if started:
-            _stop_probe(process, path, workspace)
+            with startup_span("startup_worker_cleanup", mode=admission_mode or "full"):
+                _stop_probe(process, path, workspace)
         if workspace and not keep_snapshot:
             from rem_card.app.startup_snapshot import discard
             discard({"workspace": workspace})

@@ -37,6 +37,43 @@ class DailyBackupDeferred(RuntimeError):
     """Expected coordination refusal; keep the short retry cadence."""
 
 
+class DailyBackupCopyBudgetExceeded(DailyBackupDeferred):
+    """The bounded copy yielded its shared writer gate for a later attempt."""
+
+
+def _process_state(process: Any) -> str:
+    """A failed liveness probe is not evidence that an owned child stopped."""
+    try:
+        return "alive" if process.is_alive() else "stopped"
+    except Exception:
+        return "unknown"
+
+
+def _stop_process_bounded(process: Any, *, timeout_sec: float = 2.0) -> tuple[str, tuple[str, ...]]:
+    """Recheck death after termination errors, including Windows exit races."""
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    errors: list[str] = []
+    state = _process_state(process)
+    if state == "stopped":
+        return state, ()
+    for index, action in enumerate(("terminate", "kill")):
+        try:
+            method = getattr(process, action, None)
+            if method is not None:
+                method()
+        except Exception as exc:
+            errors.append(f"{action}:{type(exc).__name__}")
+        try:
+            remaining = max(0.0, deadline - time.monotonic())
+            process.join(timeout=remaining / (2 - index))
+        except Exception as exc:
+            errors.append(f"join:{type(exc).__name__}")
+        state = _process_state(process)
+        if state == "stopped" or time.monotonic() >= deadline:
+            break
+    return state, tuple(errors)
+
+
 def daily_backup_enabled_from_environment() -> bool:
     """Default on; only an explicit false-like value disables the backup."""
     value = os.environ.get(DAILY_BACKUP_ENV)
@@ -270,7 +307,7 @@ def _bounded_sqlite_copy(
             nonlocal last_progress
             now = time.monotonic()
             if now >= copy_deadline:
-                raise TimeoutError("daily SQLite copy exceeded its copy budget")
+                raise DailyBackupCopyBudgetExceeded("copy_budget_exhausted")
             if now - last_progress >= 0.5 or remaining == 0:
                 last_progress = now
                 _emit_progress(
@@ -699,6 +736,7 @@ def cleanup_confirmed_dead_worker_reservation(
     worker_pid: int,
     job_token: str,
     owner_source: str = DAILY_BACKUP_SOURCE,
+    owner_user_id: str | None = None,
 ) -> bool:
     """Remove only this job's local dead-child lock; never clean by age."""
     from rem_card.app.sqlite_shared import is_local_pid_alive
@@ -718,7 +756,7 @@ def cleanup_confirmed_dead_worker_reservation(
         return False
     if str(payload.get("source") or "") != owner_source:
         return False
-    if str(payload.get("user_id") or "") != f"daily-backup-job:{job_token}":
+    if str(payload.get("user_id") or "") != (owner_user_id or f"daily-backup-job:{job_token}"):
         return False
     if not str(payload.get("lock_token") or ""):
         return False
@@ -786,7 +824,66 @@ def _cleanup_dead_worker_artifacts(
             pass
         except OSError:
             pass
+    # A cleanup process can itself hit a transient SMB failure. Keep the job
+    # owned until its files are gone or demonstrably belong to another owner.
+    results["completed"] = _dead_worker_artifacts_released(
+        reservation_path=reservation_path,
+        database_lock_path=database_lock_path,
+        snapshot_lease_path=snapshot_lease_path,
+        staging_paths=(staging_path, publication_staging_path),
+        worker_pid=worker_pid,
+        job_token=job_token,
+    )
     return results
+
+
+def _dead_worker_artifacts_released(
+    *, reservation_path: str, database_lock_path: str, snapshot_lease_path: str,
+    staging_paths: tuple[str, ...], worker_pid: int, job_token: str,
+) -> bool:
+    for path, source in (
+        (reservation_path, DAILY_BACKUP_SOURCE),
+        (database_lock_path, DAILY_DATABASE_LOCK_SOURCE),
+        (snapshot_lease_path, DAILY_SNAPSHOT_LEASE_SOURCE),
+    ):
+        if not path:
+            continue
+        if not _owned_lock_released(
+            path, worker_pid=worker_pid, owner_source=source,
+            owner_user_id=f"daily-backup-job:{job_token}",
+        ):
+            return False
+    for path in staging_paths:
+        if not path:
+            continue
+        try:
+            os.stat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+        return False
+    return True
+
+
+def _owned_lock_released(path: str, *, worker_pid: int, owner_source: str, owner_user_id: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return True
+    except Exception:
+        return False
+    if not isinstance(payload, dict) or not all(
+        payload.get(key) for key in ("host", "pid", "source", "user_id", "lock_token")
+    ):
+        return False
+    return not (
+        str(payload["host"]).casefold() == socket.gethostname().casefold()
+        and str(payload["pid"]) == str(worker_pid)
+        and str(payload["source"]) == owner_source
+        and str(payload["user_id"]) == owner_user_id
+    )
 
 
 def _cleanup_dead_worker_entry(arguments: dict[str, Any], result_connection: Any) -> None:
@@ -844,8 +941,13 @@ class DailyBackupScheduler:
         self._wakeup = threading.Event()
         self._thread: threading.Thread | None = None
         self._process_lock = threading.Lock()
+        self._process_stop_lock = threading.RLock()
         self._process: Any = None
         self._process_job: dict[str, Any] | None = None
+        self._cleanup_process: Any = None
+        self._cleanup_receiver: Any = None
+        self._cleanup_result: dict[str, bool] = {}
+        self._reap_retry_sec = min(5.0, self.check_interval_sec, self.deferred_retry_sec, self.failure_retry_sec)
         self._state_lock = threading.Lock()
         self._probe: dict[str, Any] = {
             "enabled": True,
@@ -861,6 +963,8 @@ class DailyBackupScheduler:
             return False
         if self._thread is not None and self._thread.is_alive():
             return True
+        # A dead scheduler thread may still own a live/unknown child. The new
+        # coordinator must reap that owner before it is allowed to create work.
         self._stop_event.clear()
         self._wakeup.clear()
         self._thread = threading.Thread(target=self._run, name="RemCardDailyBackupScheduler", daemon=True)
@@ -869,16 +973,19 @@ class DailyBackupScheduler:
         return True
 
     def stop(self, timeout_sec: float = 2.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
         self._stop_event.set()
         self._wakeup.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(0.1, float(timeout_sec)))
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
-                self._signal_current_process_stop()
-                thread.join(timeout=0.5)
+                self._signal_current_process_stop(timeout_sec=max(0.0, deadline - time.monotonic()))
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
         thread_stopped = thread is None or not thread.is_alive()
-        process_stopped = self._terminate_current_process() if thread_stopped else False
+        process_stopped = self._terminate_current_process(
+            timeout_sec=max(0.0, deadline - time.monotonic()),
+        ) if thread_stopped else False
         stopped = thread_stopped and process_stopped
         if stopped:
             self._thread = None
@@ -892,12 +999,27 @@ class DailyBackupScheduler:
         probe["thread_alive"] = bool(thread and thread.is_alive())
         with self._process_lock:
             process = self._process
-            try:
-                probe["worker_alive"] = bool(process and process.is_alive())
-            except (ValueError, OSError):
-                probe["worker_alive"] = False
-            probe["worker_pid"] = getattr(process, "pid", None) if process else None
+            state = _process_state(process) if process is not None else "stopped"
+            probe["worker_alive"] = state == "alive"
+            probe["worker_state"] = state
+            probe["worker_pid"] = self._owned_process_pid(process)
+            cleanup = self._cleanup_process
+            cleanup_state = _process_state(cleanup) if cleanup is not None else "stopped"
+            probe["cleanup_worker_state"] = cleanup_state
+            probe["cleanup_worker_pid"] = self._owned_process_pid(cleanup)
+            probe["cleanup_pending"] = self._process_job is not None
         return probe
+
+    @staticmethod
+    def _owned_process_pid(process: Any) -> int | None:
+        try:
+            return int(process.pid) if process is not None and process.pid else None
+        except Exception:
+            return None
+
+    def _has_owned_resources(self) -> bool:
+        with self._process_lock:
+            return self._process is not None or self._cleanup_process is not None or self._process_job is not None
 
     def _update_probe(self, **values: Any) -> None:
         with self._state_lock:
@@ -928,6 +1050,13 @@ class DailyBackupScheduler:
         try:
             while not self._stop_event.wait(wait_sec):
                 backup_date, schedule_reason = self._due(datetime.now())
+                if self._has_owned_resources() and not self._terminate_current_process():
+                    self._record_result(
+                        {"status": "deferred", "reason": "worker_cleanup_pending", "backup_date": backup_date},
+                        schedule_reason=schedule_reason,
+                    )
+                    wait_sec = self._reap_retry_sec
+                    continue
                 if backup_date == self._completed_date:
                     wait_sec = self.check_interval_sec
                     continue
@@ -937,9 +1066,20 @@ class DailyBackupScheduler:
                     self._record_result(result, schedule_reason=schedule_reason)
                     wait_sec = self.deferred_retry_sec
                     continue
-                result = self._run_worker(backup_date)
+                try:
+                    result = self._run_worker(backup_date)
+                except Exception as exc:
+                    # Coordination/pipe/termination failures are job outcomes,
+                    # not a reason to silently lose the scheduler thread.
+                    logger.warning("Daily backup coordinator failed: %s", type(exc).__name__)
+                    result = {
+                        "status": "failure", "reason": "coordinator_exception",
+                        "error_class": type(exc).__name__, "backup_date": backup_date,
+                    }
                 self._record_result(result, schedule_reason=schedule_reason)
-                if result.get("status") == "success":
+                if self._has_owned_resources():
+                    wait_sec = self._reap_retry_sec
+                elif result.get("status") == "success":
                     self._completed_date = backup_date
                     wait_sec = self.check_interval_sec
                 elif result.get("status") == "deferred":
@@ -947,8 +1087,8 @@ class DailyBackupScheduler:
                 else:
                     wait_sec = self.failure_retry_sec
         finally:
-            self._terminate_current_process()
-            self._update_probe(running=False)
+            stopped = self._terminate_current_process()
+            self._update_probe(running=False, status="stopped" if stopped else "cleanup_pending")
 
     def _worker_config(self, backup_date: str, job_token: str) -> dict[str, Any]:
         return {
@@ -966,6 +1106,8 @@ class DailyBackupScheduler:
         }
 
     def _run_worker(self, backup_date: str) -> dict[str, Any]:
+        if self._has_owned_resources() and not self._terminate_current_process():
+            return {"status": "deferred", "reason": "worker_cleanup_pending", "backup_date": backup_date}
         job_token = uuid.uuid4().hex
         config = self._worker_config(backup_date, job_token)
         paths = _daily_paths(config)
@@ -1053,139 +1195,164 @@ class DailyBackupScheduler:
                     "exitcode": process.exitcode,
                 }
         finally:
-            receiving.close()
-            if process.is_alive():
-                process.terminate()
-            process.join(timeout=1.0)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(timeout=1.0)
-            worker_stopped = not process.is_alive()
-            if worker_stopped:
-                needs_cleanup = str((result or {}).get("reason") or "") in {
-                    "stopping",
-                    "worker_timeout",
-                    "worker_exited_without_result",
+            try:
+                receiving.close()
+            except (OSError, ValueError):
+                pass
+            if not self._terminate_current_process():
+                result = {
+                    "status": "deferred", "reason": "worker_cleanup_pending",
+                    "stage": current_stage, "stage_state": stage_state,
                 }
-                if needs_cleanup:
-                    self._bounded_dead_worker_cleanup(
-                        {
-                            "reservation_path": reservation_path,
-                            "database_lock_path": self.database_lock_path,
-                            "staging_path": paths["staging"],
-                            "publication_staging_path": paths["publication_staging"],
-                            "snapshot_lease_path": paths["snapshot_lease"],
-                            "worker_pid": int(process.pid or 0),
-                            "job_token": job_token,
-                        }
-                    )
+        result["backup_date"] = backup_date
+        return result
+
+    def _terminate_current_process(self, timeout_sec: float = 4.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        if not self._process_stop_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return False
+        try:
+            with self._process_lock:
+                process = self._process
+                job = self._process_job
+            if process is not None:
+                state, errors = _stop_process_bounded(
+                    process, timeout_sec=min(2.0, max(0.0, deadline - time.monotonic())),
+                )
+                if errors:
+                    logger.warning("Daily backup worker stop: state=%s errors=%s", state, errors)
+                if state != "stopped":
+                    self._update_probe(status="worker_stop_pending", worker_state=state)
+                    return False
+            if job:
+                if time.monotonic() >= deadline:
+                    return False
+                cleanup = self._bounded_dead_worker_cleanup(
+                    job, timeout_sec=max(0.0, deadline - time.monotonic()),
+                )
+                if not cleanup.get("completed"):
+                    self._update_probe(status="cleanup_pending")
+                    return False
+            elif self._cleanup_process is not None:
+                # A retained cleanup child must also be reaped before another
+                # job can own these paths.
+                if not self._finish_cleanup_process(timeout_sec=max(0.0, deadline - time.monotonic())):
+                    return False
+            if process is not None:
                 try:
                     process.close()
                 except Exception:
                     pass
-                with self._process_lock:
-                    if self._process is process:
-                        self._process = None
-                        self._process_job = None
-            else:
-                result = {
-                    "status": "failure",
-                    "reason": "worker_termination_failed",
-                }
-                self._stop_event.set()
-        result["backup_date"] = backup_date
-        return result
-
-    def _terminate_current_process(self) -> bool:
-        with self._process_lock:
-            process = self._process
-            job = self._process_job
-        if process is None:
+            with self._process_lock:
+                if self._process is process:
+                    self._process = None
+                    self._process_job = None
             return True
-        try:
-            if process.is_alive():
-                process.terminate()
-            process.join(timeout=1.0)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(timeout=1.0)
-        except Exception:
+        except Exception as exc:
+            # Keep every owned handle/job available to the next reap pass even
+            # when creating a cleanup pipe/process fails transiently.
+            logger.warning("Daily backup reap remains pending: %s", type(exc).__name__)
+            self._update_probe(status="cleanup_pending")
+            return False
+        finally:
+            self._process_stop_lock.release()
+
+    def _signal_current_process_stop(self, timeout_sec: float = 1.0) -> bool:
+        """Signal only; the scheduler retains exclusive cleanup ownership."""
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        if not self._process_stop_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             return False
         try:
-            if process.is_alive():
-                return False
-        except Exception:
-            return False
-        if job:
-            self._bounded_dead_worker_cleanup(job)
+            with self._process_lock:
+                process = self._process
+            if process is None:
+                return True
+            state, _errors = _stop_process_bounded(process, timeout_sec=max(0.0, deadline - time.monotonic()))
+            return state == "stopped"
+        finally:
+            self._process_stop_lock.release()
+
+    def _receive_cleanup_result(self) -> None:
+        receiver = self._cleanup_receiver
+        if receiver is None:
+            return
         try:
-            process.close()
+            if receiver.poll(0):
+                self._cleanup_result = dict(receiver.recv() or {})
+        except (EOFError, OSError, ValueError):
+            pass
+
+    def _finish_cleanup_process(self, timeout_sec: float = 1.0) -> bool:
+        cleanup = self._cleanup_process
+        if cleanup is None:
+            return True
+        self._receive_cleanup_result()
+        state, errors = _stop_process_bounded(cleanup, timeout_sec=timeout_sec)
+        if errors:
+            logger.warning("Daily backup cleanup stop: state=%s errors=%s", state, errors)
+        self._receive_cleanup_result()
+        if state != "stopped":
+            return False
+        if self._cleanup_receiver is not None:
+            try:
+                self._cleanup_receiver.close()
+            except (OSError, ValueError):
+                pass
+        try:
+            cleanup.close()
         except Exception:
             pass
         with self._process_lock:
-            if self._process is process:
-                self._process = None
-                self._process_job = None
+            if self._cleanup_process is cleanup:
+                self._cleanup_process = None
+                self._cleanup_receiver = None
         return True
 
-    def _signal_current_process_stop(self) -> bool:
-        """Stop the child but leave cleanup/close ownership to its scheduler thread."""
-        with self._process_lock:
-            process = self._process
-        if process is None:
-            return True
-        try:
-            if process.is_alive():
-                process.terminate()
-            process.join(timeout=0.5)
-            if process.is_alive() and hasattr(process, "kill"):
-                process.kill()
-                process.join(timeout=0.5)
-            return not process.is_alive()
-        except Exception:
-            return False
-
-    @staticmethod
-    def _bounded_dead_worker_cleanup(arguments: dict[str, Any], timeout_sec: float = 2.0) -> dict[str, bool]:
-        """Run SMB cleanup out of process so shutdown cannot block indefinitely."""
-        context = multiprocessing.get_context("spawn")
-        receiving, sending = context.Pipe(duplex=False)
-        cleanup = context.Process(
-            target=_cleanup_dead_worker_entry,
-            args=(dict(arguments), sending),
-            name="RemCardDailyBackupCleanup",
-            daemon=True,
-        )
-        try:
-            cleanup.start()
-        except Exception as exc:
-            receiving.close()
-            sending.close()
-            logger.warning("Daily backup dead-worker cleanup could not start: %s", exc)
-            return {}
-        sending.close()
-        result: dict[str, bool] = {}
-        try:
-            if receiving.poll(max(0.1, float(timeout_sec))):
-                try:
-                    result = dict(receiving.recv() or {})
-                except EOFError:
-                    result = {}
-        finally:
-            receiving.close()
-            if cleanup.is_alive():
-                cleanup.terminate()
-            cleanup.join(timeout=0.5)
-            if cleanup.is_alive() and hasattr(cleanup, "kill"):
-                cleanup.kill()
-                cleanup.join(timeout=0.5)
+    def _bounded_dead_worker_cleanup(self, arguments: dict[str, Any], timeout_sec: float = 2.0) -> dict[str, bool]:
+        """Keep a blocked cleanup child owned; never replace it with another."""
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        with self._process_stop_lock:
+            if self._cleanup_process is not None:
+                if not self._finish_cleanup_process(timeout_sec=max(0.0, deadline - time.monotonic())):
+                    return {}
+                previous = dict(self._cleanup_result)
+                if previous.get("completed"):
+                    self._cleanup_result = {}
+                    return previous
+            if time.monotonic() >= deadline:
+                return {}
+            context = multiprocessing.get_context("spawn")
+            receiving, sending = context.Pipe(duplex=False)
+            cleanup = context.Process(
+                target=_cleanup_dead_worker_entry,
+                args=(dict(arguments), sending),
+                name="RemCardDailyBackupCleanup",
+                daemon=True,
+            )
             try:
-                cleanup.close()
-            except Exception:
+                cleanup.start()
+            except Exception as exc:
+                receiving.close()
+                sending.close()
+                logger.warning("Daily backup dead-worker cleanup could not start: %s", type(exc).__name__)
+                return {}
+            sending.close()
+            with self._process_lock:
+                self._cleanup_process = cleanup
+                self._cleanup_receiver = receiving
+                self._cleanup_result = {}
+            try:
+                if receiving.poll(max(0.0, deadline - time.monotonic())):
+                    self._receive_cleanup_result()
+            except (EOFError, OSError, ValueError):
                 pass
-        if not result:
-            logger.warning("Daily backup dead-worker cleanup did not complete within its bounded window")
-        return result
+            if not self._finish_cleanup_process(timeout_sec=max(0.0, deadline - time.monotonic())):
+                return {}
+            result = dict(self._cleanup_result)
+            self._cleanup_result = {}
+            if not result.get("completed"):
+                logger.warning("Daily backup dead-worker cleanup remains pending")
+            return result
 
     def _record_result(self, result: dict[str, Any], *, schedule_reason: str) -> None:
         status = str(result.get("status") or "failure")

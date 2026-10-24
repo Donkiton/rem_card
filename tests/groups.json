@@ -1,5 +1,9 @@
 {
   "core": [
+    "tests/test_replica_copy_diagnostics.py",
+    "tests/test_mandatory_upgrade_startup.py",
+    "tests/test_settings_deferred_release_retry.py",
+    "tests/test_backup_clinical_write_recovery.py",
     "tests/test_concurrent_clinical_sync.py",
     "tests/test_ventilation_event_edit.py",
     "tests/test_dev_replica_isolation.py",
@@ -124,6 +128,7 @@
     "tests/test_update_launcher_startup.py"
   ],
   "ui": [
+    "tests/test_gui_network_reads.py",
     "tests/test_sector_ivl_event_edit.py",
     "tests/test_gui_gc.py",
     "tests/test_transfer_outcome_dialog.py",

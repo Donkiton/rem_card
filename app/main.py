@@ -1920,10 +1920,22 @@ def _shutdown_window_resources(window, logger, *, application_exit: bool = False
         return True
 
     logger.info("Application resource shutdown started")
+    settings_shutdown_ok = True
     data_service_shutdown_ok = True
     db_shutdown_ok = True
     for container in containers:
         container_label = str(getattr(getattr(container, "runtime_context", None), "source_label", "") or "network")
+        settings_service = getattr(container, "settings_service", None)
+        stop_settings_retry = getattr(settings_service, "stop_deferred_release_retry", None)
+        if callable(stop_settings_retry):
+            try:
+                stopped = bool(stop_settings_retry(timeout_sec=2.0))
+                settings_shutdown_ok = bool(settings_shutdown_ok and stopped)
+                if not stopped:
+                    logger.warning("Settings release worker shutdown incomplete (%s)", container_label)
+            except Exception as exc:
+                settings_shutdown_ok = False
+                logger.warning("Settings release worker shutdown failed (%s): %s", container_label, exc)
         container_data_ok = True
         data_service = getattr(container, "data_service", None)
         if data_service:
@@ -1966,7 +1978,7 @@ def _shutdown_window_resources(window, logger, *, application_exit: bool = False
                 logger.warning("Pending emergency discard finalization failed: %s", exc)
         else:
             logger.warning("Pending emergency discard finalization skipped because DB shutdown was incomplete")
-    resources_ok = bool(data_service_shutdown_ok and db_shutdown_ok)
+    resources_ok = bool(settings_shutdown_ok and data_service_shutdown_ok and db_shutdown_ok)
     if resources_ok:
         for container in containers:
             participant = getattr(container, "emergency_participant", None)
