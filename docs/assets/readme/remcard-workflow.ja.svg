@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="490" viewBox="0 0 1200 490" role="img" aria-labelledby="title desc" xml:lang="ja">
+  <title id="title">RemCard 5.1 — ひとつのアプリ、4つの役割</title>
+  <desc id="desc">RemCard.exe は医師、看護師、予定手術室、緊急手術室のワークスペースを開きます。医療データベース、設定、バックアップを共有します。RemCardUpdater.exe は完全更新を適用します。</desc>
+  <rect width="1200" height="490" rx="24" fill="#0B1220"/>
+  <g font-family="'Yu Gothic', 'Meiryo', 'Hiragino Kaku Gothic ProN', sans-serif">
+    <text x="60" y="65" fill="#F8FAFC" font-size="40" font-weight="700">ひとつのアプリ、4つの役割。</text>
+    <text x="60" y="112" fill="#AFC0D6" font-size="26">RemCard.exe → ワークスペースを選択</text>
+    <path d="M185 235v40h820v-40M455 235v40M725 235v40M600 275v35" fill="none" stroke="#526984" stroke-width="3"/>
+    <g font-size="25" font-weight="600" text-anchor="middle">
+      <rect x="60" y="155" width="250" height="80" rx="14" fill="#14263B" stroke="#4CA4FF"/>
+      <text x="185" y="204" fill="#E3F2FF">医師</text>
+      <rect x="330" y="155" width="250" height="80" rx="14" fill="#122B24" stroke="#35C9AD"/>
+      <text x="455" y="204" fill="#E2F8EA">看護師</text>
+      <rect x="600" y="155" width="250" height="80" rx="14" fill="#202A35" stroke="#91A7C3"/>
+      <text x="725" y="189" fill="#E3F2FF">予定</text><text x="725" y="219" fill="#E3F2FF">手術室</text>
+      <rect x="870" y="155" width="270" height="80" rx="14" fill="#29203B" stroke="#AE86E3"/>
+      <text x="1005" y="189" fill="#EEE5FF">緊急</text><text x="1005" y="219" fill="#EEE5FF">手術室</text>
+      <rect x="230" y="310" width="740" height="95" rx="16" fill="#172338" stroke="#D7263D" stroke-width="2"/>
+      <text x="600" y="348" fill="#F8FAFC" font-size="30">共有データフォルダー</text>
+      <text x="600" y="382" fill="#AFC0D6" font-size="23" font-weight="400">医療データベース · 設定 · バックアップ</text>
+    </g>
+    <text x="600" y="452" text-anchor="middle" fill="#AFC0D6" font-size="23">完全更新 → RemCardUpdater.exe</text>
+  </g>
+</svg>

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc" xml:lang="zh-CN">
+  <title id="title">RemCard ICU — 共享患者与班次记录</title>
+  <desc id="desc">RemCard 班次记录示意图：从 08:00 至次日 08:00 的医嘱、生命体征和液体平衡。非真实患者数据。</desc>
+  <rect width="1200" height="400" rx="24" fill="#0B1220"/>
+  <g font-family="'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', sans-serif">
+    <g id="identity">
+      <text x="56" y="56" fill="#AFC0D6" font-size="21" font-weight="600" >重症监护 + 手术室</text>
+      <text x="53" y="146" fill="#F8FAFC" font-size="78" font-weight="700" >RemCard ICU</text>
+      <text x="56" y="203" fill="#E2EAF4" font-size="29" font-weight="500" >一份患者记录。</text>
+      <text x="56" y="246" fill="#E2EAF4" font-size="29" font-weight="500" >贯穿整个班次。</text>
+      <rect x="56" y="280" width="44" height="4" rx="2" fill="#D7263D"/>
+      <text x="56" y="322" fill="#AFC0D6" font-size="24" font-weight="500" >医生 · 护士 · 手术室</text>
+      <text x="56" y="367" fill="#AFC0D6" font-size="18" font-weight="500" >WINDOWS · PYSIDE6 · SQLITE</text>
+    </g>
+    <g id="shift-chart">
+      <rect x="730" y="40" width="414" height="320" rx="16" fill="#142238"/>
+      <text x="754" y="77" fill="#AFC0D6" font-size="22" font-weight="600" >班次记录</text>
+      <text x="754" y="121" fill="#F8FAFC" font-size="34" font-weight="600" >08:00 → 08:00</text>
+      <path d="M754 143h366M878 160v164M956 160v164M1034 160v164M1112 160v164M754 211h366M754 267h366" fill="none" stroke="#34445D" stroke-width="1"/>
+      <text x="754" y="190" fill="#E2EAF4" font-size="20" font-weight="500" >医嘱</text>
+      <text x="754" y="246" fill="#E2EAF4" font-size="20" font-weight="500" >生命体征</text>
+      <text x="754" y="302" fill="#E2EAF4" font-size="20" font-weight="500" >液体平衡</text>
+      <g fill="#4CA4FF">
+        <rect x="892" y="173" width="16" height="16" rx="4"/>
+        <rect x="970" y="173" width="16" height="16" rx="4"/>
+        <rect x="1048" y="173" width="16" height="16" rx="4"/>
+      </g>
+      <path d="M886 244l25-8 22 4 23-15 24 11 23-6 25 11 25-8 26 4 25-9" fill="none" stroke="#4CA4FF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <rect x="891" y="288" width="194" height="10" rx="5" fill="#34445D"/>
+      <rect x="891" y="288" width="132" height="10" rx="5" fill="#D7263D"/>
+      <text x="886" y="339" fill="#AFC0D6" font-size="18" font-weight="500" >08</text>
+      <text x="964" y="339" fill="#AFC0D6" font-size="18" font-weight="500" >16</text>
+      <text x="1042" y="339" fill="#AFC0D6" font-size="18" font-weight="500" >00</text>
+      <text x="1112" y="339" fill="#AFC0D6" font-size="18" font-weight="500" text-anchor="end">08</text>
+    </g>
+  </g>
+</svg>
