@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 
 from rem_card.app.replica_delta import ReplicaDeltaError, apply_delta, collect_delta
-from rem_card.app.unified_db_schema import ensure_unified_schema
+from rem_card.app.unified_db_schema import SCHEMA_FASTPATH_REV, ensure_unified_schema
 
 
 SCHEMA = """
@@ -361,7 +361,7 @@ def test_full_unified_synthetic_schema_is_supported_without_runtime_database_pat
     assert result["state"] == {
         "db_cycle": "synthetic",
         "change_cursor": 0,
-        "schema_revision": "27",
+        "schema_revision": str(SCHEMA_FASTPATH_REV),
     }
 
 
@@ -387,3 +387,39 @@ def test_large_untracked_history_reconciles_small_changes_without_full_copy(muta
     assert result["metrics"]["row_count"] < 30
     apply_delta(local, result)
     assert logical_dump(local) == logical_dump(source)
+
+
+def test_empty_untracked_tables_do_not_scan_bytes_or_payload():
+    source = make_database()
+    local = clone(source)
+    statements = []
+    source.set_trace_callback(statements.append)
+
+    result = generous_delta(source, local)
+
+    assert result["status"] == "unchanged"
+    for table in ("audit_rows", "children"):
+        reads = [sql.casefold() for sql in statements if f'from "{table}"' in sql.casefold()]
+        assert reads
+        assert all("count(*)" in sql for sql in reads)
+    assert logical_dump(local) == logical_dump(source)
+
+
+def test_journal_row_budget_chooses_full_before_scanning_untracked_history():
+    source = make_database()
+    local = clone(source)
+    source.execute("UPDATE items SET code='edited' WHERE id=1")
+    source.commit()
+    before_source = logical_dump(source)
+    before_local = logical_dump(local)
+    statements = []
+    source.set_trace_callback(statements.append)
+
+    result = collect_delta(source, local, max_rows=0, max_fraction=1)
+
+    assert (result["status"], result["reason"]) == ("full_required", "row_limit")
+    assert not any('from "audit_rows"' in sql.casefold() for sql in statements)
+    assert source.execute("PRAGMA query_only").fetchone() == (0,)
+    assert not source.in_transaction and not local.in_transaction
+    assert logical_dump(source) == before_source
+    assert logical_dump(local) == before_local

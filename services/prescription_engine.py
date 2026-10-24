@@ -292,9 +292,14 @@ class PrescriptionEngine:
                 return key, data
         return None, None
 
-    def detect_drug(self, text: str) -> Tuple[Optional[str], Optional[Dict]]:
-        """Ищет препарат по обычным алиасам или латыни"""
-        self.reload_if_changed()
+    def detect_drug(self, text: str, *, refresh: bool = True) -> Tuple[Optional[str], Optional[Dict]]:
+        """Ищет препарат; расчёты GUI используют уже загруженный каталог."""
+        if refresh:
+            self.reload_if_changed()
+        # Keep one published dictionary for the entire lookup.  In particular,
+        # refresh=False neither reads settings nor waits for a network reload's
+        # lock; the view prepares catalog updates in its background worker.
+        drugs = self.drugs
         text = self.normalize(text)
         # Разбиваем на слова для более точного поиска
         tokens = text.split()
@@ -303,12 +308,12 @@ class PrescriptionEngine:
         first_token = tokens[0]
         
         # 1. Сначала проверяем точное совпадение ключа (case-insensitive)
-        for key, data in self.drugs.items():
+        for key, data in drugs.items():
             if key.lower() == first_token:
                 return key, data
 
         # 2. Проверяем латынь и алиасы
-        for key, data in self.drugs.items():
+        for key, data in drugs.items():
             if data.get("latin", "").lower() == first_token:
                 return key, data
                 
@@ -317,7 +322,7 @@ class PrescriptionEngine:
                     return key, data
                     
         # 3. Частичное совпадение (если ввели часть названия)
-        for key, data in self.drugs.items():
+        for key, data in drugs.items():
             if first_token in key.lower() or first_token in data.get("latin", "").lower():
                 return key, data
             for alias in data.get("aliases", []):

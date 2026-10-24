@@ -4,18 +4,25 @@ import copy
 import hashlib
 import json
 import mimetypes
+import multiprocessing
 import os
 import re
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from rem_card.app.db_runtime_context import DbRuntimeContext
 from rem_card.app import operblock_startup_metrics
+from rem_card.app.daily_backup_scheduler import (
+    _owned_lock_released, _process_state, _stop_process_bounded,
+    cleanup_confirmed_dead_worker_reservation,
+)
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
+from rem_card.app.role_admission import file_identity
 from rem_card.app.settings_db_paths import (
     get_settings_backgrounds_dir_from_db_path,
     get_settings_icon_assets_dir_from_db_path,
@@ -110,6 +117,266 @@ SEEDED_ICON_DEFINITIONS = (
     *REMCARD_ICON_DEFINITIONS,
 )
 _APP_SETTING_MISSING = object()
+_RELEASE_APPLY_SOURCE = "settings_release_snapshot_apply"
+_RELEASE_RETRY_DELAY_SEC = 5.0
+_RELEASE_RETRY_INTERVAL_SEC = 30.0
+_RELEASE_RETRY_TIMEOUT_SEC = 15.0
+
+
+def _release_manifest_identity(snapshot_path: str) -> dict[str, str] | None:
+    from rem_card.data.settings.settings_release import load_settings_release_manifest
+    manifest = load_settings_release_manifest(snapshot_path)
+    if not manifest:
+        return None
+    return {key: str(manifest.get(key) or "") for key in ("content_hash", "release_version", "release_commit")}
+
+
+def _deferred_settings_release_worker(job: dict, sender: Any) -> None:
+    """Apply one fixed package to one already admitted settings DB; never migrate."""
+    from rem_card.data.settings import settings_schema
+    from rem_card.data.settings.settings_release import apply_settings_release_snapshot
+
+    attempted = False
+    try:
+        def check_target() -> None:
+            try:
+                current_identity = file_identity(job["database_path"])
+            except (OSError, ValueError):
+                current_identity = None
+            if job["readonly"] or current_identity != job["database_identity"]:
+                raise RuntimeError("settings_retry_target_changed")
+            if _release_manifest_identity(job["snapshot_path"]) != job["release_identity"]:
+                raise RuntimeError("settings_retry_release_changed")
+
+        class AdmittedSettingsDatabase(SettingsDatabase):
+            @contextmanager
+            def transaction(self, source="settings_write"):
+                if source != _RELEASE_APPLY_SOURCE:
+                    raise RuntimeError("settings_retry_unexpected_write")
+                with super().transaction(source) as cursor:
+                    # Recheck after taking the real writer lock, immediately
+                    # before the already loaded snapshot can change any rows.
+                    check_target()
+                    if not settings_schema.inspect_schema_status(cursor.connection).fastpath_ready:
+                        raise RuntimeError("settings_retry_schema_changed")
+                    yield cursor
+
+        check_target()
+        db = AdmittedSettingsDatabase(
+            context=job.get("runtime_context"), baza_dir=job["baza_dir"],
+            settings_db_path=job["database_path"], settings_db_lock_path=job["lock_path"],
+            settings_backups_dir=job["backups_dir"], settings_backup_health_dir=job["backup_health_dir"],
+            readonly=job["readonly"],
+        )
+        # Do not call ensure_ready(): a retry is not permission to initialise or
+        # migrate a replacement DB, regardless of the client's build profile.
+        with db.read_connection() as connection:
+            if not settings_schema.inspect_schema_status(connection).fastpath_ready:
+                raise RuntimeError("settings_retry_schema_changed")
+        db.write_controller.owner_id = f"settings-release:{job['job_token']}"
+        service = SettingsService(db)
+        report = service._settings_startup_write_precheck_report(
+            source=_RELEASE_APPLY_SOURCE, operation_label="отложенное обновление настроек из пакета",
+            applied=False, changed_rows=0,
+        )
+        if report:
+            result = {"status": "deferred", "reason": SETTINGS_STARTUP_WRITE_BUSY_REASON}
+        else:
+            attempted = True
+            report = apply_settings_release_snapshot(db, job["snapshot_path"], bump_catalog_version=service._bump_catalog_version)
+            # Cache refresh must remain inside the owned, killable worker too.
+            # The coordinator installs only plain rows and never reads SMB.
+            with db.read_connection() as connection:
+                rows = [dict(row) for row in connection.execute(
+                    "SELECT scope, key, value_json FROM app_settings"
+                ).fetchall()]
+            result = {"status": "success", "report": report, "app_setting_rows": rows}
+    except Exception as exc:
+        result = {
+            "status": "deferred" if SettingsService._is_settings_startup_write_busy(exc) else "failure",
+            "reason": str(exc) if str(exc).startswith("settings_retry_") else type(exc).__name__,
+        }
+    try:
+        sender.send({**result, "write_attempted": attempted})
+    finally:
+        sender.close()
+
+
+def _deferred_settings_release_cleanup(job: dict, sender: Any) -> None:
+    try:
+        owner = f"settings-release:{job['job_token']}"
+        cleanup_confirmed_dead_worker_reservation(
+            job["lock_path"], worker_pid=job["worker_pid"], job_token=job["job_token"],
+            owner_source=_RELEASE_APPLY_SOURCE, owner_user_id=owner,
+        )
+        sender.send({"completed": _owned_lock_released(
+            job["lock_path"], worker_pid=job["worker_pid"],
+            owner_source=_RELEASE_APPLY_SOURCE, owner_user_id=owner,
+        )})
+    finally:
+        sender.close()
+
+
+class _SettingsReleaseRetry:
+    """One owned, killable writer and cleanup child, outside all GUI getters."""
+
+    def __init__(self, service: Any, config: dict):
+        self.service = service
+        self.config = config
+        self.stop_event = threading.Event()
+        self.lock = threading.RLock()
+        self.process = self.receiver = None
+        self.cleanup_process = self.cleanup_receiver = None
+        self.cleanup_result: dict = {}
+        self.job: dict | None = None
+        self.result: dict | None = None
+        self.status = "scheduled"
+        self.thread = threading.Thread(target=self._run, name="RemCardSettingsReleaseRetry", daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def _receive(self, receiver: Any) -> dict | None:
+        try:
+            return dict(receiver.recv() or {}) if receiver is not None and receiver.poll(0) else None
+        except (EOFError, OSError, ValueError):
+            return None
+
+    def _finish_owned(self, timeout_sec: float = 2.0) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        if not self.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return False
+        try:
+            if self.process is not None:
+                state, _errors = _stop_process_bounded(
+                    self.process, timeout_sec=max(0.0, (deadline - time.monotonic()) / 2),
+                )
+                if state != "stopped":
+                    return False
+                self.result = self._receive(self.receiver) or self.result
+            needs_cleanup = self.job is not None and (self.result or {}).get("write_attempted", True)
+            if needs_cleanup:
+                if self.cleanup_process is None:
+                    if time.monotonic() >= deadline:
+                        return False
+                    context = multiprocessing.get_context("spawn")
+                    receiver, sender = context.Pipe(duplex=False)
+                    cleanup = context.Process(
+                        target=_deferred_settings_release_cleanup, args=(dict(self.job), sender),
+                        name="RemCardSettingsReleaseCleanup", daemon=True,
+                    )
+                    try:
+                        cleanup.start()
+                    except Exception:
+                        receiver.close()
+                        sender.close()
+                        return False
+                    sender.close()
+                    self.cleanup_process, self.cleanup_receiver = cleanup, receiver
+                    self.cleanup_result = {}
+                    try:
+                        receiver.poll(max(0.0, (deadline - time.monotonic()) / 2))
+                    except (OSError, ValueError):
+                        pass
+                self.cleanup_result = self._receive(self.cleanup_receiver) or self.cleanup_result
+                state, _errors = _stop_process_bounded(
+                    self.cleanup_process, timeout_sec=max(0.0, deadline - time.monotonic()),
+                )
+                self.cleanup_result = self._receive(self.cleanup_receiver) or self.cleanup_result
+                if state != "stopped":
+                    return False
+                try:
+                    self.cleanup_receiver.close()
+                except (OSError, ValueError):
+                    pass
+                try:
+                    self.cleanup_process.close()
+                except Exception:
+                    pass
+                self.cleanup_process = self.cleanup_receiver = None
+                if not self.cleanup_result.get("completed"):
+                    return False
+            if self.receiver is not None:
+                try:
+                    self.receiver.close()
+                except (OSError, ValueError):
+                    pass
+            if self.process is not None:
+                try:
+                    self.process.close()
+                except Exception:
+                    pass
+            self.process = self.receiver = self.job = None
+            return True
+        except Exception as exc:
+            logger.warning("Settings release retry reap remains pending: %s", type(exc).__name__)
+            return False
+        finally:
+            self.lock.release()
+
+    def _attempt(self) -> dict:
+        if not self._finish_owned():
+            return {"status": "deferred", "reason": "owned_worker_pending"}
+        if not self.service._release_retry_context_is_current(self.config):
+            return {"status": "cancelled", "reason": "context_changed"}
+        context = multiprocessing.get_context("spawn")
+        receiver, sender = context.Pipe(duplex=False)
+        job = {**self.config, "job_token": uuid.uuid4().hex}
+        process = context.Process(
+            target=_deferred_settings_release_worker, args=(job, sender),
+            name="RemCardSettingsReleaseWorker", daemon=True,
+        )
+        try:
+            process.start()
+        except Exception:
+            receiver.close()
+            sender.close()
+            return {"status": "failure", "reason": "worker_start_failed"}
+        sender.close()
+        with self.lock:
+            self.process, self.receiver, self.job = process, receiver, {**job, "worker_pid": process.pid}
+            self.result = None
+        deadline = time.monotonic() + _RELEASE_RETRY_TIMEOUT_SEC
+        while not self.stop_event.is_set() and time.monotonic() < deadline:
+            try:
+                if receiver.poll(0.05):
+                    self.result = self._receive(receiver)
+                    break
+            except (OSError, ValueError):
+                break
+            if _process_state(process) == "stopped":
+                break
+        if not self._finish_owned():
+            return {"status": "deferred", "reason": "owned_worker_pending"}
+        return self.result or {"status": "failure", "reason": "worker_timeout_or_exit"}
+
+    def _run(self) -> None:
+        delay = _RELEASE_RETRY_DELAY_SEC
+        try:
+            while not self.stop_event.wait(delay):
+                try:
+                    result = self._attempt()
+                except Exception as exc:
+                    result = {"status": "failure", "reason": type(exc).__name__}
+                self.status = str(result.get("reason") or result["status"])
+                record_metric("settings_release_retry_result", 1, status=result["status"], reason=self.status)
+                if result["status"] == "success":
+                    self.service._release_retry_applied(self.config, result["report"], result["app_setting_rows"])
+                    return
+                if result["status"] == "cancelled" or self.status.startswith("settings_retry_"):
+                    return
+                delay = min(5.0, _RELEASE_RETRY_INTERVAL_SEC) if self.job else _RELEASE_RETRY_INTERVAL_SEC
+        finally:
+            self._finish_owned()
+
+    def stop(self, timeout_sec: float) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        self.stop_event.set()
+        if self.thread is not threading.current_thread() and self.thread.is_alive():
+            self.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if self.thread.is_alive():
+            return False
+        return self._finish_owned(max(0.0, deadline - time.monotonic()))
 _CACHE_NOT_FOUND = object()
 
 _OPERBLOCK_ICON_METADATA_COLUMNS = """
@@ -376,6 +643,7 @@ class SettingsService:
         settings_backup_health_dir: str | None = None,
         readonly: bool | None = None,
     ):
+        self._runtime_context = context or runtime_context
         self.db = db or get_settings_database(
             context=context,
             runtime_context=runtime_context,
@@ -397,6 +665,9 @@ class SettingsService:
         self.source_client_id = PROCESS_SOURCE_CLIENT_ID
         self._operblock_settings_on_demand_checked = False
         self._operblock_icons_on_demand_checked = False
+        self._deferred_release_retry: _SettingsReleaseRetry | None = None
+        self._deferred_release_stop_requested = False
+        self._pending_release_retry_spec: dict | None = None
 
     @staticmethod
     def _current_startup_role() -> str:
@@ -501,6 +772,13 @@ class SettingsService:
         holder = describe_sqlite_lock_holder(self.db.lock_path)
         if str(holder.get("reason") or "") == "missing":
             return None
+        # The startup fast path must not bypass the same independently proven
+        # local-dead-PID recovery used by real writers. Foreign, live, unknown
+        # and unreadable owners remain protected regardless of their age.
+        self.db.write_controller.lock.cleanup_abandoned(source=f"{source}_precheck")
+        holder = describe_sqlite_lock_holder(self.db.lock_path)
+        if str(holder.get("reason") or "") == "missing":
+            return None
         return self._settings_startup_write_skipped_report(
             source=source,
             operation_label=operation_label,
@@ -587,7 +865,76 @@ class SettingsService:
             self._ready = True
             self._ready_info = dict(info)
             self._schedule_background_cache_warmup()
+            if isinstance(release_report, dict) and release_report.get("reason") == SETTINGS_STARTUP_WRITE_BUSY_REASON:
+                self._schedule_deferred_release_retry()
             return dict(info)
+
+    def _schedule_deferred_release_retry(self) -> None:
+        if self._deferred_release_stop_requested or self.db.settings_readonly or not self._pending_release_retry_spec:
+            return
+        if self._deferred_release_retry is not None:
+            return
+        spec = self._pending_release_retry_spec
+        try:
+            identity = file_identity(self.db.db_path)
+        except (OSError, ValueError):
+            identity = None
+        if identity is None:
+            record_metric("settings_release_retry_result", 1, status="cancelled", reason="target_identity_unavailable")
+            return
+        config = {
+            "database_path": os.path.abspath(self.db.db_path), "database_identity": identity,
+            "lock_path": os.path.abspath(self.db.lock_path), "baza_dir": self.db.baza_dir,
+            "backups_dir": self.db.backups_dir, "backup_health_dir": self.db.backup_health_dir,
+            "readonly": bool(self.db.settings_readonly), "runtime_context": self._runtime_context,
+            **spec,
+        }
+        retry = _SettingsReleaseRetry(self, config)
+        self._deferred_release_retry = retry
+        retry.start()
+
+    def _release_retry_context_is_current(self, config: dict) -> bool:
+        return bool(
+            not self._deferred_release_stop_requested
+            and not self.db.settings_readonly
+            and os.path.abspath(self.db.db_path) == config["database_path"]
+            and os.path.abspath(self.db.lock_path) == config["lock_path"]
+            and self._runtime_context == config.get("runtime_context")
+            and self._pending_release_retry_spec == {
+                "snapshot_path": config["snapshot_path"], "release_identity": config["release_identity"],
+            }
+        )
+
+    def _release_retry_applied(self, config: dict, report: dict, app_setting_rows: list[dict]) -> None:
+        if not self._release_retry_context_is_current(config):
+            return
+        self.invalidate_cache()
+        self._install_app_setting_cache(app_setting_rows)
+        with self._ready_lock:
+            self._ready_info["settings_release_snapshot"] = dict(report)
+            warnings = [item for item in self._ready_info.get("settings_startup_warnings", [])
+                        if item.get("source") != _RELEASE_APPLY_SOURCE]
+            self._ready_info["settings_startup_warnings"] = warnings
+        logger.info("Deferred settings release snapshot result: %s", report)
+
+    def stop_deferred_release_retry(self, timeout_sec: float = 2.0) -> bool:
+        """Stop only this service's existing retry owner; never create a service."""
+        self._deferred_release_stop_requested = True
+        retry = self._deferred_release_retry
+        return retry is None or retry.stop(timeout_sec)
+
+    def get_deferred_release_retry_probe(self) -> dict:
+        retry = self._deferred_release_retry
+        if retry is None:
+            return {"running": False, "status": "not_started", "pending": False}
+        # Observational only: a UI probe must not wait for a stop/join scope.
+        process, cleanup = retry.process, retry.cleanup_process
+        return {
+            "running": retry.thread.is_alive(), "status": retry.status,
+            "pending": retry.job is not None,
+            "worker_state": _process_state(process) if process is not None else "stopped",
+            "cleanup_state": _process_state(cleanup) if cleanup is not None else "stopped",
+        }
 
     def create_manual_settings_backup(self) -> str:
         self.ensure_ready()
@@ -633,6 +980,9 @@ class SettingsService:
             rows = conn.execute(
                 "SELECT scope, key, value_json FROM app_settings"
             ).fetchall()
+        self._install_app_setting_cache(rows)
+
+    def _install_app_setting_cache(self, rows) -> None:
         primed: dict[tuple[str, str], Any] = {}
         for row in rows:
             try:
@@ -969,6 +1319,11 @@ class SettingsService:
             changed_rows=0,
         )
         if lock_report:
+            if manifest is not None:
+                self._pending_release_retry_spec = {
+                    "snapshot_path": os.path.abspath(snapshot_path),
+                    "release_identity": {key: str(manifest.get(key) or "") for key in ("content_hash", "release_version", "release_commit")},
+                }
             return lock_report
         try:
             report = apply_settings_release_snapshot(
@@ -978,6 +1333,11 @@ class SettingsService:
             )
         except Exception as exc:
             if self._is_settings_startup_write_busy(exc):
+                if manifest is not None:
+                    self._pending_release_retry_spec = {
+                        "snapshot_path": os.path.abspath(snapshot_path),
+                        "release_identity": {key: str(manifest.get(key) or "") for key in ("content_hash", "release_version", "release_commit")},
+                    }
                 return self._settings_startup_write_skipped_report(
                     source="settings_release_snapshot_apply",
                     operation_label="служебное обновление настроек из пакета",
@@ -4448,6 +4808,8 @@ def configure_settings_service(
     readonly: bool | None = None,
 ) -> SettingsService:
     global _DEFAULT_SERVICE
+    if _DEFAULT_SERVICE is not None and not _DEFAULT_SERVICE.stop_deferred_release_retry():
+        raise RuntimeError("Предыдущее обновление настроек ещё завершается. Повторите смену конфигурации.")
     reset_settings_database()
     _DEFAULT_SERVICE = SettingsService(
         context=context,
@@ -4463,5 +4825,7 @@ def configure_settings_service(
 
 def reset_settings_service() -> None:
     global _DEFAULT_SERVICE
+    if _DEFAULT_SERVICE is not None and not _DEFAULT_SERVICE.stop_deferred_release_retry():
+        raise RuntimeError("Обновление настроек ещё завершается. Повторите освобождение ресурсов.")
     _DEFAULT_SERVICE = None
     reset_settings_database()

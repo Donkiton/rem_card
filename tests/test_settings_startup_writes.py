@@ -32,7 +32,7 @@ def _write_settings_lock(lock_path: str, *, source: str = "settings_test_holder"
         json.dumps(
             {
                 "timestamp": time.time(),
-                "pid": os.getpid() + 100000,
+                "pid": os.getpid(),
                 "host": socket.gethostname(),
                 "user_id": "test-holder",
                 "source": source,

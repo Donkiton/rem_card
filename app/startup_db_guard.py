@@ -4,8 +4,10 @@ import re
 import shutil
 import socket
 import sqlite3
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -23,6 +25,7 @@ from rem_card.app.runtime_paths import (
 )
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.version import APP_VERSION
+from rem_card.app.unified_db_schema import SCHEMA_REQUIRED_CLIENT_VERSION
 from rem_card.app.startup_check_worker import StartupCheckAborted, check_startup_cancelled
 from rem_card.app import role_admission
 from rem_card.app.sqlite_shared import (
@@ -40,6 +43,8 @@ RECOVERY_LOCK_STALE_SEC = 10 * 60
 RECOVERY_LOCK_WAIT_SEC = 10 * 60
 DB_LOCK_WAIT_SEC = 60
 LOCK_HEARTBEAT_SEC = 5
+CLIENT_POLICY_LOCK_WAIT_SEC = 5.0
+CLIENT_POLICY_LOCK_RETRY_SEC = 0.05
 STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
 
 
@@ -299,6 +304,79 @@ def _default_client_policy() -> dict[str, Any]:
     }
 
 
+def _write_client_policy_atomically(policy_path: str, policy: dict[str, Any]) -> None:
+    """Keep the last complete access policy if writing/replacing its successor fails."""
+    parent = os.path.dirname(os.path.abspath(policy_path))
+    os.makedirs(parent, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=parent,
+            prefix=".client_policy_", suffix=".tmp", delete=False,
+        ) as fh:
+            temporary_path = fh.name
+            json.dump(policy, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary_path, policy_path)
+    finally:
+        if temporary_path is not None:
+            try:
+                os.remove(temporary_path)
+            except FileNotFoundError:
+                pass
+
+
+@contextmanager
+def _client_policy_write_lock(policy_path: str):
+    """Serialize policy RMW only; never acquire a DB lock inside this scope.
+
+    Migrations may already own db.lock. Startup repair releases this separate
+    lock before any DB access, so there is no reverse lock order. FileWriteLock
+    recovers only independently proven dead local owners, never by lock age.
+    """
+    lock = FileWriteLock(os.path.abspath(policy_path) + ".lock")
+    owner = f"{socket.gethostname()}:{os.getpid()}:client_policy"
+    deadline = time.monotonic() + CLIENT_POLICY_LOCK_WAIT_SEC
+    while not lock.acquire(owner_id=owner, source="client_policy_update"):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StartupPolicyError("Политика доступа к базе занята. Повторите запуск программы.")
+        time.sleep(min(CLIENT_POLICY_LOCK_RETRY_SEC, remaining))
+    try:
+        yield
+    finally:
+        if not lock.release():
+            raise StartupPolicyError("Не удалось освободить блокировку политики доступа к базе.")
+
+
+def _read_client_policy(policy_path: str) -> tuple[dict[str, Any], bool]:
+    try:
+        with open(policy_path, "r", encoding="utf-8") as fh:
+            policy = json.load(fh)
+    except FileNotFoundError:
+        return _default_client_policy(), True
+    if not isinstance(policy, dict):
+        raise StartupPolicyError("Политика доступа к базе повреждена. Работа заблокирована.")
+    return policy, False
+
+
+def _complete_client_policy(policy: dict[str, Any]) -> bool:
+    changed = False
+    for key, default in (
+        ("schema_version", 1),
+        ("required_db_profile", NETWORK_SAFE_DB_PROFILE),
+        ("min_client_version", REQUIRED_CLIENT_POLICY_VERSION),
+    ):
+        if not policy.get(key):
+            policy[key] = default
+            changed = True
+    if "wal_allowed_on_shared_db" not in policy:
+        policy["wal_allowed_on_shared_db"] = False
+        changed = True
+    return changed
+
+
 def _load_or_create_client_policy(baza_dir: str, role: Optional[str]) -> dict[str, Any]:
     from rem_card.app.client_build_profile import database_upgrades_disabled
     no_upgrades = database_upgrades_disabled()
@@ -307,42 +385,24 @@ def _load_or_create_client_policy(baza_dir: str, role: Optional[str]) -> dict[st
         os.makedirs(config_dir, exist_ok=True)
     policy_path = os.path.join(config_dir, "client_policy.json")
 
-    if not os.path.exists(policy_path):
-        policy = _default_client_policy()
-        if no_upgrades:
-            return policy
-        with open(policy_path, "w", encoding="utf-8") as fh:
-            json.dump(policy, fh, ensure_ascii=False, indent=2)
+    # Complete policies remain an atomic-read fast path with no lock-file IO.
+    policy, created = _read_client_policy(policy_path)
+    changed = _complete_client_policy(policy)
+    if (created or changed) and not no_upgrades:
+        with _client_policy_write_lock(policy_path):
+            # Another client may have raised the floor after the initial read.
+            # Never repair or create from that stale snapshot.
+            policy, created = _read_client_policy(policy_path)
+            changed = _complete_client_policy(policy)
+            if created or changed:
+                _write_client_policy_atomically(policy_path, policy)
+    if created and not no_upgrades:
         write_audit_event(
             "client_policy_created",
             baza_dir=baza_dir,
             role=role,
             details={"policy_path": policy_path, "required_db_profile": NETWORK_SAFE_DB_PROFILE},
         )
-        write_audit_event(
-            "client_policy_loaded",
-            baza_dir=baza_dir,
-            role=role,
-            details={"policy_path": policy_path, "min_client_version": policy.get("min_client_version")},
-        )
-        return policy
-
-    with open(policy_path, "r", encoding="utf-8") as fh:
-        policy = json.load(fh)
-
-    changed = False
-    if not policy.get("required_db_profile"):
-        policy["required_db_profile"] = NETWORK_SAFE_DB_PROFILE
-        changed = True
-    if "wal_allowed_on_shared_db" not in policy:
-        policy["wal_allowed_on_shared_db"] = False
-        changed = True
-    if not policy.get("min_client_version"):
-        policy["min_client_version"] = REQUIRED_CLIENT_POLICY_VERSION
-        changed = True
-    if changed and not no_upgrades:
-        with open(policy_path, "w", encoding="utf-8") as fh:
-            json.dump(policy, fh, ensure_ascii=False, indent=2)
 
     min_version = str(policy.get("min_client_version") or REQUIRED_CLIENT_POLICY_VERSION)
     if _compare_client_versions(APP_VERSION, min_version) < 0:
@@ -374,39 +434,21 @@ def update_client_policy_min_version(
     from rem_card.app.client_build_profile import database_upgrades_disabled
     if database_upgrades_disabled():
         return False
-    os.makedirs(os.path.dirname(policy_path), exist_ok=True)
-    created = False
-    try:
-        with open(policy_path, "r", encoding="utf-8") as fh:
-            policy = json.load(fh)
-        if not isinstance(policy, dict):
-            policy = {}
-    except FileNotFoundError:
-        policy = _default_client_policy()
-        created = True
-
-    changed = created
-    if not policy.get("schema_version"):
-        policy["schema_version"] = 1
-        changed = True
-    if not policy.get("required_db_profile"):
-        policy["required_db_profile"] = NETWORK_SAFE_DB_PROFILE
-        changed = True
-    if "wal_allowed_on_shared_db" not in policy:
-        policy["wal_allowed_on_shared_db"] = False
-        changed = True
-
-    target = str(min_client_version or REQUIRED_CLIENT_POLICY_VERSION)
-    current = str(policy.get("min_client_version") or "")
-    if not current or _compare_client_versions(current, target) < 0:
-        policy["min_client_version"] = target
-        policy["min_client_version_updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        policy["min_client_version_reason"] = reason
-        changed = True
-
+    with _client_policy_write_lock(policy_path):
+        policy, created = _read_client_policy(policy_path)
+        changed = _complete_client_policy(policy) or created
+        target = str(min_client_version or REQUIRED_CLIENT_POLICY_VERSION)
+        if _compare_client_versions(target, SCHEMA_REQUIRED_CLIENT_VERSION) < 0:
+            target = SCHEMA_REQUIRED_CLIENT_VERSION
+        current = str(policy.get("min_client_version") or "")
+        if not current or _compare_client_versions(current, target) < 0:
+            policy["min_client_version"] = target
+            policy["min_client_version_updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+            policy["min_client_version_reason"] = reason
+            changed = True
+        if changed:
+            _write_client_policy_atomically(policy_path, policy)
     if changed:
-        with open(policy_path, "w", encoding="utf-8") as fh:
-            json.dump(policy, fh, ensure_ascii=False, indent=2)
         write_audit_event(
             "client_policy_min_version_updated",
             baza_dir=baza_dir,

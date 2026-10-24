@@ -547,6 +547,10 @@ def _reconciled_table_change(
     scanned = source_count + local_count
     if scanned > scan_remaining:
         raise ReplicaDeltaError(f"reconciliation_scan_limit:{table}:{source_count}:{local_count}")
+    if not scanned:
+        # The counts come from the same source/local snapshots as collection.
+        # Empty tables need neither two byte scans nor two ordered row scans.
+        return [], [], 0, 0, 0
     source_bytes = _estimate_source_bytes(
         source_conn, table, info, check_cancel=check_cancel
     )
@@ -675,6 +679,13 @@ def _collect_table_changes(
     scanned = 0
     scanned_bytes = 0
     estimated_bytes = int(context["event_estimated_bytes"])
+    if operations > max_rows:
+        # Journal rows are part of the eventual payload budget. This lower
+        # bound already proves full is required, before scanning any history.
+        return None, _full_required(
+            "row_limit", context["source_state"],
+            {"row_count": operations, "max_rows": max_rows},
+        ), operations, scanned
     for table in sorted(context["table_names"] - {"change_log"}):
         _cancel(check_cancel)
         try:
