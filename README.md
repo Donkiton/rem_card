@@ -1,170 +1,179 @@
 <p align="center">
-  <img src="docs/assets/readme/remcard-hero.svg" width="100%" alt="RemCard ICU — электронная реанимационная карта для ОРИТ и оперблока">
-</p>
-
-<h1 align="center">RemCard ICU — электронная реанимационная карта</h1>
-
-<p align="center">
-  <strong>RemCard — Windows-приложение для ведения карты пациента и совместной сменной работы в ОРИТ и оперблоке.</strong><br>
-  Назначения, витальные показатели, баланс жидкости, ИВЛ, процедуры, анализы, события, отчёты и архив — в одном рабочем контуре.
+  <a href="README.md"><kbd><strong>English</strong> ✓</kbd></a>
+  <a href="README.ru.md"><kbd>Русский</kbd></a>
+  <a href="README.zh-CN.md"><kbd>中文（简体）</kbd></a>
+  <a href="README.ja.md"><kbd>日本語</kbd></a>
+  <a href="README.de.md"><kbd>Deutsch</kbd></a>
 </p>
 
 <p align="center">
-  <code>Версия 5.1.10</code> · <code>Windows</code> · <code>Python 3.11</code> · <code>PySide6</code> · <code>SQLite</code> · <code>RemCard Proprietary Source License</code> · <code>Экспериментальный проект</code>
+  <img src="docs/assets/readme/remcard-hero.en.svg" width="100%" alt="RemCard ICU — one patient record across the ICU and operating room, from 08:00 to 08:00">
+</p>
+
+<h1 align="center">RemCard ICU — intensive care charting</h1>
+
+<p align="center">
+  <strong>A Windows application for patient records and shared shift work in the ICU and operating room.</strong><br>
+  Orders, vital signs, fluid balance, ventilation, procedures, laboratory results, events, reports and archives in one workflow.
 </p>
 
 <p align="center">
-  <a href="https://cliniciansthatcode.com/directory/#p-vadim-bityutsky"><img src="docs/assets/readme/clinicians-that-code-verified.svg" width="260" height="28" alt="Clinicians That Code: verified builder — карточка автора RemCard"></a><br>
-  <sub>Автор RemCard представлен в каталоге Clinicians That Code.</sub>
+  <code>Version 5.1.10</code> · <code>Windows</code> · <code>Python 3.11</code> · <code>PySide6</code> · <code>SQLite</code> · <code>RemCard Proprietary Source License</code> · <code>Experimental project</code>
 </p>
 
 <p align="center">
-  <a href="#система-в-работе">Интерфейс</a> ·
-  <a href="#возможности-текущей-версии">Возможности</a> ·
-  <a href="#как-устроен-общий-контур">Архитектура</a> ·
-  <a href="#быстрый-запуск-из-исходников">Запуск из исходников</a> ·
-  <a href="#установленная-версия-и-обновления">Установка и обновления</a> ·
-  <a href="docs/README.md">Документация</a> ·
-  <a href="CHANGELOG.md">Изменения</a> ·
-  <a href="LICENSE">Лицензия</a> ·
-  <a href="#english-overview">English overview</a>
+  <a href="https://cliniciansthatcode.com/directory/#p-vadim-bityutsky"><img src="docs/assets/readme/clinicians-that-code-verified.svg" width="260" height="28" alt="Clinicians That Code: verified builder — RemCard author's directory listing"></a><br>
+  <sub>RemCard's author is listed in the Clinicians That Code directory. This does not establish clinical validation of the software.</sub>
 </p>
 
-Обзор **RemCard 5.1.10**, обновлён **22 октября 2026 года**. Единый `RemCard.exe` открывает выбор четырёх ролей; отдельный `RemCardUpdater.exe` устанавливает полные обновления. Номер версии исходников указан в [`VERSION`](VERSION), состав конкретной сборки — в её манифесте.
+<p align="center">
+  <a href="#see-it-in-use">Screenshots</a> ·
+  <a href="#current-features">Features</a> ·
+  <a href="#how-the-shared-workflow-works">Architecture</a> ·
+  <a href="#quick-start-from-source">Run from source</a> ·
+  <a href="#installed-version-and-updates">Installation and updates</a> ·
+  <a href="docs/README.md">Documentation</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="LICENSE">License</a>
+</p>
 
-В [релизе 5.1.10](https://github.com/Donkiton/rem_card/releases/tag/v5.1.10) небольшие изменения могут передаваться в локальную реплику дельтой даже при большой истории. Сетевое получение статуса пациента вынесено из интерфейса медсестры; поздние ответы защищены от замены более новых данных. Уточнены безопасные повторы сохранения начального статуса и загрузка ночной резервной копии после освобождения блокировки общей базы. Проверки совместной работы врача и медсестры описаны в [отчёте проверки синхронизации](docs/sync_responsiveness_validation.md); правила реплики и границы замеров — в [контракте реплики](docs/source_of_truth_and_sync_contract.md) и [методике замеров](docs/replica_delta_benchmark.md).
+**README language:** use the links above for a complete translated README. The application interface, screenshots and linked technical documentation are primarily in Russian.
 
-Готовый пакет 5.1.10 собран с запретом миграций общей базы и повышения минимальной версии клиента. Это **необязательное обновление** для совместимых рабочих мест: устанавливать его на всех компьютерах одновременно не требуется. Первый полный снимок по-прежнему зависит от скорости сети и размера базы.
+Overview of **RemCard 5.1.10**, updated **October 22, 2026**. A single `RemCard.exe` opens a choice of four roles; the separate `RemCardUpdater.exe` installs full updates. The source version is recorded in [`VERSION`](VERSION), and each build's contents are recorded in its manifest.
+
+In [release 5.1.10](https://github.com/Donkiton/rem_card/releases/tag/v5.1.10), small changes can reach the local replica as deltas even when the change history is large. Network reads of patient status run outside the nurse interface; late responses cannot replace newer data. The release also refines safe retries when saving initial status and loading the nightly backup after the shared database lock is released. Doctor–nurse collaboration checks are documented in the [synchronization validation report](docs/sync_responsiveness_validation.md); replica rules and measurement limits are described in the [replica contract](docs/source_of_truth_and_sync_contract.md) and [benchmark methodology](docs/replica_delta_benchmark.md).
+
+The packaged 5.1.10 build disables both shared-database migrations and any increase in the minimum required client version. It is an **optional update** for compatible workstations: there is no need to update every computer at the same time. The initial full snapshot still depends on network speed and database size.
 
 > [!WARNING]
-> **Рем Карта не является медицинским изделием и не заменяет клинические протоколы, клинические решения или ответственный контроль специалиста.** Для реальной эксплуатации необходимы независимая техническая и клиническая проверка, приёмка в конкретной среде и резервный рабочий процесс.
+> **RemCard is not a medical device and does not replace clinical protocols, clinical decisions or responsible professional oversight.** Real-world use requires independent technical and clinical review, acceptance testing in the intended environment, and a backup workflow.
 
-## Система в работе
+## See it in use
 
-Снимки интерфейса **RemCard 5.1.0** с демонстрационными пациентами; текущий релиз — **5.1.10**. Нажмите на изображение, чтобы открыть его в полном размере.
+Screenshots show **RemCard 5.1.0** with demonstration patients; the current release is **5.1.10**. Click an image to open it at full size. The interface shown is in Russian.
 
-### Единый вход и выбор роли
+### One entry point and role selection
 
-[![RemCard 5.1.0: врач, медсестра, плановый и экстренный оперблок](docs/assets/readme/remcard-roles-5-1.jpg)](docs/assets/readme/remcard-roles-5-1.jpg)
+[![RemCard 5.1.0: doctor, nurse, planned and emergency operating rooms](docs/assets/readme/remcard-roles-5-1.jpg)](docs/assets/readme/remcard-roles-5-1.jpg)
 
-Одна программа для четырёх рабочих мест. Кнопка **«Роли»** возвращает к выбору роли; светлая и тёмная темы доступны на экране входа.
+One application for four workspaces. The **Roles** («Роли») button returns to role selection; light and dark themes are available on the entry screen.
 
-### Список пациентов
+### Patient list
 
-[![Список пациентов RemCard 5.1.0: сведения о госпитализации и переход к карте](docs/assets/readme/remcard-patients-5-1.jpg)](docs/assets/readme/remcard-patients-5-1.jpg)
+[![RemCard 5.1.0 patient list: admission information and links to patient charts](docs/assets/readme/remcard-patients-5-1.jpg)](docs/assets/readme/remcard-patients-5-1.jpg)
 
-Активные пациенты по койкам, последние показатели и быстрый переход к карте и отчётам.
+Active patients by bed, recent observations, and quick access to charts and reports.
 
 <details>
-<summary><strong>Управление койками и добавление пациента</strong></summary>
+<summary><strong>Bed management and patient admission</strong></summary>
 
-### Управление пациентами
+### Patient management
 
-[![Занятые и свободные койки с карточкой выбранного пациента](docs/assets/readme/remcard-beds-5-1.jpg)](docs/assets/readme/remcard-beds-5-1.jpg)
+[![Occupied and available beds with the selected patient's details](docs/assets/readme/remcard-beds-5-1.jpg)](docs/assets/readme/remcard-beds-5-1.jpg)
 
-Кнопка **«Добавить пациента»** открывает управление койками. Выберите свободную койку и нажмите «ЗАНЯТЬ КОЙКУ» для оформления поступления. Для занятой койки доступна карточка пациента.
+The **Add patient** («Добавить пациента») button opens bed management. Select a free bed and click **Occupy bed** («ЗАНЯТЬ КОЙКУ») to record an admission. An occupied bed provides access to the patient's details.
 
 </details>
 
-### Лист назначений
+### Medication orders
 
-[![Суточный лист назначений RemCard 5.1.0 с отметками выполнения](docs/assets/readme/remcard-orders-5-1.jpg)](docs/assets/readme/remcard-orders-5-1.jpg)
+[![RemCard 5.1.0 daily medication orders with administration tracking](docs/assets/readme/remcard-orders-5-1.jpg)](docs/assets/readme/remcard-orders-5-1.jpg)
 
-Препараты, способы введения, расписание и отметки выполнения на шкале смены с 08:00 до 08:00 следующего дня.
+Medications, administration routes, schedules and completion marks on a shift timeline from 08:00 to 08:00 the following day.
 
-### Баланс жидкости
+### Fluid balance
 
-[![Введение, выведение и почасовая таблица баланса жидкости RemCard 5.1.0](docs/assets/readme/remcard-balance-5-1.jpg)](docs/assets/readme/remcard-balance-5-1.jpg)
+[![RemCard 5.1.0 fluid intake, output and hourly balance table](docs/assets/readme/remcard-balance-5-1.jpg)](docs/assets/readme/remcard-balance-5-1.jpg)
 
-Инфузии, препараты, кровь, плазма и пероральное поступление сопоставляются с выведением; рядом доступны почасовая таблица и сводный баланс.
+Infusions, medications, blood, plasma and oral intake are compared with output, alongside an hourly table and total balance.
 
-<!-- Новый снимок графиков витальных функций версии 5.1.0 будет добавлен в эту галерею отдельно. -->
+<!-- A new screenshot of the 5.1.0 vital-sign charts will be added to this gallery separately. -->
 
-## Роли в одном рабочем контуре
+## Roles in one workflow
 
-- **Врач** — госпитализации и койки, карта пациента по сменам, назначения и шаблоны, назначение диеты, процедуры, исходы, архив, отчёты и калькуляторы.
-- **Медсестра** — ближайшие назначения, отметки о выполнении, фактическое потребление питания, сменная динамика, печать и рабочая статистика.
-- **Оперблок** — экстренная и плановая операционные, быстрые назначения, препараты, этапы и события операции, передача пациента между РАО и оперблоком, завершение случая и отчёты.
-- **Администратор** — единый центр настроек, состояние текущей и архивных БД, резервные копии, справочники, печать, оформление и диагностика.
+- **Doctor** — admissions and beds, shift-based patient charts, orders and templates, diet prescriptions, procedures, outcomes, archives, reports and calculators.
+- **Nurse** — upcoming orders, completion records, actual nutritional intake, shift trends, printing and work statistics.
+- **Operating room** — emergency and planned workspaces, quick orders, medications, surgical stages and events, ICU–OR patient handover, case completion and reports.
+- **Administrator** — a unified settings center, current and archived database status, backups, reference catalogs, printing, appearance and diagnostics.
 
-## Возможности текущей версии
+## Current features
 
-### Единое приложение 5.1
+### Unified 5.1 application
 
-Врач, медсестра, плановый и экстренный оперблок открываются из общего окна. При переходе между ролями приложение завершает принятые записи и освобождает ресурсы предыдущей сессии. Проверка базы и подготовка рабочего места выполняются с отображением состояния; вход можно отменить. Диагностика запуска помогает разбирать задержки открытия приложения и роли.
+Doctor, nurse, planned OR and emergency OR workspaces open from one window. When switching roles, the application finishes accepted writes and releases the previous session's resources. Database checks and workstation preparation show their progress; entry can be cancelled. Startup diagnostics help investigate delays when opening the application or a role.
 
-Настройка папки данных встроена в приложение. Общий режим обслуживания согласует доступ рабочих мест к базе. При недоступности центральной базы аварийный вход проверяет наличие, пригодность и возраст локальной копии; возврат в сетевой режим и перенос изменений выполняются отдельным сценарием.
+Data-folder setup is built into the application. Shared maintenance mode coordinates workstation access to the database. If the central database is unavailable, emergency entry checks whether a local copy exists, is usable and is recent enough; returning to network mode and transferring changes follow a separate workflow.
 
-### Карта пациента и работа смены
+### Patient charts and shift work
 
-Карта объединяет назначения и их выполнение, витальные показатели и графики, введённую и выведенную жидкость, ИВЛ, процедуры, лабораторные анализы и клинические события. Переходы к текущей, вчерашней и плановой картам разделены; история пациента доступна через архив. Для назначений используются справочники препаратов, растворителей и путей введения, шаблоны и расписание на смену.
+The chart combines orders and completion records, vital signs and graphs, fluid intake and output, ventilation, procedures, laboratory tests and clinical events. Current, previous-day and planned charts have separate entry points; patient history is available in the archive. Medication, diluent and administration-route catalogs, templates and shift schedules support prescribing.
 
-Во вкладке **«Диета»** врач задаёт план питания и применяет редактируемые шаблоны, а медсестра фиксирует фактическое потребление. Отказ можно сохранить как **0 мл**. Факты питания учитываются в балансе жидкости; собственные изменения можно последовательно отменять. Проверка версии записи защищает от перезаписи изменений другого пользователя.
+In the **Diet** («Диета») tab, the doctor sets the nutrition plan and applies editable templates, while the nurse records actual consumption. Refusal can be recorded as **0 ml**. Nutritional intake contributes to fluid balance; users can undo their own changes in sequence. Record-version checks prevent overwriting another user's changes.
 
-Предусмотрены документы по процедурам, включая центральный венозный катетер, люмбальную пункцию и гемотрансфузию, а также PDF-отчёты по карте и операционному случаю.
+Procedure documents cover central venous catheterization, lumbar puncture and blood transfusion, alongside PDF reports for patient charts and surgical cases.
 
-### Калькуляторы и мониторинг ожоговой инфузии
+### Calculators and burn fluid monitoring
 
-Меню **«Расчёт»** в секторе 8 объединяет калькуляторы инфузии, электролитов и ожогов. Ожоговый калькулятор доступен врачу и медсестре из карты пациента с соответствующим диагнозом МКБ.
+The **Calculation** («Расчёт») menu in sector 8 brings together infusion, electrolyte and burn calculators. The burn calculator is available to doctors and nurses from the chart of a patient with a corresponding ICD diagnosis.
 
-Он учитывает возраст, массу, площадь и время травмы, поддерживает первые, вторые и третьи сутки и период после выхода из шока. Из сохранённых данных карты загружаются фактическое введение и диурез; для детских режимов первых и 2–3-х суток учитывается также фактическое энтеральное введение. В окне показаны расчётный период, время мониторинга, остаток объёма и отклонение от расчётного графика. Сутки карты и сутки от момента травмы учитываются раздельно.
+It accounts for age, body weight, burn surface area and injury time, supporting days one, two and three and the period after recovery from shock. Actual intake and urine output are loaded from saved chart data; pediatric modes for day one and days two–three also include actual enteral intake. The window shows the calculation period, monitoring time, remaining volume and deviation from the calculated schedule. Chart days and days since injury are tracked separately.
 
-Данные загружаются при открытии калькулятора; команда **«Обновить из карты»** перечитывает их с сохранением отмеченных ручных значений. Ошибка чтения не превращается в нулевой объём, а изменение исходных данных очищает прежний результат. Расчёт можно скопировать с пояснениями; назначения автоматически не создаются. Подробные правила и ограничения описаны в [документации калькулятора](docs/burn_infusion_calculator.md).
+Data loads when the calculator opens; **Refresh from chart** («Обновить из карты») reloads it while preserving marked manual values. A read failure is not treated as zero volume, and changing inputs clears the previous result. The calculation can be copied with explanations; it does not create orders automatically. Detailed rules and limits are in the [calculator documentation](docs/burn_infusion_calculator.md).
 
-### Единый архив и аналитика
+### Unified archive and analytics
 
-Центр архива доступен врачу, медсестре и администратору с учётом ролевых возможностей. Он объединяет архив пациентов РАО, архив операционных случаев, аналитику, графики и статистические отчёты. Просмотр карты из архивной БД использует отдельный сервис чтения.
+The archive center is available to doctors, nurses and administrators according to their role permissions. It combines ICU patient archives, surgical case archives, analytics, charts and statistical reports. Opening a chart from an archived database uses a separate read service.
 
-Аналитика позволяет выбрать период и группу пациентов, применить фильтры, сохранить вид и сравнить периоды или группы. Для показателя доступны результат, методика расчёта и список включённых случаев. Общий реестр метрик задаёт единицы, источники и критерии включения; проверка качества данных выявляет дубли и несогласованные значения. Отсутствующие данные сравнения отображаются явно. Расчёты и построение графиков выполняются в фоне; отчёты и графики используют согласованный аналитический снимок.
+Analytics supports selecting a period and patient group, applying filters, saving views and comparing periods or groups. Each metric provides its result, calculation method and list of included cases. A shared metric registry defines units, sources and inclusion criteria; data-quality checks identify duplicates and inconsistent values. Missing comparison data is shown explicitly. Calculations and chart rendering run in the background; reports and charts use a consistent analytics snapshot.
 
-Определения показателей и границы технической проверки приведены в [контракте аналитики](docs/analytics_clinical_contract.md) и [матрице реализации](docs/analytics_implementation_matrix.md).
+Metric definitions and the scope of technical verification are described in the [analytics contract](docs/analytics_clinical_contract.md) and [implementation matrix](docs/analytics_implementation_matrix.md).
 
-### Оперблок, настройки и диагностика
+### Operating rooms, settings and diagnostics
 
-Экстренное и плановое рабочие места ведут операционный случай: бригаду, анестезиологическое пособие, этапы, показатели, препараты и быстрые назначения. Передача пациента из РАО связана с движением пациента и приёмом в операционной. При проблемах с сетью предусмотрен отдельный ограниченный локальный режим оперблока; его данные проходят специальную процедуру переноса после восстановления связи.
+Emergency and planned OR workspaces record the surgical team, anesthesia, stages, observations, medications and quick orders. Transfer from the ICU is linked to patient movement and OR admission. A separate, limited local OR mode is available during network problems; its data follows a dedicated transfer procedure when connectivity returns.
 
-Центр настроек объединяет справочники, параметры оперблока, шаблоны питания, каталог анализов, печать, темы, фоны и обслуживание БД. Пользовательские обращения могут включать диагностические логи. Для технических логов действуют ротация, сроки хранения и бюджет объёма; частые штатные метрики сворачиваются в минутные сводки, повторные ошибки — в компактные записи с контекстом. Медицинский аудит изменений хранится отдельно от технических логов и уведомлений синхронизации.
+The settings center combines reference catalogs, OR parameters, nutrition templates, the laboratory test catalog, printing, themes, backgrounds and database maintenance. User support requests can include diagnostic logs. Technical logs have rotation, retention periods and a storage budget; frequent routine metrics become minute summaries, while repeated errors become compact contextual records. The medical change audit is stored separately from technical logs and synchronization notifications.
 
-## Как устроен общий контур
+## How the shared workflow works
 
 <p align="center">
-  <a href="https://donkiton.github.io/rem_card/codemap/codemap.html"><img src="docs/assets/readme/remcard-workflow.svg" width="100%" alt="Врач, медсестра и оперблок работают с общей папкой данных, медицинской БД, настройками и резервными копиями"></a>
+  <a href="https://donkiton.github.io/rem_card/codemap/codemap.html"><img src="docs/assets/readme/remcard-workflow.en.svg" width="100%" alt="A doctor, nurse, planned OR and emergency OR share the medical database, settings and backups through one data folder"></a>
 </p>
 
-RemCard — настольное приложение на **PySide6** с общей папкой данных. Для штатной работы рабочих мест отдельный веб-сервер не требуется. Основной поток — **интерфейс → сервисы → DAO → SQLite**.
+RemCard is a **PySide6** desktop application with a shared data folder. Routine workstation use does not require a separate web server. The main flow is **UI → services → DAO → SQLite**.
 
-1. **Сохранение.** Интерфейс передаёт изменение в очередь записи. Контроллер получает файловую блокировку и выполняет транзакцию; успешное сохранение подтверждается после `COMMIT` в центральной БД. Черновик или очередь сами по себе не означают, что данные сохранены.
-2. **Обновление другого рабочего места.** Триггеры записывают уведомления в `change_log` в той же транзакции. `DataUpdateMonitor` обнаруживает изменения, `SyncCoordinator` сбрасывает устаревшие данные, после чего рабочее место перечитывает нужный снимок. Файлы кэша между компьютерами не передаются.
-3. **Быстрое чтение.** `ReadCoordinator`, снимки и локальный кэш ускоряют отображение. Первая локальная реплика создаётся через SQLite Backup API, затем небольшие изменения применяются к отдельному локальному кандидату. Кандидат проверяется и атомарно заменяет прежнюю копию; при превышении ограничений или несовместимости выполняется полное копирование. Реплика служит только для чтения. Если её версия отстаёт от необходимой, чтение переключается на центральную БД. Источником клинической истины остаётся центральная запись после `COMMIT`.
-4. **Отзывчивость.** Загрузка снимков, сетевые записи, аналитика и PDF используют фоновые задачи. Поздние результаты проверяются перед применением к открытому пациенту или выбранному периоду.
+1. **Saving.** The interface submits changes to a write queue. The controller obtains a file lock and executes a transaction; a successful save is confirmed after `COMMIT` in the central database. A draft or queue entry alone does not mean the data is saved.
+2. **Updating another workstation.** Triggers write notifications to `change_log` in the same transaction. `DataUpdateMonitor` detects changes, `SyncCoordinator` invalidates stale data, and the workstation rereads the required snapshot. Cache files are not transferred between computers.
+3. **Fast reads.** `ReadCoordinator`, snapshots and local caching speed up display. The initial local replica is created through the SQLite Backup API, then small changes are applied to a separate local candidate. The candidate is checked and atomically replaces the previous copy; exceeding limits or encountering incompatibility triggers a full copy. The replica is read-only. If its version is behind the required version, reads switch to the central database. The central record after `COMMIT` remains the clinical source of truth.
+4. **Responsiveness.** Snapshot loading, network writes, analytics and PDF generation use background tasks. Late results are checked before being applied to the open patient or selected period.
 
-### Где находится реализация
+### Where the implementation lives
 
-| Каталог | Ответственность |
+| Directory | Responsibility |
 | --- | --- |
-| [`ui/`](ui/) | Рабочие места врача и медсестры, оперблок, секторы карты, архив, процедуры и настройки интерфейса. |
-| [`services/`](services/) | Прикладные операции, расчёты, баланс, питание, координация чтения и синхронизации. |
-| [`services/analytics/`](services/analytics/) | Реестр метрик, выборки, когорты, сравнения, статистика и данные графиков. |
-| [`data/`](data/) | DAO, модели, справочники и отдельная БД настроек. |
-| [`app/`](app/) | Запуск и роли, пути, SQLite-инфраструктура, реплика, резервирование, аварийные режимы, логи и обновления. |
-| [`scripts/`](scripts/), [`tests/`](tests/) | Сборка и публикация, CI, проверки качества, автоматические тесты и safety-сценарии. |
+| [`ui/`](ui/) | Doctor and nurse workspaces, operating rooms, chart sectors, archives, procedures and UI settings. |
+| [`services/`](services/) | Application operations, calculations, fluid balance, nutrition, read coordination and synchronization. |
+| [`services/analytics/`](services/analytics/) | Metric registry, selections, cohorts, comparisons, statistics and chart data. |
+| [`data/`](data/) | DAOs, models, reference catalogs and the separate settings database. |
+| [`app/`](app/) | Startup and roles, paths, SQLite infrastructure, replicas, backups, emergency modes, logs and updates. |
+| [`scripts/`](scripts/), [`tests/`](tests/) | Build and publication tools, CI, quality checks, automated tests and safety scenarios. |
 
-Подробный [контракт источника истины и синхронизации](docs/source_of_truth_and_sync_contract.md) описывает границы транзакций, свежесть реплики и правила кэша.
+The detailed [source-of-truth and synchronization contract](docs/source_of_truth_and_sync_contract.md) defines transaction boundaries, replica freshness and cache rules.
 
-## Интерактивная карта архитектуры
+## Interactive architecture map
 
 <p align="center">
-  <a href="https://donkiton.github.io/rem_card/codemap/codemap.html"><strong>Открыть интерактивную карту RemCard →</strong></a><br>
-  <sub>24 основных модуля · 48 подтверждённых связей · 6 сквозных потоков</sub>
+  <a href="https://donkiton.github.io/rem_card/codemap/codemap.html"><strong>Open the interactive RemCard map →</strong></a><br>
+  <sub>24 main modules · 48 verified connections · 6 end-to-end flows</sub>
 </p>
 
-Карта обновлена **23 сентября 2026 года** для архитектуры единого приложения: запуск `run_remcard.py`, выбор роли, допуск к базе, фоновая проверка, завершение сессии, реплика чтения и полное обновление. Это обзор основных компонентов, а не перечень каждого файла; исходный коммит указан на самой карте. Нажмите на модуль, чтобы увидеть его входящие и исходящие связи, связанные тесты, исходные пути и подтверждающие символы. Отдельно можно выбирать сквозные сценарии, искать компоненты, фильтровать типы модулей, масштабировать и перетаскивать схему.
+The map was updated on **September 23, 2026** for the unified application architecture: `run_remcard.py` startup, role selection, database admission, background checks, session shutdown, the read replica and full updates. It is an overview of main components, rather than a list of every file; the source commit is shown on the map. Click a module to inspect its incoming and outgoing connections, related tests, source paths and supporting symbols. You can also select end-to-end scenarios, search components, filter module types, zoom and pan.
 
-Карта полностью выполняется в браузере и не отправляет данные на внешний сервер. Её проверяемые исходные данные доступны в [`codemap.json`](docs/codemap/codemap.json), а автономная HTML-версия — в [`codemap.html`](docs/codemap/codemap.html).
+The map runs entirely in the browser and sends no data to an external server. Its verifiable source data is in [`codemap.json`](docs/codemap/codemap.json), with a standalone HTML version in [`codemap.html`](docs/codemap/codemap.html).
 
-## Быстрый запуск из исходников
+## Quick start from source
 
-Проект разрабатывается и проверяется на **Windows с Python 3.11**. Нужны Git и Python; файл `.env` не требуется.
+The project is developed and tested on **Windows with Python 3.11**. Git and Python are required; no `.env` file is needed.
 
 ```powershell
 git clone https://github.com/Donkiton/rem_card.git
@@ -176,64 +185,64 @@ python -m pip install -r requirements.txt
 python run_remcard.py
 ```
 
-`run_remcard.py` открывает единое приложение с выбором роли.
+`run_remcard.py` opens the unified application with role selection.
 
 > [!CAUTION]
-> Для разработки и испытаний используйте отдельную папку данных, а не рабочую production-БД. Блокировки и проверки доступа не заменяют изоляцию тестовой среды. Единая оболочка использует допуск сессии `SessionLease`.
+> Use a separate data folder for development and testing, rather than the production database. Locks and access checks do not replace test-environment isolation. The unified shell uses a `SessionLease` for session admission.
 
 <details>
-<summary><strong>Dev-база: выбор и защита от случайной подмены</strong></summary>
+<summary><strong>Development database: selection and protection against accidental replacement</strong></summary>
 
-Исходная версия использует локальную dev-папку данных; при первом запуске может быть создана недостающая структура. Список выбранных папок и активный путь хранятся отдельно для каждого checkout в `.remcard/dev_database_paths.json`.
+The source version uses a local development data folder; missing structure may be created on first launch. The selected-folder list and active path are stored separately for each checkout in `.remcard/dev_database_paths.json`.
 
-Выбранная существующая база открывается с проверкой: приложение не должно незаметно создать пустую БД вместо пропавшей. Старый путь `%LOCALAPPDATA%\RemCard\dev_database_paths.json` используется только для однократного переноса настройки.
+An existing selected database is opened with checks: the application must not silently create an empty database in place of a missing one. The legacy `%LOCALAPPDATA%\RemCard\dev_database_paths.json` path is used only for a one-time settings migration.
 
 </details>
 
-## Установленная версия и обновления
+## Installed version and updates
 
-Рабочая Windows-версия распространяется полной папкой PyInstaller, а не MSI или Docker-образом.
+The Windows distribution is a complete PyInstaller folder, rather than an MSI package or Docker image.
 
-| Файл | Назначение |
+| File | Purpose |
 | --- | --- |
-| `RemCard.exe` | Единое приложение: выбор роли, рабочие места и настройка папки данных. |
-| `RemCardUpdater.exe` | Служебная программа установки полного обновления. |
+| `RemCard.exe` | Unified application: role selection, workspaces and data-folder setup. |
+| `RemCardUpdater.exe` | Utility for installing a full update. |
 
-Запустите **`RemCard.exe`**, выберите папку данных при первом запуске, затем нужную роль. Сохраняйте полную папку поставки вместе с `_internal`: одного EXE недостаточно. Рядом с программой сохраняется `remcard_data_path.json`; обновления ищутся в `<папка данных>\UPD\releases`.
+Run **`RemCard.exe`**, select the data folder on first launch, then choose a role. Keep the entire distribution folder, including `_internal`: the EXE alone is insufficient. `remcard_data_path.json` is stored beside the application; updates are discovered in `<data folder>\UPD\releases`.
 
-Отдельные `RemCardDoctor.exe`, `RemCardNurse.exe`, EXE оперблока и `RemCardPathSetup.exe` относятся к прежней схеме поставки. В версии 5.1 используется единый вход. Проект распространяет только **полные обновления**: `PATCH` в SemVer обозначает уровень версии, а не отдельный формат пакета.
+Separate `RemCardDoctor.exe`, `RemCardNurse.exe`, OR executables and `RemCardPathSetup.exe` belong to the previous distribution model. Version 5.1 uses one entry point. The project distributes **full updates only**: `PATCH` in SemVer denotes the version level, not a separate package format.
 
 <details>
-<summary><strong>Тестовая сборка и безопасная production-публикация</strong></summary>
+<summary><strong>Test builds and safe production publication</strong></summary>
 
-Непубликуемая сборка текущего рабочего дерева:
+Build the current working tree without publishing:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\build_release.py --test-worktree
 ```
 
-Она запускает обязательные проверки, PyInstaller и smoke-тест обоих EXE, но не меняет `VERSION`, `CHANGELOG.md` или `app/release_info.json`, не создаёт коммит, не выполняет `git push` и не публикует пакет. Результат помечается `TEST_WORKTREE_ONLY.txt`, поэтому не может быть случайно опубликован в production.
+This runs mandatory checks, PyInstaller and smoke tests for both executables. It does not change `VERSION`, `CHANGELOG.md` or `app/release_info.json`, create a commit, run `git push` or publish a package. The output is marked `TEST_WORKTREE_ONLY.txt` so it cannot accidentally be published to production.
 
-Для рабочего релиза версия и точный коммит сначала должны находиться в GitHub `main`; затем менеджер релизов запускает `scripts\build_release.py` с `--expected-version` и `--expected-commit`. После приёмки на изолированной тестовой БД пакет переносится отдельной командой `scripts\publish_full_update.py`. `ready.ok` создаётся последним: после его появления версия сразу доступна клиентам этой базы. Подробности: [сборка и публикация](docs/how_to_build_and_update.md) и [автообновление](docs/auto_update.md).
+For a production release, the version and exact commit must first be in GitHub `main`; the release manager then runs `scripts\build_release.py` with `--expected-version` and `--expected-commit`. After acceptance testing on an isolated test database, the package is transferred using the separate `scripts\publish_full_update.py` command. `ready.ok` is created last: once it appears, the version is immediately available to clients of that database. See [build and publication](docs/how_to_build_and_update.md) and [automatic updates](docs/auto_update.md).
 
 </details>
 
-## Общая SQLite-БД и безопасность данных
+## Shared SQLite database and data safety
 
-Медицинская БД находится в `archiv/rao_journal.db`, а справочники и общие настройки, включая параметры тем и фонов, — в `settings/remcard_settings.db`. Пользовательские фоновые изображения хранятся в `settings/backgrounds`. Пути указаны относительно выбранной папки данных. JSON-файлы справочников в репозитории служат начальными данными и слоем совместимости, но не являются рабочим источником истины установленной версии. Подробности — в [описании БД настроек](docs/settings_db.md).
+The medical database is at `archiv/rao_journal.db`; reference catalogs and shared settings, including theme and background parameters, are in `settings/remcard_settings.db`. Custom background images are in `settings/backgrounds`. These paths are relative to the selected data folder. Repository JSON catalogs provide seed data and a compatibility layer, but are not the installed version's operational source of truth. See the [settings database documentation](docs/settings_db.md).
 
-Для общей сетевой БД закреплены следующие правила:
+The shared network database follows these rules:
 
-- `journal_mode=DELETE`, `synchronous=EXTRA`, `mmap_size=0`; WAL для shared DB запрещён;
-- записи проходят через контроллер, файловую блокировку и транзакции;
-- живая БД резервируется только через SQLite Backup API, не простым копированием открытого файла;
-- для миграций, восстановления и ротации предусмотрены проверенные backup, `quick_check` и `integrity_check`.
+- `journal_mode=DELETE`, `synchronous=EXTRA`, `mmap_size=0`; WAL is prohibited for the shared database.
+- Writes go through the controller, a file lock and transactions.
+- A live database is backed up only through the SQLite Backup API, not by copying an open file.
+- Migrations, restoration and rotation use verified backups, `quick_check` and `integrity_check`.
 
-Эти меры уменьшают известные риски, но не делают произвольное сетевое размещение SQLite автоматически безопасным. Права доступа, задержки, резервирование и восстановление требуют отдельной эксплуатационной приёмки. См. [безопасность БД](docs/db_safety_contract.md) и [контракт источника истины и синхронизации](docs/source_of_truth_and_sync_contract.md).
+These measures reduce known risks; they do not automatically make an arbitrary SQLite network deployment safe. Access permissions, latency, backup and restoration require separate operational acceptance testing. See [database safety](docs/db_safety_contract.md) and the [source-of-truth and synchronization contract](docs/source_of_truth_and_sync_contract.md).
 
-## Проверки для разработчика
+## Developer checks
 
-Локальные проверки и GitHub Actions используют единую точку входа. После установки зависимостей в активированном окружении:
+Local checks and GitHub Actions use the same entry point. After installing dependencies, run these in the activated environment:
 
 ```powershell
 python scripts\run_ci_checks.py core
@@ -243,47 +252,33 @@ python scripts\run_ci_checks.py regression
 git diff --check
 ```
 
-`core` проверяет логику и данные, `ui` — Qt-интерфейс, `quality` — качество кода и архитектурные ограничения, `regression` — полный реестр safety-сценариев. В CI группы выполняются независимо; итоговый статус `tests` проверяет их успех и полноту отчётов. Модули pytest распределены в [`tests/groups.json`](tests/groups.json) без пропусков и повторений.
+`core` checks logic and data, `ui` checks the Qt interface, `quality` checks code quality and architectural constraints, and `regression` runs the full safety-scenario registry. In CI the groups run independently; the final `tests` status checks their success and report completeness. Pytest modules are assigned in [`tests/groups.json`](tests/groups.json) without omissions or duplicates.
 
-Команда `python scripts\run_ci_checks.py all` запускает весь pytest в одном процессе для проверки общей изоляции; она не заменяет отдельные `quality` и `regression`. Runner назначает временные пути БД и QSettings, отчёты сохраняет в `tmp/ci-reports/<группа>`. Для точечной проверки также доступен обычный `python -m pytest tests -q`. Подробнее — [проверки и CI](docs/testing.md).
+`python scripts\run_ci_checks.py all` runs the entire pytest suite in one process to check shared isolation; it does not replace the separate `quality` and `regression` runs. The runner assigns temporary database and QSettings paths, saving reports in `tmp/ci-reports/<group>`. Standard `python -m pytest tests -q` is also available for direct testing. See [testing and CI](docs/testing.md).
 
-Сетевые стенды, restore drill, аварийный и offline-режимы читают или изменяют выбранную папку данных. Запускайте их только с осознанно заданной тестовой базой по [регламенту приёмки](docs/operational_acceptance.md) и [инструкции проверки резервных копий](docs/backup_restore_drill.md).
+Network test rigs, restore drills, emergency mode and offline mode read or modify the selected data folder. Run them only against a deliberately selected test database, following the [acceptance procedure](docs/operational_acceptance.md) and [backup verification guide](docs/backup_restore_drill.md).
 
-## English overview
+## Documentation, status and contact
 
-**RemCard ICU** is an experimental Windows desktop application for ICU and operating-room charting, built by anaesthesiologist-intensivist Vadim Bityutsky.
+- [Documentation index](docs/README.md) — current procedures and historical materials, primarily in Russian.
+- [Interactive architecture map](https://donkiton.github.io/rem_card/codemap/codemap.html) — modules, dependencies, tests and end-to-end flows linked to source.
+- [Project website](https://donkiton.github.io/rem_site/#english) and [releases](https://github.com/Donkiton/rem_card/releases).
+- [Changelog](CHANGELOG.md) and [`VERSION`](VERSION) — changes and the current version.
+- [Testing and CI](docs/testing.md) — test groups, isolation, completeness checks and reports.
+- [Burn calculator](docs/burn_infusion_calculator.md) and [analytics contract](docs/analytics_clinical_contract.md) — calculations, data sources and limitations.
+- [Versioning](docs/versioning.md), [automatic updates](docs/auto_update.md) and [builds](docs/how_to_build_and_update.md) — the full-release process.
+- [Database safety contract](docs/db_safety_contract.md), [source of truth and synchronization](docs/source_of_truth_and_sync_contract.md), [operational acceptance](docs/operational_acceptance.md) and [emergency runbook](docs/emergency_runbook.md) — safe operation.
 
-The current interface and main documentation are in Russian.
+RemCard is an experimental project under active development, built by anaesthesiologist-intensivist Vadim Bityutsky. Tests, static checks, backups and protective mechanisms do not replace independent technical, information-security and clinical audits.
 
-- **One shared record:** medication orders and administration tracking, vital signs, fluid balance, ventilation, procedures, laboratory results and reports.
-- **Role-specific workspaces:** doctors, nurses, and planned and emergency operating-room teams work from one application.
-- **Local deployment:** a PySide6 desktop interface with a shared SQLite database on the organisation's local network. Routine workstation use does not require a separate web server.
-- **Source-available:** the [RemCard Proprietary Source License](LICENSE) permits non-commercial use by individuals. Institutional and commercial use require prior written permission from the author.
+For bug reports and suggestions about architecture, performance and safe operation, contact [menfise@mail.ru](mailto:menfise@mail.ru) with the subject `РЕМ КАРТА`.
 
-Clinical use requires independent technical, security and clinical review, acceptance testing in the intended environment, and a backup workflow. The directory badge above identifies the author's listing; it does not establish clinical validation of the software.
+## License and responsibility
 
-[Demo screenshots](#система-в-работе) · [Project website](https://donkiton.github.io/rem_site/#english) · [Releases](https://github.com/Donkiton/rem_card/releases)
+RemCard's concept, architecture and original source code were created by its developer, Vadim Alekseevich Bityutsky (Битюцкий Вадим Алексеевич; GitHub: [DonKiton](https://github.com/DonKiton)).
 
-## Документы, статус и связь
+RemCard is distributed under the [RemCard Proprietary Source License 1.1](LICENSE), which permits non-commercial use by individuals. An individual user or developer may view, download, copy, run, study and modify the code for free, and share original or modified versions without receiving money or other commercial benefit. Distribution must retain the license and author attribution, identify changes, provide source code and clearly mark modified versions as unofficial.
 
-- [Карта документации](docs/README.md) — действующие регламенты и исторические материалы.
-- [Интерактивная карта архитектуры](https://donkiton.github.io/rem_card/codemap/codemap.html) — модули, зависимости, тесты и сквозные потоки с привязкой к исходникам.
-- [История изменений](CHANGELOG.md) и [`VERSION`](VERSION) — изменения и текущая версия.
-- [Проверки и CI](docs/testing.md) — группы тестов, изоляция, контроль полноты и отчёты.
-- [Ожоговый калькулятор](docs/burn_infusion_calculator.md) и [контракт аналитики](docs/analytics_clinical_contract.md) — расчёты, источники данных и ограничения.
-- [Версионность](docs/versioning.md), [автообновление](docs/auto_update.md) и [сборка](docs/how_to_build_and_update.md) — full-release процесс.
-- [Контракт безопасности БД](docs/db_safety_contract.md), [источник истины и синхронизация](docs/source_of_truth_and_sync_contract.md), [эксплуатационная приёмка](docs/operational_acceptance.md) и [аварийная инструкция](docs/emergency_runbook.md) — безопасная эксплуатация.
+Any use by an organization or on behalf of an employer, client, business, clinic or institution requires the copyright holder's prior written permission. Without a separate agreement, sale and resale, paid deployment, installation, integration, modification, support, training, consulting, hosting, SaaS, subscriptions, advertising and other monetization are prohibited. These restrictions apply to all derivative versions: changing the font, interface, features, name or any other part of the application does not grant the right to earn money from it.
 
-Проект экспериментальный и активно меняется. Тесты, статические проверки, резервирование и защитные механизмы не заменяют независимый технический, информационно-безопасностный и клинический аудит.
-
-Для сообщений об ошибках и предложений по архитектуре, производительности и безопасной эксплуатации: [menfise@mail.ru](mailto:menfise@mail.ru), тема письма — `РЕМ КАРТА`.
-
-## Лицензия и ответственность
-
-Автор концепции, архитектуры, оригинального исходного кода и разработчик RemCard — Битюцкий Вадим Алексеевич (GitHub: [DonKiton](https://github.com/DonKiton)).
-
-RemCard распространяется по [RemCard Proprietary Source License 1.1](LICENSE) с разрешённым некоммерческим использованием физическими лицами. Отдельный пользователь или разработчик может бесплатно смотреть, скачивать, копировать, запускать, изучать и изменять код, а также делиться оригинальной или изменённой версией без получения денег или иной коммерческой выгоды. При распространении необходимо сохранить лицензию и сведения об авторе, указать внесённые изменения, предоставить исходный код и явно обозначить неофициальный статус модификации.
-
-Любое использование организацией либо в интересах работодателя, клиента, бизнеса, клиники или учреждения требует предварительного письменного разрешения правообладателя. Без отдельного соглашения запрещены продажа и перепродажа, платное внедрение, установка, интеграция, доработка, сопровождение, обучение, консультации, хостинг, SaaS, подписка, реклама и иная монетизация. Эти ограничения распространяются на любые производные версии: изменение шрифта, интерфейса, функций, названия или другой части программы не даёт права зарабатывать на ней.
-
-Публичное размещение и fork внутри GitHub не предоставляют коммерческих прав. Программа предоставляется «как есть» и используется на ответственность пользователя. Сторонние библиотеки и зависимости сохраняют собственные лицензии. По классификации OSI это source-available, а не open-source лицензия, поскольку коммерческое использование ограничено. При расхождении этого краткого описания с полным текстом приоритет имеет файл [LICENSE](LICENSE).
+Public availability and forks on GitHub do not grant commercial rights. The software is provided “as is” and used at the user's own responsibility. Third-party libraries and dependencies retain their own licenses. Under the OSI classification this is a source-available license, rather than an open-source license, because commercial use is restricted. If this summary differs from the full license text, [LICENSE](LICENSE) takes precedence.

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="490" viewBox="0 0 1200 490" role="img" aria-labelledby="title desc" xml:lang="de">
+  <title id="title">RemCard 5.1 — eine Anwendung, vier Rollen</title>
+  <desc id="desc">RemCard.exe öffnet die Arbeitsbereiche für ärztlichen Dienst, Pflege, geplante OPs und Notfall-OPs. Sie teilen medizinische Datenbank, Einstellungen und Sicherungen. RemCardUpdater.exe installiert Vollupdates.</desc>
+  <rect width="1200" height="490" rx="24" fill="#0B1220"/>
+  <g font-family="Segoe UI, sans-serif">
+    <text x="60" y="65" fill="#F8FAFC" font-size="40" font-weight="700">Eine Anwendung. Vier Rollen.</text>
+    <text x="60" y="112" fill="#AFC0D6" font-size="26">RemCard.exe → Arbeitsbereich wählen</text>
+    <path d="M185 235v40h820v-40M455 235v40M725 235v40M600 275v35" fill="none" stroke="#526984" stroke-width="3"/>
+    <g font-size="25" font-weight="600" text-anchor="middle">
+      <rect x="60" y="155" width="250" height="80" rx="14" fill="#14263B" stroke="#4CA4FF"/>
+      <text x="185" y="204" fill="#E3F2FF">Ärztlicher Dienst</text>
+      <rect x="330" y="155" width="250" height="80" rx="14" fill="#122B24" stroke="#35C9AD"/>
+      <text x="455" y="204" fill="#E2F8EA">Pflege</text>
+      <rect x="600" y="155" width="250" height="80" rx="14" fill="#202A35" stroke="#91A7C3"/>
+      <text x="725" y="189" fill="#E3F2FF">Geplanter</text><text x="725" y="219" fill="#E3F2FF">OP</text>
+      <rect x="870" y="155" width="270" height="80" rx="14" fill="#29203B" stroke="#AE86E3"/>
+      <text x="1005" y="189" fill="#EEE5FF">Notfall-</text><text x="1005" y="219" fill="#EEE5FF">OP</text>
+      <rect x="230" y="310" width="740" height="95" rx="16" fill="#172338" stroke="#D7263D" stroke-width="2"/>
+      <text x="600" y="348" fill="#F8FAFC" font-size="30">Gemeinsamer Datenordner</text>
+      <text x="600" y="382" fill="#AFC0D6" font-size="23" font-weight="400">Medizinische Datenbank · Einstellungen · Sicherungen</text>
+    </g>
+    <text x="600" y="452" text-anchor="middle" fill="#AFC0D6" font-size="23">Vollupdate → RemCardUpdater.exe</text>
+  </g>
+</svg>
