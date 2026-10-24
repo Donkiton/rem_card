@@ -1342,8 +1342,13 @@ class LocalReplicaSyncTest(unittest.TestCase):
             for thread in threads:
                 thread.join(timeout=5.0)
         finally:
-            self.assertTrue(first.close())
-            self.assertTrue(second.close())
+            # Windows CI may need more than the default 0.5 s to stop two
+            # spawned workers. This test checks gate ownership, not shutdown
+            # latency; always close both clients before asserting the result.
+            first_closed = first.close(timeout_sec=3.0)
+            second_closed = second.close(timeout_sec=3.0)
+            self.assertTrue(first_closed)
+            self.assertTrue(second_closed)
 
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(len(outcomes), 2)
