@@ -1,6 +1,6 @@
 <p align="center">
-  <a href="architecture.en.md"><kbd>English</kbd></a>
   <a href="architecture.ru.md"><kbd>Русский</kbd></a>
+  <a href="architecture.en.md"><kbd>English</kbd></a>
   <a href="architecture.zh-CN.md"><kbd><strong>中文（简体）</strong> ✓</kbd></a>
   <a href="architecture.ja.md"><kbd>日本語</kbd></a>
   <a href="architecture.de.md"><kbd>Deutsch</kbd></a>

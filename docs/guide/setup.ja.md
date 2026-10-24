@@ -1,6 +1,6 @@
 <p align="center">
-  <a href="setup.en.md"><kbd>English</kbd></a>
   <a href="setup.ru.md"><kbd>Русский</kbd></a>
+  <a href="setup.en.md"><kbd>English</kbd></a>
   <a href="setup.zh-CN.md"><kbd>中文（简体）</kbd></a>
   <a href="setup.ja.md"><kbd><strong>日本語</strong> ✓</kbd></a>
   <a href="setup.de.md"><kbd>Deutsch</kbd></a>

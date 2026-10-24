@@ -1,6 +1,6 @@
 <p align="center">
-  <a href="features.en.md"><kbd>English</kbd></a>
   <a href="features.ru.md"><kbd>Русский</kbd></a>
+  <a href="features.en.md"><kbd>English</kbd></a>
   <a href="features.zh-CN.md"><kbd>中文（简体）</kbd></a>
   <a href="features.ja.md"><kbd><strong>日本語</strong> ✓</kbd></a>
   <a href="features.de.md"><kbd>Deutsch</kbd></a>

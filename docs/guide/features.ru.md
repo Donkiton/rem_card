@@ -1,13 +1,13 @@
 <p align="center">
-  <a href="features.en.md"><kbd>English</kbd></a>
   <a href="features.ru.md"><kbd><strong>Русский</strong> ✓</kbd></a>
+  <a href="features.en.md"><kbd>English</kbd></a>
   <a href="features.zh-CN.md"><kbd>中文（简体）</kbd></a>
   <a href="features.ja.md"><kbd>日本語</kbd></a>
   <a href="features.de.md"><kbd>Deutsch</kbd></a>
 </p>
 
 <p align="center">
-  <a href="../../README.ru.md">← README</a> ·
+  <a href="../../README.md">← README</a> ·
   <a href="setup.ru.md">Запуск</a> ·
   <a href="architecture.ru.md">Архитектура</a>
 </p>
