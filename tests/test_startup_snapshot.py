@@ -253,6 +253,10 @@ def test_old_startup_master_does_not_replace_a_newer_valid_role_replica(source, 
 
 @pytest.mark.parametrize("busy", [worker.LocalReplicaWriterBusy, worker.LocalReplicaSnapshotBusy])
 def test_busy_snapshot_can_use_full_direct_check_without_seed(source, monkeypatch, busy):
+    from rem_card.app import startup_diagnostics
+    events = []
+    monkeypatch.setattr(startup_diagnostics, "startup_event",
+                        lambda stage, **fields: events.append((stage, fields)))
     def blocked(*args, **kwargs):
         raise busy()
     monkeypatch.setattr(worker, "_sync_snapshot_with_network_lease", blocked)
@@ -260,6 +264,9 @@ def test_busy_snapshot_can_use_full_direct_check_without_seed(source, monkeypatc
     assert payload["snapshot"] is None
     ok, state, _ = admission.read_only_admission_probe(str(source))
     assert ok and payload["admission"] == json.loads(state)
+    reason = "writer_busy" if busy is worker.LocalReplicaWriterBusy else "snapshot_busy"
+    assert any(stage == "startup_snapshot_fallback" and fields["reason"] == reason
+               for stage, fields in events)
 
 
 def test_rotation_busy_never_uses_direct_fallback(source, monkeypatch):
@@ -273,20 +280,32 @@ def test_rotation_busy_never_uses_direct_fallback(source, monkeypatch):
 
 
 def test_local_destination_failure_keeps_direct_entry_available(source, monkeypatch):
+    from rem_card.app import startup_diagnostics
+    events = []
+    monkeypatch.setattr(startup_diagnostics, "startup_event",
+                        lambda stage, **fields: events.append((stage, fields)))
     def blocked(path):
         raise PermissionError("synthetic local disk unavailable")
     monkeypatch.setattr(worker, "_open_temp_replica", blocked)
     payload = checked(source)
     assert payload["snapshot"] is None
+    assert any(stage == "startup_snapshot_fallback"
+               and fields["reason"] == "local_destination_unavailable"
+               for stage, fields in events)
 
 
 def test_workspace_failure_runs_direct_check_in_the_cancellable_child(source, monkeypatch):
+    from rem_card.app import startup_diagnostics
+    events = []
+    monkeypatch.setattr(startup_diagnostics, "startup_event",
+                        lambda stage, **fields: events.append((stage, fields)))
     def blocked():
         raise PermissionError("synthetic cache directory unavailable")
     monkeypatch.setattr(snapshots, "create_workspace", blocked)
     result = run_startup_probe(str(source), threading.Event(), admission_mode="snapshot")
     assert result[0], result[1]
     assert json.loads(result[1])["snapshot"] is None
+    assert ("startup_snapshot_workspace_unavailable", {"error_class": "PermissionError"}) in events
 
 
 def test_empty_or_foreign_admission_envelope_is_rejected(source):

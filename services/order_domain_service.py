@@ -11,6 +11,7 @@ from rem_card.app.logger import logger
 from rem_card.services.shift_service import ShiftService
 from rem_card.app.local_metrics import record_metric
 from rem_card.services.orders_sync_observability import record_orders_sync_event
+from rem_card.services.concurrency import OrderMarkConflictError
 
 # Метки выполнения медсестрой (хранятся в поле comment)
 NURSE_MARK_EXECUTED = "nurse_executed"
@@ -628,7 +629,7 @@ class OrderDomainService:
                 is_committed=row.get("is_committed"),
                 latest_id=row.get("latest_id"),
             )
-        raise RuntimeError(message)
+        raise OrderMarkConflictError(message, reason=reason, current_version=row.get("version"))
 
     def _assert_nurse_admin_current(self, cursor, row: Optional[dict]) -> int:
         if not row:

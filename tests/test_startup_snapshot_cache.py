@@ -88,6 +88,39 @@ def test_next_startup_reuses_persisted_validated_master(source):
         assert conn.execute("SELECT value FROM example").fetchone() == ("sample",)
 
 
+def test_unchanged_warm_entry_preserves_the_authenticated_master(source):
+    first = checked(source)
+    db_path, manifest_path = cache.cache_paths(str(source))
+    before = [(os.stat(path).st_mtime_ns, cache._digest(path))
+              for path in (db_path, manifest_path)]
+    snapshots.discard(first["snapshot"])
+
+    second = checked(source)
+
+    assert second["sync_mode"] == "cache"
+    assert second["full_checked_at_epoch"] == first["full_checked_at_epoch"]
+    assert [(os.stat(path).st_mtime_ns, cache._digest(path))
+            for path in (db_path, manifest_path)] == before
+    assert second["snapshot"]["sha256"] == snapshots._digest(second["snapshot"]["path"])
+
+
+def test_changed_source_still_publishes_an_updated_authenticated_master(source):
+    first = checked(source)
+    snapshots.discard(first["snapshot"])
+    with closing(sqlite3.connect(source)) as conn, conn:
+        conn.execute("UPDATE example SET value='changed' WHERE id=1")
+
+    second = checked(source)
+    persisted = cache.load(str(source), ttl_sec=ADMISSION_TTL_SEC)
+
+    assert second["sync_mode"] == "delta"
+    assert second["full_checked_at_epoch"] == first["full_checked_at_epoch"]
+    assert persisted["state"] == second["snapshot"]["state"]
+    assert persisted["source_stamp"] == second["snapshot"]["source_stamp"]
+    with closing(sqlite3.connect(persisted["path"])) as conn:
+        assert conn.execute("SELECT value FROM example").fetchone() == ("changed",)
+
+
 def test_original_ttl_is_not_renewed_by_cache_reuse(source, monkeypatch):
     first = checked(source)
     original = first["full_checked_at_epoch"]
@@ -102,9 +135,11 @@ def test_original_ttl_is_not_renewed_by_cache_reuse(source, monkeypatch):
     assert checked(source)["sync_mode"] == "full"
 
 
-def test_ttl_expiring_during_final_persistence_retries_full_snapshot(source, monkeypatch):
+def test_ttl_expiring_during_changed_master_persistence_retries_full_snapshot(source, monkeypatch):
     first = checked(source)
     snapshots.discard(first["snapshot"])
+    with closing(sqlite3.connect(source)) as conn, conn:
+        conn.execute("UPDATE example SET value='changed' WHERE id=1")
     clock = [first["full_checked_at_epoch"] + ADMISSION_TTL_SEC - 1]
     monkeypatch.setattr(cache.time, "time", lambda: clock[0])
     original_store = cache.store
@@ -118,6 +153,28 @@ def test_ttl_expiring_during_final_persistence_retries_full_snapshot(source, mon
         return result
 
     monkeypatch.setattr(cache, "store", store_then_expire)
+    result = checked(source)
+    assert result["sync_mode"] == "full"
+    assert result["full_checked_at_epoch"] == clock[0]
+    assert len(calls) == 2
+
+
+def test_ttl_expiring_during_final_manifest_retries_full_snapshot(source, monkeypatch):
+    first = checked(source)
+    snapshots.discard(first["snapshot"])
+    clock = [first["full_checked_at_epoch"] + ADMISSION_TTL_SEC - 1]
+    monkeypatch.setattr(cache.time, "time", lambda: clock[0])
+    original_digest = snapshots._digest
+    calls = []
+
+    def digest_then_expire(path):
+        result = original_digest(path)
+        calls.append(path)
+        if len(calls) == 1:
+            clock[0] += 2
+        return result
+
+    monkeypatch.setattr(snapshots, "_digest", digest_then_expire)
     result = checked(source)
     assert result["sync_mode"] == "full"
     assert result["full_checked_at_epoch"] == clock[0]

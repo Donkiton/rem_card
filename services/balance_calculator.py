@@ -81,7 +81,7 @@ class BalanceCalculator:
 
             lookup_text = re.sub(r"[^0-9a-zа-яё]+", " ", str(raw or "").lower()).strip()
             if lookup_text:
-                found_key, _ = engine.detect_drug(lookup_text)
+                found_key, _ = engine.detect_drug(lookup_text, refresh=False)
                 if found_key in ("blood", "plasma"):
                     return found_key
 
@@ -140,7 +140,7 @@ class BalanceCalculator:
             clean_latin = str(order.latin or "")
             prefix_match = re.match(r'^([A-Za-z]+\.)\s+', clean_latin)
             if prefix_match: clean_latin = clean_latin[prefix_match.end():]
-            found_key, found_data = engine.detect_drug(clean_latin)
+            found_key, found_data = engine.detect_drug(clean_latin, refresh=False)
             if found_data: drug_info = found_data
                 
         group_key = drug_info.get("group")

@@ -5,12 +5,12 @@ from typing import Optional
 from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 27
-SCHEMA_MIN_MIGRATION_VERSION = 27
-# Migration 27 only adds a query optimization. A client built without database
-# upgrades can use the complete version 26 storage contract without that index.
-SCHEMA_NO_UPGRADE_MIN_MIGRATION_VERSION = 26
-SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
+SCHEMA_FASTPATH_REV = 28
+SCHEMA_MIN_MIGRATION_VERSION = 28
+# The 5.1.11 contract is mandatory even if this client is accidentally built
+# without migrations. Such a build may read version 28, but cannot accept 26/27.
+SCHEMA_NO_UPGRADE_MIN_MIGRATION_VERSION = 28
+SCHEMA_REQUIRED_CLIENT_VERSION = "5.1.11"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
 _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
@@ -171,6 +171,7 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_medical_audit_admission_changed",
     "idx_medical_audit_table_row",
     "idx_medical_audit_operation",
+    "idx_order_audit_admission_id",
     "idx_runtime_write_receipts_committed",
     "idx_runtime_write_receipts_request",
     "idx_procedures_admission_type_time",
@@ -338,7 +339,7 @@ def _schema_contract_satisfied(conn: sqlite3.Connection, deep_column_check: bool
         return False
 
     required_indexes = list(_FASTPATH_REQUIRED_INDEXES)
-    if no_upgrades:
+    if no_upgrades and min_version < 27:
         required_indexes.remove("idx_admin_committed_planned_expr_order_id")
     if _table_exists(conn, "operation_cases"):
         required_indexes.append("idx_operation_cases_started_at_id")
@@ -1787,6 +1788,7 @@ def ensure_unified_schema(
     conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_admission_changed ON medical_audit_log(admission_id, changed_at, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_table_row ON medical_audit_log(table_name, row_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_operation ON medical_audit_log(operation_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_order_audit_admission_id ON order_audit_log(admission_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_applied_ops_applied_at ON sync_applied_ops(applied_at)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_runtime_write_receipts_committed "
@@ -2292,7 +2294,12 @@ def ensure_unified_schema(
     )
     _mark_schema_migration(
         conn,
-        SCHEMA_MIN_MIGRATION_VERSION,
+        27,
         "expression index for latest committed administrations by normalized planned time",
+    )
+    _mark_schema_migration(
+        conn,
+        28,
+        "mandatory 5.1.11 contract and admission index for order audit cleanup",
     )
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

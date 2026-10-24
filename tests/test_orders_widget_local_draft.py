@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
-from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
 from rem_card.services.order_service import OrderConflictError
 from rem_card.services.read_coordinator import OrdersContext
 from rem_card.ui.doctor_view.components.order_template_builder import build_orders_from_template
@@ -95,6 +95,106 @@ def _make_widget():
     widget.model.apply_snapshot(snapshot)
     widget._capture_local_draft_baseline(snapshot)
     return widget, service
+
+
+def _make_mark_widget():
+    widget, service = _make_widget()
+    queued, written, refreshes, warnings = [], [], [], []
+    service.enqueue_write = lambda **request: queued.append(request)
+    service.set_doctor_order_mark = lambda *args, **kwargs: written.append((args, kwargs))
+    service.cancel_doctor_order_mark = lambda *args, **kwargs: written.append((args, kwargs))
+    widget.request_refresh = lambda **kwargs: refreshes.append(kwargs)
+    widget._show_warning = warnings.append
+    widget._schedule_fast_sync = lambda: None
+    widget._schedule_state_sync = lambda: None
+    slot = widget.model.time_slots[0]
+    key = (1, slot.isoformat())
+    widget.model.admin_map[key] = AdministrationDTO(
+        id=101, order_id=1, planned_time=slot, cell_role="single", status="planned",
+        version=2, is_committed=1,
+    )
+    return widget, service, key, queued, written, refreshes, warnings
+
+
+def test_doctor_mark_coalesces_pending_clicks_and_commits_displayed_revision():
+    widget, _service, key, queued, written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        index = widget.model.index(0, 1)
+        widget._handle_doctor_order_mark(index)
+        for _ in range(7):
+            widget._handle_doctor_order_mark(index)
+        assert len(queued) == 1
+        assert widget._pending_admin_write_count == 1
+        request = queued.pop()
+        request["operation"]()
+        request["on_success"](None)
+        assert written == [((101, "nurse_executed"), {"expected_version": 2})]
+        assert widget.model.admin_map[key].version == 3
+        assert not hasattr(widget.model.admin_map[key], "_pending_mark")
+        assert widget._pending_admin_write_count == 0
+    finally:
+        widget.shutdown()
+
+
+def test_doctor_mark_conflict_requires_fresh_display_before_another_write():
+    from rem_card.services.concurrency import OrderMarkConflictError
+    widget, _service, key, queued, written, refreshes, warnings = _make_mark_widget()
+    try:
+        index = widget.model.index(0, 1)
+        widget._handle_doctor_order_mark(index)
+        request = queued.pop()
+        request["on_error"](OrderMarkConflictError(
+            "Обновите карточку.", reason="displayed_version_changed", current_version=5,
+        ))
+        assert warnings and refreshes
+        assert widget.model.admin_map[key].comment == ""
+        assert not widget._balance_mark_overrides
+        for version in (2, 3, 4):
+            widget.model.admin_map[key].version = version
+            widget._handle_doctor_order_mark(index)
+        assert not queued and not written
+        widget.model.admin_map[key].version = 5
+        widget._handle_doctor_order_mark(index)
+        assert len(queued) == 1
+        queued[0]["operation"]()
+        assert written == [((101, "nurse_executed"), {"expected_version": 5})]
+        queued[0]["on_success"](None)
+    finally:
+        widget.shutdown()
+
+
+def test_doctor_mark_queue_rejection_restores_pending_state():
+    widget, service, key, queued, _written, _refreshes, warnings = _make_mark_widget()
+    try:
+        def reject(**_request):
+            raise RuntimeError("Queue is closed")
+        service.enqueue_write = reject
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        assert not queued and warnings
+        assert not widget._pending_doctor_mark_writes
+        assert widget._pending_admin_write_count == 0
+        assert widget.model.admin_map[key].comment == ""
+        assert not hasattr(widget.model.admin_map[key], "_pending_mark")
+    finally:
+        widget.shutdown()
+
+
+def test_old_mark_callback_cannot_restore_reentered_card():
+    from rem_card.services.concurrency import OrderMarkConflictError
+    widget, _service, key, queued, _written, refreshes, _warnings = _make_mark_widget()
+    try:
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        request = queued.pop()
+        widget._reset_cached_state()
+        widget.model.admin_map[key].comment = "new visit"
+        request["on_error"](OrderMarkConflictError(
+            "Обновите карточку.", reason="displayed_version_changed", current_version=5,
+        ))
+        assert widget.model.admin_map[key].comment == "new visit"
+        assert not widget._doctor_mark_required_versions
+        assert not refreshes
+    finally:
+        widget.shutdown()
 
 
 def _committed_snapshot_for_current_mark(widget, *, change_id=5):

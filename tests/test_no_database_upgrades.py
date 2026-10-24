@@ -18,7 +18,7 @@ def test_compatible_database_and_policy_are_unchanged(tmp_path, monkeypatch):
     conn.commit()
     before = list(conn.iterdump())
     policy = tmp_path / 'client_policy.json'
-    policy.write_text('{"min_client_version": "5.1.0"}', encoding='utf-8')
+    policy.write_text('{"min_client_version": "5.1.11"}', encoding='utf-8')
     original_policy = policy.read_bytes()
     monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', True)
     for _ in range(2):
@@ -45,10 +45,11 @@ def test_loading_policy_does_not_create_or_repair_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('marker', [26, None])
-def test_version_516_database_stays_writable_without_migration(tmp_path, monkeypatch, marker):
+def test_legacy_optional_profile_keeps_516_database_writable(tmp_path, monkeypatch, marker):
     conn = sqlite3.connect(':memory:')
     try:
         unified_db_schema.ensure_unified_schema(conn)
+        conn.execute('DROP INDEX idx_order_audit_admission_id')
         conn.execute('DROP INDEX idx_admin_committed_planned_expr_order_id')
         conn.execute('DELETE FROM schema_migrations WHERE version >= 27')
         conn.execute("INSERT OR IGNORE INTO schema_migrations (version, note) VALUES (26, '5.1.6')")
@@ -64,6 +65,14 @@ def test_version_516_database_stays_writable_without_migration(tmp_path, monkeyp
         original_policy = policy.read_bytes()
         before = list(conn.iterdump())
         monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', True)
+        # Frozen 5.1.7--5.1.10 clients intentionally accepted schema 26. Keep
+        # that historical contract distinct from the mandatory 5.1.11 profile.
+        monkeypatch.setattr(unified_db_schema, 'SCHEMA_NO_UPGRADE_MIN_MIGRATION_VERSION', 26)
+        monkeypatch.setattr('rem_card.app.schema_migration_guard.SCHEMA_REQUIRED_CLIENT_VERSION', '5.1.6')
+        monkeypatch.setattr(unified_db_schema, '_FASTPATH_REQUIRED_INDEXES', tuple(
+            name for name in unified_db_schema._FASTPATH_REQUIRED_INDEXES
+            if name != 'idx_order_audit_admission_id'
+        ))
         for _ in range(2):
             result = ensure_unified_schema_with_migration_backup(
                 conn, db_path='unused', backup_dir=str(tmp_path / 'backup'), policy_path=str(policy),

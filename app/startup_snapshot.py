@@ -169,7 +169,8 @@ def _source_state(path: str) -> tuple[dict, dict]:
         return read_admission_state(conn, path), state
 
 
-def _direct_without_seed(path: str, original: dict, progress) -> tuple[bool, str, bool]:
+def _direct_without_seed(path: str, original: dict, progress, *,
+                         fallback_reason: str = "snapshot_busy") -> tuple[bool, str, bool]:
     """Keep baseline availability when another copier/writer preempts backup."""
     from rem_card.app.startup_db_guard import _check_quick_direct
     from rem_card.app.role_admission import file_identity
@@ -184,7 +185,7 @@ def _direct_without_seed(path: str, original: dict, progress) -> tuple[bool, str
         return False, "database is locked: source changed before direct check", False
     if progress:
         progress({"stage": "direct_check"})
-    startup_event("startup_snapshot_fallback", reason="snapshot_busy", check_mode="direct_without_seed")
+    startup_event("startup_snapshot_fallback", reason=fallback_reason, check_mode="direct_without_seed")
     outcome = _check_quick_direct(path, capture_admission=True)
     if file_identity(path) != original["identity"] or os.path.exists(rotation):
         return False, "database is locked: source changed during direct check", False
@@ -203,7 +204,8 @@ def check_direct_admission(path: str, progress=None) -> tuple[bool, str, bool]:
     """A local cache failure must not make the central database unusable."""
     try:
         original, _ = _source_state(path)
-        return _direct_without_seed(path, original, progress)
+        return _direct_without_seed(path, original, progress,
+                                    fallback_reason="direct_admission_requested")
     except Exception as exc:
         return False, f"direct admission unavailable: {exc}", False
 
@@ -218,7 +220,7 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
         _local_destination,
     )
     from rem_card.app.startup_db_guard import _check_quick_direct, is_confirmed_db_corruption_reason
-    from rem_card.app.startup_diagnostics import startup_span
+    from rem_card.app.startup_diagnostics import startup_event, startup_span
     from rem_card.app.role_admission import ADMISSION_TTL_SEC
     from rem_card.app import startup_snapshot_cache
 
@@ -233,12 +235,14 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
     snapshot_path = os.path.join(workspace, "validated.db")
     try:
         stage("source_probe")
-        before, original_state = _source_state(path)
+        with startup_span("startup_source_probe", target="central_medical"):
+            before, original_state = _source_state(path)
         stage("cache_probe")
-        cached = startup_snapshot_cache.load(
-            path, ttl_sec=ADMISSION_TTL_SEC,
-            destination_path=os.path.join(workspace, "cache_baseline.db"),
-        ) if use_cache else None
+        with startup_span("startup_cache_load"):
+            cached = startup_snapshot_cache.load(
+                path, ttl_sec=ADMISSION_TTL_SEC,
+                destination_path=os.path.join(workspace, "cache_baseline.db"),
+            ) if use_cache else None
         if cached is not None and (
                 cached.get("admission") != before
                 or cached.get("state", {}).get("db_cycle") != original_state.get("db_cycle")
@@ -269,15 +273,17 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
         # Backup API already quick_checked, checkpointed, closed and fsynced the
         # local snapshot. Verify its schema/cycle against the live source too.
         stage("source_confirmation")
-        after, current = _source_state(path)
+        with startup_span("startup_source_confirmation", target="central_medical"):
+            after, current = _source_state(path)
         if (before != after or original_state["db_cycle"] != current["db_cycle"]
                 or original_state["schema_digest"] != current["schema_digest"]
                 or result["state"].get("db_cycle") != current.get("db_cycle")):
             return False, "database is locked: database changed during startup snapshot", False
-        with closing(sqlite3.connect(build_sqlite_file_uri(snapshot_path, mode="ro"), uri=True)) as conn:
-            from rem_card.app.role_admission import read_admission_state
-            copied = read_admission_state(conn, path)
-            schema_digest = _schema_digest(conn)
+        with startup_span("startup_snapshot_validation"):
+            with closing(sqlite3.connect(build_sqlite_file_uri(snapshot_path, mode="ro"), uri=True)) as conn:
+                from rem_card.app.role_admission import read_admission_state
+                copied = read_admission_state(conn, path)
+                schema_digest = _schema_digest(conn)
         # SQLite backup deliberately changes destination schema_version and the
         # local destination uses WAL. Compare actual schema definitions instead.
         for key in ("schema_version", "journal_mode"):
@@ -291,12 +297,27 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
             full_checked_at_epoch = time.time()
         # Persistence is optional. DPAPI/cache/filesystem failures cannot turn a
         # successfully validated source snapshot into an admission failure.
-        startup_snapshot_cache.store(
-            path, snapshot_path, admission=after, state=result["state"],
-            schema_digest=current["schema_digest"], source_stamp=result.get("source_stamp"),
-            full_checked_at_epoch=full_checked_at_epoch,
+        unchanged_master = (
+            cached is not None and sync_mode == "cache"
+            and result.get("source_stamp") is not None
+            and cached.get("source_stamp") == result["source_stamp"]
+            and cached.get("admission") == after
+            and cached.get("state") == result["state"]
+            and cached.get("schema_digest") == current["schema_digest"]
         )
-        with _local_destination():
+        with startup_span("startup_cache_store"):
+            # load() already authenticated and hashed this exact master. A
+            # live unchanged source and equal watermark do not require another
+            # copy/fsync/hash/DPAPI publication of the same persistent baseline.
+            # The workspace candidate still receives its independent checks.
+            persisted = unchanged_master or startup_snapshot_cache.store(
+                path, snapshot_path, admission=after, state=result["state"],
+                schema_digest=current["schema_digest"], source_stamp=result.get("source_stamp"),
+                full_checked_at_epoch=full_checked_at_epoch,
+            )
+        startup_event("startup_cache_persistence", sync_mode=sync_mode,
+                      outcome="unchanged_master" if unchanged_master else "stored" if persisted else "unavailable")
+        with startup_span("startup_manifest_prepare"), _local_destination():
             manifest = {"workspace": workspace, "path": snapshot_path, "source": after,
                         "state": result["state"], "fingerprint": _fingerprint(snapshot_path),
                         "sha256": _digest(snapshot_path), "sync_mode": sync_mode,
@@ -307,15 +328,21 @@ def check_snapshot(path: str, workspace: str, *, lease_duration_sec: float = 183
             stage("cache_expired")
             return check_snapshot(path, workspace, lease_duration_sec=lease_duration_sec,
                                   progress=progress, use_cache=False)
+        startup_event("startup_snapshot_result", sync_mode=sync_mode,
+                      cache_hit=cached is not None,
+                      full_scan_age_sec=round(max(0.0, time.time() - full_checked_at_epoch), 3))
         return True, json.dumps({"admission": after, "snapshot": manifest,
                                  "full_checked_at_epoch": full_checked_at_epoch,
                                  "sync_mode": sync_mode}), False
-    except (LocalReplicaWriterBusy, LocalReplicaSnapshotBusy, LocalReplicaDestinationError):
+    except (LocalReplicaWriterBusy, LocalReplicaSnapshotBusy, LocalReplicaDestinationError) as exc:
         # One bounded attempt at the original direct full check. It can hold a
         # read lock like the old startup path, but avoids starving role entry
         # behind the optional background copier. No stale seed is published.
         try:
-            return _direct_without_seed(path, before, progress)
+            reason = ("local_destination_unavailable" if isinstance(exc, LocalReplicaDestinationError)
+                      else "writer_busy" if isinstance(exc, LocalReplicaWriterBusy) else "snapshot_busy")
+            startup_event("startup_snapshot_copy_deferred", reason=reason, error_class=type(exc).__name__)
+            return _direct_without_seed(path, before, progress, fallback_reason=reason)
         except Exception as exc:
             return False, f"direct admission unavailable: {exc}", False
     except LocalReplicaRotationBusy as exc:
