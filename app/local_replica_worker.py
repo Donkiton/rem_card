@@ -18,6 +18,7 @@ from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
 from rem_card.app.db_wait_diagnostics import observe, observed_call, mark_stage, current_operation, bind_connection
 from rem_card.app.sqlite_shared import FileWriteLock, configure_connection, describe_sqlite_lock_holder
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
+from rem_card.app.replica_copy_diagnostics import current_copy, observed_copy
 
 
 DEFAULT_REPLICA_SYNC_TIMEOUT_SEC = 30.0
@@ -255,6 +256,13 @@ def _open_temp_replica(db_path: str) -> sqlite3.Connection:
         raise
 
 
+def _flush_snapshot_file(path):
+    with open(path, "r+b") as handle:
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+@observed_copy("direct_snapshot")
 def _sync_snapshot(
     message: dict[str, Any],
     *,
@@ -262,6 +270,7 @@ def _sync_snapshot(
     progress_callback: Callable[[str], None] | None = None,
     backup_progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
+    diagnostics = current_copy()
     central_db_path = os.path.abspath(str(message.get("central_db_path") or ""))
     temp_db_path = os.path.abspath(str(message.get("temp_db_path") or ""))
     expected_state = dict(message.get("local_state") or {})
@@ -284,12 +293,12 @@ def _sync_snapshot(
     try:
         if progress_callback is not None:
             progress_callback("central_open")
-        central_conn = _open_central_readonly(central_db_path)
+        central_conn = diagnostics.call("source_open", _open_central_readonly, central_db_path)
         bind_connection(central_conn)
         mark_stage("replica_state_read")
         if progress_callback is not None:
             progress_callback("state_read")
-        central_state = _read_database_state(central_conn)
+        central_state = diagnostics.call("source_state", _read_database_state, central_conn)
         if _states_match(central_state, expected_state):
             return {
                 "status": "unchanged",
@@ -302,17 +311,17 @@ def _sync_snapshot(
             before_backup()
         if debug_delay_sec:
             time.sleep(debug_delay_sec)
-        if writer_lock_path and os.path.exists(writer_lock_path):
+        if writer_lock_path and diagnostics.call("writer_probe", os.path.exists, writer_lock_path):
             raise LocalReplicaWriterBusy()
 
         if progress_callback is not None:
             progress_callback("central_open")
-        central_conn = _open_central_readonly(central_db_path)
+        central_conn = diagnostics.call("source_open", _open_central_readonly, central_db_path)
         bind_connection(central_conn)
         mark_stage("replica_state_read")
         if progress_callback is not None:
             progress_callback("state_read")
-        central_state = _read_database_state(central_conn)
+        central_state = diagnostics.call("source_state", _read_database_state, central_conn)
         if _states_match(central_state, expected_state):
             return {
                 "status": "unchanged",
@@ -321,7 +330,7 @@ def _sync_snapshot(
 
         with _local_destination():
             os.makedirs(os.path.dirname(temp_db_path), exist_ok=True)
-            temp_conn = _open_temp_replica(temp_db_path)
+            temp_conn = diagnostics.call("local_open", _open_temp_replica, temp_db_path)
 
         last_writer_probe = 0.0
         last_backup_progress_emit = 0.0
@@ -357,28 +366,32 @@ def _sync_snapshot(
         def yield_to_writer(status: int, remaining: int, total: int) -> None:
             nonlocal backup_reported_full, last_writer_probe
             now = time.monotonic()
-            if int(status) & 0xFF == getattr(sqlite3, "SQLITE_FULL", 13):
-                backup_reported_full = True
-            sqlite_busy = status in (
-                getattr(sqlite3, "SQLITE_BUSY", 5),
-                getattr(sqlite3, "SQLITE_LOCKED", 6),
-            )
-            if (
-                not sqlite_busy
-                and now - last_writer_probe < WRITER_LOCK_PROBE_INTERVAL_SEC
-            ):
+            observed_at = diagnostics.callback_begin(status, remaining, total)
+            try:
+                if int(status) & 0xFF == getattr(sqlite3, "SQLITE_FULL", 13):
+                    backup_reported_full = True
+                sqlite_busy = status in (
+                    getattr(sqlite3, "SQLITE_BUSY", 5),
+                    getattr(sqlite3, "SQLITE_LOCKED", 6),
+                )
+                if (
+                    not sqlite_busy
+                    and now - last_writer_probe < WRITER_LOCK_PROBE_INTERVAL_SEC
+                ):
+                    report_backup_progress(remaining, total)
+                    return
+                last_writer_probe = now
+                if writer_lock_path and diagnostics.call("writer_probe", os.path.exists, writer_lock_path):
+                    raise LocalReplicaWriterBusy()
                 report_backup_progress(remaining, total)
-                return
-            last_writer_probe = now
-            if writer_lock_path and os.path.exists(writer_lock_path):
-                raise LocalReplicaWriterBusy()
-            report_backup_progress(remaining, total)
+            finally:
+                diagnostics.callback_end(observed_at)
 
         mark_stage("replica_backup")
         if progress_callback is not None:
             progress_callback("backup")
         try:
-            central_conn.backup(
+            diagnostics.call("full_backup", central_conn.backup,
                 temp_conn,
                 pages=LOCAL_REPLICA_BACKUP_PAGES,
                 progress=yield_to_writer,
@@ -392,7 +405,8 @@ def _sync_snapshot(
         if progress_callback is not None:
             progress_callback("checkpoint")
         with _local_destination():
-            checkpoint_row = temp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            checkpoint_row = diagnostics.call("checkpoint", lambda:
+                temp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
             if checkpoint_row and int(checkpoint_row[0] or 0) not in (0,):
                 raise sqlite3.OperationalError(
                     f"local replica WAL checkpoint failed: {tuple(checkpoint_row)}"
@@ -401,21 +415,20 @@ def _sync_snapshot(
         if progress_callback is not None:
             progress_callback("quick_check")
         with _local_destination():
-            quick_row = temp_conn.execute("PRAGMA quick_check").fetchone()
+            quick_row = diagnostics.call("quick_check", lambda:
+                temp_conn.execute("PRAGMA quick_check").fetchone())
             if not quick_row or str(quick_row[0] or "").lower() != "ok":
                 raise sqlite3.DatabaseError(
                     f"local replica quick_check failed: {quick_row[0] if quick_row else 'empty'}"
                 )
-            snapshot_state = _read_database_state(temp_conn)
+            snapshot_state = diagnostics.call("local_state", _read_database_state, temp_conn)
             temp_conn.close()
         temp_conn = None
         mark_stage("replica_fsync")
         if progress_callback is not None:
             progress_callback("fsync")
         with _local_destination():
-            with open(temp_db_path, "r+b") as fh:
-                fh.flush()
-                os.fsync(fh.fileno())
+            diagnostics.call("fsync", _flush_snapshot_file, temp_db_path)
         return {
             "status": "snapshot_ready",
             "state": snapshot_state,
@@ -428,6 +441,7 @@ def _sync_snapshot(
             ),
         }
     except Exception:
+        diagnostics.note_error()
         failed = True
         raise
     finally:
@@ -459,6 +473,7 @@ def _sync_snapshot_with_network_lease(
         )
 
 
+@observed_copy("network_lease")
 def _sync_snapshot_with_network_lease_observed(
     message: dict[str, Any],
     *,
@@ -471,6 +486,7 @@ def _sync_snapshot_with_network_lease_observed(
     Keeping rotation checks, lease I/O and the database snapshot in this
     process lets the parent enforce one hard deadline for the complete sync.
     """
+    diagnostics = current_copy()
     progress_reporter = _ReplicaProgress(progress_callback)
     progress_callback = progress_reporter
     central_db_path = os.path.abspath(
@@ -548,7 +564,7 @@ def _sync_snapshot_with_network_lease_observed(
             progress_callback("lease_acquire")
         if debug_lease_delay_sec:
             time.sleep(debug_lease_delay_sec)
-        if writer_lock_path and os.path.exists(writer_lock_path):
+        if writer_lock_path and diagnostics.call("writer_probe", os.path.exists, writer_lock_path):
             raise LocalReplicaWriterBusy()
         if rotation_gate is not None and os.path.exists(rotation_lock_path):
             rotation_gate.cleanup_abandoned(
@@ -560,7 +576,7 @@ def _sync_snapshot_with_network_lease_observed(
         owner_id = (
             f"{socket.gethostname()}:{os.getpid()}:local_replica_snapshot"
         )
-        if not snapshot_lease.acquire(
+        if not diagnostics.call("lease_acquire", snapshot_lease.acquire,
             owner_id=owner_id,
             source="local_replica_snapshot",
         ):
@@ -574,19 +590,19 @@ def _sync_snapshot_with_network_lease_observed(
 
         def acquire_snapshot_gate() -> None:
             nonlocal snapshot_gate_acquired
-            if writer_lock_path and os.path.exists(writer_lock_path):
+            if writer_lock_path and diagnostics.call("writer_probe", os.path.exists, writer_lock_path):
                 raise LocalReplicaWriterBusy()
             if snapshot_gate_acquired:
                 return
             if progress_callback is not None:
                 progress_callback("snapshot_gate_acquire")
-            if not snapshot_gate.acquire(
+            if not diagnostics.call("gate_acquire", snapshot_gate.acquire,
                 owner_id=owner_id,
                 source="local_replica_snapshot_gate",
             ):
                 raise LocalReplicaSnapshotBusy(describe_sqlite_lock_holder(snapshot_gate_path))
             snapshot_gate_acquired = True
-            if writer_lock_path and os.path.exists(writer_lock_path):
+            if writer_lock_path and diagnostics.call("writer_probe", os.path.exists, writer_lock_path):
                 raise LocalReplicaWriterBusy()
             if rotation_gate is not None and os.path.exists(rotation_lock_path):
                 raise LocalReplicaRotationBusy()
@@ -600,7 +616,7 @@ def _sync_snapshot_with_network_lease_observed(
             acquire_snapshot_gate()
 
             def check_delta_cancel() -> None:
-                if writer_lock_path and os.path.exists(writer_lock_path):
+                if writer_lock_path and diagnostics.call("writer_probe", os.path.exists, writer_lock_path):
                     raise LocalReplicaWriterBusy()
                 if rotation_gate is not None and os.path.exists(rotation_lock_path):
                     raise LocalReplicaRotationBusy()
@@ -621,8 +637,9 @@ def _sync_snapshot_with_network_lease_observed(
             message = {**message, "local_state": {}}
         from rem_card.app.role_admission import file_identity
         from rem_card.app.replica_source_stamp import capture_source_stamp
-        with closing(_open_central_readonly(central_db_path)) as stamp_conn:
-            source_stamp = capture_source_stamp(stamp_conn, central_db_path)
+        with closing(diagnostics.call("source_open", _open_central_readonly, central_db_path)) as stamp_conn:
+            source_stamp = diagnostics.call("source_stamp", capture_source_stamp, stamp_conn, central_db_path)
+            diagnostics.source_stamp("before", source_stamp)
         try:
             source_identity = file_identity(central_db_path)
         except ValueError:
@@ -637,14 +654,17 @@ def _sync_snapshot_with_network_lease_observed(
             _remove_with_sidecars(str(message["temp_db_path"]))
             raise LocalReplicaRotationBusy()
         result["source_identity"] = source_identity
-        with closing(_open_central_readonly(central_db_path)) as stamp_conn:
-            result["source_stamp"] = source_stamp if capture_source_stamp(stamp_conn, central_db_path) == source_stamp else None
+        with closing(diagnostics.call("source_open", _open_central_readonly, central_db_path)) as stamp_conn:
+            final_stamp = diagnostics.call("source_stamp", capture_source_stamp, stamp_conn, central_db_path)
+            diagnostics.source_stamp("after", final_stamp)
+            result["source_stamp"] = source_stamp if final_stamp == source_stamp else None
         result["sync_mode"] = "full" if result["status"] == "snapshot_ready" else "unchanged"
         if fallback_reason:
             result["full_reason"] = fallback_reason
             result["delta_metrics"] = fallback_metrics
         return result
     except Exception as exc:
+        diagnostics.note_error()
         # Cleanup emits its own progress; preserve the operation that failed.
         progress_reporter.preserve_failure(exc)
         raise
@@ -656,7 +676,7 @@ def _sync_snapshot_with_network_lease_observed(
                         progress_callback("snapshot_gate_release")
                 except Exception:
                     pass  # IPC diagnostics must never prevent lock release.
-                snapshot_gate.release()
+                diagnostics.call("gate_release", snapshot_gate.release)
         finally:
             if snapshot_lease_acquired:
                 try:
@@ -664,7 +684,7 @@ def _sync_snapshot_with_network_lease_observed(
                         progress_callback("lease_release")
                 except Exception:
                     pass
-                snapshot_lease.release()
+                diagnostics.call("lease_release", snapshot_lease.release)
 
 
 def _send_error(pipe, exc: Exception, *, stage: str = "") -> None:
