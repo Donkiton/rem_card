@@ -1,13 +1,13 @@
 <p align="center">
-  <a href="architecture.en.md"><kbd><strong>English</strong> ✓</kbd></a>
   <a href="architecture.ru.md"><kbd>Русский</kbd></a>
+  <a href="architecture.en.md"><kbd><strong>English</strong> ✓</kbd></a>
   <a href="architecture.zh-CN.md"><kbd>中文（简体）</kbd></a>
   <a href="architecture.ja.md"><kbd>日本語</kbd></a>
   <a href="architecture.de.md"><kbd>Deutsch</kbd></a>
 </p>
 
 <p align="center">
-  <a href="../../README.md">← README</a> ·
+  <a href="../../README.en.md">← README</a> ·
   <a href="features.en.md">Features</a> ·
   <a href="setup.en.md">Setup</a>
 </p>
