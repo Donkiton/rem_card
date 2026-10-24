@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from rem_card.app.logger import logger
 from rem_card.services.operblock_handoff_service import OperBlockLocalRaoHandoffService
+from rem_card.ui.shared.async_call import AsyncCallThread
 
 
 def _remcard_db(service):
@@ -90,26 +91,56 @@ class OperBlockRaoHandoffNotifier(QObject):
         self._shown_ids: set[int] = set()
         self._dialog: QMessageBox | None = None
         self._closed = False
+        self._read_worker: AsyncCallThread | None = None
+        self._read_generation = 0
 
     def close(self) -> None:
         self._closed = True
+        self._read_generation += 1
+        if self._read_worker is not None:
+            # A blocked SQLite/SMB read cannot be interrupted by a Qt signal.
+            # The keepalive worker owns it; closing the role must not wait for
+            # it or display its eventual result in another session.
+            self._read_worker.requestInterruption()
         if self._dialog is not None:
             self._dialog.close()
             self._dialog.deleteLater()
             self._dialog = None
 
     def check(self) -> None:
-        if self._closed or self._dialog is not None or self._service is None:
+        if (self._closed or self._dialog is not None or self._service is None
+                or self._read_worker is not None):
             return
+        self._read_generation += 1
+        generation = self._read_generation
+        worker = AsyncCallThread(self._service.list_pending)
+        self._read_worker = worker
+        worker.succeeded.connect(lambda rows: self._on_pending_loaded(generation, rows))
+        worker.failed.connect(lambda exc: self._on_pending_failed(generation, exc))
+        worker.finished.connect(lambda: self._on_pending_finished(worker))
         try:
-            invitations = self._service.list_pending()
-        except Exception:
-            logger.exception("Unable to read local OperBlock RAO invitations")
+            worker.start()
+        except Exception as exc:
+            self._read_worker = None
+            worker.deleteLater()
+            self._on_pending_failed(generation, exc)
+
+    def _on_pending_loaded(self, generation, invitations) -> None:
+        if self._closed or generation != self._read_generation or self._dialog is not None:
             return
         invitation = next((row for row in invitations if int(row["id"]) not in self._shown_ids), None)
         if invitation is None:
             return
         self._show(invitation)
+
+    def _on_pending_failed(self, generation, exc) -> None:
+        if not self._closed and generation == self._read_generation:
+            logger.warning("Unable to read local OperBlock RAO invitations: %s", exc)
+
+    def _on_pending_finished(self, worker) -> None:
+        if worker is self._read_worker:
+            self._read_worker = None
+        worker.deleteLater()
 
     def _show(self, invitation: dict[str, Any]) -> None:
         invitation_id = int(invitation["id"])

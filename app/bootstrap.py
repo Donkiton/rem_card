@@ -380,6 +380,15 @@ def _bootstrap_impl(role: str | None = None, runtime_context=None) -> Container:
 
 
 def _cleanup_failed_bootstrap(runtime_owner) -> dict[str, bool]:
+    settings_ok = True
+    settings_service = getattr(runtime_owner, "settings_service", None)
+    stop_settings_retry = getattr(settings_service, "stop_deferred_release_retry", None)
+    if callable(stop_settings_retry):
+        try:
+            settings_ok = bool(stop_settings_retry(timeout_sec=2.0))
+        except Exception as exc:
+            settings_ok = False
+            logger.warning("Failed bootstrap settings worker cleanup: %s", exc)
     data_service = getattr(runtime_owner, "data_service", None)
     data_ok = True
     if data_service is not None:
@@ -399,7 +408,10 @@ def _cleanup_failed_bootstrap(runtime_owner) -> dict[str, bool]:
             logger.warning("Failed bootstrap DatabaseManager cleanup: %s", exc)
     else:
         logger.warning("Failed bootstrap DB cleanup deferred until DataService stops")
-    return {"ok": bool(data_ok and db_ok), "data_service": data_ok, "db_manager": db_ok}
+    result = {"ok": bool(settings_ok and data_ok and db_ok), "data_service": data_ok, "db_manager": db_ok}
+    if callable(stop_settings_retry):
+        result["settings_service"] = settings_ok
+    return result
 
 
 def _finish_bootstrap(
@@ -422,6 +434,8 @@ def _finish_bootstrap(
         runtime_context=effective_context,
         readonly=bool(getattr(effective_context, "settings_readonly", False)),
     )
+    # Retain deferred settings work even if a later bootstrap step fails.
+    runtime_owner.settings_service = settings_service
     from rem_card.app import operblock_startup_metrics
 
     with operblock_startup_metrics.measure("settings_ensure_ready_ms", source="bootstrap"):

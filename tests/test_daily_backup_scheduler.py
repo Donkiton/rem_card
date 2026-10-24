@@ -198,6 +198,48 @@ def test_clinical_writer_can_commit_while_completed_snapshot_is_uploaded(
         ]
 
 
+def test_copy_budget_yields_shared_locks_and_defers_without_publishing(tmp_path: Path) -> None:
+    source = tmp_path / "medical.db"
+    _make_database(source)
+    config = _config(tmp_path, backup_date="2026-10-23")
+    config.update(copy_budget_sec=0.25, emit_progress=True)
+    paths = daily._daily_paths(config)
+
+    class SlowCopy(_CaptureConnection):
+        def send(self, message):
+            if message.get("stage") == "copy" and message.get("state") == "started":
+                time.sleep(0.3)
+            super().send(message)
+
+    capture = SlowCopy()
+    daily._daily_backup_worker(config, capture)
+
+    assert capture.value == {"status": "deferred", "reason": "copy_budget_exhausted"}
+    assert not Path(paths["done"]).exists()
+    assert not Path(paths["backup"]).exists()
+    assert not Path(config["database_lock_path"]).exists()
+    assert not Path(paths["snapshot_lease"]).exists()
+    assert not Path(paths["reservation"]).exists()
+    assert not Path(paths["staging"]).exists()
+    # The next ordinary attempt can publish the same intact source.
+    assert daily._perform_daily_backup(config)["status"] == "success"
+
+
+def test_unrelated_timeout_keeps_failure_classification(tmp_path: Path, monkeypatch) -> None:
+    _make_database(tmp_path / "medical.db")
+
+    def unrelated_timeout(*_args, **_kwargs):
+        raise TimeoutError("daily SQLite copy exceeded its copy budget")
+
+    monkeypatch.setattr(daily, "_upload_local_staging", unrelated_timeout)
+    capture = _CaptureConnection()
+    daily._daily_backup_worker(_config(tmp_path, backup_date="2026-10-23"), capture)
+
+    assert capture.value["status"] == "failure"
+    assert capture.value["error_class"] == "TimeoutError"
+    assert not (tmp_path / "db.lock").exists()
+
+
 def test_publication_failure_keeps_last_good_backup_and_cleans_owned_staging(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -531,6 +573,230 @@ def test_termination_failure_retains_worker_and_refuses_cleanup(tmp_path: Path, 
 
     assert not scheduler._terminate_current_process()
     assert scheduler._process is process and scheduler._process_job is not None
+
+
+def _hold_daily_copy_lock(config, sender):
+    """A real child dies without finally, like an interrupted network copy."""
+    paths = daily._daily_paths(config)
+    owner = f"daily-backup-job:{config['job_token']}"
+    for path, source in (
+        (paths["reservation"], daily.DAILY_BACKUP_SOURCE),
+        (config["database_lock_path"], daily.DAILY_DATABASE_LOCK_SOURCE),
+        (paths["snapshot_lease"], daily.DAILY_SNAPSHOT_LEASE_SOURCE),
+    ):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        lock = FileWriteLock(path)
+        assert lock.acquire(owner, source)
+    sender.send({"message_type": "progress", "stage": "copy", "state": "started"})
+    while not Path(config["database_path"] + ".exit-child").exists():
+        time.sleep(0.01)
+    os._exit(0)
+
+
+class _FailingStopProcess:
+    def __init__(self, process, *, kill_really: bool):
+        self.process = process
+        self.kill_really = kill_really
+
+    def __getattr__(self, name):
+        return getattr(self.process, name)
+
+    def terminate(self):
+        raise PermissionError("simulated TerminateProcess exit race")
+
+    def kill(self):
+        if self.kill_really:
+            self.process.kill()
+        raise PermissionError("simulated TerminateProcess exit race")
+
+
+def _install_copy_stop_failure(monkeypatch, *, kill_really):
+    context = multiprocessing.get_context("spawn")
+    workers = []
+
+    class Context:
+        Pipe = staticmethod(context.Pipe)
+
+        @staticmethod
+        def Process(**kwargs):
+            if kwargs.get("name") == "RemCardDailyBackupWorker" and not workers:
+                kwargs["target"] = _hold_daily_copy_lock
+                worker = _FailingStopProcess(context.Process(**kwargs), kill_really=kill_really)
+                workers.append(worker)
+                return worker
+            return context.Process(**kwargs)
+
+    monkeypatch.setattr(daily.multiprocessing, "get_context", lambda *_args: Context())
+    return workers
+
+
+def test_permission_error_after_killing_copy_reaps_real_owned_database_lock(tmp_path, monkeypatch):
+    source = tmp_path / "medical.db"
+    _make_database(source)
+    workers = _install_copy_stop_failure(monkeypatch, kill_really=True)
+    scheduler = daily.DailyBackupScheduler(
+        database_path=str(source), backup_dir=str(tmp_path / "backups"),
+        health_dir=str(tmp_path / "health"), invalid_dir=str(tmp_path / "invalid"),
+        database_lock_path=str(tmp_path / "db.lock"), role="doctor", worker_timeout_sec=0.5,
+    )
+    try:
+        result = scheduler._run_worker("2026-10-23")
+        assert result["reason"] == "worker_timeout"
+        assert not (tmp_path / "db.lock").exists()
+        assert not list((tmp_path / "health").glob("*.lock"))
+        assert not scheduler._has_owned_resources()
+        # Cleanup must restore another workstation's ability to write, without
+        # restarting the owning application.
+        writer = FileWriteLock(str(tmp_path / "db.lock"))
+        assert writer.acquire("second-client", "clinical_write")
+        writer.release()
+    finally:
+        Path(str(source) + ".exit-child").touch()
+        assert scheduler.stop()
+        assert workers
+
+
+def test_scheduler_keeps_failed_stop_owner_and_reaps_after_child_later_dies(tmp_path, monkeypatch):
+    source = tmp_path / "medical.db"
+    _make_database(source)
+    workers = _install_copy_stop_failure(monkeypatch, kill_really=False)
+    scheduler = daily.DailyBackupScheduler(
+        database_path=str(source), backup_dir=str(tmp_path / "backups"),
+        health_dir=str(tmp_path / "health"), invalid_dir=str(tmp_path / "invalid"),
+        database_lock_path=str(tmp_path / "db.lock"), role="nurse", startup_delay_sec=0,
+        worker_timeout_sec=0.5, check_interval_sec=0.05, deferred_retry_sec=0.05,
+        failure_retry_sec=0.05,
+    )
+    try:
+        assert scheduler.start()
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and scheduler.get_probe().get("reason") != "worker_cleanup_pending":
+            time.sleep(0.02)
+        assert scheduler._thread.is_alive()
+        assert scheduler._process is workers[0]
+        assert (tmp_path / "db.lock").exists()
+        assert len(workers) == 1
+        Path(str(source) + ".exit-child").touch()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not scheduler._completed_date:
+            time.sleep(0.02)
+        assert scheduler._completed_date
+        assert not (tmp_path / "db.lock").exists()
+        assert scheduler._thread.is_alive()
+    finally:
+        Path(str(source) + ".exit-child").touch()
+        assert scheduler.stop(timeout_sec=3)
+
+
+def test_public_stop_deadline_preserves_a_child_that_cannot_be_stopped(tmp_path, monkeypatch):
+    source = tmp_path / "medical.db"
+    _make_database(source)
+    workers = _install_copy_stop_failure(monkeypatch, kill_really=False)
+    scheduler = daily.DailyBackupScheduler(
+        database_path=str(source), backup_dir=str(tmp_path / "backups"),
+        health_dir=str(tmp_path / "health"), invalid_dir=str(tmp_path / "invalid"),
+        database_lock_path=str(tmp_path / "db.lock"), role="doctor", worker_timeout_sec=0.5,
+    )
+    try:
+        assert scheduler._run_worker("2026-10-23")["reason"] == "worker_cleanup_pending"
+        started = time.monotonic()
+        assert scheduler.stop(timeout_sec=0.05) is False
+        assert time.monotonic() - started < 0.3
+        assert scheduler._process is workers[0]
+        assert (tmp_path / "db.lock").exists()
+    finally:
+        Path(str(source) + ".exit-child").touch()
+        assert scheduler.stop(timeout_sec=3)
+
+
+def _blocked_cleanup_child(arguments, sender):
+    while not Path(arguments["staging_path"] + ".allow-cleanup").exists():
+        time.sleep(0.01)
+    daily._cleanup_dead_worker_entry(arguments, sender)
+
+
+def test_unstoppable_cleanup_child_is_owned_and_reused_until_it_finishes(tmp_path, monkeypatch):
+    context = multiprocessing.get_context("spawn")
+    dead = context.Process(target=time.sleep, args=(0,))
+    dead.start()
+    dead.join(5)
+    assert dead.exitcode == 0
+    job = {
+        "reservation_path": str(tmp_path / "reservation.lock"),
+        "database_lock_path": str(tmp_path / "db.lock"),
+        "staging_path": str(tmp_path / "owned.staging"),
+        "worker_pid": dead.pid, "job_token": uuid.uuid4().hex,
+    }
+    Path(job["database_lock_path"]).write_text(json.dumps({
+        "host": socket.gethostname(), "pid": dead.pid, "source": daily.DAILY_DATABASE_LOCK_SOURCE,
+        "user_id": f"daily-backup-job:{job['job_token']}", "lock_token": uuid.uuid4().hex,
+    }), encoding="utf-8")
+    Path(job["staging_path"]).write_bytes(b"partial snapshot")
+    children = []
+
+    class Context:
+        Pipe = staticmethod(context.Pipe)
+
+        @staticmethod
+        def Process(**kwargs):
+            kwargs["target"] = _blocked_cleanup_child
+            child = _FailingStopProcess(context.Process(**kwargs), kill_really=False)
+            children.append(child)
+            return child
+
+    monkeypatch.setattr(daily.multiprocessing, "get_context", lambda *_args: Context())
+    scheduler = daily.DailyBackupScheduler(
+        database_path=str(tmp_path / "medical.db"), backup_dir=str(tmp_path / "backups"),
+        health_dir=str(tmp_path / "health"), invalid_dir=str(tmp_path / "invalid"),
+        database_lock_path=job["database_lock_path"], role="doctor",
+    )
+    scheduler._process, scheduler._process_job = dead, job
+    try:
+        assert not scheduler._terminate_current_process(timeout_sec=0.3)
+        assert scheduler._cleanup_process is children[0]
+        assert not scheduler._terminate_current_process(timeout_sec=0.05)
+        assert len(children) == 1
+        assert scheduler._process_job is job
+        assert Path(job["database_lock_path"]).exists()
+        Path(job["staging_path"] + ".allow-cleanup").touch()
+        children[0].join(5)
+        assert scheduler.stop(timeout_sec=3)
+        assert not Path(job["database_lock_path"]).exists()
+        assert not Path(job["staging_path"]).exists()
+        assert len(children) == 1
+    finally:
+        Path(job["staging_path"] + ".allow-cleanup").touch()
+        assert scheduler.stop(timeout_sec=3)
+
+
+def test_unknown_worker_liveness_never_cleans_or_replaces_owner(tmp_path, monkeypatch):
+    class UnknownProcess:
+        pid = 424242
+
+        def is_alive(self):
+            raise OSError("liveness unavailable")
+
+        def terminate(self):
+            raise PermissionError("cannot terminate")
+
+        kill = terminate
+
+        def join(self, timeout=None):
+            pass
+
+    scheduler = daily.DailyBackupScheduler(
+        database_path=str(tmp_path / "medical.db"), backup_dir=str(tmp_path / "backups"),
+        health_dir=str(tmp_path / "health"), invalid_dir=str(tmp_path / "invalid"),
+        database_lock_path=str(tmp_path / "db.lock"), role="doctor",
+    )
+    owner = UnknownProcess()
+    scheduler._process = owner
+    scheduler._process_job = {"worker_pid": owner.pid, "job_token": "unknown-owner"}
+    monkeypatch.setattr(scheduler, "_bounded_dead_worker_cleanup", lambda *_a, **_k: pytest.fail("unknown owner cleaned"))
+    result = scheduler._run_worker("2026-10-23")
+    assert result["reason"] == "worker_cleanup_pending"
+    assert scheduler._process is owner
+    assert scheduler.get_probe()["worker_state"] == "unknown"
 
 
 def test_rotation_deletes_only_bounded_metadata_valid_daily_files(tmp_path: Path) -> None:

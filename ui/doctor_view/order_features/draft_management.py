@@ -37,6 +37,10 @@ class DraftManagementMixin:
         self._legacy_central_draft_detected = False
         self._pending_admin_cell_write_keys.clear()
         self._recent_admin_cell_clicks.clear()
+        # Replace the maps so callbacks from a previous visit cannot release
+        # or restore marks belonging to a new visit to the same card.
+        self._pending_doctor_mark_writes = {}
+        self._doctor_mark_required_versions = {}
         self._discard_deferred_forced_reload_after_guard(discard_reason="context_reset")
         self._clear_local_cell_draft_guard()
         self._reset_local_draft_tracking(clear_baseline=True)

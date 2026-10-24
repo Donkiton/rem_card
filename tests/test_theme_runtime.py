@@ -88,7 +88,7 @@ def test_theme_policy_import_does_not_load_qt_or_storage():
         "assert not any(n.startswith('PySide6') for n in sys.modules); "
         "assert 'rem_card.ui.styles.theme_manager' not in sys.modules; "
         "assert 'rem_card.ui.styles.theme_storage' not in sys.modules",
-    ], cwd=Path(__file__).resolve().parents[2], check=True)
+    ], cwd=Path(__file__).resolve().parents[1], check=True)
 
 
 def test_storage_defaults_to_local_app_data(monkeypatch, tmp_path):

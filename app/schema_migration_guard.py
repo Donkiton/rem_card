@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import socket
 import sqlite3
@@ -9,7 +10,7 @@ from datetime import datetime
 from typing import Any, Iterator, Optional
 
 from rem_card.app.sqlite_shared import FileWriteLock, backup_connection
-from rem_card.app.startup_db_guard import update_client_policy_min_version
+from rem_card.app.startup_db_guard import _compare_client_versions, update_client_policy_min_version
 from rem_card.app.unified_db_schema import (
     SCHEMA_REQUIRED_CLIENT_VERSION,
     ensure_unified_schema,
@@ -90,12 +91,17 @@ def _run_schema_migration(
     conn: sqlite3.Connection, logger: logging.Logger, controller: Any, source: str,
     allow_local_schema_upgrades: bool = False,
 ):
+    def apply_and_validate():
+        ensure_unified_schema(conn, logger=logger, allow_local_schema_upgrades=allow_local_schema_upgrades)
+        if not is_unified_schema_ready(conn):
+            raise RuntimeError("Unified schema migration finished but fastpath contract is not satisfied")
+
     if controller is not None:
         with controller.transaction(conn, source=source):
-            ensure_unified_schema(conn, logger=logger, allow_local_schema_upgrades=allow_local_schema_upgrades)
+            apply_and_validate()
         return
     with _plain_write_transaction(conn):
-        ensure_unified_schema(conn, logger=logger, allow_local_schema_upgrades=allow_local_schema_upgrades)
+        apply_and_validate()
 
 
 def _create_validated_backup(
@@ -134,6 +140,21 @@ def _update_policy(
         baza_dir=baza_dir,
         reason=source,
     )
+
+
+def _require_existing_policy_floor(policy_path: Optional[str]) -> None:
+    if policy_path is None:
+        return
+    try:
+        with open(policy_path, "r", encoding="utf-8") as fh:
+            policy = json.load(fh)
+    except (FileNotFoundError, ValueError) as exc:
+        raise RuntimeError("schema incompatible: обязательная политика доступа к базе недоступна") from exc
+    floor = str(policy.get("min_client_version") or "") if isinstance(policy, dict) else ""
+    if not floor or _compare_client_versions(floor, SCHEMA_REQUIRED_CLIENT_VERSION) < 0:
+        raise RuntimeError(
+            "schema incompatible: обязательное обновление политики базы требует сборки с миграциями"
+        )
 
 
 def _ensure_after_lock(
@@ -175,8 +196,6 @@ def _ensure_after_lock(
         source=source,
     )
     _run_schema_migration(conn, logger, controller, source, allow_local_schema_upgrades)
-    if not is_unified_schema_ready(conn):
-        raise RuntimeError("Unified schema migration finished but fastpath contract is not satisfied")
     return SchemaMigrationResult(migrated=True, backup_path=backup_path, policy_updated=policy_updated)
 
 
@@ -197,13 +216,21 @@ def ensure_unified_schema_with_migration_backup(
     runtime_context: Any = None,
 ) -> SchemaMigrationResult:
     logger = logger or logging.getLogger(__name__)
+    if getattr(runtime_context, "is_network", False) and not policy_path:
+        raise RuntimeError("schema incompatible: для сетевой базы не задана политика доступа")
     with controller.connection_guard(conn) if controller is not None else nullcontext():
         allow_local_schema_upgrades = local_operblock_schema_upgrades_allowed(conn, runtime_context)
         if database_upgrades_disabled() and not allow_local_schema_upgrades:
             require_compatible_schema(is_unified_schema_ready(conn))
+            # A mistakenly optional 5.1.11 build cannot silently leave an
+            # already upgraded shared database accessible to old clients.
+            _require_existing_policy_floor(policy_path)
             return SchemaMigrationResult(migrated=False)
     _ = db_path
-    effective_min_client_version = str(min_client_version or APP_VERSION or SCHEMA_REQUIRED_CLIENT_VERSION)
+    effective_min_client_version = SCHEMA_REQUIRED_CLIENT_VERSION
+    for candidate in (APP_VERSION, min_client_version):
+        if candidate and _compare_client_versions(str(candidate), effective_min_client_version) > 0:
+            effective_min_client_version = str(candidate)
 
     if controller is not None:
         with controller.connection_guard(conn):

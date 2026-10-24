@@ -19,6 +19,7 @@ from rem_card.app.logger import logger
 from rem_card.data.dto.remcard_dto import OrderDTO
 from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
 from rem_card.services.order_domain_service import NURSE_MARK_NOT_EXECUTED
+from rem_card.services.concurrency import OrderMarkConflictError
 from rem_card.ui.doctor_view.components.order_template_builder import build_orders_from_template
 from rem_card.ui.doctor_view.template_dialog import TemplateSelectionDialog
 from rem_card.ui.shared.async_call import AsyncCallThread
@@ -379,7 +380,7 @@ class OrdersInterfaceMixin:
             return True
 
     def _handle_doctor_order_mark(self, index):
-        if self._is_read_only():
+        if self._is_read_only() or getattr(self, "_is_closing", False):
             return
         if not index.isValid() or index.column() == 0 or not self.model:
             return
@@ -427,8 +428,27 @@ class OrdersInterfaceMixin:
             self.request_refresh(force=True, source="doctor_order_mark_uncommitted", priority="HIGH")
             return
 
-        mark = str(getattr(admin, "comment", "") or "")
         expected_version = int(getattr(admin, "version", 0) or 0)
+        pending = getattr(self, "_pending_doctor_mark_writes", None)
+        if pending is None:
+            pending = self._pending_doctor_mark_writes = {}
+        required_versions = getattr(self, "_doctor_mark_required_versions", None)
+        if required_versions is None:
+            required_versions = self._doctor_mark_required_versions = {}
+        if admin_id in pending or hasattr(admin, "_pending_mark"):
+            return
+        required_version = required_versions.get(admin_id)
+        if required_version is not None and expected_version < required_version:
+            record_metric(
+                "order_action_pending_blocked", 1, role="doctor", source="ui_guard",
+                reason="awaiting_mark_revision", admission_id=self.admission_id,
+                admin_id=admin_id, version=expected_version, required_version=required_version,
+            )
+            self.request_refresh(force=True, source="doctor_order_mark_conflict", priority="HIGH")
+            return
+        required_versions.pop(admin_id, None)
+
+        mark = str(getattr(admin, "comment", "") or "")
         set_mark = getattr(self.service, "set_doctor_order_mark", None) or getattr(self.service, "set_nurse_order_mark", None)
         cancel_mark = getattr(self.service, "cancel_doctor_order_mark", None) or getattr(self.service, "cancel_nurse_order_mark", None)
         if not callable(set_mark) or not callable(cancel_mark):
@@ -445,6 +465,7 @@ class OrdersInterfaceMixin:
             operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_EXECUTED, expected_version=expected_version)
 
         click_seq = self._next_orders_click_seq()
+        pending[admin_id] = click_seq
         logger.info(
             "[OrdersClick] click_accept role=doctor_mark seq=%s admission_id=%s row=%s col=%s admin_id=%s old_mark=%s next_mark=%s",
             click_seq,
@@ -464,17 +485,27 @@ class OrdersInterfaceMixin:
         balance_sequence = self._balance_mark_override_seq
 
         def on_success():
+            if pending.get(admin_id) == click_seq:
+                pending.pop(admin_id, None)
             self._finish_admin_write()
-            if not self._is_current_context(target_admission_id, target_shift_date):
+            if (not self._is_current_context(target_admission_id, target_shift_date)
+                    or self._pending_doctor_mark_writes is not pending):
                 return
             self._apply_committed_order_mark(index, admin, next_mark, sequence=balance_sequence)
             self._schedule_fast_sync()
             self._schedule_state_sync()
 
         def on_error(exc):
+            if pending.get(admin_id) == click_seq:
+                pending.pop(admin_id, None)
             self._finish_admin_write()
-            if not self._is_current_context(target_admission_id, target_shift_date):
+            if (not self._is_current_context(target_admission_id, target_shift_date)
+                    or self._pending_doctor_mark_writes is not pending):
                 return
+            if isinstance(exc, OrderMarkConflictError) and exc.reason in {
+                "displayed_version_changed", "version_update_mismatch", "version_cancel_mismatch",
+            }:
+                required_versions[admin_id] = max(expected_version + 1, int(exc.current_version or 0))
             override = self._balance_mark_overrides.get(admin_id)
             if override is not None and override.get("sequence") == balance_sequence:
                 self._discard_balance_mark_override(admin_id)
@@ -483,7 +514,7 @@ class OrdersInterfaceMixin:
                         delattr(previous, "_pending_mark")
                 self._restore_admin_cells(previous_by_key)
             self.balanceSnapshotRequired.emit()
-            self.request_refresh(force=True)
+            self.request_refresh(force=True, source="doctor_order_mark_failed", priority="HIGH")
 
         self._enqueue_write(
             f"doctor_order_mark:{admin_id}:seq={click_seq}",

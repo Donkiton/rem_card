@@ -217,6 +217,7 @@ class ChangeWriteCoordinationMixin:
             return
 
         queued_at = time.perf_counter()
+        completion_delivered = False
         logger.info(
             "[OrdersClick] write_enqueue role=doctor admission_id=%s description=%s block_ui=%s",
             self.admission_id,
@@ -227,6 +228,8 @@ class ChangeWriteCoordinationMixin:
             self.frame_container.setEnabled(False)
 
         def _on_success(result):
+            nonlocal completion_delivered
+            completion_delivered = True
             if block_ui and hasattr(self, "frame_container"):
                 self.frame_container.setEnabled(True)
             logger.info(
@@ -243,6 +246,8 @@ class ChangeWriteCoordinationMixin:
                     on_success()
 
         def _on_error(exc):
+            nonlocal completion_delivered
+            completion_delivered = True
             if block_ui and hasattr(self, "frame_container"):
                 self.frame_container.setEnabled(True)
             logger.info(
@@ -260,9 +265,16 @@ class ChangeWriteCoordinationMixin:
                 if show_error:
                     self._show_write_error(description, exc)
 
-        self.service.enqueue_write(
-            description=description,
-            operation=operation,
-            on_success=_on_success,
-            on_error=_on_error,
-        )
+        try:
+            self.service.enqueue_write(
+                description=description,
+                operation=operation,
+                on_success=_on_success,
+                on_error=_on_error,
+            )
+        except Exception as exc:
+            # Queue admission can fail before any callback is registered.
+            # Restore the same pending UI state as for an asynchronous failure.
+            if completion_delivered:
+                raise
+            _on_error(exc)
