@@ -4,14 +4,15 @@ from contextlib import nullcontext
 
 import pytest
 
-from rem_card.app import client_build_profile, unified_db_schema
+from rem_card.app import client_build_profile, schema_migration_guard, startup_db_guard, unified_db_schema
 from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
 from rem_card.app.startup_db_guard import update_client_policy_min_version, _load_or_create_client_policy
 from rem_card.app.operblock_schema import ensure_operblock_schema, _apply_operblock_schema
 from rem_card.data.settings import settings_schema
 
 
-def test_compatible_database_and_policy_are_unchanged(tmp_path, monkeypatch):
+@pytest.mark.parametrize("client_version", ["5.1.11", "5.1.12"])
+def test_compatible_database_and_policy_are_unchanged(tmp_path, monkeypatch, client_version):
     conn = sqlite3.connect(':memory:')
     unified_db_schema.ensure_unified_schema(conn)
     conn.execute('DELETE FROM meta WHERE key = ?', (unified_db_schema.SCHEMA_FASTPATH_META_KEY,))
@@ -21,12 +22,14 @@ def test_compatible_database_and_policy_are_unchanged(tmp_path, monkeypatch):
     policy.write_text('{"min_client_version": "5.1.11"}', encoding='utf-8')
     original_policy = policy.read_bytes()
     monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', True)
+    monkeypatch.setattr(schema_migration_guard, 'APP_VERSION', client_version)
+    monkeypatch.setattr(startup_db_guard, 'APP_VERSION', client_version)
     for _ in range(2):
         result = ensure_unified_schema_with_migration_backup(
             conn, db_path='unused', backup_dir=str(tmp_path / 'backup'), policy_path=str(policy))
         assert not result.migrated and not result.policy_updated
         unified_db_schema.ensure_unified_schema(conn)
-        assert not update_client_policy_min_version(str(policy), '5.1.1')
+        assert not update_client_policy_min_version(str(policy), client_version)
     assert list(conn.iterdump()) == before
     assert policy.read_bytes() == original_policy
     assert not (tmp_path / 'backup').exists()

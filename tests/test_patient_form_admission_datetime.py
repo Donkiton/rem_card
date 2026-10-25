@@ -6,6 +6,9 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,12 +18,77 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from PySide6.QtCore import QDate, QTime  # noqa: E402
-from PySide6.QtWidgets import QApplication, QDateEdit, QTimeEdit  # noqa: E402
+from PySide6.QtCore import QDate, QDateTime, QPoint, QTime, Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication, QDateEdit, QStyle, QStyleOptionFrame, QTableView, QTimeEdit,
+)
 
 from rem_card.ui.patient_bed_management.patient_form import PatientForm  # noqa: E402
 from rem_card.ui.patient_bed_management.tabs.general_tab import GeneralTabWidget  # noqa: E402
 from rem_card.ui.shared.custom_message_box import CustomMessageBox  # noqa: E402
+from rem_card.ui.styles import theme_runtime  # noqa: E402
+from rem_card.ui.styles.theme import STYLE_PATIENT_FORM_TAB  # noqa: E402
+
+
+@pytest.fixture(params=["light", "dark"])
+def visible_general_tab(request):
+    app = QApplication.instance() or QApplication([])
+    with patch.object(theme_runtime, "_mode", request.param):
+        widget = GeneralTabWidget()
+        theme_runtime.set_widget_style(widget, STYLE_PATIENT_FORM_TAB)
+        widget.admission_datetime_input.setDateTime(QDateTime(2026, 6, 24, 7, 45, 0))
+        widget.show()
+        app.processEvents()
+        try:
+            yield app, widget
+        finally:
+            widget.hide()
+
+
+def test_visible_admission_datetime_text_fits_form_field(visible_general_tab):
+    _app, widget = visible_general_tab
+    editor = widget.admission_datetime_input
+    line_edit = editor.lineEdit()
+    option = QStyleOptionFrame()
+    line_edit.initStyleOption(option)
+    content = line_edit.style().subElementRect(QStyle.SE_LineEditContents, option, line_edit)
+    margins = line_edit.textMargins()
+
+    assert editor.isVisible()
+    assert line_edit.text() == "24.06.2026 07:45"
+    available_width = content.width() - margins.left() - margins.right()
+    assert available_width >= line_edit.fontMetrics().horizontalAdvance(line_edit.text()) + 4
+    assert content.height() >= line_edit.fontMetrics().height()
+
+
+def test_visible_admission_calendar_and_time_edit_update_form_data(visible_general_tab):
+    app, widget = visible_general_tab
+    editor = widget.admission_datetime_input
+    assert editor.calendarPopup()
+
+    QTest.mouseClick(editor, Qt.LeftButton, Qt.NoModifier, QPoint(editor.width() - 8, editor.height() // 2))
+    app.processEvents()
+    calendar = editor.calendarWidget()
+    assert calendar.isVisible()
+    assert calendar.selectedDate() == QDate(2026, 6, 24)
+
+    calendar_view = calendar.findChild(QTableView)
+    assert calendar_view is not None
+    QTest.keyClick(calendar_view, Qt.Key_Right)
+    QTest.keyClick(calendar_view, Qt.Key_Return)
+    app.processEvents()
+
+    assert not calendar.isVisible()
+    assert widget.get_data()["admission_datetime"] == datetime(2026, 6, 25, 7, 45)
+
+    line_edit = editor.lineEdit()
+    minute_x = line_edit.fontMetrics().horizontalAdvance(line_edit.text()[:14]) + 3
+    QTest.mouseClick(line_edit, Qt.LeftButton, Qt.NoModifier, QPoint(minute_x, line_edit.height() // 2))
+    QTest.keyClick(line_edit, Qt.Key_Up)
+    app.processEvents()
+
+    assert widget.get_data()["admission_datetime"] == datetime(2026, 6, 25, 7, 46)
 
 
 class PatientFormAdmissionDateTimeTest(unittest.TestCase):
@@ -28,7 +96,7 @@ class PatientFormAdmissionDateTimeTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_admission_date_and_time_are_separate_fields_with_same_data_contract(self):
+    def test_legacy_admission_date_and_time_fields_keep_data_contract(self):
         widget = GeneralTabWidget()
         widget.admission_date_input.setDate(QDate(2026, 6, 24))
         widget.admission_time_input.setTime(QTime(7, 45))
