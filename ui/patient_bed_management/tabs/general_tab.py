@@ -2,10 +2,8 @@ from rem_card.ui.styles.theme_runtime import set_widget_style
 from datetime import datetime
 
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QComboBox,
     QDateEdit,
-    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -22,8 +20,8 @@ from rem_card.app.patient_age import (
     storage_age_from_birth_date,
 )
 from rem_card.services.patient_departments import PROFILE_DEPARTMENTS, normalize_profile_department
-from rem_card.ui.patient_bed_management.form_widgets import GenderSegmentedControl, IconBadge, line_icon
-from rem_card.ui.shared.click_section_wheel_datetime_edit import ClickSectionWheelDateTimeEdit
+from rem_card.ui.patient_bed_management.admission_datetime_field import AdmissionDateTimeField
+from rem_card.ui.patient_bed_management.form_widgets import GenderSegmentedControl, line_icon
 from rem_card.ui.styles.theme import STYLE_FORM_DATETIME_EDIT
 
 
@@ -120,39 +118,10 @@ class GeneralTabWidget(QWidget):
 
         current_dt = QDateTime.currentDateTime()
 
-        self.admission_datetime_field = QFrame()
-        self.admission_datetime_field.setFixedSize(300, 34)
-        set_widget_style(self.admission_datetime_field, """
-            QFrame {
-                background: #ffffff;
-                border: 1px solid #dbe5ef;
-                border-radius: 5px;
-            }
-            QDateTimeEdit {
-                background: transparent;
-                border: none;
-                padding: 0px;
-                color: #253858;
-                font-size: 13px;
-                font-weight: 700;
-                selection-background-color: #0d6efd;
-                selection-color: #ffffff;
-            }
-            """)
-        admission_datetime_layout = QHBoxLayout(self.admission_datetime_field)
-        admission_datetime_layout.setContentsMargins(9, 0, 9, 0)
-        admission_datetime_layout.setSpacing(9)
-        admission_datetime_layout.addWidget(IconBadge("calendar", "#8ea0ba", "transparent", side=17, icon_size=16))
-
-        self.admission_datetime_input = ClickSectionWheelDateTimeEdit()
+        self.admission_datetime_field = AdmissionDateTimeField()
+        self.admission_datetime_input = self.admission_datetime_field.editor
         self.admission_datetime_input.setDateTime(current_dt)
-        self.admission_datetime_input.setDisplayFormat("dd.MM.yyyy HH:mm")
-        self.admission_datetime_input.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.admission_datetime_input.setCalendarPopup(True)
-        self.admission_datetime_input.setFixedHeight(31)
         self.admission_datetime_input.dateTimeChanged.connect(self._on_visible_admission_datetime_changed)
-        admission_datetime_layout.addWidget(self.admission_datetime_input, 1)
-        admission_datetime_layout.addWidget(IconBadge("clock", "#8ea0ba", "transparent", side=17, icon_size=16))
 
         self.admission_date_input = QDateEdit()
         self.admission_date_input.setParent(self)
