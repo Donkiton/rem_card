@@ -148,7 +148,7 @@ class GeneralTabWidget(QWidget):
         self.admission_datetime_input.setDateTime(current_dt)
         self.admission_datetime_input.setDisplayFormat("dd.MM.yyyy HH:mm")
         self.admission_datetime_input.setButtonSymbols(QAbstractSpinBox.NoButtons)
-        self.admission_datetime_input.setCalendarPopup(False)
+        self.admission_datetime_input.setCalendarPopup(True)
         self.admission_datetime_input.setFixedHeight(31)
         self.admission_datetime_input.dateTimeChanged.connect(self._on_visible_admission_datetime_changed)
         admission_datetime_layout.addWidget(self.admission_datetime_input, 1)

@@ -431,12 +431,17 @@ def _read_version():
 def _write_update_manifest(directory):
     release_info = _read_release_info()
     version = _read_version()
+    min_client_version = version
+    if os.environ.get("REMCARD_BUILD_NO_DATABASE_UPGRADES") == "1":
+        from rem_card.app.unified_db_schema import SCHEMA_REQUIRED_CLIENT_VERSION
+
+        min_client_version = SCHEMA_REQUIRED_CLIENT_VERSION
     manifest = {
         "schema_version": 1,
         "app": "rem_card",
         "package_type": "full",
         "version": version,
-        "min_client_version": version,
+        "min_client_version": min_client_version,
         "prog_dir": ".",
         "source_commit": _current_git_commit(),
         "built_at": datetime.now().astimezone().isoformat(timespec="seconds"),

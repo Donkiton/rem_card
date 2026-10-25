@@ -199,6 +199,8 @@ def test_old_preflight_seed_stays_not_ready_until_real_sync_of_upgraded_database
     environment.pop("REMCARD_INTERNAL_DEV_BAZA_PIN", None)
     environment.pop("REMCARD_VERSION_FILE", None)
     environment.update({
+        # Этот сценарий проверяет обязательную миграцию релиза 5.1.11.
+        "REMCARD_APP_VERSION": "5.1.11",
         "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8",
         "QT_QPA_PLATFORM": "offscreen",
         "APPDATA": str(tmp_path / "roaming"), "LOCALAPPDATA": str(tmp_path / "local"),

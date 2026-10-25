@@ -12,6 +12,16 @@ from rem_card.app import schema_migration_guard as guard
 from rem_card.app import client_build_profile, startup_db_guard, unified_db_schema
 
 
+@pytest.fixture(autouse=True)
+def mandatory_release_version(monkeypatch):
+    """Проверки миграции 28 моделируют обязательный клиент 5.1.11."""
+    version = unified_db_schema.SCHEMA_REQUIRED_CLIENT_VERSION
+    monkeypatch.setenv("REMCARD_APP_VERSION", version)
+    monkeypatch.setattr(guard, "APP_VERSION", version)
+    monkeypatch.setattr(startup_db_guard, "APP_VERSION", version)
+    monkeypatch.setattr(startup_db_guard, "REQUIRED_CLIENT_POLICY_VERSION", version)
+
+
 class _Clock:
     def __init__(self):
         self.elapsed = 0.0
