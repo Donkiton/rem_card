@@ -19,6 +19,10 @@ from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.network_write_worker import NetworkWriteWorkerTimeout
 from rem_card.app.sqlite_shared import LocalWriteQueue, OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS
+from rem_card.app.write_operation_diagnostics import (
+    current_write_diagnostic_context, write_diagnostic_fields, write_diagnostic_scope,
+    write_error_fields, write_operation_family,
+)
 from rem_card.app.runtime_outage import (
     RuntimeNetworkOutageWriteBlockedError,
     runtime_outage_transition_allowed,
@@ -164,7 +168,7 @@ class DataService(QObject):
             self._active_write_submissions = max(0, self._active_write_submissions - 1)
             self._write_outcome_condition.notify_all()
 
-    def _register_accepted_write(self, description: str) -> str:
+    def _register_accepted_write(self, description: str, metadata: dict | None = None) -> str:
         DataService._ensure_write_registry(self)
         operation_id = uuid.uuid4().hex
         now = datetime.now().astimezone().isoformat(timespec="milliseconds")
@@ -178,6 +182,11 @@ class DataService(QObject):
                 "accepted_at": now,
                 "completed_at": None,
                 "error_class": "",
+                "diagnostic_started": time.perf_counter(),
+                "diagnostic_context": write_diagnostic_fields({
+                    "session_id": str(getattr(self, "_runtime_session_id", "") or ""),
+                    "role": str(getattr(self, "_runtime_role", "") or ""),
+                    **(metadata or {}), "accepted_write_id": operation_id}),
             }
         DataService._record_write_outcome_metric(self, operation_id, "pending")
         return operation_id
@@ -186,19 +195,25 @@ class DataService(QObject):
         try:
             with self._write_outcome_condition:
                 outcome = dict(self._write_outcome_registry.get(operation_id) or {})
+            fields = dict(outcome.get("diagnostic_context") or {})
+            current = current_write_diagnostic_context()
+            if current.get("accepted_write_id") == operation_id:
+                fields.update(current)
+            fields["operation_id"] = operation_id  # Preserve the accepted-outcome event's identity.
+            fields["accepted_write_id"] = operation_id
+            fields.update(outcome.get("diagnostic_error") or {})
+            started = outcome.get("diagnostic_started")
             record_metric(
                 "accepted_write_outcome",
                 1,
                 force_flush=state == "unknown",
-                operation_id=operation_id,
-                operation_name=str(outcome.get("description") or ""),
-                session_id=str(outcome.get("session_id") or ""),
-                role=str(outcome.get("role") or ""),
+                **fields,
+                operation_name=write_operation_family(outcome.get("description")),
+                elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3) if started is not None else None,
                 result=state,
-                error_class=str(outcome.get("error_class") or ""),
             )
-        except Exception as exc:
-            logger.debug("Accepted-write outcome metric failed: %s", exc)
+        except Exception:
+            pass
 
     def _set_write_outcome(self, operation_id: str, state: str, exc: Exception | None = None) -> None:
         if state not in {"committed", "failed", "unknown"}:
@@ -217,6 +232,7 @@ class DataService(QObject):
             current["state"] = state
             current["completed_at"] = datetime.now().astimezone().isoformat(timespec="milliseconds")
             current["error_class"] = type(exc).__name__ if exc is not None else ""
+            current["diagnostic_error"] = write_error_fields(exc)
             changed = True
             if state == "unknown":
                 self._unknown_active_write = True
@@ -510,7 +526,7 @@ class DataService(QObject):
                     )
                 operation_uuid = self._record_operblock_write_intent(description)
                 metadata = self._opblock_interactive_write_metadata(description)
-                accepted_write_id = DataService._register_accepted_write(self, description)
+                accepted_write_id = DataService._register_accepted_write(self, description, metadata)
                 metadata["accepted_write_id"] = accepted_write_id
                 metadata.setdefault("session_id", str(getattr(self, "_runtime_session_id", "") or ""))
                 metadata.setdefault("role", str(getattr(self, "_runtime_role", "") or ""))
@@ -771,11 +787,12 @@ class DataService(QObject):
 
     @contextmanager
     def _write_metadata_context(self, metadata: dict[str, Any] | None):
-        if metadata and hasattr(self.db, "write_metadata_context"):
-            with self.db.write_metadata_context(metadata):
-                yield
-            return
-        yield
+        with write_diagnostic_scope(metadata):
+            if metadata and hasattr(self.db, "write_metadata_context"):
+                with self.db.write_metadata_context(metadata):
+                    yield
+                return
+            yield
 
     def _record_operblock_write_intent(self, description: str) -> str | None:
         if not self._is_operblock_network_write(description):
@@ -1345,7 +1362,7 @@ class DataService(QObject):
                 if metadata.get("queue_deadline_sec") is not None:
                     queue_deadline = time.perf_counter() + max(0.001, min(60.0, float(metadata["queue_deadline_sec"])))
                     metadata["write_deadline_monotonic"] = queue_deadline
-                accepted_write_id = DataService._register_accepted_write(self, description)
+                accepted_write_id = DataService._register_accepted_write(self, description, metadata)
                 metadata["accepted_write_id"] = accepted_write_id
                 metadata.setdefault("session_id", str(getattr(self, "_runtime_session_id", "") or ""))
                 metadata.setdefault("role", str(getattr(self, "_runtime_role", "") or ""))
@@ -1402,15 +1419,16 @@ class DataService(QObject):
                     self._error_callback_requested.emit(on_error, exc)
 
                 try:
-                    self._queue.submit(
-                        func=run_operation_with_metadata,
-                        description=description,
-                        on_success=handle_success,
-                        on_error=handle_error,
-                        retryable=bool(metadata.get("queue_retryable", True)),
-                        retries_left=max(0, int(metadata.get("queue_retries_left", 10))),
-                        **({"deadline": queue_deadline} if queue_deadline is not None else {}),
-                    )
+                    with write_diagnostic_scope(metadata):
+                        self._queue.submit(
+                            func=run_operation_with_metadata,
+                            description=description,
+                            on_success=handle_success,
+                            on_error=handle_error,
+                            retryable=bool(metadata.get("queue_retryable", True)),
+                            retries_left=max(0, int(metadata.get("queue_retries_left", 10))),
+                            **({"deadline": queue_deadline} if queue_deadline is not None else {}),
+                        )
                 except Exception as exc:
                     handle_error(exc)
                     return False

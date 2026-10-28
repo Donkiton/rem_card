@@ -11,15 +11,22 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from contextlib import nullcontext
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
 from rem_card.app.db_wait_diagnostics import observe, mark_stage, mark_retry, current_context
 from rem_card.app.startup_diagnostics import measured
+from rem_card.app.connection_diagnostics import connection_phase
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.db_availability import DatabaseClosedError
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
+from rem_card.app.write_operation_diagnostics import (
+    WriteOperationDiagnostics, current_write_diagnostic_context,
+    write_diagnostic_fields, write_diagnostic_scope, write_operation_family,
+)
 
 NETWORK_SAFE_DB_PROFILE = "network_safe_v1"
 SQLITE_BUSY_TIMEOUT_MS = max(100, int(os.environ.get("REMCARD_SQLITE_BUSY_TIMEOUT_MS", "10000")))
@@ -393,27 +400,39 @@ def configure_connection(
     profile: str = "network",
 ):
     settings = _resolve_sqlite_profile_settings(profile)
-    with _SQLITE_NATIVE_MAINTENANCE_LOCK:
-        conn.row_factory = sqlite3.Row
-        conn.create_function(
-            "CASEFOLD",
-            1,
-            lambda value: "" if value is None else str(value).casefold(),
-            deterministic=True,
-        )
-        conn.execute("PRAGMA foreign_keys = ON")
-        if readonly:
-            conn.execute("PRAGMA query_only = ON")
-        else:
-            conn.execute(f"PRAGMA journal_mode = {settings['journal_mode']}")
-            conn.execute(f"PRAGMA synchronous = {settings['synchronous']}")
-        if settings["temp_store"] != "DEFAULT":
-            conn.execute(f"PRAGMA temp_store = {settings['temp_store']}")
-        if settings["cache_kb"]:
-            conn.execute(f"PRAGMA cache_size = {-int(settings['cache_kb'])}")
-        if settings["mmap_mb"] is not None:
-            conn.execute(f"PRAGMA mmap_size = {int(settings['mmap_mb']) * 1024 * 1024}")
-        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    with connection_phase("configure_mutex_wait") as waiting:
+        with _SQLITE_NATIVE_MAINTENANCE_LOCK:
+            waiting.finish()
+            with connection_phase("row_factory"):
+                conn.row_factory = sqlite3.Row
+            with connection_phase("casefold_function"):
+                conn.create_function(
+                    "CASEFOLD",
+                    1,
+                    lambda value: "" if value is None else str(value).casefold(),
+                    deterministic=True,
+                )
+            with connection_phase("pragma_foreign_keys"):
+                conn.execute("PRAGMA foreign_keys = ON")
+            if readonly:
+                with connection_phase("pragma_query_only"):
+                    conn.execute("PRAGMA query_only = ON")
+            else:
+                with connection_phase("pragma_journal_mode"):
+                    conn.execute(f"PRAGMA journal_mode = {settings['journal_mode']}")
+                with connection_phase("pragma_synchronous"):
+                    conn.execute(f"PRAGMA synchronous = {settings['synchronous']}")
+            if settings["temp_store"] != "DEFAULT":
+                with connection_phase("pragma_temp_store"):
+                    conn.execute(f"PRAGMA temp_store = {settings['temp_store']}")
+            if settings["cache_kb"]:
+                with connection_phase("pragma_cache_size"):
+                    conn.execute(f"PRAGMA cache_size = {-int(settings['cache_kb'])}")
+            if settings["mmap_mb"] is not None:
+                with connection_phase("pragma_mmap_size"):
+                    conn.execute(f"PRAGMA mmap_size = {int(settings['mmap_mb']) * 1024 * 1024}")
+            with connection_phase("pragma_busy_timeout"):
+                conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
 
 
 def run_integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
@@ -1658,6 +1677,24 @@ class FileWriteLock:
             return False
 
 
+def _write_metric(name, value=None, **fields):
+    try:
+        record_metric(name, value, **fields)
+    except Exception:
+        pass
+
+
+def _write_phase(state, stage):
+    diagnostics = getattr(state, "diagnostics", None)
+    return diagnostics.phase(stage) if diagnostics is not None else nullcontext()
+
+
+def _note_write_retry(state):
+    diagnostics = getattr(state, "diagnostics", None)
+    if diagnostics is not None:
+        diagnostics.retry_count += 1
+
+
 @dataclass
 class _WriteTransactionState:
     source: str
@@ -1673,6 +1710,7 @@ class _WriteTransactionState:
     lock_acquired: bool = False
     lock_held_started: float | None = None
     released_file_lock_owner: dict[str, Any] = field(default_factory=dict)
+    diagnostics: WriteOperationDiagnostics | None = None
 
     @property
     def is_bounded_write(self) -> bool:
@@ -1738,6 +1776,7 @@ class SQLiteWriteController:
     @staticmethod
     def _write_metric_context(options: dict[str, Any], *, interactive: bool) -> dict[str, Any]:
         diagnostic = current_context()
+        correlation = write_diagnostic_fields(options)
         return {
             **{f"diagnostic_{key}": value for key, value in diagnostic.items()},
             "request_id": str(options.get("request_id") or ""),
@@ -1748,6 +1787,8 @@ class SQLiteWriteController:
             "operation_case_id": options.get("operation_case_id"),
             "table_code": str(options.get("table_code") or ""),
             "interactive": bool(interactive),
+            "accepted_write_id": correlation.get("accepted_write_id", ""),
+            "queue_task_id": correlation.get("task_id", ""),
         }
 
     @staticmethod
@@ -1781,7 +1822,7 @@ class SQLiteWriteController:
         total_wait_ms = round((time.perf_counter() - lock_wait_started) * 1000.0, 3)
         sqlite_error_class = type(exc).__name__ if exc is not None else ""
         sqlite_error_message_sanitized = _sanitize_sqlite_error_message(exc)
-        record_metric(
+        _write_metric(
             "sqlite_write_lock_timeout",
             1,
             operation_name=source,
@@ -1951,7 +1992,7 @@ class SQLiteWriteController:
             **state.metric_context,
         }
         _set_active_sqlite_operation(state.thread_id, active_payload)
-        record_metric(
+        _write_metric(
             "sqlite_write_lock_wait_started",
             1,
             operation_name=state.source,
@@ -1976,7 +2017,7 @@ class SQLiteWriteController:
             isinstance(holder_age_ms, (int, float))
             and holder_age_ms >= self.lock.stale_timeout_sec * 1000.0
         ):
-            record_metric(
+            _write_metric(
                 "sqlite_write_lock_stale_observed",
                 1,
                 lock_path=self.lock_path,
@@ -2014,7 +2055,7 @@ class SQLiteWriteController:
         ):
             state.lock_acquired = True
             state.lock_held_started = time.perf_counter()
-            record_metric(
+            _write_metric(
                 "db_lock_wait_ms",
                 round(
                     (time.perf_counter() - state.lock_wait_started) * 1000.0,
@@ -2028,8 +2069,9 @@ class SQLiteWriteController:
         holder = describe_sqlite_lock_holder(self.lock_path)
         active_payload["lock_holder"] = holder
         mark_retry()
+        _note_write_retry(state)
         _set_active_sqlite_operation(state.thread_id, active_payload)
-        record_metric(
+        _write_metric(
             "sqlite_write_lock_wait_retry",
             1,
             operation_name=state.source,
@@ -2076,7 +2118,7 @@ class SQLiteWriteController:
         }
         if conn.in_transaction:
             conn.execute("ROLLBACK")
-        record_metric(
+        _write_metric(
             "sqlite_write_lock_released",
             1,
             operation_name=state.source,
@@ -2104,7 +2146,8 @@ class SQLiteWriteController:
     ) -> dict[str, Any]:
         holder = describe_sqlite_lock_holder(self.lock_path)
         mark_retry()
-        record_metric(
+        _note_write_retry(state)
+        _write_metric(
             "sqlite_write_lock_wait_retry",
             1,
             operation_name=state.source,
@@ -2142,7 +2185,7 @@ class SQLiteWriteController:
             conn.execute("BEGIN IMMEDIATE")
             mark_stage("transaction_body")
             cursor = conn.cursor()
-            record_metric(
+            _write_metric(
                 "sqlite_write_lock_acquired",
                 1,
                 operation_name=state.source,
@@ -2166,7 +2209,7 @@ class SQLiteWriteController:
             state.last_exc = exc
             retryable = self._is_retryable(exc)
             if retryable:
-                record_metric(
+                _write_metric(
                     "sqlite_locked_count",
                     1,
                     source=state.source,
@@ -2209,7 +2252,7 @@ class SQLiteWriteController:
                     options=state.options,
                     exc=exc,
                 )
-            record_metric(
+            _write_metric(
                 "sqlite_write_lock_timeout",
                 1,
                 operation_name=state.source,
@@ -2251,7 +2294,7 @@ class SQLiteWriteController:
                 options=state.options,
                 exc=state.last_exc,
             )
-        record_metric(
+        _write_metric(
             "sqlite_write_lock_timeout",
             1,
             operation_name=state.source,
@@ -2290,15 +2333,17 @@ class SQLiteWriteController:
             ):
                 break
             self._raise_if_interactive_deadline_expired(state)
-            active_payload = self._try_acquire_file_lock(state)
+            with _write_phase(state, "file_lock"):
+                active_payload = self._try_acquire_file_lock(state)
             if active_payload is None:
                 continue
-            cursor = self._try_begin_immediate(
-                conn,
-                state,
-                active_payload,
-                before_begin,
-            )
+            with _write_phase(state, "begin"):
+                cursor = self._try_begin_immediate(
+                    conn,
+                    state,
+                    active_payload,
+                    before_begin,
+                )
             if cursor is not None:
                 return cursor
         self._raise_transaction_lock_exhausted(state)
@@ -2311,7 +2356,7 @@ class SQLiteWriteController:
     ) -> None:
         if not state.lock_acquired:
             return
-        record_metric(
+        _write_metric(
             "sqlite_write_lock_released",
             1,
             operation_name=state.source,
@@ -2346,7 +2391,7 @@ class SQLiteWriteController:
             if state.is_bounded_write:
                 remaining_ms = self._remaining_ms(state.deadline)
                 if remaining_ms <= 0:
-                    record_metric(
+                    _write_metric(
                         "sqlite_write_commit_timeout",
                         1,
                         source=state.source,
@@ -2384,7 +2429,7 @@ class SQLiteWriteController:
             try:
                 conn.execute("COMMIT")
                 if retry_count:
-                    record_metric(
+                    _write_metric(
                         "sqlite_write_commit_wait_ms",
                         round((time.perf_counter() - commit_started) * 1000.0, 3),
                         source=state.source,
@@ -2399,8 +2444,9 @@ class SQLiteWriteController:
                 last_exc = exc
                 retry_count += 1
                 mark_retry()
+                _note_write_retry(state)
                 remaining_ms = self._remaining_ms(state.deadline)
-                record_metric(
+                _write_metric(
                     "sqlite_write_commit_retry",
                     1,
                     source=state.source,
@@ -2420,7 +2466,7 @@ class SQLiteWriteController:
                     **state.metric_context,
                 )
                 if remaining_ms <= 0:
-                    record_metric(
+                    _write_metric(
                         "sqlite_write_commit_timeout",
                         1,
                         source=state.source,
@@ -2452,20 +2498,30 @@ class SQLiteWriteController:
         started = time.perf_counter()
         status = "error"
         state = self._make_write_transaction_state(source, write_options)
-        with observe(source, resource=f"{self.db_path}:{id(conn)}", database=self.db_path,
-                     connection=conn, stage="connection_guard_wait") as diagnostic, self.connection_guard(conn, deadline=state.deadline):
+        trace = WriteOperationDiagnostics(source, state.options, clock=time.perf_counter, deadline=state.deadline)
+        state.diagnostics = trace
+        with trace.summary("sqlite_write_transaction_diagnostic"), observe(
+            source, resource=f"{self.db_path}:{id(conn)}", database=self.db_path,
+            connection=conn, stage="connection_guard_wait"
+        ) as diagnostic, ExitStack() as guards:
+            trace.context["diagnostic_operation_id"] = diagnostic.id
+            with trace.phase("connection_guard"):
+                guards.enter_context(self.connection_guard(conn, deadline=state.deadline))
             diagnostic.stage("connection_guard_acquired")
             # Deadline starts before mutex acquisition; diagnostic ownership is
             # bound only once the observed connection scope has been entered.
             state.metric_context = self._write_metric_context(state.options, interactive=state.is_interactive_write)
             if conn.in_transaction:
+                trace.nested = True
+                trace.database_outcome = "unknown"
                 cursor = conn.cursor()
                 try:
-                    yield cursor
+                    with trace.phase("body"):
+                        yield cursor
                     status = "ok"
                     return
                 finally:
-                    record_metric(
+                    _write_metric(
                         "write_duration_ms",
                         round((time.perf_counter() - started) * 1000.0, 3),
                         source=source,
@@ -2478,48 +2534,59 @@ class SQLiteWriteController:
             busy_timeout_overridden = False
 
             try:
-                (
-                    original_busy_timeout_ms,
-                    busy_timeout_overridden,
-                ) = self._override_interactive_busy_timeout(conn, state)
+                with trace.phase("busy_timeout_setup"):
+                    (
+                        original_busy_timeout_ms,
+                        busy_timeout_overridden,
+                    ) = self._override_interactive_busy_timeout(conn, state)
                 diagnostic.stage("transaction_begin_wait")
                 cursor = self._acquire_transaction_cursor(
                     conn,
                     state,
                     before_begin,
                 )
+                trace.database_outcome = "unknown"
                 diagnostic.stage("transaction_body")
-                yield cursor
+                with trace.phase("body"):
+                    yield cursor
                 if state.options.get("write_budget_ms") is not None and self._remaining_ms(state.deadline) <= 0:
                     raise QueuedWriteDeadlineExceeded("Write budget exhausted before commit")
                 diagnostic.stage("commit")
-                self._commit_transaction(conn, state)
+                with trace.phase("commit"):
+                    self._commit_transaction(conn, state)
+                trace.database_outcome = "committed"
                 diagnostic.stage("committed")
                 status = "ok"
                 committed = True
-            except Exception:
+            except Exception as exc:
+                trace.note_error(exc)
                 if conn.in_transaction:
+                    trace.database_outcome = "unknown"
                     diagnostic.stage("rollback")
-                    conn.execute("ROLLBACK")
+                    with trace.phase("rollback"):
+                        conn.execute("ROLLBACK")
+                    trace.database_outcome = "rolled_back"
                     diagnostic.stage("rolled_back")
                 raise
             finally:
-                self._restore_busy_timeout(
-                    conn,
-                    original_busy_timeout_ms,
-                    busy_timeout_overridden,
-                )
-                record_metric(
+                with trace.phase("busy_timeout_restore"):
+                    self._restore_busy_timeout(
+                        conn,
+                        original_busy_timeout_ms,
+                        busy_timeout_overridden,
+                    )
+                _write_metric(
                     "write_duration_ms",
                     round((time.perf_counter() - started) * 1000.0, 3),
                     source=source,
                     status=status,
                     nested=False,
                 )
-                self._record_transaction_lock_released(
-                    state,
-                    committed=committed,
-                )
+                with trace.phase("lock_release"):
+                    self._record_transaction_lock_released(
+                        state,
+                        committed=committed,
+                    )
                 _clear_active_sqlite_operation(state.thread_id)
 
     def execute(self, conn: sqlite3.Connection, query: str, params: tuple = (), source: str = "unknown", write_options: Optional[dict[str, Any]] = None):
@@ -2539,6 +2606,7 @@ class QueuedWriteTask:
     enqueued_at: float = field(default_factory=time.perf_counter)
     diagnostic_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     deadline: float | None = None
+    diagnostic_context: dict[str, Any] = field(default_factory=current_write_diagnostic_context)
 
 
 class LocalWriteQueue:
@@ -2632,14 +2700,22 @@ class LocalWriteQueue:
                 with self._active_lock:
                     self._active_count += 1
                     active_marked = True
-                record_metric(
+                correlation = {**task.diagnostic_context, "task_id": task.diagnostic_id}
+                trace = WriteOperationDiagnostics(task.description, correlation, clock=time.perf_counter,
+                                                  deadline=task.deadline)
+                trace.queue_wait_ms = round((time.perf_counter() - task.enqueued_at) * 1000.0, 3)
+                _write_metric(
                     "write_queue_wait_ms",
-                    round((time.perf_counter() - task.enqueued_at) * 1000.0, 3),
-                    description=task.description,
+                    trace.queue_wait_ms,
+                    description=write_operation_family(task.description),
                     diagnostic_id=task.diagnostic_id,
+                    **trace.context,
                 )
 
-                with observe(task.description, resource=f"queue:{id(self)}", stage="task_execute") as diagnostic:
+                with trace.summary("write_queue_diagnostic"), write_diagnostic_scope(correlation), observe(
+                    task.description, resource=f"queue:{id(self)}", stage="task_execute"
+                ) as diagnostic:
+                    trace.context["diagnostic_operation_id"] = diagnostic.id
                     diagnostic.payload["task_id"] = task.diagnostic_id
                     diagnostic.payload["queue_wait_ms"] = round((time.perf_counter() - task.enqueued_at) * 1000)
                     diagnostic.payload["pending_at_start"] = self.pending_count()
@@ -2648,7 +2724,9 @@ class LocalWriteQueue:
                             diagnostic.stage("task_execute")
                             if task.deadline is not None and time.perf_counter() >= task.deadline:
                                 raise QueuedWriteDeadlineExceeded("Queued write budget exhausted before execution")
-                            result = task.func()
+                            trace.database_outcome = "unknown"
+                            with trace.phase("execute"):
+                                result = task.func()
                             diagnostic.stage("success_callback")
                             if task.on_success:
                                 try:
@@ -2660,6 +2738,10 @@ class LocalWriteQueue:
                             break
                         except sqlite3.OperationalError as exc:
                             if task.retryable and task.retries_left > 0 and self._is_retryable_operational_error(exc):
+                                # A retry is not the terminal queue outcome.
+                                trace.error = {}
+                                trace.failure_stage = ""
+                                trace.retry_count += 1
                                 diagnostic.retry()
                                 diagnostic.stage("task_retry_backoff")
                                 task.retries_left -= 1
@@ -2669,6 +2751,7 @@ class LocalWriteQueue:
                                 time.sleep(delay)
                                 continue
                             diagnostic.stage("task_failed")
+                            trace.note_error(exc, stage="execute")
                             if task.on_error:
                                 try:
                                     task.on_error(exc)
@@ -2679,6 +2762,7 @@ class LocalWriteQueue:
                             break
                         except Exception as exc:
                             diagnostic.stage("task_failed")
+                            trace.note_error(exc, stage="execute")
                             if task.on_error:
                                 try:
                                     task.on_error(exc)

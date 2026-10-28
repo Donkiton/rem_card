@@ -137,19 +137,28 @@ def admission_still_valid(receipt: dict) -> bool:
 
 def read_only_admission_probe(path: str) -> tuple[bool, str, bool]:
     import sqlite3
+    from rem_card.app.connection_diagnostics import connection_observation, connection_phase
     from rem_card.app.sqlite_shared import configure_connection
     from rem_card.app.sqlite_uri import build_sqlite_file_uri
     from rem_card.app.startup_diagnostics import startup_span
     try:
         with startup_span("startup_admission_probe", target="central_medical"):
-            conn = sqlite3.connect(build_sqlite_file_uri(path, mode="ro"), uri=True,
-                                   isolation_level=None, timeout=5.0)
-            try:
-                configure_connection(conn, readonly=True, profile="network")
-                conn.execute("BEGIN")
-                return True, json.dumps(read_admission_state(conn, path)), False
-            finally:
-                conn.close()
+            with connection_observation(path, source="startup_admission"):
+                with connection_phase("connection_uri"):
+                    uri = build_sqlite_file_uri(path, mode="ro")
+                with connection_phase("sqlite_connect"):
+                    conn = sqlite3.connect(uri, uri=True, isolation_level=None, timeout=5.0)
+                try:
+                    with connection_phase("connection_configure"):
+                        configure_connection(conn, readonly=True, profile="network")
+                    with connection_phase("admission_begin"):
+                        conn.execute("BEGIN")
+                    with connection_phase("admission_metadata"):
+                        result = json.dumps(read_admission_state(conn, path))
+                    return True, result, False
+                finally:
+                    with connection_phase("connection_close"):
+                        conn.close()
     except Exception as exc:
         # A failed cheap probe only requests the normal full check; it never
         # authorizes recovery or a local emergency database by itself.
