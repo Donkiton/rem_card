@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import multiprocessing
 import os
 import re
@@ -31,6 +32,11 @@ DAILY_DATABASE_LOCK_SOURCE = "daily_central_backup_copy"
 DAILY_SNAPSHOT_LEASE_SOURCE = "daily_central_backup_snapshot"
 DAILY_BACKUP_KIND = "daily_central"
 _DAILY_NAME_RE = re.compile(r"^daily_.+_(\d{4}-\d{2}-\d{2})\.db$")
+_FAILURE_DIAGNOSTIC_FIELDS = (
+    "failure_stage", "failure_stage_state", "failure_stage_wait_ms", "failure_reported_elapsed_ms",
+    "failure_copy_pages_remaining", "failure_copy_pages_total", "failure_copy_progress_age_ms",
+    "failure_error_class", "cleanup_failure_stage", "cleanup_error_class",
+)
 
 
 class DailyBackupDeferred(RuntimeError):
@@ -41,6 +47,42 @@ class DailyBackupCopyBudgetExceeded(DailyBackupDeferred):
     """The bounded copy yielded its shared writer gate for a later attempt."""
 
 
+def _diagnostic_token(value: Any) -> str:
+    """Only bounded machine labels, never exception messages or paths."""
+    text = str(value or "")
+    return text if re.fullmatch(r"[A-Za-z0-9_:-]{1,80}", text) else ""
+
+
+def _diagnostic_number(value: Any) -> int | float | None:
+    try:
+        return value if isinstance(value, (int, float)) and math.isfinite(value) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _safe_backup_log(level: str, message: str, *args: Any) -> None:
+    try:
+        getattr(logger, level)(message, *args)
+    except Exception:
+        pass
+
+
+def _backup_diagnostic(event: str, **fields: Any) -> None:
+    payload = {"diagnostic_version": 1, "event": event, **fields}
+    try:
+        record_metric("daily_backup_diagnostic", 1, **payload)
+    except Exception:
+        pass
+    _safe_backup_log("info", "Daily backup diagnostic: %s", payload)
+
+
+def _process_exitcode(process: Any) -> int | None:
+    try:
+        return process.exitcode
+    except Exception:
+        return None
+
+
 def _process_state(process: Any) -> str:
     """A failed liveness probe is not evidence that an owned child stopped."""
     try:
@@ -49,14 +91,28 @@ def _process_state(process: Any) -> str:
         return "unknown"
 
 
-def _stop_process_bounded(process: Any, *, timeout_sec: float = 2.0) -> tuple[str, tuple[str, ...]]:
+def _stop_process_bounded(
+    process: Any, *, timeout_sec: float = 2.0,
+    diagnostic: Callable[..., None] | None = None,
+) -> tuple[str, tuple[str, ...]]:
     """Recheck death after termination errors, including Windows exit races."""
     deadline = time.monotonic() + max(0.0, float(timeout_sec))
     errors: list[str] = []
     state = _process_state(process)
+
+    def report(event: str, **fields: Any) -> None:
+        if diagnostic is not None:
+            try:
+                diagnostic(event, child_state=state, child_exitcode=_process_exitcode(process), **fields)
+            except Exception:
+                pass
+    report("stop_begin")
     if state == "stopped":
+        report("stop_end", stop_errors=())
         return state, ()
     for index, action in enumerate(("terminate", "kill")):
+        action_started = time.monotonic()
+        report("stop_action", action=action)
         try:
             method = getattr(process, action, None)
             if method is not None:
@@ -69,8 +125,12 @@ def _stop_process_bounded(process: Any, *, timeout_sec: float = 2.0) -> tuple[st
         except Exception as exc:
             errors.append(f"join:{type(exc).__name__}")
         state = _process_state(process)
+        report("stop_action_finished", action=action,
+               action_elapsed_ms=round((time.monotonic() - action_started) * 1000, 3),
+               stop_errors=tuple(errors))
         if state == "stopped" or time.monotonic() >= deadline:
             break
+    report("stop_end", stop_errors=tuple(errors))
     return state, tuple(errors)
 
 
@@ -168,10 +228,13 @@ def _emit_progress(
     progress_callback: Callable[[dict[str, Any]], None] | None,
     stage: str,
     state: str,
+    attempt_id: str = "",
+    backup_date: str = "",
     **fields: Any,
 ) -> None:
     """Report bounded, non-clinical stage telemetry without affecting backup."""
-    payload = {"stage": stage, "state": state, **fields}
+    payload = {"stage": stage, "state": state, "attempt_id": attempt_id,
+               "backup_date": backup_date, **fields}
     try:
         record_metric("daily_backup_stage", 1, **payload)
     except Exception:
@@ -263,8 +326,10 @@ def _bounded_sqlite_copy(
         logger=logger,
     )
     acquired = False
+    progress_identity = {"attempt_id": str(config.get("job_token") or ""),
+                         "backup_date": str(config.get("backup_date") or "")}
     read_started = time.monotonic()
-    _emit_progress(progress_callback, "read_wait", "started")
+    _emit_progress(progress_callback, "read_wait", "started", **progress_identity)
     try:
         source = sqlite3.connect(
             uri,
@@ -281,6 +346,7 @@ def _bounded_sqlite_copy(
                     progress_callback,
                     "read_wait",
                     "deferred",
+                    **progress_identity,
                     elapsed_ms=round((time.monotonic() - read_started) * 1000, 3),
                 )
                 raise DailyBackupDeferred("central_database_lock_busy")
@@ -290,6 +356,7 @@ def _bounded_sqlite_copy(
             progress_callback,
             "read_wait",
             "completed",
+            **progress_identity,
             elapsed_ms=round((time.monotonic() - read_started) * 1000, 3),
         )
         os.makedirs(os.path.dirname(staging_path), exist_ok=True)
@@ -301,7 +368,7 @@ def _bounded_sqlite_copy(
         copy_deadline = time.monotonic() + max(0.25, float(config.get("copy_budget_sec", 8.0)))
         copy_started = time.monotonic()
         last_progress = copy_started
-        _emit_progress(progress_callback, "copy", "started")
+        _emit_progress(progress_callback, "copy", "started", **progress_identity)
 
         def _progress(_status: int, remaining: int, total: int) -> None:
             nonlocal last_progress
@@ -314,6 +381,7 @@ def _bounded_sqlite_copy(
                     progress_callback,
                     "copy",
                     "progress",
+                    **progress_identity,
                     elapsed_ms=round((now - copy_started) * 1000, 3),
                     pages_remaining=max(0, int(remaining)),
                     pages_total=max(0, int(total)),
@@ -329,6 +397,7 @@ def _bounded_sqlite_copy(
             progress_callback,
             "copy",
             "completed",
+            **progress_identity,
             elapsed_ms=round((time.monotonic() - copy_started) * 1000, 3),
             size_bytes=os.path.getsize(staging_path),
         )
@@ -349,6 +418,8 @@ def _upload_local_staging(
     publication_path: str,
     *,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    attempt_id: str = "",
+    backup_date: str = "",
 ) -> None:
     """Upload a completed local snapshot to a same-volume publication file."""
     os.makedirs(os.path.dirname(publication_path), exist_ok=True)
@@ -360,7 +431,8 @@ def _upload_local_staging(
     last_progress = started
     copied = 0
     total = os.path.getsize(local_path)
-    _emit_progress(progress_callback, "upload", "started", size_bytes=total)
+    progress_identity = {"attempt_id": attempt_id, "backup_date": backup_date}
+    _emit_progress(progress_callback, "upload", "started", size_bytes=total, **progress_identity)
     try:
         with open(local_path, "rb") as source, open(publication_path, "xb") as target:
             while True:
@@ -376,6 +448,7 @@ def _upload_local_staging(
                         progress_callback,
                         "upload",
                         "progress",
+                        **progress_identity,
                         elapsed_ms=round((now - started) * 1000, 3),
                         bytes_copied=copied,
                         size_bytes=total,
@@ -395,6 +468,7 @@ def _upload_local_staging(
         progress_callback,
         "upload",
         "completed",
+        **progress_identity,
         elapsed_ms=round((time.monotonic() - started) * 1000, 3),
         size_bytes=copied,
     )
@@ -528,10 +602,13 @@ def _perform_daily_backup(
     config: dict[str, Any],
     *,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    failure_callback: Callable[[BaseException], None] | None = None,
 ) -> dict[str, Any]:
     from rem_card.app.sqlite_shared import FileWriteLock, validate_sqlite_file
 
     paths = _daily_paths(config)
+    progress_identity = {"attempt_id": str(config.get("job_token") or ""),
+                         "backup_date": str(config.get("backup_date") or "")}
     backup_path = paths["backup"]
     os.makedirs(str(config["backup_dir"]), exist_ok=True)
     os.makedirs(str(config["health_dir"]), exist_ok=True)
@@ -593,7 +670,7 @@ def _perform_daily_backup(
                 snapshot_lease.release()
 
         verify_started = time.monotonic()
-        _emit_progress(progress_callback, "verify_local", "started")
+        _emit_progress(progress_callback, "verify_local", "started", **progress_identity)
         valid, reason = validate_sqlite_file(local_staging_path)
         if not valid:
             invalid_path = _quarantine_failed_staging(
@@ -613,6 +690,7 @@ def _perform_daily_backup(
             progress_callback,
             "verify_local",
             "completed",
+            **progress_identity,
             elapsed_ms=round((time.monotonic() - verify_started) * 1000, 3),
             size_bytes=os.path.getsize(local_staging_path),
         )
@@ -621,9 +699,10 @@ def _perform_daily_backup(
             local_staging_path,
             publication_staging_path,
             progress_callback=progress_callback,
+            **progress_identity,
         )
         verify_upload_started = time.monotonic()
-        _emit_progress(progress_callback, "verify_upload", "started")
+        _emit_progress(progress_callback, "verify_upload", "started", **progress_identity)
         uploaded_sha256 = _sha256(publication_staging_path)
         if uploaded_sha256 != sha256:
             raise OSError("daily backup upload digest mismatch")
@@ -631,10 +710,11 @@ def _perform_daily_backup(
             progress_callback,
             "verify_upload",
             "completed",
+            **progress_identity,
             elapsed_ms=round((time.monotonic() - verify_upload_started) * 1000, 3),
             size_bytes=os.path.getsize(publication_staging_path),
         )
-        _emit_progress(progress_callback, "publish", "started")
+        _emit_progress(progress_callback, "publish", "started", **progress_identity)
         os.replace(publication_staging_path, backup_path)
         metadata = _write_daily_metadata(backup_path, config=config, sha256=sha256)
         valid, metadata = _lightweight_daily_metadata(
@@ -653,8 +733,11 @@ def _perform_daily_backup(
             progress_callback,
             "publish",
             "completed",
+            **progress_identity,
             size_bytes=int(metadata.get("size_bytes") or 0),
         )
+        marker_started = time.monotonic()
+        _emit_progress(progress_callback, "done_marker", "started", **progress_identity)
         _atomic_json(
             paths["done"],
             {
@@ -668,14 +751,31 @@ def _perform_daily_backup(
                 "pid": os.getpid(),
             },
         )
+        _emit_progress(progress_callback, "done_marker", "completed", **progress_identity,
+                       elapsed_ms=round((time.monotonic() - marker_started) * 1000, 3))
+        prune_started = time.monotonic()
+        _emit_progress(progress_callback, "prune", "started", **progress_identity)
         prune = _prune_validated_daily_backups(config, backup_path)
+        _emit_progress(progress_callback, "prune", "completed", **progress_identity,
+                       elapsed_ms=round((time.monotonic() - prune_started) * 1000, 3))
         return {
             "status": "success",
             "reason": "created",
             "backup_path": backup_path,
             "pruned": prune.get("deleted", 0),
         }
+    except BaseException as exc:
+        # Capture the failing work phase before finally reports its own phase.
+        # The callback is diagnostic only and cannot replace the original error.
+        if failure_callback is not None:
+            try:
+                failure_callback(exc)
+            except Exception:
+                pass
+        raise
     finally:
+        finalize_started = time.monotonic()
+        _emit_progress(progress_callback, "worker_finalize", "started", **progress_identity)
         for owned_staging in (
             paths.get("local_staging", ""),
             paths.get("publication_staging", ""),
@@ -689,24 +789,92 @@ def _perform_daily_backup(
         heartbeat_stop.set()
         heartbeat.join(timeout=1.0)
         reservation.release()
+        _emit_progress(progress_callback, "worker_finalize", "completed", **progress_identity,
+                       elapsed_ms=round((time.monotonic() - finalize_started) * 1000, 3))
 
 
 def _daily_backup_worker(config: dict[str, Any], result_connection: Any) -> None:
-    def report_progress(payload: dict[str, Any]) -> None:
-        if config.get("emit_progress"):
-            result_connection.send({"message_type": "progress", **payload})
+    identity = {"attempt_id": str(config.get("job_token") or ""),
+                "backup_date": str(config.get("backup_date") or "")}
+    latest_progress: dict[str, Any] = {}
+    copy_progress: dict[str, Any] = {}
+    before_finalize: dict[str, Any] = {}
+    failure_fields: dict[str, Any] = {}
+    stage_started = time.monotonic()
+    copy_progress_at: float | None = None
+    work_exception: BaseException | None = None
 
+    def phase_snapshot() -> dict[str, Any]:
+        now = time.monotonic()
+        return {
+            "failure_stage": _diagnostic_token(latest_progress.get("stage")),
+            "failure_stage_state": _diagnostic_token(latest_progress.get("state")),
+            "failure_stage_wait_ms": round(max(0.0, now - stage_started) * 1000, 3),
+            "failure_reported_elapsed_ms": _diagnostic_number(latest_progress.get("elapsed_ms")),
+            "failure_copy_pages_remaining": _diagnostic_number(copy_progress.get("pages_remaining")),
+            "failure_copy_pages_total": _diagnostic_number(copy_progress.get("pages_total")),
+            "failure_copy_progress_age_ms": round(max(0.0, now - copy_progress_at) * 1000, 3)
+            if copy_progress_at is not None else None,
+        }
+
+    def report_progress(payload: dict[str, Any]) -> None:
+        nonlocal stage_started, copy_progress_at
+        try:
+            if payload.get("stage") != latest_progress.get("stage"):
+                if payload.get("stage") == "worker_finalize":
+                    before_finalize.update(phase_snapshot())
+                stage_started = time.monotonic()
+            latest_progress.clear()
+            latest_progress.update(payload)
+            if payload.get("stage") == "copy" and "pages_remaining" in payload:
+                copy_progress.update(payload)
+                copy_progress_at = time.monotonic()
+        except Exception:
+            pass
+        if config.get("emit_progress"):
+            result_connection.send({"message_type": "progress", **payload, **failure_fields})
+
+    def report_failure(exc: BaseException) -> None:
+        nonlocal work_exception
+        try:
+            if not failure_fields:
+                failure_fields.update(phase_snapshot())
+                failure_fields["failure_error_class"] = _diagnostic_token(type(exc).__name__)
+                work_exception = exc
+            elif exc is not work_exception:
+                failure_fields.update(cleanup_failure_stage=_diagnostic_token(latest_progress.get("stage")),
+                                      cleanup_error_class=_diagnostic_token(type(exc).__name__))
+            _backup_diagnostic("worker_failure", **identity, **failure_fields)
+        except Exception:
+            pass
+
+    _backup_diagnostic("worker_started", **identity)
     try:
-        result = _perform_daily_backup(config, progress_callback=report_progress)
+        result = _perform_daily_backup(config, progress_callback=report_progress, failure_callback=report_failure)
     except DailyBackupDeferred as exc:
+        if exc is not work_exception:
+            report_failure(exc)
         result = {"status": "deferred", "reason": str(exc)}
     except BaseException as exc:
+        if exc is not work_exception:
+            report_failure(exc)
         result = {
             "status": "failure",
             "reason": "worker_exception",
             "error_class": type(exc).__name__,
             "error": str(exc)[:500],
         }
+    if failure_fields:
+        result.update(failure_fields)
+    elif result.get("status") == "failure":
+        result.update(before_finalize)
+    _backup_diagnostic(
+        "worker_outcome", **identity,
+        attempt_status=_diagnostic_token(result.get("status")),
+        attempt_reason=_diagnostic_token(result.get("reason")),
+        error_class=_diagnostic_token(result.get("error_class")),
+        **{key: result[key] for key in _FAILURE_DIAGNOSTIC_FIELDS if key in result},
+    )
     try:
         result_connection.send(result)
     except Exception:
@@ -887,10 +1055,16 @@ def _owned_lock_released(path: str, *, worker_pid: int, owner_source: str, owner
 
 
 def _cleanup_dead_worker_entry(arguments: dict[str, Any], result_connection: Any) -> None:
+    identity = {"attempt_id": str(arguments.get("job_token") or ""),
+                "owned_worker_pid": arguments.get("worker_pid")}
+    _backup_diagnostic("cleanup_child_started", **identity)
     try:
-        result_connection.send(_cleanup_dead_worker_artifacts(**arguments))
-    except Exception:
-        pass
+        result = _cleanup_dead_worker_artifacts(**arguments)
+        _backup_diagnostic("cleanup_child_result", **identity, **result)
+        result_connection.send(result)
+    except Exception as exc:
+        _backup_diagnostic("cleanup_child_error", **identity,
+                           error_class=_diagnostic_token(type(exc).__name__))
     finally:
         try:
             result_connection.close()
@@ -947,6 +1121,7 @@ class DailyBackupScheduler:
         self._cleanup_process: Any = None
         self._cleanup_receiver: Any = None
         self._cleanup_result: dict[str, bool] = {}
+        self._attempt_diagnostic: dict[str, Any] = {}
         self._reap_retry_sec = min(5.0, self.check_interval_sec, self.deferred_retry_sec, self.failure_retry_sec)
         self._state_lock = threading.Lock()
         self._probe: dict[str, Any] = {
@@ -1026,6 +1201,57 @@ class DailyBackupScheduler:
             self._probe.update(values)
             self._probe["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
 
+    def _attempt_snapshot(self) -> dict[str, Any]:
+        try:
+            return self._build_attempt_snapshot()
+        except Exception:
+            return {}
+
+    def _build_attempt_snapshot(self) -> dict[str, Any]:
+        context = self._attempt_diagnostic
+        if not context:
+            return {}
+        now = time.monotonic()
+        snapshot = {key: context.get(key) for key in (
+            "attempt_id", "backup_date", "child_pid", "stage", "stage_state",
+            "stage_reported_elapsed_ms", "copy_pages_remaining", "copy_pages_total",
+            "attempt_status", "attempt_reason", "outcome_origin",
+        )}
+        snapshot.update({key: context[key] for key in _FAILURE_DIAGNOSTIC_FIELDS if key in context})
+        for key, source in (
+            ("attempt_elapsed_ms", "_started"), ("stage_wait_ms", "_stage_started"),
+            ("last_progress_age_ms", "_progress_received_at"),
+            ("copy_progress_age_ms", "_copy_progress_received_at"),
+        ):
+            started = context.get(source)
+            snapshot[key] = round(max(0.0, now - started) * 1000, 3) if started is not None else None
+        snapshot["progress_received"] = context.get("_progress_received_at") is not None
+        return snapshot
+
+    def _diagnose(self, event: str, *, attempt_id: str | None = None, **fields: Any) -> None:
+        try:
+            context = self._attempt_snapshot()
+            if attempt_id is not None and context.get("attempt_id") != attempt_id:
+                context = {"attempt_id": attempt_id}
+            _backup_diagnostic(event, **{**context, "role": self.role, **fields})
+        except Exception:
+            pass
+
+    def _observe_progress(self, message: dict[str, Any]) -> None:
+        context = self._attempt_diagnostic
+        now = time.monotonic()
+        stage = _diagnostic_token(message.get("stage"))
+        if stage != context.get("stage"):
+            context["_stage_started"] = now
+        context.update(stage=stage, stage_state=_diagnostic_token(message.get("state")),
+                       stage_reported_elapsed_ms=_diagnostic_number(message.get("elapsed_ms")),
+                       _progress_received_at=now)
+        context.update({key: message[key] for key in _FAILURE_DIAGNOSTIC_FIELDS if key in message})
+        if stage == "copy" and "pages_remaining" in message:
+            context.update(copy_pages_remaining=_diagnostic_number(message.get("pages_remaining")),
+                           copy_pages_total=_diagnostic_number(message.get("pages_total")),
+                           _copy_progress_received_at=now)
+
     def _due(self, now: datetime) -> tuple[str, str]:
         target = now.replace(hour=self.target_hour, minute=0, second=0, microsecond=0)
         if now < target:
@@ -1071,7 +1297,7 @@ class DailyBackupScheduler:
                 except Exception as exc:
                     # Coordination/pipe/termination failures are job outcomes,
                     # not a reason to silently lose the scheduler thread.
-                    logger.warning("Daily backup coordinator failed: %s", type(exc).__name__)
+                    _safe_backup_log("warning", "Daily backup coordinator failed: %s", type(exc).__name__)
                     result = {
                         "status": "failure", "reason": "coordinator_exception",
                         "error_class": type(exc).__name__, "backup_date": backup_date,
@@ -1109,6 +1335,12 @@ class DailyBackupScheduler:
         if self._has_owned_resources() and not self._terminate_current_process():
             return {"status": "deferred", "reason": "worker_cleanup_pending", "backup_date": backup_date}
         job_token = uuid.uuid4().hex
+        diagnostic_started = time.monotonic()
+        self._attempt_diagnostic = {
+            "attempt_id": job_token, "backup_date": backup_date,
+            "stage": "worker_start", "stage_state": "started",
+            "_started": diagnostic_started, "_stage_started": diagnostic_started,
+        }
         config = self._worker_config(backup_date, job_token)
         paths = _daily_paths(config)
         reservation_path = paths["reservation"]
@@ -1125,12 +1357,18 @@ class DailyBackupScheduler:
         except Exception as exc:
             receiving.close()
             sending.close()
-            return {
+            result = {
                 "status": "failure",
                 "reason": "worker_start_failed",
                 "error_class": type(exc).__name__,
+                "attempt_id": job_token,
             }
+            self._diagnose("attempt_result", final_status="failure", final_reason="worker_start_failed",
+                           error_class=_diagnostic_token(type(exc).__name__))
+            return result
         sending.close()
+        self._attempt_diagnostic["child_pid"] = self._owned_process_pid(process)
+        self._diagnose("attempt_started", worker_timeout_ms=round(self.worker_timeout_sec * 1000, 3))
         with self._process_lock:
             self._process = process
             self._process_job = {
@@ -1148,6 +1386,7 @@ class DailyBackupScheduler:
         current_stage = "worker_start"
         stage_state = "started"
         stage_elapsed_ms: Any = None
+        outcome_origin = "no_result"
         try:
             while time.monotonic() < deadline and not self._stop_event.is_set():
                 if receiving.poll(0.1):
@@ -1157,6 +1396,10 @@ class DailyBackupScheduler:
                         result = None
                         break
                     if isinstance(message, dict) and message.get("message_type") == "progress":
+                        try:
+                            self._observe_progress(message)
+                        except Exception:
+                            pass
                         current_stage = str(message.get("stage") or current_stage)
                         stage_state = str(message.get("state") or stage_state)
                         stage_elapsed_ms = message.get("elapsed_ms")
@@ -1170,10 +1413,16 @@ class DailyBackupScheduler:
                         )
                         continue
                     result = dict(message) if isinstance(message, dict) else None
+                    if result is not None:
+                        self._attempt_diagnostic.update({
+                            key: result[key] for key in _FAILURE_DIAGNOSTIC_FIELDS if key in result
+                        })
+                    outcome_origin = "worker" if result is not None else "no_result"
                     break
                 if not process.is_alive():
                     break
             if result is None and self._stop_event.is_set():
+                outcome_origin = "stopping"
                 result = {
                     "status": "deferred",
                     "reason": "stopping",
@@ -1181,6 +1430,7 @@ class DailyBackupScheduler:
                     "stage_state": stage_state,
                 }
             elif result is None and time.monotonic() >= deadline:
+                outcome_origin = "deadline"
                 result = {
                     "status": "failure",
                     "reason": "worker_timeout",
@@ -1195,6 +1445,14 @@ class DailyBackupScheduler:
                     "exitcode": process.exitcode,
                 }
         finally:
+            self._attempt_diagnostic.update(
+                attempt_status=_diagnostic_token((result or {}).get("status")),
+                attempt_reason=_diagnostic_token((result or {}).get("reason")),
+                outcome_origin=outcome_origin,
+            )
+            # Preserve the attempt's outcome before cleanup can defer its result.
+            outcome_snapshot = self._attempt_snapshot()
+            self._diagnose("attempt_outcome", **outcome_snapshot)
             try:
                 receiving.close()
             except (OSError, ValueError):
@@ -1204,6 +1462,9 @@ class DailyBackupScheduler:
                     "status": "deferred", "reason": "worker_cleanup_pending",
                     "stage": current_stage, "stage_state": stage_state,
                 }
+        result.update({key: value for key, value in outcome_snapshot.items() if key not in result})
+        self._diagnose("attempt_result", final_status=_diagnostic_token(result.get("status")),
+                       final_reason=_diagnostic_token(result.get("reason")))
         result["backup_date"] = backup_date
         return result
 
@@ -1218,10 +1479,13 @@ class DailyBackupScheduler:
             if process is not None:
                 state, errors = _stop_process_bounded(
                     process, timeout_sec=min(2.0, max(0.0, deadline - time.monotonic())),
+                    diagnostic=lambda event, **fields: self._diagnose(
+                        event, process_kind="worker", **fields),
                 )
                 if errors:
-                    logger.warning("Daily backup worker stop: state=%s errors=%s", state, errors)
+                    _safe_backup_log("warning", "Daily backup worker stop: state=%s errors=%s", state, errors)
                 if state != "stopped":
+                    self._diagnose("cleanup_pending", child_state=state)
                     self._update_probe(status="worker_stop_pending", worker_state=state)
                     return False
             if job:
@@ -1231,6 +1495,7 @@ class DailyBackupScheduler:
                     job, timeout_sec=max(0.0, deadline - time.monotonic()),
                 )
                 if not cleanup.get("completed"):
+                    self._diagnose("cleanup_pending", child_state="stopped")
                     self._update_probe(status="cleanup_pending")
                     return False
             elif self._cleanup_process is not None:
@@ -1251,7 +1516,8 @@ class DailyBackupScheduler:
         except Exception as exc:
             # Keep every owned handle/job available to the next reap pass even
             # when creating a cleanup pipe/process fails transiently.
-            logger.warning("Daily backup reap remains pending: %s", type(exc).__name__)
+            _safe_backup_log("warning", "Daily backup reap remains pending: %s", type(exc).__name__)
+            self._diagnose("cleanup_error", error_class=_diagnostic_token(type(exc).__name__))
             self._update_probe(status="cleanup_pending")
             return False
         finally:
@@ -1267,7 +1533,11 @@ class DailyBackupScheduler:
                 process = self._process
             if process is None:
                 return True
-            state, _errors = _stop_process_bounded(process, timeout_sec=max(0.0, deadline - time.monotonic()))
+            state, _errors = _stop_process_bounded(
+                process, timeout_sec=max(0.0, deadline - time.monotonic()),
+                diagnostic=lambda event, **fields: self._diagnose(
+                    event, process_kind="worker", **fields),
+            )
             return state == "stopped"
         finally:
             self._process_stop_lock.release()
@@ -1287,9 +1557,13 @@ class DailyBackupScheduler:
         if cleanup is None:
             return True
         self._receive_cleanup_result()
-        state, errors = _stop_process_bounded(cleanup, timeout_sec=timeout_sec)
+        state, errors = _stop_process_bounded(
+            cleanup, timeout_sec=timeout_sec,
+            diagnostic=lambda event, **fields: self._diagnose(
+                event, process_kind="cleanup", **fields),
+        )
         if errors:
-            logger.warning("Daily backup cleanup stop: state=%s errors=%s", state, errors)
+            _safe_backup_log("warning", "Daily backup cleanup stop: state=%s errors=%s", state, errors)
         self._receive_cleanup_result()
         if state != "stopped":
             return False
@@ -1318,6 +1592,8 @@ class DailyBackupScheduler:
                 previous = dict(self._cleanup_result)
                 if previous.get("completed"):
                     self._cleanup_result = {}
+                    self._diagnose("cleanup_result", attempt_id=str(arguments.get("job_token") or ""),
+                                   completed=True, reused_cleanup=True)
                     return previous
             if time.monotonic() >= deadline:
                 return {}
@@ -1334,9 +1610,13 @@ class DailyBackupScheduler:
             except Exception as exc:
                 receiving.close()
                 sending.close()
-                logger.warning("Daily backup dead-worker cleanup could not start: %s", type(exc).__name__)
+                _safe_backup_log("warning", "Daily backup dead-worker cleanup could not start: %s", type(exc).__name__)
+                self._diagnose("cleanup_start_failed", attempt_id=str(arguments.get("job_token") or ""),
+                               error_class=_diagnostic_token(type(exc).__name__))
                 return {}
             sending.close()
+            self._diagnose("cleanup_started", attempt_id=str(arguments.get("job_token") or ""),
+                           cleanup_pid=self._owned_process_pid(cleanup))
             with self._process_lock:
                 self._cleanup_process = cleanup
                 self._cleanup_receiver = receiving
@@ -1350,8 +1630,12 @@ class DailyBackupScheduler:
                 return {}
             result = dict(self._cleanup_result)
             self._cleanup_result = {}
+            self._diagnose("cleanup_result", attempt_id=str(arguments.get("job_token") or ""),
+                           **{key: bool(result.get(key)) for key in (
+                               "completed", "reservation", "database_lock", "staging",
+                           )})
             if not result.get("completed"):
-                logger.warning("Daily backup dead-worker cleanup remains pending")
+                _safe_backup_log("warning", "Daily backup dead-worker cleanup remains pending")
             return result
 
     def _record_result(self, result: dict[str, Any], *, schedule_reason: str) -> None:
@@ -1368,11 +1652,24 @@ class DailyBackupScheduler:
             "stage_state": str(result.get("stage_state") or ""),
             "stage_elapsed_ms": result.get("stage_elapsed_ms"),
         }
-        record_metric("daily_central_backup_result", 1, **fields)
+        diagnostic = result
+        if reason == "worker_cleanup_pending" and not result.get("attempt_id"):
+            diagnostic = self._attempt_snapshot()
+        for key in (
+            "attempt_id", "attempt_status", "attempt_reason", "outcome_origin", "child_pid",
+            "progress_received", "attempt_elapsed_ms", "stage_wait_ms", "last_progress_age_ms",
+            "stage_reported_elapsed_ms", "copy_pages_remaining", "copy_pages_total", "copy_progress_age_ms",
+        ) + _FAILURE_DIAGNOSTIC_FIELDS:
+            if key in diagnostic:
+                fields[key] = diagnostic[key]
+        try:
+            record_metric("daily_central_backup_result", 1, **fields)
+        except Exception:
+            pass
         self._update_probe(**fields)
         if status == "success":
-            logger.info("Daily central backup result: %s", fields)
+            _safe_backup_log("info", "Daily central backup result: %s", fields)
         elif status == "deferred":
-            logger.info("Daily central backup deferred: %s", fields)
+            _safe_backup_log("info", "Daily central backup deferred: %s", fields)
         else:
-            logger.warning("Daily central backup failed: %s", {**fields, "error": result.get("error", "")})
+            _safe_backup_log("warning", "Daily central backup failed: %s", {**fields, "error": result.get("error", "")})

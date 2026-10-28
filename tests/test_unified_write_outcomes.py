@@ -368,7 +368,8 @@ class UnifiedWriteOutcomeTest(unittest.TestCase):
             for call in self.data_metric.call_args_list
             if call.kwargs.get("result") == "committed"
         ][0]
-        self.assertEqual(terminal_metric["session_id"], "session-doctor-7")
+        from rem_card.app.write_operation_diagnostics import write_diagnostic_fields
+        self.assertEqual(terminal_metric["session_id"], write_diagnostic_fields({"session_id": "session-doctor-7"})["session_id"])
         self.assertEqual(terminal_metric["role"], "doctor")
 
     def test_unknown_receipt_is_sticky_and_blocks_shutdown(self):

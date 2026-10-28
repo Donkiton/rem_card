@@ -17,6 +17,7 @@ from typing import Any
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
 from rem_card.app.db_wait_diagnostics import observe, observed_call, mark_stage, current_operation, bind_connection
 from rem_card.app.sqlite_shared import FileWriteLock, configure_connection, describe_sqlite_lock_holder
+from rem_card.app.connection_diagnostics import connection_observation, connection_phase
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.replica_copy_diagnostics import current_copy, observed_copy
 
@@ -273,20 +274,26 @@ def _states_match(left: dict[str, Any] | None, right: dict[str, Any] | None) -> 
 
 
 def _open_central_readonly(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(
-        build_sqlite_file_uri(db_path, mode="ro"),
-        uri=True,
-        check_same_thread=True,
-        isolation_level=None,
-        timeout=0.25,
-    )
-    try:
-        configure_connection(conn, readonly=True, profile="network")
-        conn.execute("PRAGMA busy_timeout = 250")
-        return conn
-    except Exception:
-        conn.close()
-        raise
+    with connection_observation(db_path, source="replica_readonly"):
+        with connection_phase("connection_uri"):
+            uri = build_sqlite_file_uri(db_path, mode="ro")
+        with connection_phase("sqlite_connect"):
+            conn = sqlite3.connect(
+                uri,
+                uri=True,
+                check_same_thread=True,
+                isolation_level=None,
+                timeout=0.25,
+            )
+        try:
+            with connection_phase("connection_configure"):
+                configure_connection(conn, readonly=True, profile="network")
+            with connection_phase("pragma_worker_busy_timeout"):
+                conn.execute("PRAGMA busy_timeout = 250")
+            return conn
+        except Exception:
+            conn.close()
+            raise
 
 
 def _open_temp_replica(db_path: str) -> sqlite3.Connection:

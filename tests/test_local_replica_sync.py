@@ -1860,10 +1860,20 @@ class LocalReplicaSyncTest(unittest.TestCase):
         )
         self.assertFalse(self.replica.sync_once())
         self.replica.trigger_fast_sync()
-        started = time.monotonic()
-        with patch("rem_card.app.local_replica_sync.os.path.exists", side_effect=AssertionError("network probe")):
+        # A short wall-clock bound is unstable on Windows CI. Verify the
+        # actual backoff contract: only stop can interrupt the full wait,
+        # while an already pending fast request is coalesced afterwards.
+        def stop_wait(timeout):
+            self.assertEqual(timeout, 0.06)
+            self.assertTrue(self.replica._fast_sync_evt.is_set())
+            return False
+        with (
+            patch("rem_card.app.local_replica_sync.os.path.exists", side_effect=AssertionError("network probe")),
+            patch.object(self.replica._stop_evt, "wait", side_effect=stop_wait) as wait_for_stop,
+            patch.object(self.replica._fast_sync_evt, "wait", side_effect=AssertionError("fast request bypassed backoff")),
+        ):
             self.assertFalse(self.replica._wait_for_retry(0.06, "LocalReplicaWorkerTimeout"))
-        self.assertGreaterEqual(time.monotonic() - started, 0.05)
+        wait_for_stop.assert_called_once_with(0.06)
         self.assertFalse(self.replica._fast_sync_evt.is_set())
 
     def test_stop_interrupts_failure_backoff_without_network_probe(self):

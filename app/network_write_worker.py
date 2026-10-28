@@ -10,14 +10,52 @@ import time
 from collections.abc import Iterator, Mapping
 from datetime import date, datetime
 from typing import Any, Callable
+from contextlib import contextmanager, nullcontext, ExitStack
+from contextvars import ContextVar
+from functools import wraps
 
 from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
 from rem_card.app.db_wait_diagnostics import observe, observed_call, bind_connection, mark_stage, mark_retry
+from rem_card.app.write_operation_diagnostics import (
+    WriteOperationDiagnostics, write_diagnostic_scope, write_error_fields,
+)
 
 
 DEFAULT_NETWORK_WRITE_TIMEOUT_SEC = 8.0
 NETWORK_WRITE_CONFIRM_RESERVE_SEC = 1.5
 NETWORK_WRITE_RECEIPT_TABLE = "runtime_write_receipts"
+_NETWORK_TRACE = ContextVar("network_write_diagnostic", default=None)
+
+
+def _network_phase(stage, *, deadline=None):
+    trace = _NETWORK_TRACE.get()
+    return trace.phase(stage, deadline=deadline) if trace is not None else nullcontext()
+
+
+def _network_retry():
+    trace = _NETWORK_TRACE.get()
+    if trace is not None:
+        trace.retry_count += 1
+
+
+@contextmanager
+def _network_trace_scope(trace):
+    token = _NETWORK_TRACE.set(trace)
+    try:
+        yield
+    finally:
+        _NETWORK_TRACE.reset(token)
+
+
+def _diagnose_network_write(function):
+    @wraps(function)
+    def wrapped(self, operation, *, operation_id, source, metadata=None, timeout_sec=None):
+        context = {**(metadata or {}), "operation_id": operation_id}
+        trace = WriteOperationDiagnostics(source, context, clock=time.monotonic)
+        with trace.summary("network_write_client_diagnostic"), write_diagnostic_scope(context), _network_trace_scope(trace):
+            return function(self, operation, operation_id=operation_id, source=source,
+                            metadata=metadata, timeout_sec=timeout_sec)
+    return wrapped
 
 
 class NetworkWriteWorkerError(RuntimeError):
@@ -127,7 +165,7 @@ def _send_error(pipe, exc: Exception, *, phase: str) -> None:
             {
                 "ok": False,
                 "phase": str(phase or ""),
-                "error_class": type(exc).__name__,
+                **write_error_fields(exc),
                 "error": str(exc),
             }
         )
@@ -223,7 +261,11 @@ def _execute_sql(conn: sqlite3.Connection, message: dict[str, Any]) -> dict[str,
 
 
 def _worker_write(pipe, message: dict[str, Any]) -> None:
-    with observe(message.get("source"), resource=message.get("db_path"), stage="network_connection_open"):
+    context = {**dict(message.get("metadata") or {}), "operation_id": message.get("operation_id")}
+    trace = WriteOperationDiagnostics(message.get("source"), context, clock=time.monotonic)
+    with trace.summary("network_write_worker_diagnostic"), write_diagnostic_scope(context), _network_trace_scope(trace), observe(
+        message.get("source"), resource=message.get("db_path"), stage="network_connection_open"
+    ):
         _worker_write_observed(pipe, message)
 
 
@@ -238,35 +280,52 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
     lock = FileWriteLock(lock_path, stale_timeout_sec=60.0)
     lock_acquired = False
     transaction_started = False
+    trace = _NETWORK_TRACE.get()
     try:
-        conn = _open_network_connection(db_path)
+        with _network_phase("connection_open"):
+            conn = _open_network_connection(db_path)
         bind_connection(conn)
-        receipt = _lookup_receipt(conn, operation_id)
+        with _network_phase("receipt_lookup"):
+            receipt = _lookup_receipt(conn, operation_id)
         if receipt is not None:
+            if trace is not None:
+                trace.database_outcome = "committed"
+                trace.confirmation_result = "existing_receipt"
             pipe.send({"ok": True, "status": "already_committed", **receipt})
             return
 
         mark_stage("file_lock_wait")
-        while not lock.acquire(node_id or f"{socket.gethostname()}:{os.getpid()}", source):
-            mark_retry()
-            time.sleep(0.05)
+        with _network_phase("file_lock"):
+            while not lock.acquire(node_id or f"{socket.gethostname()}:{os.getpid()}", source):
+                mark_retry()
+                _network_retry()
+                time.sleep(0.05)
         lock_acquired = True
         mark_stage("sqlite_begin_wait")
-        while True:
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                transaction_started = True
-                break
-            except sqlite3.OperationalError as exc:
-                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
-                    raise
-                mark_retry()
-                time.sleep(0.05)
+        with _network_phase("begin"):
+            while True:
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    transaction_started = True
+                    if trace is not None:
+                        trace.database_outcome = "unknown"
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                        raise
+                    mark_retry()
+                    _network_retry()
+                    time.sleep(0.05)
 
-        receipt = _lookup_receipt(conn, operation_id)
+        with _network_phase("receipt_lookup"):
+            receipt = _lookup_receipt(conn, operation_id)
         if receipt is not None:
-            conn.rollback()
+            with _network_phase("rollback"):
+                conn.rollback()
             transaction_started = False
+            if trace is not None:
+                trace.database_outcome = "committed"
+                trace.confirmation_result = "existing_receipt"
             pipe.send({"ok": True, "status": "already_committed", **receipt})
             return
         before_change_id = _change_cursor(conn)
@@ -274,17 +333,23 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
         pipe.send({"ok": True, "status": "ready"})
 
         while True:
-            command = pipe.recv()
+            with _network_phase("body_wait"):
+                command = pipe.recv()
             name = str(command.get("cmd") or "")
             if name in {"execute", "executemany", "executescript"}:
                 try:
-                    pipe.send(_execute_sql(conn, command))
+                    with _network_phase("body"):
+                        response = _execute_sql(conn, command)
+                    pipe.send(response)
                 except Exception as exc:
                     _send_error(pipe, exc, phase="execute")
                 continue
             if name == "abort":
                 mark_stage("rollback")
-                conn.rollback()
+                with _network_phase("rollback"):
+                    conn.rollback()
+                if trace is not None:
+                    trace.database_outcome = "rolled_back"
                 mark_stage("rolled_back")
                 transaction_started = False
                 pipe.send({"ok": True, "status": "rolled_back"})
@@ -300,28 +365,32 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-            conn.execute(
-                f"""
-                INSERT INTO {NETWORK_WRITE_RECEIPT_TABLE} (
-                    operation_id, request_id, source, node_id, role,
-                    admission_id, operation_case_id, result_json, affected_rows_json
+            with _network_phase("receipt_store"):
+                conn.execute(
+                    f"""
+                    INSERT INTO {NETWORK_WRITE_RECEIPT_TABLE} (
+                        operation_id, request_id, source, node_id, role,
+                        admission_id, operation_case_id, result_json, affected_rows_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        operation_id,
+                        str(metadata.get("request_id") or ""),
+                        source,
+                        node_id,
+                        str(metadata.get("role") or ""),
+                        metadata.get("admission_id"),
+                        metadata.get("operation_case_id"),
+                        result_json,
+                        affected_rows_json,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    operation_id,
-                    str(metadata.get("request_id") or ""),
-                    source,
-                    node_id,
-                    str(metadata.get("role") or ""),
-                    metadata.get("admission_id"),
-                    metadata.get("operation_case_id"),
-                    result_json,
-                    affected_rows_json,
-                ),
-            )
             mark_stage("commit")
-            conn.commit()
+            with _network_phase("commit"):
+                conn.commit()
+            if trace is not None:
+                trace.database_outcome = "committed"
             mark_stage("committed")
             transaction_started = False
             pipe.send(
@@ -334,21 +403,29 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
                 }
             )
             return
-    except EOFError:
-        pass
+    except EOFError as exc:
+        if trace is not None:
+            trace.note_error(exc)
     except Exception as exc:
+        if trace is not None:
+            trace.note_error(exc)
         if transaction_started and conn is not None:
             try:
-                conn.rollback()
+                with _network_phase("rollback"):
+                    conn.rollback()
+                if trace is not None:
+                    trace.database_outcome = "rolled_back"
             except Exception:
                 pass
         _send_error(pipe, exc, phase="worker")
     finally:
         if lock_acquired:
-            lock.release()
+            with _network_phase("lock_release"):
+                lock.release()
         if conn is not None:
             try:
-                conn.close()
+                with _network_phase("connection_close"):
+                    conn.close()
             except Exception:
                 pass
 
@@ -584,12 +661,22 @@ class NetworkWriteWorkerClient:
                 remote_error_class=type(exc).__name__,
             ) from exc
         if not response.get("ok"):
-            raise NetworkWriteWorkerError(
+            error = NetworkWriteWorkerError(
                 str(response.get("error") or "Ошибка процесса сетевой записи"),
                 operation_id=operation_id,
                 source=source,
                 remote_error_class=str(response.get("error_class") or ""),
             )
+            # Preserve only numeric SQLite/OS evidence already returned by the
+            # child; no extra receipt query or filesystem probe is introduced.
+            for key in ("sqlite_errorcode", "winerror", "errno"):
+                if type(response.get(key)) is int:
+                    setattr(error, key, response[key])
+            name = response.get("sqlite_errorname")
+            if isinstance(name, str) and name.startswith("SQLITE_"):
+                error.sqlite_errorname = name
+            error.phase = str(response.get("phase") or phase)
+            raise error
         return dict(response)
 
     def _request(
@@ -607,13 +694,21 @@ class NetworkWriteWorkerClient:
                 operation_id=operation_id,
                 source=source,
             )
-        self._pipe.send(message)
-        return self._recv(
-            deadline=deadline,
-            operation_id=operation_id,
-            source=source,
-            phase=phase,
-        )
+        with _network_phase(phase, deadline=deadline):
+            self._pipe.send(message)
+            response = self._recv(
+                deadline=deadline,
+                operation_id=operation_id,
+                source=source,
+                phase=phase,
+            )
+        trace = _NETWORK_TRACE.get()
+        if trace is not None:
+            if response.get("status") in {"committed", "already_committed"}:
+                trace.database_outcome = "committed"
+            elif response.get("status") == "rolled_back":
+                trace.database_outcome = "rolled_back"
+        return response
 
     def _terminate(self) -> None:
         process = self._process
@@ -670,6 +765,7 @@ class NetworkWriteWorkerClient:
         return {"missing": True}
 
     @observed_call("network_worker_mutex_wait")
+    @_diagnose_network_write
     def execute(
         self,
         operation: Callable[[Any], Any],
@@ -689,11 +785,19 @@ class NetworkWriteWorkerClient:
             NETWORK_WRITE_CONFIRM_RESERVE_SEC,
             effective_timeout / 3.0,
         )
-        with self._mutex:
+        trace = _NETWORK_TRACE.get()
+        if trace is not None:
+            trace.deadline = total_deadline
+        with ExitStack() as mutex_scope:
+            with _network_phase("mutex_wait"):
+                mutex_scope.enter_context(self._mutex)
             mark_stage("network_worker_start")
             self._remember_commit_info({})
             try:
-                self._ensure_started()
+                with _network_phase("worker_start"):
+                    self._ensure_started()
+                if trace is not None:
+                    trace.database_outcome = "unknown"
                 begin = self._request(
                     {
                         "cmd": "write",
@@ -710,11 +814,14 @@ class NetworkWriteWorkerClient:
                     phase="begin",
                 )
                 if begin.get("status") == "already_committed":
+                    if trace is not None:
+                        trace.confirmation_result = "existing_receipt"
                     self._remember_commit_info(begin)
                     return begin.get("result")
                 cursor = _RemoteCursor(self, work_deadline, operation_id, source)
                 try:
-                    result = operation(cursor)
+                    with _network_phase("body"):
+                        result = operation(cursor)
                 except Exception:
                     try:
                         self._request(
@@ -742,7 +849,12 @@ class NetworkWriteWorkerClient:
                     source=source,
                     deadline=total_deadline,
                 )
+                if trace is not None:
+                    trace.confirmation_result = "unavailable" if receipt is None else "missing" if receipt.get("missing") else "found"
                 if receipt and not receipt.get("missing"):
+                    if trace is not None:
+                        trace.database_outcome = "committed"
+                        trace.recover_error()
                     self._remember_commit_info(receipt)
                     return receipt.get("result")
                 raise NetworkWriteWorkerTimeout(

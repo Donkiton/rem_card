@@ -1,4 +1,5 @@
 from rem_card.app.db_wait_diagnostics import observe, observed_scope, observed_call, bind_connection, mark_stage
+from rem_card.app.connection_diagnostics import connection_observation, connection_phase
 import json
 import os
 import random
@@ -2469,17 +2470,23 @@ class DatabaseManager:
 
     @observed_call("read_connection_open")
     def _open_readonly_central_connection(self) -> sqlite3.Connection:
-        if self._closed or self._remcard_conn is None:
-            raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
-        conn = sqlite3.connect(
-            self._readonly_db_uri(),
-            uri=True,
-            check_same_thread=True,
-            isolation_level=None,
-            timeout=5.0,
-        )
-        configure_connection(conn, readonly=True, profile="network")
-        return conn
+        with connection_observation(self.db_path):
+            with connection_phase("connection_precondition"):
+                if self._closed or self._remcard_conn is None:
+                    raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
+            with connection_phase("connection_uri"):
+                uri = self._readonly_db_uri()
+            with connection_phase("sqlite_connect"):
+                conn = sqlite3.connect(
+                    uri,
+                    uri=True,
+                    check_same_thread=True,
+                    isolation_level=None,
+                    timeout=5.0,
+                )
+            with connection_phase("connection_configure"):
+                configure_connection(conn, readonly=True, profile="network")
+            return conn
 
     def _get_central_write_connection_for_read(self, context: str) -> sqlite3.Connection:
         if self._closed or self._remcard_conn is None:

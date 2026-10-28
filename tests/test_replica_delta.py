@@ -401,7 +401,8 @@ def test_empty_untracked_tables_do_not_scan_bytes_or_payload():
     for table in ("audit_rows", "children"):
         reads = [sql.casefold() for sql in statements if f'from "{table}"' in sql.casefold()]
         assert reads
-        assert all("count(*)" in sql for sql in reads)
+        assert all("count(*)" in sql or ("order by" in sql and "limit 1" in sql) for sql in reads)
+        assert not any("sum(" in sql for sql in reads)
     assert logical_dump(local) == logical_dump(source)
 
 
@@ -423,3 +424,209 @@ def test_journal_row_budget_chooses_full_before_scanning_untracked_history():
     assert not source.in_transaction and not local.in_transaction
     assert logical_dump(source) == before_source
     assert logical_dump(local) == before_local
+
+
+def test_dense_integer_history_fuses_count_and_size_without_changing_delta():
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    source.executemany("INSERT INTO audit_rows(item_id, action) VALUES(1, ?)",
+                       [("history" * 40,) for _ in range(12_000)])
+    source.commit()
+    local = clone(source)
+    source.execute("UPDATE audit_rows SET action='old update' WHERE id=17")
+    source.execute("DELETE FROM audit_rows WHERE id=19")
+    source.commit()
+    source_sql, local_sql = [], []
+    source.set_trace_callback(source_sql.append)
+    local.set_trace_callback(local_sql.append)
+    package = collect_delta(source, local, max_fraction=1)
+    assert package["status"] == "delta"
+    for statements in (source_sql, local_sql):
+        table_reads = [sql.casefold() for sql in statements if 'from "audit_rows"' in sql.casefold()]
+        assert len(table_reads) == 3  # Constant edge seeks, fused preflight, ordered payload.
+        assert sum("count(*)" in sql and "sum(" in sql for sql in table_reads) == 1
+        assert not any(sql.startswith('select count(*) from "audit_rows"') for sql in table_reads)
+    apply_delta(local, package)
+    assert logical_dump(local) == logical_dump(source)
+    assert generous_delta(source, local)["status"] == "unchanged"
+    assert delta._rowid_interval_key(source, "audit_rows", delta._table_info(source, "audit_rows")) == "id"
+
+
+def test_row_limit_rejection_retains_fast_count_without_evaluating_sizes(monkeypatch):
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    source.executemany("INSERT INTO audit_rows(item_id, action) VALUES(1, 'history')", [()] * 6001)
+    source.commit()
+    local = clone(source)
+    before = logical_dump(local)
+    original = delta._row_size_expression
+    def size_expression(info):
+        if info["columns"] == ["id", "item_id", "action"]:
+            pytest.fail("sized rows after known row refusal")
+        return original(info)
+    monkeypatch.setattr(delta, "_row_size_expression", size_expression)
+    result = collect_delta(source, local, max_scan_rows=5000, max_fraction=1)
+    assert result["reason"] == "reconciliation_scan_limit"
+    assert result["metrics"]["source_rows"] == result["metrics"]["local_rows"] == 6001
+    assert logical_dump(local) == before
+
+
+@pytest.mark.parametrize("local_oversized", [False, True])
+def test_untracked_oversized_blob_refuses_before_python_payload(local_oversized, monkeypatch):
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    local = clone(source)
+    oversized = local if local_oversized else source
+    oversized.execute("INSERT INTO audit_rows(item_id, action) VALUES(1, zeroblob(?))", (33 * 1024 * 1024,))
+    oversized.commit()
+    monkeypatch.setattr(delta, "_ordered_table_rows", lambda *_args: pytest.fail("oversized payload fetched"))
+    result = collect_delta(source, local, max_fraction=1)
+    assert result["status"] == "full_required" and result["reason"] == "reconciliation_byte_limit"
+    assert result["metrics"]["table"] == "audit_rows"
+    assert not source.in_transaction and not local.in_transaction
+
+
+def test_fused_byte_refusal_labels_unread_local_row_count_as_lower_bound(monkeypatch):
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    source.executemany("INSERT INTO audit_rows(item_id, action) VALUES(1, 'x')", [()] * 10_000)
+    source.commit()
+    local = clone(source)
+    budget = delta._database_bytes(source)
+    size = delta._estimate_source_bytes(source, "audit_rows", delta._table_info(source, "audit_rows"))
+    assert size > budget  # Framing of many tiny rows exceeds their on-disk footprint.
+    local_sql = []
+    local.set_trace_callback(local_sql.append)
+    monkeypatch.setattr(delta, "_ordered_table_rows", lambda *_args: pytest.fail("payload fetched after byte refusal"))
+    result = collect_delta(source, local, max_scan_bytes=budget, max_fraction=1)
+    assert result["reason"] == "reconciliation_byte_limit"
+    assert result["metrics"] == {"table": "audit_rows", "source_rows": 10_000, "local_rows": 0,
+                                  "row_counts_lower_bound": True}
+    assert not any('from "audit_rows"' in sql.casefold() and "sum(" in sql.casefold() for sql in local_sql)
+
+
+@pytest.mark.parametrize("ddl,rows,expected_key", [
+    ("CREATE TABLE custom_rows(value)", [("old",), ("deleted",)], "_rowid_"),
+    ("CREATE TABLE custom_rows(id INTEGER PRIMARY KEY DESC, value)", [(1, "old"), (2, "deleted")], None),
+    ("CREATE TABLE custom_rows(id TEXT PRIMARY KEY, value) WITHOUT ROWID", [("1", "old"), ("2", "deleted")], None),
+    ("CREATE TABLE custom_rows(id PRIMARY KEY, value)", [(1, "old"), ("2", "deleted")], None),
+])
+def test_rowid_fused_guard_leaves_other_key_shapes_on_existing_safe_path(ddl, rows, expected_key):
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    source.execute(ddl)
+    source.executemany("INSERT INTO custom_rows VALUES (%s)" % ",".join("?" for _ in rows[0]), rows)
+    source.commit()
+    local = clone(source)
+    info = delta._table_info(source, "custom_rows")
+    assert delta._rowid_interval_key(source, "custom_rows", info) == expected_key
+    if expected_key:
+        source.execute("UPDATE custom_rows SET value='updated' WHERE rowid=1")
+        source.execute("DELETE FROM custom_rows WHERE rowid=2")
+    else:
+        source.execute("UPDATE custom_rows SET value='updated' WHERE id=?", (rows[0][0],))
+        source.execute("DELETE FROM custom_rows WHERE id=?", (rows[1][0],))
+    source.commit()
+    package = collect_delta(source, local, max_fraction=1)
+    assert package["status"] == "delta", package
+    apply_delta(local, package)
+    assert logical_dump(local) == logical_dump(source)
+
+
+def test_sparse_integer_keys_fall_back_to_fast_count_before_size_scan():
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    source.execute("INSERT INTO audit_rows(id,item_id,action) VALUES(1,1,'old')")
+    source.execute("INSERT INTO audit_rows(id,item_id,action) VALUES(1000000000,1,'tail')")
+    source.commit()
+    local = clone(source)
+    statements = []
+    source.set_trace_callback(statements.append)
+    result = generous_delta(source, local)
+    assert result["status"] == "unchanged"
+    assert any(sql.casefold().startswith('select count(*) from "audit_rows"') for sql in statements)
+    assert not any('from "audit_rows"' in sql.casefold() and "count(*)" in sql.casefold() and "sum(" in sql.casefold()
+                   for sql in statements)
+    assert delta._rowid_count_bound(source, "audit_rows", "id") == 1_000_000_000
+
+
+def test_fused_metadata_cancellation_precedes_local_scan_and_restores_transactions(monkeypatch):
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    source.executemany("INSERT INTO audit_rows(item_id,action) VALUES(1,'history')", [()] * 6001)
+    source.commit()
+    local = clone(source)
+    cancelled = [False]
+    original = delta._count_and_estimate_bytes
+    class CallerCancelled(RuntimeError):
+        pass
+    def sized(*args):
+        result = original(*args)
+        if args[0] is source and args[1] == "audit_rows":
+            cancelled[0] = True
+        return result
+    def check_cancel():
+        if cancelled[0]:
+            raise CallerCancelled()
+    monkeypatch.setattr(delta, "_count_and_estimate_bytes", sized)
+    local_sql = []
+    local.set_trace_callback(local_sql.append)
+    with pytest.raises(CallerCancelled):
+        collect_delta(source, local, check_cancel=check_cancel, max_fraction=1)
+    assert not source.in_transaction and not local.in_transaction
+    assert source.execute("PRAGMA query_only").fetchone() == (0,)
+    assert not any('from "audit_rows"' in sql.casefold() and "sum(" in sql.casefold() for sql in local_sql)
+
+
+def test_large_unrelated_tracked_table_does_not_disable_history_fusion():
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    source.executescript("""
+        CREATE TABLE unrelated(id INTEGER PRIMARY KEY, payload BLOB);
+        CREATE TRIGGER trg_unrelated_version_ins AFTER INSERT ON unrelated BEGIN
+          INSERT INTO change_log(entity_name,entity_id,action) VALUES('unrelated',NEW.id,'insert');
+        END;
+        CREATE TRIGGER trg_unrelated_version_upd AFTER UPDATE ON unrelated BEGIN
+          INSERT INTO change_log(entity_name,entity_id,action) VALUES('unrelated',NEW.id,'update');
+        END;
+        CREATE TRIGGER trg_unrelated_version_del AFTER DELETE ON unrelated BEGIN
+          INSERT INTO change_log(entity_name,entity_id,action) VALUES('unrelated',OLD.id,'delete');
+        END;
+        INSERT INTO unrelated VALUES(1,zeroblob(34000000));
+    """)
+    source.executemany("INSERT INTO audit_rows(item_id,action) VALUES(1,'history')", [()] * 6001)
+    source.commit()
+    assert delta._database_bytes(source) > delta.MAX_RECONCILIATION_SCAN_BYTES
+    local = clone(source)
+    source.execute("UPDATE audit_rows SET action='updated' WHERE id=17")
+    source.commit()
+    statements = []
+    source.set_trace_callback(statements.append)
+    package = collect_delta(source, local, max_fraction=1)
+    assert package["status"] == "delta"
+    assert any('from "audit_rows"' in sql.casefold() and "count(*)" in sql.casefold() and "sum(" in sql.casefold()
+               for sql in statements)
+    assert not any(sql.casefold().startswith('select count(*) from "audit_rows"') for sql in statements)
+    apply_delta(local, package)
+    assert local.execute("SELECT action FROM audit_rows WHERE id=17").fetchone() == ("updated",)
+    assert local.execute("SELECT length(payload) FROM unrelated").fetchone() == (34000000,)
+
+
+@pytest.mark.parametrize("text_value", [False, True], ids=["blob", "text"])
+def test_huge_value_with_excess_rows_still_rejects_before_sizing(text_value, monkeypatch):
+    from rem_card.app import replica_delta as delta
+    source = make_database()
+    payload = "Ж" * 1_000_000 if text_value else b"x" * 2_000_000
+    source.execute("INSERT INTO audit_rows(item_id,action) VALUES(1,?)", (payload,))
+    source.executemany("INSERT INTO audit_rows(item_id,action) VALUES(1,'small')", [()] * 10)
+    source.commit()
+    local = clone(source)
+    original = delta._row_size_expression
+    def size_expression(info):
+        if info["columns"] == ["id", "item_id", "action"]:
+            pytest.fail("evaluated oversized value after proven row-budget refusal")
+        return original(info)
+    monkeypatch.setattr(delta, "_row_size_expression", size_expression)
+    result = collect_delta(source, local, max_scan_rows=4, max_scan_bytes=1024 * 1024, max_fraction=1)
+    assert result["reason"] == "reconciliation_scan_limit"
+    assert result["metrics"]["source_rows"] == result["metrics"]["local_rows"] == 11

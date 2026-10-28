@@ -140,17 +140,54 @@ def test_local_snapshot_and_network_publication_use_separate_staging_paths(
 def test_progress_distinguishes_read_copy_upload_and_verify_without_record_data(tmp_path: Path) -> None:
     _make_database(tmp_path / "medical.db", "sensitive row is never telemetry")
     progress: list[dict] = []
+    config = _config(tmp_path, backup_date="2026-10-17")
 
     result = daily._perform_daily_backup(
-        _config(tmp_path, backup_date="2026-10-17"),
+        config,
         progress_callback=progress.append,
     )
 
     assert result["status"] == "success"
     started = [item["stage"] for item in progress if item["state"] == "started"]
-    assert started == ["read_wait", "copy", "verify_local", "upload", "verify_upload", "publish"]
+    assert started == ["read_wait", "copy", "verify_local", "upload", "verify_upload", "publish",
+                       "done_marker", "prune", "worker_finalize"]
+    assert all(event["attempt_id"] == config["job_token"] for event in progress)
     assert all("sensitive row" not in repr(item) for item in progress)
     assert all("path" not in key for item in progress for key in item)
+
+
+def test_worker_failure_preserves_verify_phase_before_finalization(tmp_path: Path, monkeypatch) -> None:
+    from rem_card.app import sqlite_shared
+
+    _make_database(tmp_path / "medical.db")
+    config = _config(tmp_path, backup_date="2026-10-28")
+    config["emit_progress"] = True
+    messages: list[dict] = []
+    diagnostics: list[dict] = []
+
+    class Connection(_CaptureConnection):
+        def send(self, message):
+            messages.append(message)
+
+    def failed_validation(*_args, **_kwargs):
+        raise OSError("validation unavailable")
+
+    monkeypatch.setattr(sqlite_shared, "validate_sqlite_file", failed_validation)
+    monkeypatch.setattr(daily, "record_metric", lambda _name, _value, **fields: diagnostics.append(fields))
+    daily._daily_backup_worker(config, Connection())
+    result = messages[-1]
+    assert (result["status"], result["reason"], result["error_class"]) == ("failure", "worker_exception", "OSError")
+    assert result["failure_stage"] == "verify_local" and result["failure_stage_state"] == "started"
+    assert result["failure_error_class"] == "OSError"
+    assert result["failure_copy_pages_remaining"] == 0 and result["failure_copy_pages_total"] > 0
+    assert result["failure_stage_wait_ms"] >= 0 and result["failure_reported_elapsed_ms"] is None
+    finalize = [message for message in messages if message.get("stage") == "worker_finalize"]
+    assert [message["state"] for message in finalize] == ["started", "completed"]
+    assert all(message["failure_stage"] == "verify_local" for message in finalize)
+    outcome = next(item for item in diagnostics if item.get("event") == "worker_outcome")
+    assert outcome["failure_stage"] == "verify_local" and outcome["error_class"] == "OSError"
+    assert not Path(config["database_lock_path"]).exists()
+    assert not Path(daily._daily_paths(config)["reservation"]).exists()
 
 
 def test_clinical_writer_can_commit_while_completed_snapshot_is_uploaded(
@@ -214,7 +251,8 @@ def test_copy_budget_yields_shared_locks_and_defers_without_publishing(tmp_path:
     capture = SlowCopy()
     daily._daily_backup_worker(config, capture)
 
-    assert capture.value == {"status": "deferred", "reason": "copy_budget_exhausted"}
+    assert capture.value["status"] == "deferred" and capture.value["reason"] == "copy_budget_exhausted"
+    assert capture.value["failure_stage"] == "copy"
     assert not Path(paths["done"]).exists()
     assert not Path(paths["backup"]).exists()
     assert not Path(config["database_lock_path"]).exists()
@@ -281,7 +319,8 @@ def test_live_database_writer_defers_backup_without_deleting_its_lock(tmp_path: 
     capture = _CaptureConnection()
     try:
         daily._daily_backup_worker(config, capture)
-        assert capture.value == {"status": "deferred", "reason": "central_database_lock_busy"}
+        assert capture.value["status"] == "deferred" and capture.value["reason"] == "central_database_lock_busy"
+        assert capture.value["failure_stage"] == "read_wait"
         assert Path(path).read_bytes() == token
     finally:
         writer.release()
