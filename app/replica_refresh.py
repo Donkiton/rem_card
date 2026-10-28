@@ -18,7 +18,7 @@ def incremental_enabled() -> bool:
     }
 
 
-def try_incremental_snapshot(message: dict, *, check_cancel, progress) -> dict:
+def try_incremental_snapshot(message: dict, *, check_cancel, progress, check_boundary=None) -> dict:
     """Return a worker result, or full_required without touching the source.
 
     A full_required result MUST force a backup even when change_log's maximum
@@ -32,6 +32,14 @@ def try_incremental_snapshot(message: dict, *, check_cancel, progress) -> dict:
         _open_central_readonly, _open_temp_replica, _read_database_state,
         _remove_with_sidecars, _local_destination, LOCAL_REPLICA_BACKUP_PAGES,
     )
+
+    # Row-level checks may amortize network metadata probes. At phase boundaries
+    # and before handing out a candidate, the writer/rotation fence is always
+    # fresh. Other callers retain their existing cancellation callback.
+    def check_fence():
+        check_cancel()
+        if check_boundary is not None:
+            check_boundary()
 
     source_path = os.path.abspath(message["central_db_path"])
     local_path = os.path.abspath(message["local_db_path"])
@@ -71,16 +79,18 @@ def try_incremental_snapshot(message: dict, *, check_cancel, progress) -> dict:
                 package = {"status": "unchanged", "state": base_state, "metrics": {"source_unchanged": True}}
             else:
                 package = collect_delta(source, local, check_cancel=check_cancel)
+            check_fence()
             if package["status"] == "full_required":
                 return package
             after = read_admission_state(source, source_path)
             if before != after:
                 raise sqlite3.OperationalError("database is locked: source changed during delta")
             if package["status"] == "unchanged" and not message.get("require_snapshot"):
-                check_cancel()
+                final_stamp = stamp if capture_source_stamp(source, source_path) == stamp else None
+                check_fence()
                 return {"status": "unchanged", "state": package["state"],
                         "source_identity": before["identity"],
-                        "source_stamp": stamp if capture_source_stamp(source, source_path) == stamp else None,
+                        "source_stamp": final_stamp,
                         "sync_mode": "unchanged", "delta_metrics": package.get("metrics", {})}
             _remove_with_sidecars(temp_path)
             try:
@@ -92,7 +102,7 @@ def try_incremental_snapshot(message: dict, *, check_cancel, progress) -> dict:
                     with _local_destination():
                         local.backup(candidate, pages=LOCAL_REPLICA_BACKUP_PAGES,
                                      progress=lambda *_: check_cancel(), sleep=0.01)
-                    check_cancel()
+                    check_fence()
                     if package["status"] == "delta":
                         progress("delta_apply")
                         # Constraints/unsupported local state require a fresh
@@ -113,16 +123,18 @@ def try_incremental_snapshot(message: dict, *, check_cancel, progress) -> dict:
                         if any(state.get(k) != package["state"].get(k)
                                for k in ("db_cycle", "change_cursor", "schema_revision")):
                             raise sqlite3.DatabaseError("local delta watermark mismatch")
-                check_cancel()
+                check_fence()
                 if read_admission_state(source, source_path) != before:
                     raise sqlite3.OperationalError("database is locked: source changed before delta publication")
                 progress("fsync")
                 with _local_destination(), open(temp_path, "r+b") as handle:
                     handle.flush()
                     os.fsync(handle.fileno())
+                final_stamp = stamp if capture_source_stamp(source, source_path) == stamp else None
+                check_fence()
                 return {"status": "snapshot_ready", "state": state, "temp_db_path": temp_path,
                         "source_identity": before["identity"],
-                        "source_stamp": stamp if capture_source_stamp(source, source_path) == stamp else None,
+                        "source_stamp": final_stamp,
                         "sync_mode": "delta" if package["status"] == "delta" else "cache",
                         "delta_metrics": package.get("metrics", {})}
             except BaseException:
