@@ -259,7 +259,7 @@ def test_inflight_cancel_releases_connection_before_full_fallback(tmp_path):
 
     assert not worker.is_alive()
     assert len(errors) == 1 and isinstance(errors[0], OrdersRefreshCancelled)
-    assert service.calls == Counter(open=1, probe=1, changes=1)
+    assert service.calls == Counter(open=1, probe=1)
     service.assert_closed()
     assert coordinator._orders_reads_inflight == {}
 
@@ -318,3 +318,120 @@ def test_scope_open_error_preserves_probe_retry_and_local_fallback(tmp_path, mon
     assert service.db._scoped_central_read_connection() is None
     assert service.db._thread_state.central_read_scope_depth == 0
     assert coordinator._orders_reads_inflight == {}
+
+
+def _stop_at_early_stage(monkeypatch, service, coordinator, stage, stop):
+    if stage == 'probe':
+        service.after_probe = stop
+        return
+    target, method = {
+        'scope_open': (service.db, '_open_readonly_central_connection'),
+        'changes': (service, 'get_changes_since'),
+        'delta_rows': (service, 'get_latest_administrations'),
+        'finalize': (coordinator, '_finalize_snapshot'),
+        'resolve': (coordinator, '_resolve_orders_early_snapshot'),
+        'store': (coordinator, '_store_orders_tab'),
+    }[stage]
+    original = getattr(target, method)
+
+    def stopped(*args, **kwargs):
+        if stage == 'store':
+            # This is after the pre-store call-site checkpoint. The store
+            # itself must check again after acquiring its cache lock.
+            stop()
+        result = original(*args, **kwargs)
+        if stage != 'store':
+            stop()
+        return result
+
+    monkeypatch.setattr(target, method, stopped)
+
+
+@pytest.mark.parametrize('stage,changes,delta_rows', [
+    ('scope_open', 0, 0), ('probe', 0, 0), ('changes', 1, 0),
+    ('delta_rows', 1, 1), ('finalize', 1, 1), ('store', 1, 1),
+])
+@pytest.mark.parametrize('stop_kind', ['budget', 'cancel'])
+def test_real_sqlite_delta_stops_before_further_reads_or_cache_publication(
+    tmp_path, monkeypatch, stage, changes, delta_rows, stop_kind,
+):
+    service = _SqliteOrdersService(tmp_path / 'orders.db', ['administrations'])
+    reader, context = _coordinator(service)
+    base = reader.get_cached_tab(context)
+    epoch = reader._orders_cache_epochs.get(context.cache_key(), 0)
+    clock, records = [100.0], []
+    cancelled = threading.Event()
+    monkeypatch.setattr(
+        coordinator_module, 'time',
+        SimpleNamespace(perf_counter=lambda: clock[0], monotonic=time.monotonic),
+    )
+    monkeypatch.setattr(
+        coordinator_module, 'record_metric',
+        lambda name, value, **fields: records.append((name, value, fields)),
+    )
+
+    def stop():
+        if stop_kind == 'budget':
+            clock[0] += 6
+        else:
+            cancelled.set()
+
+    _stop_at_early_stage(monkeypatch, service, reader, stage, stop)
+    expected_reason = 'read_budget_exhausted' if stop_kind == 'budget' else 'cancel_check'
+    with pytest.raises(OrdersRefreshCancelled, match=expected_reason):
+        reader.load_orders_tab(context, source='click', timeout_sec=5, cancel_check=cancelled.is_set)
+
+    # Only actual DBManager/SQLite reads before the stop point ran. Neither
+    # a full fallback nor an admin read after an expired probe is allowed.
+    assert service.calls == Counter(
+        open=1, probe=int(stage != 'scope_open'), changes=changes, delta_rows=delta_rows,
+    )
+    assert reader.get_cached_tab(context) is base
+    assert base['version'] == 10
+    assert reader._orders_cache_epochs.get(context.cache_key(), 0) == epoch
+    assert not any(name == 'orders_load_time_ms' for name, _value, _fields in records)
+    assert reader._orders_active_refreshes == {}
+    assert reader._orders_reads_inflight == {}
+    service.assert_closed()
+
+
+@pytest.mark.parametrize('stage', ['probe', 'resolve', 'store'])
+@pytest.mark.parametrize('stop_kind', ['budget', 'cancel'])
+def test_current_base_cannot_be_republished_after_early_stop(
+    tmp_path, monkeypatch, stage, stop_kind,
+):
+    service = _SqliteOrdersService(tmp_path / 'orders.db', [])
+    reader, context = _coordinator(service)
+    reader.invalidate_tab(context, 'test_stale_base')
+    stale = reader._orders_stale_snapshots[context.cache_key()]
+    epoch = reader._orders_cache_epochs[context.cache_key()]
+    clock, records = [100.0], []
+    cancelled = threading.Event()
+    monkeypatch.setattr(
+        coordinator_module, 'time',
+        SimpleNamespace(perf_counter=lambda: clock[0], monotonic=time.monotonic),
+    )
+    monkeypatch.setattr(
+        coordinator_module, 'record_metric',
+        lambda name, value, **fields: records.append((name, value, fields)),
+    )
+
+    def stop():
+        if stop_kind == 'budget':
+            clock[0] += 6
+        else:
+            cancelled.set()
+
+    _stop_at_early_stage(monkeypatch, service, reader, stage, stop)
+    with pytest.raises(OrdersRefreshCancelled):
+        reader.load_orders_tab(context, source='click', timeout_sec=5, cancel_check=cancelled.is_set)
+
+    assert service.calls == Counter(open=1, probe=1)
+    assert reader.get_cached_tab(context) is None
+    assert reader._orders_stale_snapshots[context.cache_key()] is stale
+    assert stale['version'] == 10
+    assert reader._orders_cache_epochs[context.cache_key()] == epoch
+    assert not any(name == 'orders_load_time_ms' for name, _value, _fields in records)
+    assert reader._orders_active_refreshes == {}
+    assert reader._orders_reads_inflight == {}
+    service.assert_closed()

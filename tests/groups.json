@@ -1,5 +1,6 @@
 {
   "core": [
+    "tests/test_orders_read_retry_policy.py",
     "tests/test_write_operation_diagnostics.py",
     "tests/test_daily_backup_diagnostics.py",
     "tests/test_connection_diagnostics.py",

@@ -48,6 +48,14 @@ class ReplicaDeltaCancelled(ReplicaDeltaError):
     """Collection was cancelled by the caller between bounded reads."""
 
 
+class _ReconciliationBudgetExceeded(ReplicaDeltaError):
+    def __init__(self, reason: str, table: str, source_rows: int, local_rows: int):
+        super().__init__(reason)
+        self.reason = reason
+        self.metrics = {"table": table, "source_rows": source_rows, "local_rows": local_rows,
+                        "row_counts_lower_bound": True}
+
+
 def _quote(identifier: str) -> str:
     return '"' + str(identifier).replace('"', '""') + '"'
 
@@ -172,6 +180,7 @@ def _table_info(conn: sqlite3.Connection, table: str) -> dict[str, Any]:
         raise ReplicaDeltaError(f"table_without_stable_key:{table}")
     return {
         "columns": columns,
+        "declared_types": {str(row[1]): str(row[2]).strip().upper() for row in rows},
         "key_kind": key_kind,
         "key_columns": key_columns,
         "without_rowid": without_rowid,
@@ -531,6 +540,73 @@ def _tracked_table_change(
     return rows, [(entity_id,) for entity_id in ids if entity_id not in found], estimated
 
 
+def _rowid_interval_key(conn, table, info):
+    """Prove an integer, non-null, unique key before using its numeric range.
+
+    INTEGER PRIMARY KEY DESC can have a separate nullable/mixed-type PK index;
+    index_list distinguishes it from a true rowid alias without parsing DDL.
+    Other key shapes retain the existing COUNT preflight and comparison rules.
+    """
+    if info["key_kind"] == "rowid":
+        return "_rowid_"
+    keys = info["key_columns"]
+    if info["without_rowid"] or len(keys) != 1 or info["declared_types"].get(keys[0]) != "INTEGER":
+        return None
+    indexes = conn.execute(f"PRAGMA index_list({_quote(table)})").fetchall()
+    if any(str(row[3]) == "pk" for row in indexes):
+        return None
+    return keys[0]
+
+
+def _rowid_count_bound(conn, table, key):
+    # Separate LIMIT seeks avoid SQLite's full scan for combined MIN/MAX.
+    column, name = _quote(key), _quote(table)
+    row = conn.execute(
+        f"SELECT (SELECT {column} FROM {name} ORDER BY {column} LIMIT 1), "
+        f"(SELECT {column} FROM {name} ORDER BY {column} DESC LIMIT 1)"
+    ).fetchone()
+    if row[0] is None and row[1] is None:
+        return 0
+    if type(row[0]) is not int or type(row[1]) is not int:
+        return None
+    return row[1] - row[0] + 1
+
+
+def _fused_preflight_bounds(source_conn, local_conn, table, info, scan_remaining, check_cancel):
+    key = _rowid_interval_key(source_conn, table, info)
+    if key is None:
+        return None
+    _cancel(check_cancel)
+    source_bound = _rowid_count_bound(source_conn, table, key)
+    if source_bound is None or source_bound > min(scan_remaining, (1 << 63) - 2):
+        return None
+    _cancel(check_cancel)
+    local_bound = _rowid_count_bound(local_conn, table, key)
+    if local_bound is None or local_bound > (1 << 63) - 2 or source_bound + local_bound > scan_remaining:
+        return None
+    return source_bound, local_bound
+
+
+def _count_and_estimate_bytes(conn, table, info, row_bound, check_cancel):
+    if row_bound == 0:
+        return 0, 0
+    _cancel(check_cancel)
+    row_size = _row_size_expression(info)
+    # The integer span already proves that the previous COUNT guard would
+    # admit these rows. This visits the same value bytes as the previous SUM,
+    # including huge values, and returns only two integers to Python. The exact
+    # combined byte guard below still precedes every ordered payload read.
+    row = conn.execute(
+        f'SELECT COUNT(*), COALESCE(SUM("row_bytes"), 0) FROM '
+        f'(SELECT {row_size} AS "row_bytes" FROM {_quote(table)} LIMIT ?)',
+        (row_bound + 1,),
+    ).fetchone()
+    count, size = int(row[0]), int(row[1])
+    if count > row_bound:
+        raise ReplicaDeltaError("unsupported_table_shape")
+    return count, size
+
+
 def _reconciled_table_change(
     source_conn: sqlite3.Connection,
     local_conn: sqlite3.Connection,
@@ -542,8 +618,16 @@ def _reconciled_table_change(
     check_cancel: Callable[[], Any] | None,
     scan_byte_remaining: int,
 ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]], int, int, int]:
-    source_count = int(_scalar(source_conn, f"SELECT COUNT(*) FROM {_quote(table)}") or 0)
-    local_count = int(_scalar(local_conn, f"SELECT COUNT(*) FROM {_quote(table)}") or 0)
+    bounds = _fused_preflight_bounds(source_conn, local_conn, table, info, scan_remaining, check_cancel)
+    if bounds is not None:
+        source_count, source_bytes = _count_and_estimate_bytes(source_conn, table, info, bounds[0], check_cancel)
+        if source_bytes > scan_byte_remaining:
+            # No local sizing/count query is justified after a proven refusal.
+            raise _ReconciliationBudgetExceeded("reconciliation_byte_limit", table, source_count, 0)
+        local_count, local_bytes = _count_and_estimate_bytes(local_conn, table, info, bounds[1], check_cancel)
+    else:
+        source_count = int(_scalar(source_conn, f"SELECT COUNT(*) FROM {_quote(table)}") or 0)
+        local_count = int(_scalar(local_conn, f"SELECT COUNT(*) FROM {_quote(table)}") or 0)
     scanned = source_count + local_count
     if scanned > scan_remaining:
         raise ReplicaDeltaError(f"reconciliation_scan_limit:{table}:{source_count}:{local_count}")
@@ -551,12 +635,11 @@ def _reconciled_table_change(
         # The counts come from the same source/local snapshots as collection.
         # Empty tables need neither two byte scans nor two ordered row scans.
         return [], [], 0, 0, 0
-    source_bytes = _estimate_source_bytes(
-        source_conn, table, info, check_cancel=check_cancel
-    )
-    if source_bytes > scan_byte_remaining:
-        raise ReplicaDeltaError(f"reconciliation_byte_limit:{table}:{source_count}:{local_count}")
-    local_bytes = _estimate_source_bytes(local_conn, table, info, check_cancel=check_cancel)
+    if bounds is None:
+        source_bytes = _estimate_source_bytes(source_conn, table, info, check_cancel=check_cancel)
+        if source_bytes > scan_byte_remaining:
+            raise ReplicaDeltaError(f"reconciliation_byte_limit:{table}:{source_count}:{local_count}")
+        local_bytes = _estimate_source_bytes(local_conn, table, info, check_cancel=check_cancel)
     if source_bytes + local_bytes > scan_byte_remaining:
         raise ReplicaDeltaError(f"reconciliation_byte_limit:{table}:{source_count}:{local_count}")
     upserts, deletes, estimated = _stream_table_difference(
@@ -648,6 +731,8 @@ def _stream_table_difference(source_conn, local_conn, table, info, max_rows, byt
 
 
 def _table_error_result(exc: ReplicaDeltaError, state: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(exc, _ReconciliationBudgetExceeded):
+        return _full_required(exc.reason, state, exc.metrics)
     detail = str(exc)
     if detail.startswith(("reconciliation_scan_limit:", "reconciliation_byte_limit:")):
         reason, description = detail.split(":", 1)
