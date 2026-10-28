@@ -56,7 +56,8 @@ def test_rejected_delta_forces_full_even_with_equal_cursor(databases, monkeypatc
     assert response["status"] == "snapshot_ready"
     assert response["sync_mode"] == "full"
     assert response["full_reason"] == "untracked_limit"
-    assert response["delta_metrics"] == {"table": "history", "source_rows": 9000, "local_rows": 8999}
+    assert {key: response["delta_metrics"][key] for key in ("table", "source_rows", "local_rows")} == {
+        "table": "history", "source_rows": 9000, "local_rows": 8999}
     with closing(sqlite3.connect(response["temp_db_path"])) as conn:
         assert conn.execute("SELECT name FROM patients").fetchone()[0] == "central change without notification"
     with closing(sqlite3.connect(local)) as conn:

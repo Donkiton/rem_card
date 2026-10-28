@@ -11,7 +11,7 @@ from rem_card.app.operblock_schema import ensure_operblock_schema, _apply_operbl
 from rem_card.data.settings import settings_schema
 
 
-@pytest.mark.parametrize("client_version", ["5.1.11", "5.1.12"])
+@pytest.mark.parametrize("client_version", ["5.1.11", "5.1.12", "5.1.13"])
 def test_compatible_database_and_policy_are_unchanged(tmp_path, monkeypatch, client_version):
     conn = sqlite3.connect(':memory:')
     unified_db_schema.ensure_unified_schema(conn)

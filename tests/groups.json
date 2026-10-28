@@ -1,5 +1,7 @@
 {
   "core": [
+    "tests/test_read_coordinator_connection_reuse.py",
+    "tests/test_replica_delta_writer_probe.py",
     "tests/test_replica_copy_diagnostics.py",
     "tests/test_mandatory_upgrade_startup.py",
     "tests/test_settings_deferred_release_retry.py",

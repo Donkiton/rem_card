@@ -117,6 +117,54 @@ class LocalReplicaSourceBusy(LocalReplicaWriterBusy):
     """SQLite refused a read while a concurrent source transaction was active."""
 
 
+class _DeltaCoordinationProbe:
+    """Bound SMB metadata work while retaining checks at publication fences.
+
+    Reconciliation checks cancellation for every historical row. The parent
+    still cancels the killable worker independently; these checks only yield
+    to a clinical writer or rotation. Schedule the next poll after both probes
+    finish so slow metadata calls cannot turn the next row into another poll.
+    """
+
+    def __init__(self, writer_lock_path: str, rotation_lock_path: str):
+        self.writer_lock_path = writer_lock_path
+        self.rotation_lock_path = rotation_lock_path
+        self._next_probe_at = float("-inf")
+        self.check_count = 0
+        self.probe_count = 0
+        self.probe_ms = 0.0
+
+    def __call__(self) -> None:
+        self.check_count += 1
+        if time.monotonic() >= self._next_probe_at:
+            self.force()
+
+    def force(self) -> None:
+        started = time.perf_counter()
+        self.probe_count += 1
+        try:
+            if self.writer_lock_path and current_copy().call(
+                "writer_probe", os.path.exists, self.writer_lock_path
+            ):
+                raise LocalReplicaWriterBusy()
+            if self.rotation_lock_path and os.path.exists(self.rotation_lock_path):
+                raise LocalReplicaRotationBusy()
+        finally:
+            self.probe_ms += (time.perf_counter() - started) * 1000.0
+            self._next_probe_at = time.monotonic() + WRITER_LOCK_PROBE_INTERVAL_SEC
+
+    def metrics(self) -> dict[str, Any]:
+        return {
+            "coordination_check_count": self.check_count,
+            "coordination_probe_count": self.probe_count,
+            "coordination_probe_ms": round(self.probe_ms, 3),
+        }
+
+    def annotate_result(self, result: dict[str, Any]) -> None:
+        metrics_key = "metrics" if result["status"] == "full_required" else "delta_metrics"
+        result[metrics_key] = {**result.get(metrics_key, {}), **self.metrics()}
+
+
 class _ReplicaProgress:
     def __init__(self, callback):
         self.callback = callback
@@ -614,17 +662,12 @@ def _sync_snapshot_with_network_lease_observed(
         fallback_metrics = {}
         if message.get("local_db_path") and incremental_enabled():
             acquire_snapshot_gate()
-
-            def check_delta_cancel() -> None:
-                if writer_lock_path and diagnostics.call("writer_probe", os.path.exists, writer_lock_path):
-                    raise LocalReplicaWriterBusy()
-                if rotation_gate is not None and os.path.exists(rotation_lock_path):
-                    raise LocalReplicaRotationBusy()
-
+            coordination = _DeltaCoordinationProbe(writer_lock_path, rotation_lock_path)
             result = try_incremental_snapshot(
-                message, check_cancel=check_delta_cancel,
+                message, check_cancel=coordination, check_boundary=coordination.force,
                 progress=progress_callback or (lambda _: None),
             )
+            coordination.annotate_result(result)
             if result["status"] != "full_required":
                 return result
             fallback_reason, fallback_metrics = _delta_fallback_details(result)

@@ -5,7 +5,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha1
@@ -1677,10 +1677,51 @@ class ReadCoordinator:
         if base_snapshot is None or force_refresh:
             return OrdersCachedDeltaResult(delta_base=delta_base)
 
+        # Reuse only the connection, not a transaction or a snapshot cursor:
+        # later SELECTs must still observe writes committed after the probe.
+        db = getattr(getattr(self.remcard_service, "orders_dao", None), "db", None)
+        read_scope = getattr(db, "central_read_scope", None)
+        version_probe_started = time.perf_counter()
+        with ExitStack() as scopes:
+            if callable(read_scope):
+                try:
+                    scopes.enter_context(read_scope("orders_cache_delta"))
+                except Exception:
+                    # Scope setup is optional: the authoritative probe retains
+                    # its own retry/local-fallback policy when opening fails.
+                    logger.debug("Orders read connection reuse unavailable", exc_info=True)
+            return self._load_orders_current_or_delta(
+                context=context,
+                base_snapshot=base_snapshot,
+                delta_base=delta_base,
+                cache_epoch=cache_epoch,
+                version_probe_started=version_probe_started,
+                source=source,
+                priority=priority,
+                started=started,
+                trace_id=trace_id,
+                context_hash=context_hash,
+                phase_timings=phase_timings,
+            )
+
+    def _load_orders_current_or_delta(
+        self,
+        *,
+        context: OrdersContext,
+        base_snapshot,
+        delta_base: str,
+        cache_epoch: int,
+        version_probe_started: float,
+        source: str,
+        priority: str,
+        started: float,
+        trace_id: str,
+        context_hash: str,
+        phase_timings: OrdersLoadPhaseTimings,
+    ) -> OrdersCachedDeltaResult:
         # Keep cache lookup memory-only and perform exactly one authoritative
         # freshness probe for this early path.  The result is reused as the
         # delta cursor floor and is never replaced by a monitor cursor.
-        version_probe_started = time.perf_counter()
         current_change_id = self._get_orders_current_change_id(context)
         phase_timings.version_probe_ms = (
             time.perf_counter() - version_probe_started
