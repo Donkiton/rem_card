@@ -4,10 +4,10 @@ pyqtgraph==0.14.0
 numpy==2.4.6
 
 # Reports, PDF and analytics
-reportlab==5.0.1
+reportlab==5.1.0
 pypdf==6.21.2
 matplotlib==3.11.2
-pandas==3.0.6
+pandas==3.1.0
 pillow==13.0.0
 
 # Windows integration used by shortcuts/window helpers
