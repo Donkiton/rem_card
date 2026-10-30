@@ -1,5 +1,7 @@
 {
   "core": [
+    "tests/test_read_operation_diagnostics.py",
+    "tests/test_release_5_1_15_schema.py",
     "tests/test_orders_read_retry_policy.py",
     "tests/test_write_operation_diagnostics.py",
     "tests/test_daily_backup_diagnostics.py",
@@ -134,6 +136,7 @@
     "tests/test_update_launcher_startup.py"
   ],
   "ui": [
+    "tests/test_pdf_report_async.py",
     "tests/test_gui_network_reads.py",
     "tests/test_sector_ivl_event_edit.py",
     "tests/test_gui_gc.py",

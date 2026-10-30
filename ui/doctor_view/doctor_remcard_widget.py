@@ -246,6 +246,8 @@ class DoctorRemCardWidget(
 
     def shutdown(self):
         self._is_closing = True
+        from rem_card.ui.shared.pdf_report_jobs import shutdown_report_jobs
+        shutdown_report_jobs(self)
         self._balance_engine_generation += 1
         balance_engine_worker = self._balance_engine_worker
         self._balance_engine_worker = None

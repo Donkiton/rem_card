@@ -57,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         commands = [
             ("quality", [py, "scripts/code_quality_checks.py"]),
             ("architecture", [py, "scripts/architecture_safety_check.py"]),
+            ("installer_contract", [py, "-m", "unittest", "discover", "-s", "installer/windows",
+                                    "-p", "test_installer_localization.py"]),
         ]
     elif args.suite == "regression":
         commands = [("regression", [

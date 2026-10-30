@@ -10,6 +10,7 @@ from rem_card.ui.shared.background_settings import get_active_background_path
 from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
 from rem_card.ui.shared.w1_beds_signature import build_w1_bed_row_signature
 from rem_card.ui.shared.pdf_opener import open_pdf_file
+from rem_card.ui.shared.pdf_report_jobs import ReportDataWorker, report_jobs, shutdown_report_jobs
 from rem_card.ui.shared.report_guard import ensure_daily_card_exists
 from rem_card.ui.shared.recovery_bed_status_actions import (
     cancel_recovery_transfer,
@@ -523,6 +524,7 @@ class BedsSelectionWidget(QWidget):
 
     def shutdown(self, timeout_ms: int = 1200):
         self._is_closing = True
+        shutdown_report_jobs(self)
         self._outcome_release_monitor.stop()
         if hasattr(self, "_shift_boundary_timer") and self._shift_boundary_timer:
             self._shift_boundary_timer.stop()
@@ -642,49 +644,58 @@ class BedsSelectionWidget(QWidget):
     def on_daily_report_requested(self, patient):
         """РћР±СЂР°Р±РѕС‚РєР° Р·Р°РїСЂРѕСЃР° РѕС‚С‡РµС‚Р° Р·Р° СЃСѓС‚РєРё РёР· СЃРїРёСЃРєР° РєРѕРµРє."""
         if not self.remcard_service: return
-        if self.daily_worker is not None and self.daily_worker.isRunning():
+        jobs = report_jobs(self)
+        if not jobs.available():
+            return
+        if not jobs.begin("daily"):
             CustomMessageBox.information(self, "Инфо", "Отчет за сутки уже формируется.")
             return
         
         from ...rem_card_sectors.sector_print import DataCollectorWorker, PrintConfig
         
-        cfg = PrintConfig().load()
-        
         try:
+            cfg = PrintConfig().load()
             target_date = datetime.datetime.now()
             if not ensure_daily_card_exists(self, self.remcard_service, patient.id, target_date):
+                jobs.finish("daily")
                 return
             logger.info(
                 "[W1Report] daily requested role=doctor admission_id=%s date=%s",
                 patient.id,
                 target_date.isoformat(),
             )
-            self.daily_worker = DataCollectorWorker(self.remcard_service, patient.id, target_date, cfg)
+            self.daily_worker = ReportDataWorker(DataCollectorWorker(self.remcard_service, patient.id, target_date, cfg))
             self._daily_report_config = cfg
-            self.daily_worker.finished.connect(self._on_daily_report_collected)
+            self.daily_worker.collected.connect(self._on_daily_report_collected)
             self.daily_worker.error.connect(self._on_daily_report_error)
+            jobs.track("daily", self.daily_worker)
             self.daily_worker.start()
             
         except Exception as e:
+            jobs.finish("daily")
             logger.exception("[W1Report] daily init failed role=doctor admission_id=%s", getattr(patient, "id", None))
             CustomMessageBox.critical(self, "Ошибка", f"Ошибка при инициализации отчета: {str(e)}")
 
     @Slot(dict)
     def _on_daily_report_collected(self, data):
+        jobs = report_jobs(self)
+        if not jobs.active("daily"):
+            return
         try:
             if not data:
+                jobs.finish("daily")
                 return
             from rem_card.app.paths import REPORT_DIR
 
             cfg = self._daily_report_config or {}
             report_dir = pathlib.Path(REPORT_DIR)
-            report_dir.mkdir(parents=True, exist_ok=True)
             p_name_safe = self._pdf_patient_name(data.get("patient_name"))
             pdf_path = report_dir / f"{p_name_safe}_{data['start_dt'].strftime('%Y-%m-%d')}_day{data['icu_day']}.pdf"
 
             logger.info("[W1Report] daily PDF build role=doctor path=%s", pdf_path)
             self._start_daily_pdf_worker(data, cfg, pdf_path)
         except Exception as exc:
+            jobs.finish("daily")
             logger.exception("[W1Report] daily PDF failed role=doctor")
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось сформировать PDF отчета за сутки:\n{exc}")
 
@@ -698,72 +709,94 @@ class BedsSelectionWidget(QWidget):
         self.daily_pdf_worker.completed.connect(self._on_daily_pdf_ready)
         self.daily_pdf_worker.error.connect(self._on_daily_pdf_error)
         self.daily_pdf_worker.finished.connect(self._clear_daily_pdf_worker)
+        report_jobs(self).track("daily", self.daily_pdf_worker)
         self.daily_pdf_worker.start()
 
     @Slot(object)
     def _on_daily_pdf_ready(self, pdf_path):
+        jobs = report_jobs(self)
+        if not jobs.active("daily"):
+            return
+        jobs.finish("daily")
         pdf_path = pathlib.Path(pdf_path)
-        if pdf_path.exists():
-            logger.info("[W1Report] daily PDF ready role=doctor size=%s path=%s", pdf_path.stat().st_size, pdf_path)
-            open_pdf_file(pdf_path, parent=self)
+        logger.info("[W1Report] daily PDF ready role=doctor path=%s", pdf_path)
+        open_pdf_file(pdf_path, parent=self)
 
     @Slot(str)
     def _on_daily_pdf_error(self, msg):
+        jobs = report_jobs(self)
+        if not jobs.active("daily"):
+            return
+        jobs.finish("daily")
         CustomMessageBox.critical(self, "Ошибка", f"Не удалось сформировать PDF отчета за сутки:\n{msg}")
 
     @Slot()
     def _clear_daily_pdf_worker(self):
-        self.daily_pdf_worker = None
+        if self.sender() is self.daily_pdf_worker:
+            self.daily_pdf_worker = None
 
     @Slot(str)
     def _on_daily_report_error(self, msg):
+        jobs = report_jobs(self)
+        if not jobs.active("daily"):
+            return
+        jobs.finish("daily")
         logger.error("[W1Report] daily data collection failed role=doctor: %s", msg)
         CustomMessageBox.critical(self, "Ошибка", f"Не удалось собрать данные для отчета:\n{msg}")
 
     def on_full_report_requested(self, patient):
         """РћР±СЂР°Р±РѕС‚РєР° Р·Р°РїСЂРѕСЃР° РѕР±С‰РµРіРѕ РѕС‚С‡РµС‚Р° РёР· СЃРїРёСЃРєР° РєРѕРµРє."""
         if not self.remcard_service: return
-        if self.report_worker is not None and self.report_worker.isRunning():
+        jobs = report_jobs(self)
+        if not jobs.available():
+            return
+        if not jobs.begin("full"):
             CustomMessageBox.information(self, "Инфо", "Общий отчет уже формируется.")
             return
         
         from ...rem_card_sectors.sector_print import FullReportWorker, PrintConfig
         
-        cfg = PrintConfig().load()
-        
         try:
+            cfg = PrintConfig().load()
             logger.info("[W1Report] full requested role=doctor admission_id=%s", patient.id)
             dates = self.remcard_service.get_all_card_dates(patient.id)
             if not dates:
+                jobs.finish("full")
                 CustomMessageBox.information(self, "Инфо", "Нет данных для формирования общего отчета.")
                 return
                 
-            self.report_worker = FullReportWorker(self.remcard_service, patient.id, dates, cfg)
+            self.report_worker = ReportDataWorker(FullReportWorker(self.remcard_service, patient.id, dates, cfg))
             self._full_report_config = cfg
-            self.report_worker.finished.connect(self._on_full_report_collected)
+            self.report_worker.collected.connect(self._on_full_report_collected)
             self.report_worker.error.connect(self._on_full_report_error)
+            jobs.track("full", self.report_worker)
             self.report_worker.start()
             
         except Exception as e:
+            jobs.finish("full")
             logger.exception("[W1Report] full init failed role=doctor admission_id=%s", getattr(patient, "id", None))
             CustomMessageBox.critical(self, "Ошибка", f"Ошибка при инициализации отчета: {str(e)}")
 
     @Slot(list)
     def _on_full_report_collected(self, results):
+        jobs = report_jobs(self)
+        if not jobs.active("full"):
+            return
         try:
             if not results:
+                jobs.finish("full")
                 return
             from rem_card.app.paths import REPORT_DIR
 
             cfg = self._full_report_config or {}
             report_dir = pathlib.Path(REPORT_DIR)
-            report_dir.mkdir(parents=True, exist_ok=True)
             p_name_safe = self._pdf_patient_name(results[0].get("patient_name"))
             pdf_path = report_dir / f"FULL_W1_{p_name_safe}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
 
             logger.info("[W1Report] full PDF build role=doctor days=%s path=%s", len(results), pdf_path)
             self._start_full_pdf_worker(results, cfg, pdf_path)
         except Exception as exc:
+            jobs.finish("full")
             logger.exception("[W1Report] full PDF failed role=doctor")
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось сформировать PDF общего отчета:\n{exc}")
 
@@ -777,25 +810,38 @@ class BedsSelectionWidget(QWidget):
         self.full_pdf_worker.completed.connect(self._on_full_pdf_ready)
         self.full_pdf_worker.error.connect(self._on_full_pdf_error)
         self.full_pdf_worker.finished.connect(self._clear_full_pdf_worker)
+        report_jobs(self).track("full", self.full_pdf_worker)
         self.full_pdf_worker.start()
 
     @Slot(object)
     def _on_full_pdf_ready(self, pdf_path):
+        jobs = report_jobs(self)
+        if not jobs.active("full"):
+            return
+        jobs.finish("full")
         pdf_path = pathlib.Path(pdf_path)
-        if pdf_path.exists():
-            logger.info("[W1Report] full PDF ready role=doctor size=%s path=%s", pdf_path.stat().st_size, pdf_path)
-            open_pdf_file(pdf_path, parent=self)
+        logger.info("[W1Report] full PDF ready role=doctor path=%s", pdf_path)
+        open_pdf_file(pdf_path, parent=self)
 
     @Slot(str)
     def _on_full_pdf_error(self, msg):
+        jobs = report_jobs(self)
+        if not jobs.active("full"):
+            return
+        jobs.finish("full")
         CustomMessageBox.critical(self, "Ошибка", f"Не удалось сформировать PDF общего отчета:\n{msg}")
 
     @Slot()
     def _clear_full_pdf_worker(self):
-        self.full_pdf_worker = None
+        if self.sender() is self.full_pdf_worker:
+            self.full_pdf_worker = None
 
     @Slot(str)
     def _on_full_report_error(self, msg):
+        jobs = report_jobs(self)
+        if not jobs.active("full"):
+            return
+        jobs.finish("full")
         logger.error("[W1Report] full data collection failed role=doctor: %s", msg)
         CustomMessageBox.critical(self, "Ошибка", f"Не удалось собрать данные для общего отчета:\n{msg}")
 

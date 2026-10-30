@@ -1980,11 +1980,11 @@ def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool,
             return False, f"{role}: daily report must not use nested callbacks"
         if "def on_finished" in full_source or "def on_error" in full_source:
             return False, f"{role}: full report must not use nested callbacks"
-        if "finished.connect(self._on_daily_report_collected)" not in daily_source:
+        if "ReportDataWorker(" not in daily_source or "collected.connect(self._on_daily_report_collected)" not in daily_source:
             return False, f"{role}: daily report must connect to QObject slot"
         if "error.connect(self._on_daily_report_error)" not in daily_source:
             return False, f"{role}: daily report error must connect to QObject slot"
-        if "finished.connect(self._on_full_report_collected)" not in full_source:
+        if "ReportDataWorker(" not in full_source or "collected.connect(self._on_full_report_collected)" not in full_source:
             return False, f"{role}: full report must connect to QObject slot"
         if "error.connect(self._on_full_report_error)" not in full_source:
             return False, f"{role}: full report error must connect to QObject slot"
@@ -1995,7 +1995,18 @@ def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool,
 def _check_pdf_build_runs_in_worker(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     worker_source = (PROJECT_ROOT / "ui" / "shared" / "pdf_build_worker.py").read_text(encoding="utf-8")
-    if "class PdfBuildWorker(QThread)" not in worker_source or "ReportBuilder.build_pdf" not in worker_source:
+    tree = ast.parse(worker_source)
+    worker_class = next((node for node in tree.body
+                         if isinstance(node, ast.ClassDef) and node.name == "PdfBuildWorker"), None)
+    if worker_class is None or not any(isinstance(base, ast.Name) and base.id == "AsyncCallThread"
+                                       for base in worker_class.bases):
+        return False, "PdfBuildWorker must use the retained asynchronous runner"
+    worker_methods = {node.name: node for node in worker_class.body if isinstance(node, ast.FunctionDef)}
+    if "__init__" not in worker_methods or "_build_pdf" not in worker_methods:
+        return False, "PdfBuildWorker must delegate the PDF build to its asynchronous callable"
+    init_source = _cached_source_segment(worker_source, worker_methods["__init__"]) or ""
+    build_source = _cached_source_segment(worker_source, worker_methods["_build_pdf"]) or ""
+    if "super().__init__(self._build_pdf)" not in init_source or "ReportBuilder.build_pdf" not in build_source:
         return False, "PdfBuildWorker must own ReportBuilder.build_pdf"
 
     checked_methods = {

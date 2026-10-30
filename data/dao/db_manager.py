@@ -1,5 +1,6 @@
 from rem_card.app.db_wait_diagnostics import observe, observed_scope, observed_call, bind_connection, mark_stage
 from rem_card.app.connection_diagnostics import connection_observation, connection_phase
+from rem_card.app.read_operation_diagnostics import ReadOperationDiagnostics
 import json
 import os
 import random
@@ -2786,7 +2787,7 @@ class DatabaseManager:
             return exc
         return RuntimeError("SQLite read cancelled")
 
-    def _fetch_all_with_cancel(self, conn, query, params=(), *, cancel_check=None):
+    def _fetch_all_with_cancel(self, conn, query, params=(), *, cancel_check=None, read_diagnostic=None):
         cancel_state: dict[str, Any] = {"cancelled": False, "exception": None}
         done_event = threading.Event()
         watchdog_thread = None
@@ -2823,8 +2824,14 @@ class DatabaseManager:
             if should_cancel():
                 raise self._cancelled_read_exception(cancel_state)
             cursor = conn.cursor()
+            if read_diagnostic is not None:
+                read_diagnostic.phase = "execute"
             cursor.execute(query, params)
+            if read_diagnostic is not None:
+                read_diagnostic.phase = "fetch_all"
             rows = cursor.fetchall()
+            if read_diagnostic is not None:
+                read_diagnostic.phase = "complete"
             if should_cancel():
                 raise self._cancelled_read_exception(cancel_state)
             return rows
@@ -2857,58 +2864,80 @@ class DatabaseManager:
         # sqlite3.Connection по Thread рискованно: соединение переживает поток и
         # позже закрывается/переиспользуется уже из другого потока, что на Windows
         # может завершиться native access violation без Python-исключения.
+        read_diagnostic = ReadOperationDiagnostics(getattr(self, "db_path", ""), "fetch_all")
         try:
             if use_write_connection or self._in_current_thread_remcard_transaction():
                 with self._central_io_lock_scope("remcard_read_all_write_conn", source="fetch_all"):
                     conn = self._get_central_write_connection_for_read("remcard_read_all")
+                    read_diagnostic.bind(conn, scope="write_connection")
                     with self.write_controller.connection_guard(conn):
-                        return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check))
+                        return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
             scoped_conn = self._scoped_central_read_connection()
             if scoped_conn is not None:
                 bind_connection(scoped_conn)
-                return self._confirmed_central_read_result(self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check))
+                read_diagnostic.bind(scoped_conn, scope="scoped")
+                return self._confirmed_central_read_result(self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
             conn = self._open_readonly_central_connection()
             bind_connection(conn)
+            read_diagnostic.bind(conn, scope="short_lived", known_readonly=True)
             try:
-                return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check))
+                return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
             finally:
                 try:
                     conn.close()
                 except Exception as close_exc:
                     logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
+            read_diagnostic.report(exc)
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             raise
 
     @observed_call("central_read_execute")
     def _fetch_one_central(self, query, params=(), *, use_write_connection: bool = False):
+        read_diagnostic = ReadOperationDiagnostics(getattr(self, "db_path", ""), "fetch_one")
         try:
             if use_write_connection or self._in_current_thread_remcard_transaction():
                 with self._central_io_lock_scope("remcard_read_one_write_conn", source="fetch_one"):
                     conn = self._get_central_write_connection_for_read("remcard_read_one")
+                    read_diagnostic.bind(conn, scope="write_connection")
                     with self.write_controller.connection_guard(conn):
                         cursor = conn.cursor()
+                        read_diagnostic.phase = "execute"
                         cursor.execute(query, params)
-                        return self._confirmed_central_read_result(cursor.fetchone())
+                        read_diagnostic.phase = "fetch_one"
+                        row = cursor.fetchone()
+                        read_diagnostic.phase = "complete"
+                        return self._confirmed_central_read_result(row)
             scoped_conn = self._scoped_central_read_connection()
             if scoped_conn is not None:
                 bind_connection(scoped_conn)
+                read_diagnostic.bind(scoped_conn, scope="scoped")
                 cursor = scoped_conn.cursor()
+                read_diagnostic.phase = "execute"
                 cursor.execute(query, params)
-                return self._confirmed_central_read_result(cursor.fetchone())
+                read_diagnostic.phase = "fetch_one"
+                row = cursor.fetchone()
+                read_diagnostic.phase = "complete"
+                return self._confirmed_central_read_result(row)
             conn = self._open_readonly_central_connection()
             bind_connection(conn)
+            read_diagnostic.bind(conn, scope="short_lived", known_readonly=True)
             try:
                 cursor = conn.cursor()
+                read_diagnostic.phase = "execute"
                 cursor.execute(query, params)
-                return self._confirmed_central_read_result(cursor.fetchone())
+                read_diagnostic.phase = "fetch_one"
+                row = cursor.fetchone()
+                read_diagnostic.phase = "complete"
+                return self._confirmed_central_read_result(row)
             finally:
                 try:
                     conn.close()
                 except Exception as close_exc:
                     logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
+            read_diagnostic.report(exc)
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_one", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             raise

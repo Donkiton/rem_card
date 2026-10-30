@@ -14,7 +14,7 @@ from rem_card.app import client_build_profile, startup_db_guard, unified_db_sche
 
 @pytest.fixture(autouse=True)
 def mandatory_release_version(monkeypatch):
-    """Проверки миграции 28 моделируют обязательный клиент 5.1.11."""
+    """Проверки актуальной миграции моделируют обязательный клиент 5.1.15."""
     version = unified_db_schema.SCHEMA_REQUIRED_CLIENT_VERSION
     monkeypatch.setenv("REMCARD_APP_VERSION", version)
     monkeypatch.setattr(guard, "APP_VERSION", version)
@@ -148,7 +148,7 @@ def legacy_database(tmp_path):
 
 
 @pytest.mark.parametrize("version", [26, 27])
-def test_mandatory_28_migration_validates_backup_preserves_data_and_is_idempotent(legacy_database, version):
+def test_mandatory_migration_validates_backup_preserves_data_and_is_idempotent(legacy_database, version):
     conn, policy, kwargs = legacy_database(version)
     preserved_tables = ("patients", "admissions", "orders", "administrations", "order_audit_log",
                         "medical_audit_log", "change_log")
@@ -165,12 +165,12 @@ def test_mandatory_28_migration_validates_backup_preserves_data_and_is_idempoten
     assert conn.execute("SELECT payload FROM order_audit_log").fetchone() == ("retained",)
     assert {table: conn.execute(f"SELECT * FROM {table} ORDER BY 1").fetchall()
             for table in preserved_tables} == clinical_before
-    assert conn.execute("SELECT version FROM schema_migrations WHERE version IN (27,28) ORDER BY version").fetchall() == [(27,), (28,)]
+    assert conn.execute("SELECT version FROM schema_migrations WHERE version IN (27,28,29) ORDER BY version").fetchall() == [(27,), (28,), (29,)]
     assert unified_db_schema.is_unified_schema_ready(conn)
     plan = conn.execute("EXPLAIN QUERY PLAN DELETE FROM order_audit_log WHERE admission_id=?", (1,)).fetchall()
     assert "idx_order_audit_admission_id" in str(plan)
     persisted_policy = json.loads(policy.read_text(encoding="utf-8"))
-    assert persisted_policy["min_client_version"] == "5.1.11"
+    assert persisted_policy["min_client_version"] == "5.1.15"
     assert persisted_policy["custom"] == {"retained": True}
     before = list(conn.iterdump())
     backups = sorted(Path(kwargs["backup_dir"]).glob("*.db"))
@@ -230,7 +230,7 @@ def test_failed_migration_rolls_back_database_keeps_floor_and_can_retry(legacy_d
             guard.ensure_unified_schema_with_migration_backup(conn, **kwargs)
     assert not conn.in_transaction
     assert list(conn.iterdump()) == before
-    assert json.loads(policy.read_text(encoding="utf-8"))["min_client_version"] == "5.1.11"
+    assert json.loads(policy.read_text(encoding="utf-8"))["min_client_version"] == "5.1.15"
     assert len(list(Path(kwargs["backup_dir"]).glob("*.db"))) == 1
     assert guard.ensure_unified_schema_with_migration_backup(conn, **kwargs).migrated
     assert unified_db_schema.is_unified_schema_ready(conn)
@@ -311,7 +311,7 @@ def test_current_no_upgrade_contract_still_requires_the_migration_27_index(legac
     assert policy.read_bytes() == policy_before
 
 
-@pytest.mark.parametrize("old_version", ["5.1.6", "5.1.7", "5.1.8", "5.1.9", "5.1.10"])
+@pytest.mark.parametrize("old_version", ["5.1.6", "5.1.7", "5.1.8", "5.1.9", "5.1.10", "5.1.11", "5.1.12", "5.1.13", "5.1.14"])
 @pytest.mark.parametrize("no_upgrades", [True, False])
 def test_optional_old_clients_cannot_bypass_mandatory_floor(tmp_path, monkeypatch, old_version, no_upgrades):
     policy = tmp_path / "config" / "client_policy.json"
@@ -429,9 +429,9 @@ def test_startup_policy_repair_cannot_undo_another_process_migration_floor(legac
             assert process.exitcode == 0
         outcomes = dict(results.get(timeout=3) for _ in range(2))
         assert outcomes == {"repair": "blocked" if phase == "before_lock" else "5.1.6", "migration": True}
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (28,)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (29,)
         persisted = json.loads(policy.read_text(encoding="utf-8"))
-        assert persisted["min_client_version"] == "5.1.11"
+        assert persisted["min_client_version"] == "5.1.15"
         assert persisted["custom"] == {"retained": True}
         assert not Path(str(policy) + ".lock").exists()
     finally:
@@ -449,14 +449,14 @@ def test_startup_policy_repair_cannot_undo_another_process_migration_floor(legac
 
 def test_complete_startup_policy_uses_read_only_fast_path(tmp_path, monkeypatch):
     policy = tmp_path / "config" / "client_policy.json"
-    startup_db_guard.update_client_policy_min_version(str(policy), "5.1.11")
+    startup_db_guard.update_client_policy_min_version(str(policy), "5.1.15")
     before = policy.read_bytes()
 
     def unexpected_lock(*args, **kwargs):
         pytest.fail("complete startup policy must not create or acquire a writer lock")
 
     monkeypatch.setattr(startup_db_guard, "FileWriteLock", unexpected_lock)
-    assert startup_db_guard._load_or_create_client_policy(str(tmp_path), None)["min_client_version"] == "5.1.11"
+    assert startup_db_guard._load_or_create_client_policy(str(tmp_path), None)["min_client_version"] == "5.1.15"
     assert policy.read_bytes() == before
     assert sorted(policy.parent.iterdir()) == [policy]
 

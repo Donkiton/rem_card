@@ -37,14 +37,14 @@ LEGACY_PACKAGE_EXES = (
 )
 
 
-@pytest.mark.parametrize("no_upgrades, expected_minimum", [("1", "5.1.11"), ("0", "5.1.12")])
+@pytest.mark.parametrize("no_upgrades, expected_minimum", [("1", "5.1.15"), ("0", "5.1.16")])
 def test_built_manifest_preserves_schema_floor_for_optional_release(tmp_path, monkeypatch, no_upgrades, expected_minimum):
     tree = ast.parse((PROJECT_DIR / "RemCard.spec").read_text(encoding="utf-8"))
     function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                     and node.name == "_write_update_manifest")
     namespace = {
-        "_read_release_info": lambda: {"version": "5.1.12"},
-        "_read_version": lambda: "5.1.12",
+        "_read_release_info": lambda: {"version": "5.1.16"},
+        "_read_version": lambda: "5.1.16",
         "_current_git_commit": lambda: "a" * 40,
         "datetime": datetime,
         "json": json,
@@ -56,7 +56,7 @@ def test_built_manifest_preserves_schema_floor_for_optional_release(tmp_path, mo
     namespace["_write_update_manifest"](str(tmp_path))
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "5.1.12"
+    assert manifest["version"] == "5.1.16"
     assert manifest["min_client_version"] == expected_minimum
 
 

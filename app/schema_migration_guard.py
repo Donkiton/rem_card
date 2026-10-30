@@ -222,7 +222,7 @@ def ensure_unified_schema_with_migration_backup(
         allow_local_schema_upgrades = local_operblock_schema_upgrades_allowed(conn, runtime_context)
         if database_upgrades_disabled() and not allow_local_schema_upgrades:
             require_compatible_schema(is_unified_schema_ready(conn))
-            # A mistakenly optional 5.1.11 build cannot silently leave an
+            # A mistakenly optional mandatory-release build cannot leave an
             # already upgraded shared database accessible to old clients.
             _require_existing_policy_floor(policy_path)
             return SchemaMigrationResult(migrated=False)

@@ -5,12 +5,12 @@ from typing import Optional
 from rem_card.app.client_build_profile import database_upgrades_disabled, require_compatible_schema
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 28
-SCHEMA_MIN_MIGRATION_VERSION = 28
-# The 5.1.11 contract is mandatory even if this client is accidentally built
-# without migrations. Such a build may read version 28, but cannot accept 26/27.
-SCHEMA_NO_UPGRADE_MIN_MIGRATION_VERSION = 28
-SCHEMA_REQUIRED_CLIENT_VERSION = "5.1.11"
+SCHEMA_FASTPATH_REV = 29
+SCHEMA_MIN_MIGRATION_VERSION = 29
+# 5.1.15 deliberately advances the shared schema contract. A mistakenly
+# migration-disabled build must not silently accept an older schema or policy.
+SCHEMA_NO_UPGRADE_MIN_MIGRATION_VERSION = 29
+SCHEMA_REQUIRED_CLIENT_VERSION = "5.1.15"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
 _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
@@ -322,12 +322,19 @@ def _all_sqlite_master_objects_exist(conn: sqlite3.Connection, obj_type: str, na
     return all(name in existing for name in names)
 
 
-def _schema_contract_satisfied(conn: sqlite3.Connection, deep_column_check: bool) -> bool:
+def _schema_contract_satisfied(
+    conn: sqlite3.Connection,
+    deep_column_check: bool,
+    *,
+    min_migration_version: Optional[int] = None,
+) -> bool:
     if not _all_sqlite_master_objects_exist(conn, "table", _FASTPATH_REQUIRED_TABLES):
         return False
 
     no_upgrades = database_upgrades_disabled()
     min_version = SCHEMA_NO_UPGRADE_MIN_MIGRATION_VERSION if no_upgrades else SCHEMA_MIN_MIGRATION_VERSION
+    if min_migration_version is not None:
+        min_version = int(min_migration_version)
     if not _schema_migration_applied(conn, min_version):
         return False
 
@@ -778,6 +785,17 @@ def ensure_unified_schema(
         return
     logger = logger or logging.getLogger(__name__)
     if _is_fastpath_schema_ready(conn):
+        return
+
+    # Release 5.1.15 changes the mandatory client/schema contract, not clinical
+    # storage. A complete schema 28 therefore needs only transactional metadata
+    # writes; do not rebuild its tables, indexes or triggers. The migration
+    # guard creates and validates the pre-migration backup before entering here.
+    if SCHEMA_MIN_MIGRATION_VERSION == 29 and _schema_contract_satisfied(
+        conn, deep_column_check=True, min_migration_version=28,
+    ):
+        _mark_schema_migration(conn, 29, "mandatory 5.1.15 contract; clinical storage unchanged")
+        _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)
         return
 
     conn.execute(
@@ -2302,4 +2320,5 @@ def ensure_unified_schema(
         28,
         "mandatory 5.1.11 contract and admission index for order audit cleanup",
     )
+    _mark_schema_migration(conn, 29, "mandatory 5.1.15 contract; clinical storage unchanged")
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

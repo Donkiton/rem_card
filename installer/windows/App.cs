@@ -31,6 +31,8 @@ namespace RemCard.Setup
             InstallerContext context = null;
             try
             {
+                InstallerText.SetLanguage(Get(options, "language", "ru"));
+                if (options.ContainsKey("ui-smoke") && Get(options, "preview", "") == "uninstall") uninstall = true;
                 string executable = Assembly.GetExecutingAssembly().Location;
                 string version = Assembly.GetExecutingAssembly().GetName().Version.ToString(3);
                 string target = Get(options, "target", null);
@@ -42,8 +44,9 @@ namespace RemCard.Setup
                     catch (ArgumentException) { }
                 }
                 if (uninstall && !testUninstall && !options.ContainsKey("from-temp") && !String.IsNullOrEmpty(target) && SameDirectory(Path.GetDirectoryName(executable), target))
-                    return RelaunchUninstaller(executable, target);
+                    return RelaunchUninstaller(executable, target, InstallerText.Language);
                 context = new InstallerContext(); context.Version = version; context.UninstallMode = uninstall;
+                context.Language = InstallerText.Language;
                 context.SuppressLaunch = options.ContainsKey("ui-smoke") || testInstall || testUninstall;
                 context.NoRegistration = options.ContainsKey("ui-smoke");
                 context.AutomationTargetDirectory = options.ContainsKey("ui-smoke") ? target : null;
@@ -87,6 +90,18 @@ namespace RemCard.Setup
                 };
                 InstallerWindow window = new InstallerWindow(context);
                 application.MainWindow = window;
+                if (options.ContainsKey("ui-smoke") && options.ContainsKey("language-state-smoke"))
+                {
+                    window.Loaded += delegate
+                    {
+                        window.Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            try { WriteReport(reportPath, window.RunLanguageStateSmoke()); }
+                            catch (Exception error) { WriteReport(reportPath, new { ok = false, mode = "ui-language-state", message = error.ToString() }); }
+                            finally { window.CloseForAutomation(); }
+                        }), DispatcherPriority.ApplicationIdle);
+                    };
+                }
                 string renderPreview = options.ContainsKey("ui-smoke") ? Get(options, "render-preview", null) : null;
                 if (!String.IsNullOrWhiteSpace(renderPreview))
                 {
@@ -106,7 +121,7 @@ namespace RemCard.Setup
                                 encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
                                 string destination = Path.GetFullPath(renderPreview); Directory.CreateDirectory(Path.GetDirectoryName(destination));
                                 using (FileStream image = File.Create(destination)) encoder.Save(image);
-                                WriteReport(reportPath, new { ok = true, mode = "ui-render", preview = context.AutomationPreview ?? "welcome", width = width, height = height, image = destination });
+                                WriteReport(reportPath, new { ok = true, mode = "ui-render", preview = context.AutomationPreview ?? "welcome", language = context.Language, width = width, height = height, image = destination, layout_issues = window.FindLayoutIssues() });
                             }
                             catch (Exception error) { WriteReport(reportPath, new { ok = false, mode = "ui-render", message = error.ToString() }); }
                             finally { window.CloseForAutomation(); }
@@ -135,12 +150,12 @@ namespace RemCard.Setup
             finally { if (context != null) context.Dispose(); }
         }
 
-        private static int RelaunchUninstaller(string executable, string target)
+        private static int RelaunchUninstaller(string executable, string target, string language)
         {
             string directory = Path.Combine(Path.GetTempPath(), "RemCard-uninstall-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(directory); string helper = Path.Combine(directory, "RemCardUninstall.exe");
             File.Copy(executable, helper);
-            Process.Start(new ProcessStartInfo(helper, "--uninstall --from-temp --wait-parent " + Process.GetCurrentProcess().Id + " --target " + Quote(target)) { UseShellExecute = false, WorkingDirectory = directory });
+            Process.Start(new ProcessStartInfo(helper, "--uninstall --from-temp --language " + language + " --wait-parent " + Process.GetCurrentProcess().Id + " --target " + Quote(target)) { UseShellExecute = false, WorkingDirectory = directory });
             return 0;
         }
 
@@ -176,18 +191,28 @@ namespace RemCard.Setup
             System.Windows.Media.SolidColorBrush background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(12, 24, 36));
             System.Windows.Controls.StackPanel panel = new System.Windows.Controls.StackPanel { Margin = new Thickness(30) };
             panel.Children.Add(new System.Windows.Controls.Image { Source = InstallerResources.Image("RemCard.logo.png"), Width = 42, Height = 42, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 0, 0, 20) });
-            panel.Children.Add(new System.Windows.Controls.TextBlock { Text = "Не удалось открыть установщик", FontSize = 23, Foreground = System.Windows.Media.Brushes.White, TextWrapping = TextWrapping.Wrap });
-            panel.Children.Add(new System.Windows.Controls.TextBlock { Text = error.Message, FontSize = 14, Foreground = System.Windows.Media.Brushes.LightGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 16, 0, 22) });
+            System.Windows.Controls.TextBlock heading = new System.Windows.Controls.TextBlock { Text = InstallerText.Get("Не удалось открыть установщик"), FontSize = 23, Foreground = System.Windows.Media.Brushes.White, TextWrapping = TextWrapping.Wrap };
+            System.Windows.Controls.TextBlock message = new System.Windows.Controls.TextBlock { Text = InstallerText.Get(error.Message), FontSize = 14, Foreground = System.Windows.Media.Brushes.LightGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 16, 0, 22) };
+            panel.Children.Add(heading); panel.Children.Add(message);
             System.Windows.Controls.Border frame = new System.Windows.Controls.Border { Child = panel, Background = background, CornerRadius = new CornerRadius(16), BorderBrush = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(40, 64, 79)), BorderThickness = new Thickness(1) };
-            Window window = new Window { Title = "Ремкарта — ошибка установщика", Content = frame, Width = 520, SizeToContent = SizeToContent.Height, WindowStyle = WindowStyle.None, AllowsTransparency = true, ResizeMode = ResizeMode.NoResize, WindowStartupLocation = WindowStartupLocation.CenterScreen, Background = System.Windows.Media.Brushes.Transparent, Icon = InstallerResources.Image("RemCard.logo.png"), FontFamily = new System.Windows.Media.FontFamily("Segoe UI") };
+            Window window = new Window { Title = InstallerText.Get("Ремкарта — ошибка установщика"), Content = frame, Width = 520, SizeToContent = SizeToContent.Height, WindowStyle = WindowStyle.None, AllowsTransparency = true, ResizeMode = ResizeMode.NoResize, WindowStartupLocation = WindowStartupLocation.CenterScreen, Background = System.Windows.Media.Brushes.Transparent, Icon = InstallerResources.Image("RemCard.logo.png"), FontFamily = new System.Windows.Media.FontFamily("Segoe UI") };
             frame.MouseLeftButtonDown += delegate { try { window.DragMove(); } catch (InvalidOperationException) { } };
-            System.Windows.Controls.Button close = new System.Windows.Controls.Button { Content = "Закрыть", Padding = new Thickness(20, 10, 20, 10), HorizontalAlignment = HorizontalAlignment.Right, Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(112, 228, 213)), Foreground = background };
+            System.Windows.Controls.Button close = new System.Windows.Controls.Button { Content = InstallerText.Get("Закрыть"), Padding = new Thickness(20, 10, 20, 10), HorizontalAlignment = HorizontalAlignment.Right, Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(112, 228, 213)), Foreground = background };
             FrameworkElementFactory closeBorder = new FrameworkElementFactory(typeof(System.Windows.Controls.Border));
             closeBorder.SetValue(System.Windows.Controls.Border.BackgroundProperty, close.Background); closeBorder.SetValue(System.Windows.Controls.Border.CornerRadiusProperty, new CornerRadius(8));
             FrameworkElementFactory closeContent = new FrameworkElementFactory(typeof(System.Windows.Controls.ContentPresenter));
             closeContent.SetValue(FrameworkElement.MarginProperty, new Thickness(20, 10, 20, 10)); closeContent.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
             closeBorder.AppendChild(closeContent); close.Template = new System.Windows.Controls.ControlTemplate(typeof(System.Windows.Controls.Button)) { VisualTree = closeBorder };
             close.Click += delegate { window.Close(); }; panel.Children.Add(close);
+            System.Windows.Controls.StackPanel languages = new System.Windows.Controls.StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 16) };
+            foreach (string language in new[] { "ru", "en" })
+            {
+                string selected = language;
+                System.Windows.Controls.Button languageButton = new System.Windows.Controls.Button { Content = language == "ru" ? "Русский" : "English", Padding = new Thickness(12, 7, 12, 7), Margin = new Thickness(0, 0, 8, 0) };
+                languageButton.Click += delegate { InstallerText.SetLanguage(selected); heading.Text = InstallerText.Get("Не удалось открыть установщик"); message.Text = InstallerText.Get(error.Message); close.Content = InstallerText.Get("Закрыть"); window.Title = InstallerText.Get("Ремкарта — ошибка установщика"); };
+                languages.Children.Add(languageButton);
+            }
+            panel.Children.Insert(1, languages);
             if (application.MainWindow == null) { application.MainWindow = window; window.Show(); } else window.ShowDialog();
         }
     }

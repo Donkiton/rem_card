@@ -1,14 +1,15 @@
 # Установщик Windows: исходники, сборка и приёмка
 
-Актуализировано 29 октября 2026 года. Это постоянная инструкция для новых чатов
+Актуализировано 30 октября 2026 года. Это постоянная инструкция для новых чатов
 и последующих выпусков. Перед работой с установщиком читать её вместе с
 [корневым AGENTS.md](../AGENTS.md).
 
 ## Текущее состояние и ближайшая задача
 
 - Последний принятый установщик: **5.1.14**, интерфейс пока только русский.
-- Следующий новый выпуск должен поддерживать **русский и английский с переключателем**.
-  Это поручение пользователя на будущее; реализация пока не выполнена.
+- Для **5.1.15** реализованы русский и английский с переключателем с первого окна,
+  русский по умолчанию. Других языков нет. Полная приёмка выпуска выполняется
+  отдельно на его принятом full ZIP; UI-fixture не является дистрибутивом приложения.
 - Не пересобирать и не заменять опубликованный 5.1.14 ради локализации.
 - Канонические исходники находятся в `installer/windows/` этого проекта.
   Для обычной работы не нужны старые чаты, временный checkout или `tmp/`.
@@ -47,7 +48,9 @@ runtime, выбором каталога, лицензией, ярлыками, 
 | [PayloadArchive.cs](../installer/windows/PayloadArchive.cs) | Чтение встроенного ZIP/метаданных, проверка SHA и состава |
 | [InstallerEngine.cs](../installer/windows/InstallerEngine.cs) | Установка, сохранение файлов, транзакционная замена, откат, удаление и регистрация |
 | [InstallerWindow.cs](../installer/windows/InstallerWindow.cs) | Окна и шаги мастера, темы и пользовательские сообщения |
+| [InstallerText.cs](../installer/windows/InstallerText.cs) | Общий каталог RU/EN для интерфейса и технических сообщений |
 | [EcgMonitor.cs](../installer/windows/EcgMonitor.cs) | ЭКГ-индикатор состояния |
+| [verify_ui_languages.py](../installer/windows/verify_ui_languages.py) | Изолированные рендеры обоих языков и проверка сохранения состояния |
 
 29 октября сюда скопированы без изменения кода исходники, которыми собран
 принятый установщик 5.1.14. Раньше они оставались незакоммиченными в отдельном
@@ -114,10 +117,15 @@ SHA-256 всего ZIP и сохранить его вместе с резуль
 Отслеживаемый словарь `_internal/rem_card/data/mkb/mkb10.db` — штатный ресурс
 программы; он допустим при совпадении с принятым inventory.
 
-Текущий builder принимает full-manifest schema 2 и требует
-`database_upgrades_disabled: true`. Упоминание 5.1.12 в тексте ошибки этого
-guard историческое; фактическая версия сверяется с `VERSION`.
-Не менять поля принятого manifest, чтобы обойти отказ сборщика.
+Builder принимает full-manifest schema 2. Версия сверяется с `VERSION`, а
+`min_client_version` и булев `database_upgrades_disabled` — с явно переданным
+принятым профилем. Для обязательного 5.1.15 это минимальный клиент **5.1.15**
+и `database_upgrades_disabled: false`; схема медицинской БД **29** проверяется
+приёмкой приложения (отдельного поля схемы БД в full-manifest нет).
+Для необязательных выпусков явно передавать `disabled` и согласованный минимум.
+Не менять поля принятого manifest, чтобы обойти отказ сборщика. Builder читает
+каждый файл ZIP и сверяет размер/SHA-256; проверяет также состав, повторяющиеся
+имена, пути и ссылки. Исходные байты ZIP и manifest сохраняются.
 
 ## Собрать установщик
 
@@ -125,14 +133,16 @@ guard историческое; фактическая версия сверяе
 
 ```powershell
 $python = '.\.venv\Scripts\python.exe'
-$package = 'C:\path\to\accepted\RemCard_5.1.14_full.zip'
+$package = 'C:\path\to\accepted\RemCard_5.1.15_full.zip'
 $zipSha = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash.ToLowerInvariant()
 $runId = Get-Date -Format 'yyyyMMdd-HHmmss'
-$output = Join-Path (Get-Location) ("tmp\installer-5.1.14-build-" + $runId)
+$output = Join-Path (Get-Location) ("tmp\installer-5.1.15-build-" + $runId)
 
 & $python installer\windows\build_installer.py `
   --package $package `
   --expected-sha256 $zipSha `
+  --expected-min-client-version 5.1.15 `
+  --expected-database-upgrades enabled `
   --output-dir $output
 ```
 
@@ -151,14 +161,16 @@ Setup EXE. Вспомогательные файлы output не являютс�
 ## Обязательная изолированная приёмка
 
 ```powershell
-$installer = Join-Path $output 'RemCard-Setup-5.1.14.exe'
-$packageDirectory = 'C:\path\to\accepted\full-package-5.1.14'
+$installer = Join-Path $output 'RemCard-Setup-5.1.15.exe'
+$packageDirectory = 'C:\path\to\accepted\full-package-5.1.15'
 $qaRoot = Join-Path $env:LOCALAPPDATA `
-  ("Temp\RemCard-installer-QA-5.1.14-" + $runId)
+  ("Temp\RemCard-installer-QA-5.1.15-" + $runId)
 
 & $python installer\windows\verify_installer.py `
   --installer $installer `
   --package-directory $packageDirectory `
+  --expected-min-client-version 5.1.15 `
+  --expected-database-upgrades enabled `
   --qa-root $qaRoot
 ```
 
@@ -172,7 +184,9 @@ Verifier проверяет:
 1. Полную проверку встроенного payload и отказ установки в корень диска.
 2. Первую установку и SHA-256 всех программных файлов по manifest.
 3. Отсутствие установленного `ready.ok`, наличие деинсталлятора и метаданных.
-4. Запуск обоих установленных EXE в `--compiled-smoke`, ожидая запрет миграций.
+4. Запуск обоих установленных EXE в `--compiled-smoke`, ожидая профиль миграций
+   из проверенного manifest (`REMCARD_SMOKE_EXPECT_NO_DATABASE_UPGRADES=0`
+   для 5.1.15). Сам compiled smoke общую медицинскую БД не открывает.
 5. Переустановку с сохранением подключения, журналов и неизвестного root-файла.
 6. Контролируемую ошибку после первого атомарного переноса (`--fail-after 0`),
    откат и повторную сверку inventory.
@@ -194,15 +208,35 @@ Test-режимы не регистрируют программу, не соз�
 
 ```powershell
 & $installer --ui-smoke --preview welcome `
+  --language en `
   --target 'C:\isolated\preview-target' `
   --render-preview 'C:\isolated\welcome.png' `
   --report 'C:\isolated\welcome.json' --auto-close-ms 15000
 ```
 
-Доступны `welcome`, `review`, `error`. Выбирать явные новые пути отчётов.
+Доступны `welcome`, `license`, `location`, `review`, `progress`, `error`,
+`uninstall`. `--language ru|en` выбирает язык; без параметра используется русский.
+Выбирать явные новые пути отчётов.
 `error` — искусственный экран для визуальной проверки, не реальная ошибка установки.
 Проверить `ok` в JSON и просмотреть PNG: номер версии, читаемость, кнопки,
 длинные пути, отсутствие обрезания и наложений.
+
+Полный UI smoke (14 рендеров, два переключения состояния и русский по умолчанию):
+
+```powershell
+$uiRoot = Join-Path $env:LOCALAPPDATA ("Temp\RemCard-installer-QA-ui-" + $runId)
+& $python installer\windows\verify_ui_languages.py --installer $installer --output-dir $uiRoot
+& $python -m unittest discover -s installer\windows -p test_installer_localization.py -v
+```
+
+До появления принятого full ZIP можно использовать `--build-preview-fixture`
+вместо `--installer`: он компилирует ясно обозначенный `RemCard-PREVIEW-ONLY.exe`
+с искусственными байтами приложения, только для UI. Его нельзя распространять
+или использовать для compiled-smoke/приёмки настоящей установки.
+Отдельный `--ui-smoke --language-state-smoke --report <JSON>` проверяет сохранение
+папки, режима выбора, параметров, согласия, темы, текущего прогресса, журнала,
+ошибки и режима удаления при RU → EN → RU. Тесты не устанавливают приложение,
+не создают выбранный target и не меняют реестр.
 
 ## Поведение установленной копии
 
@@ -219,7 +253,7 @@ Test-режимы не регистрируют программу, не соз�
 
 ## Два языка в следующем установщике
 
-**Статус: запланировано, не реализовано в 5.1.14.**
+**Статус: реализовано в исходниках 5.1.15; в 5.1.14 отсутствует.**
 Поручение пользователя от 29 октября 2026 года:
 
 - Первый следующий новый выпуск установщика после 5.1.14 и дальнейшие
@@ -237,8 +271,12 @@ Test-режимы не регистрируют программу, не соз�
   и отсутствие обрезания длинных надписей. Сохранить прежние проверки
   payload, установки, переустановки, отката, удаления и обоих EXE.
 
-Сейчас только зафиксировано требование. Не менять текущую реализацию языка,
-не пересобирать EXE 5.1.14 и не заменять опубликованные assets ради этой записи.
+Переключатель доступен также при ошибке и в деинсталляторе. Смена языка
+перерисовывает строки, сохраняя выбранные параметры, согласие, тему, прогресс,
+журнал и открытый диалог. Каталог переводит только представление; исходный
+LICENSE, пути, идентичность ярлыков/регистрации и диагностические коды не меняются.
+Сообщения Windows могут содержать исходный системный текст, который сохраняется
+как техническая подробность. Не пересобирать EXE 5.1.14 и не заменять его assets.
 
 ## Передача на рабочий стол и GitHub
 
