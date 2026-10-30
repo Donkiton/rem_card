@@ -61,7 +61,8 @@ medical = pathlib.Path(context.medical_db_path)
 assert medical.is_relative_to(baza)
 assert pathlib.Path(context.settings_db_path).is_relative_to(baza)
 with sqlite3.connect(medical) as connection:
-    connection.execute('DROP INDEX idx_order_audit_admission_id')
+    if version < 28:
+        connection.execute('DROP INDEX idx_order_audit_admission_id')
     if version == 26:
         connection.execute('DROP INDEX idx_admin_committed_planned_expr_order_id')
     connection.execute('DELETE FROM schema_migrations WHERE version > ?', (version,))
@@ -109,9 +110,9 @@ try:
     assert replica is not None and pending == [replica]
     assert pathlib.Path(replica.local_db_path).is_relative_to(pathlib.Path(os.environ['LOCALAPPDATA']))
     with sqlite3.connect(medical) as central:
-        assert central.execute('SELECT MAX(version) FROM schema_migrations').fetchone() == (28,)
+        assert central.execute('SELECT MAX(version) FROM schema_migrations').fetchone() == (29,)
         assert schema.is_unified_schema_ready(central)
-    assert json.loads(policy_path.read_text(encoding='utf-8'))['min_client_version'] == '5.1.11'
+    assert json.loads(policy_path.read_text(encoding='utf-8'))['min_client_version'] == '5.1.15'
     assert replica._read_local_state()['schema_revision'] == str(version)
     assert replica.last_sync_ok_ts == 0
     assert not replica.is_ready(max_stale_sec=60)
@@ -150,18 +151,19 @@ try:
     assert first_request['schema_revision'] == str(version)
     assert first_response['status'] == 'snapshot_ready', first_response
     assert first_response['sync_mode'] == 'full', first_response
-    assert first_response['full_reason'] == 'schema_mismatch', first_response
-    assert first_response['state']['schema_revision'] == '28'
+    expected_full_reason = 'schema_revision_changed' if version == 28 else 'schema_mismatch'
+    assert first_response['full_reason'] == expected_full_reason, first_response
+    assert first_response['state']['schema_revision'] == '29'
     assert first_response['source_identity'] == admission.file_identity(str(medical))
     assert replica.last_state['change_cursor'] >= required
-    assert replica._read_local_state()['schema_revision'] == '28'
+    assert replica._read_local_state()['schema_revision'] == '29'
     with sqlite3.connect(replica.local_db_path) as local:
         assert schema.is_unified_schema_ready(local)
         assert local.execute('SELECT full_name FROM patients WHERE id=?', (patient_id,)).fetchone() == (
             'synthetic after upgrade',
         )
     provenance = replica_provenance.read_baseline(replica.local_db_path, admission.file_identity(str(medical)))
-    assert provenance and provenance['state']['schema_revision'] == '28'
+    assert provenance and provenance['state']['schema_revision'] == '29'
     assert provenance['state']['change_cursor'] >= required
     assert manager.fetch_one_remcard('SELECT full_name FROM patients WHERE id=?', (patient_id,))[0] == (
         'synthetic after upgrade'
@@ -169,7 +171,7 @@ try:
     with manager.snapshot_read_scope('test_mandatory_upgrade_read_source'):
         assert manager.current_snapshot_read_source() == 'local_replica'
     report = {
-        'old_schema': version, 'role': role, 'new_schema': 28,
+        'old_schema': version, 'role': role, 'new_schema': 29,
         'seed_was_ready': False, 'sync_mode': first_response['sync_mode'],
         'full_reason': first_response.get('full_reason'), 'required_cursor_observed': True,
     }
@@ -186,7 +188,7 @@ print('MANDATORY_UPGRADE_CHECK ' + json.dumps(report))
 '''
 
 
-@pytest.mark.parametrize("version", [26, 27])
+@pytest.mark.parametrize("version", [26, 27, 28])
 @pytest.mark.parametrize("role", ["doctor", "nurse"])
 def test_old_preflight_seed_stays_not_ready_until_real_sync_of_upgraded_database(tmp_path, version, role):
     source = Path(__file__).resolve().parents[1]
@@ -199,8 +201,8 @@ def test_old_preflight_seed_stays_not_ready_until_real_sync_of_upgraded_database
     environment.pop("REMCARD_INTERNAL_DEV_BAZA_PIN", None)
     environment.pop("REMCARD_VERSION_FILE", None)
     environment.update({
-        # Этот сценарий проверяет обязательную миграцию релиза 5.1.11.
-        "REMCARD_APP_VERSION": "5.1.11",
+        # Этот сценарий проверяет обязательную миграцию релиза 5.1.15.
+        "REMCARD_APP_VERSION": "5.1.15",
         "PYTHONPATH": str(source), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8",
         "QT_QPA_PLATFORM": "offscreen",
         "APPDATA": str(tmp_path / "roaming"), "LOCALAPPDATA": str(tmp_path / "local"),
@@ -226,6 +228,6 @@ def test_old_preflight_seed_stays_not_ready_until_real_sync_of_upgraded_database
                if line.startswith("MANDATORY_UPGRADE_CHECK ")]
     assert len(reports) == 1
     report = json.loads(reports[0])
-    assert report["old_schema"] == version and report["new_schema"] == 28
+    assert report["old_schema"] == version and report["new_schema"] == 29
     assert report["role"] == role and report["sync_mode"] == "full"
     assert report["seed_was_ready"] is False and report["required_cursor_observed"] is True

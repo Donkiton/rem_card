@@ -290,3 +290,105 @@ def test_read_snapshot_has_connection_identity_and_releases_transaction(events):
         assert not hasattr(manager._thread_state, 'central_read_scope_conn')
     finally:
         conn.close()
+
+
+def test_fast_failed_commit_captures_reader_before_rollback_without_claiming_owner(tmp_path, events, monkeypatch):
+    monkeypatch.setattr(diagnostics, 'THRESHOLD_SEC', 5.0)
+    path = tmp_path / 'reader.db'
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute('CREATE TABLE sample(value INTEGER)')
+    ready, release = threading.Event(), threading.Event()
+    errors = []
+
+    def hold_reader():
+        try:
+            reader = sqlite3.connect(path, isolation_level=None)
+            try:
+                with diagnostics.observe('_fetch_all_central', resource=str(path),
+                                         connection=reader, stage='central_read_execute'):
+                    reader.execute('BEGIN')
+                    reader.execute('SELECT * FROM sample').fetchall()
+                    ready.set()
+                    assert release.wait(3)
+                    reader.execute('ROLLBACK')
+            finally:
+                reader.close()
+        except BaseException as exc:
+            errors.append(exc)
+            ready.set()
+
+    thread = threading.Thread(target=hold_reader)
+    thread.start()
+    try:
+        assert ready.wait(3) and not errors
+        controller = sqlite_shared.SQLiteWriteController(str(path), str(tmp_path / 'db.lock'), 'test')
+        with pytest.raises(sqlite_shared.QueuedWriteDeadlineExceeded):
+            with controller.transaction(writer, source='test_write', write_options={'write_budget_ms': 100}) as cursor:
+                cursor.execute('INSERT INTO sample VALUES (1)')
+        final = next(payload for event, payload in events
+                     if event == 'DB_WAIT_FINISHED' and payload['source'] == 'test_write')
+        assert final['elapsed_ms'] < 5000 and final['outcome'] == 'QueuedWriteDeadlineExceeded'
+        assert final['read_candidate_snapshot_reason'] == 'commit_failure'
+        candidate, = final['local_read_candidates']
+        assert candidate['source'] == '_fetch_all_central' and candidate['connection_id']
+        assert final['holder_confidence'] == 'unknown' and final['holder_kind'] == 'sqlite_native'
+        assert not writer.in_transaction
+    finally:
+        release.set()
+        thread.join(timeout=3)
+        assert not thread.is_alive() and not errors
+        assert writer.execute('SELECT COUNT(*) FROM sample').fetchone()[0] == 0
+        writer.close()
+
+
+def test_commit_candidates_are_bounded_local_intervals_not_unrelated_owners(monkeypatch):
+    monkeypatch.setattr(diagnostics, '_active', {})
+    writer = diagnostics.Operation('write', database='same', connection=object())
+    writer.payload['thread_id'] = -1
+    # These are excluded: another database, own thread, connection-open only,
+    # and another interval using the writer connection itself.
+    excluded = [
+        diagnostics.Operation('_fetch_one_central', resource='other', stage='central_read_execute', connection=object()),
+        diagnostics.Operation('_fetch_one_central', resource='same', stage='central_read_execute', connection=object()),
+        diagnostics.Operation('_open_readonly_central_connection', resource='same', stage='read_connection_open', connection=object()),
+        diagnostics.Operation('_fetch_one_central', resource='same', stage='central_read_execute', connection=object()),
+    ]
+    excluded[1].payload['thread_id'] = -1
+    excluded[3].payload['connection_id'] = writer.payload['connection_id']
+    for operation in excluded:
+        diagnostics._active[operation.id] = operation
+    connections = [object() for _ in range(8)]
+    included = []
+    for index, connection in enumerate(connections):
+        operation = diagnostics.Operation('central_read_snapshot_scope', resource='same',
+                                          stage='read_snapshot_active', connection=connection)
+        operation.payload['thread_id'] = 100 + index
+        included.append(operation.id)
+        diagnostics._active[operation.id] = operation
+    writer.stage('commit')
+    snapshot = diagnostics._operation_snapshot(writer, time.monotonic())
+    assert snapshot['holder_confidence'] == 'unknown'
+    assert len(snapshot['local_read_candidates']) == diagnostics.MAX_READ_CANDIDATES
+    assert snapshot['read_candidates_truncated'] is True
+    assert all(row['operation_id'] in included for row in snapshot['local_read_candidates'])
+    assert 'local_holders' not in snapshot
+
+
+def test_broken_commit_candidate_collection_does_not_block_original_rollback(events, monkeypatch):
+    class Broken:
+        @property
+        def started(self):
+            raise RuntimeError('diagnostic snapshot failed')
+
+    error = sqlite3.OperationalError('original failure')
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        with diagnostics.observe('write', database='same') as operation:
+            operation.stage('commit')
+            diagnostics._active['broken'] = Broken()
+            try:
+                operation.stage('rollback')
+                operation.stage('rolled_back')
+            finally:
+                diagnostics._active.pop('broken', None)
+            raise error
+    assert caught.value is error

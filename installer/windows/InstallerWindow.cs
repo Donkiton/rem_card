@@ -31,6 +31,7 @@ namespace RemCard.Setup
         private TextBlock _footerHint, _title, _lead, _phase, _percentage, _detail, _pathError;
         private Button _themeButton, _nextButton;
         private Grid _headerActions;
+        private StackPanel _windowActions;
         private ProgressBar _bar;
         private StackPanel _journal;
         private ScrollViewer _journalScroll;
@@ -49,9 +50,13 @@ namespace RemCard.Setup
         private IInputElement _previousFocus;
         private InstallResult _result;
         private CancellationTokenSource _cancel;
-        private readonly List<string> _log = new List<string>();
+        private readonly List<JournalEntry> _log = new List<JournalEntry>();
         private readonly object _progressLock = new object();
         private InstallProgress _pendingProgress;
+        private InstallProgress _currentProgress;
+        private string _folderPickerPath, _pathErrorSource;
+        private bool _journalHidden, _customLocation;
+        private DialogState _dialogState;
         private int _pendingRunId;
         private bool _progressScheduled;
 
@@ -59,13 +64,14 @@ namespace RemCard.Setup
         {
             if (context == null) throw new ArgumentNullException("context");
             _context = context;
+            InstallerText.SetLanguage(context.Language);
             _logo = InstallerResources.Image("RemCard.logo.png");
             _darkPhoto = InstallerResources.Image("RemCard.background-dark.png");
             _lightPhoto = InstallerResources.Image("RemCard.background-light.png");
             _launchAfter = !context.SuppressLaunch;
             _target = !String.IsNullOrWhiteSpace(context.AutomationTargetDirectory) ? context.AutomationTargetDirectory : String.IsNullOrWhiteSpace(context.ExistingInstallDirectory) ? DefaultTarget() : context.ExistingInstallDirectory;
-            Title = context.UninstallMode ? "Удаление Ремкарты" : "Установка Ремкарты " + context.Version;
-            if (context.NoRegistration) Title += " — проверка интерфейса";
+            _customLocation = !String.Equals(_target.TrimEnd('\\'), DefaultTarget().TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+            RefreshWindowTitle();
             Icon = _logo;
             FontFamily = new FontFamily("Segoe UI"); FontSize = 14;
             WindowStyle = WindowStyle.None; AllowsTransparency = true;
@@ -144,19 +150,108 @@ namespace RemCard.Setup
 
         private TextBlock Text(string value, double size, string color)
         {
-            TextBlock block = new TextBlock { Text = value, FontSize = size, TextWrapping = TextWrapping.Wrap };
+            TextBlock block = new TextBlock { Text = InstallerText.Get(value), FontSize = size, TextWrapping = TextWrapping.Wrap };
             Color(block, TextBlock.ForegroundProperty, color); return block;
         }
         private TextBlock Text(string value, double size) { return Text(value, size, "Text"); }
+        private TextBlock RawText(string value, double size, string color)
+        { TextBlock block = Text("", size, color); block.Text = value; return block; }
+
+        private void RefreshWindowTitle()
+        {
+            Title = InstallerText.Get(_context.UninstallMode ? "Удаление Ремкарты" : "Установка Ремкарты " + _context.Version);
+            if (_context.NoRegistration) Title += InstallerText.Get(" — проверка интерфейса");
+            AutomationProperties.SetName(this, Title);
+        }
+
+        public void ChangeLanguage(string language)
+        {
+            if (_context.Language == language) return;
+            InstallerText.SetLanguage(language);
+            if (_pathBox != null) _target = _pathBox.Text;
+            DialogState dialog = _dialogState;
+            _context.Language = language; RefreshWindowTitle();
+            _dialogVisible = false; BuildShell(); Render();
+            if (dialog != null) ShowDialog(dialog.Title, dialog.Body, dialog.Error, dialog.Extra, dialog.Actions);
+        }
+
+        public string[] FindLayoutIssues()
+        {
+            UpdateLayout(); List<string> issues = new List<string>();
+            InspectLayout((DependencyObject)Content, issues);
+            return issues.Distinct().ToArray();
+        }
+
+        private static void InspectLayout(DependencyObject parent, List<string> issues)
+        {
+            TextBlock text = parent as TextBlock;
+            if (text != null && text.IsVisible && text.ActualWidth > 1 && text.ActualHeight > 1 && text.TextTrimming == TextTrimming.None)
+            {
+                if (text.DesiredSize.Height - text.Margin.Top - text.Margin.Bottom > text.ActualHeight + 2)
+                    issues.Add("text-height: " + text.Text.Substring(0, Math.Min(60, text.Text.Length)));
+            }
+            for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++) InspectLayout(VisualTreeHelper.GetChild(parent, index), issues);
+        }
+
+        public object RunLanguageStateSmoke()
+        {
+            if (!_context.NoRegistration) throw new InvalidOperationException("UI state checks require --ui-smoke.");
+            List<string> checks = new List<string>();
+            string originalLanguage = _context.Language;
+            _target = IOPath.Combine(IOPath.GetTempPath(), "RemCard-language-preview", "A long selected application folder");
+            _customLocation = true; _accepted = true; _desktop = false; _menu = true; _launchAfter = false; _dark = false; SetPalette();
+            _step = 2; Render();
+            foreach (string language in new[] { "en", "ru" })
+            {
+                ChangeLanguage(language);
+                if (_pathBox.Text != _target || _pathBox.IsReadOnly || !_accepted || _desktop || !_menu || _launchAfter || _dark || _step != 2)
+                    throw new InvalidOperationException("Language switch changed location, options, consent or theme.");
+            }
+            checks.Add("location-options-consent-theme");
+            _step = 1; Render(); ChangeLanguage("en");
+            if (_acceptBox.IsChecked != true || _nextButton.IsEnabled != true) throw new InvalidOperationException("License consent was lost.");
+            checks.Add("license-consent");
+            _step = 4; _installing = true; _currentProgress = new InstallProgress(58, "Подготовка файлов", "Проверяем готовность пакета");
+            AppendLog("Проверяем готовность пакета", false); _journalHidden = true; Render();
+            int logCount = _log.Count; ChangeLanguage("ru"); ChangeLanguage("en");
+            if (!_installing || _step != 4 || _percent != 58 || _bar.Value != 58 || _log.Count != logCount || !_journalHidden || _phase.Text != "Preparing files")
+                throw new InvalidOperationException("Language switch changed installation progress or journal.");
+            checks.Add("active-progress-and-journal");
+            _installing = false; PresentFailure(new InstallFailureException("RC-INSTALL-005", "Нет доступа к записи в папку приложения. Проверьте права на выбранную папку или выберите другой каталог."));
+            ChangeLanguage("ru"); ChangeLanguage("en");
+            if (!_failed || !_dialogVisible || _errorCode != "RC-INSTALL-005" || _percent != 58 || _dialogState == null || _windowActions.IsEnabled)
+                throw new InvalidOperationException("Language switch changed the error state.");
+            checks.Add("error-dialog-and-progress");
+            byte[] beforeLicense = InstallerResources.ReadBytes("RemCard.LICENSE");
+            HideDialog(); ShowLicense(); ChangeLanguage("ru"); ChangeLanguage("en");
+            if (!beforeLicense.SequenceEqual(InstallerResources.ReadBytes("RemCard.LICENSE"))) throw new InvalidOperationException("License bytes changed.");
+            checks.Add("original-license-bytes"); HideDialog();
+            bool rejected = false; try { ChangeLanguage("fr"); } catch (ArgumentException) { rejected = true; }
+            if (!rejected || _context.Language != "en") throw new InvalidOperationException("An unsupported language was accepted.");
+            checks.Add("exactly-two-languages");
+            bool uninstall = _context.UninstallMode;
+            _context.UninstallMode = true; _failed = false; _step = 0; Render();
+            ChangeLanguage("ru"); ChangeLanguage("en");
+            if (!Title.StartsWith("Uninstall RemCard", StringComparison.Ordinal) || _target == null || !_accepted)
+                throw new InvalidOperationException("Uninstaller language state was lost.");
+            _step = 4; _currentProgress = new InstallProgress(58, "Удаление программы", "Данные и настройки сохраняются."); Render();
+            ChangeLanguage("ru"); ChangeLanguage("en");
+            if (_percent != 58 || _phase.Text != "Uninstall application") throw new InvalidOperationException("Uninstaller progress was lost.");
+            checks.Add("uninstaller-language-and-progress"); _context.UninstallMode = uninstall;
+            _failed = false; _step = 3; ChangeLanguage(originalLanguage); Render();
+            string licenseHash;
+            using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create()) licenseHash = PayloadArchive.Hex(sha.ComputeHash(beforeLicense));
+            return new { ok = true, mode = "ui-language-state", checks = checks, language = _context.Language, license_sha256 = licenseHash, layout_issues = FindLayoutIssues() };
+        }
 
         private Image Logo(double size)
         { return new Image { Source = _logo, Width = size, Height = size, Stretch = Stretch.Uniform }; }
 
         private Button Button(string label, Action action, bool primary)
         {
-            Button button = new Button { Content = label, Style = (Style)FindResource(primary ? "Primary" : "Button"), HorizontalContentAlignment = HorizontalAlignment.Center };
+            Button button = new Button { Content = InstallerText.Get(label), Style = (Style)FindResource(primary ? "Primary" : "Button"), HorizontalContentAlignment = HorizontalAlignment.Center };
             button.Click += delegate { action(); };
-            AutomationProperties.SetName(button, label); return button;
+            AutomationProperties.SetName(button, InstallerText.Get(label)); return button;
         }
 
         private Button Link(string label, Action action)
@@ -213,6 +308,7 @@ namespace RemCard.Setup
         {
             Grid headerGrid = new Grid { Margin = new Thickness(20, 0, 16, 0) }; headerGrid.ColumnDefinitions.Add(new ColumnDefinition()); headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             _header = new Border { BorderThickness = new Thickness(0, 0, 0, 1), Child = headerGrid }; Color(_header, Border.BackgroundProperty, "Panel"); Color(_header, Border.BorderBrushProperty, "Line"); _shell.Children.Add(_header);
+            Panel.SetZIndex(_header, 100);
             StackPanel brand = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             Image logo = Logo(32); logo.Margin = new Thickness(0, 0, 10, 0); brand.Children.Add(logo);
             StackPanel names = new StackPanel(); TextBlock name = Text("РЕМКАРТА", 14); name.FontWeight = FontWeights.SemiBold; names.Children.Add(name); names.Children.Add(Text(_context.UninstallMode ? "Удаление программы" : "Мастер установки", 11, "Muted")); brand.Children.Add(names); headerGrid.Children.Add(brand);
@@ -220,9 +316,18 @@ namespace RemCard.Setup
             _headerActions = new Grid { VerticalAlignment = VerticalAlignment.Center }; Grid.SetColumn(_headerActions, 1); headerGrid.Children.Add(_headerActions);
             StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center }; _headerActions.Children.Add(actions);
             TextBlock version = Text("v" + (_context.Version ?? ""), 12, "Muted"); version.VerticalAlignment = VerticalAlignment.Center; version.Margin = new Thickness(0, 0, 12, 0); actions.Children.Add(version);
-            _themeButton = Button("☼", ToggleTheme, false); _themeButton.Style = (Style)FindResource("Quiet"); _themeButton.FontSize = 21; _themeButton.Width = 36; _themeButton.MinHeight = 34; _themeButton.Padding = new Thickness(0); AutomationProperties.SetName(_themeButton, "Переключить светлую и тёмную тему"); actions.Children.Add(_themeButton);
-            Button minimize = Button("−", delegate { WindowState = WindowState.Minimized; }, false); minimize.Style = (Style)FindResource("Quiet"); minimize.Width = 34; minimize.MinHeight = 34; minimize.Padding = new Thickness(0); AutomationProperties.SetName(minimize, "Свернуть установщик"); actions.Children.Add(minimize);
-            Button close = Button("×", RequestClose, false); close.Style = (Style)FindResource("Quiet"); close.FontSize = 21; close.Width = 34; close.MinHeight = 34; close.Padding = new Thickness(0); AutomationProperties.SetName(close, "Закрыть установщик"); actions.Children.Add(close);
+            foreach (string language in new[] { "ru", "en" })
+            {
+                string selectedLanguage = language;
+                Button languageButton = Button(language == "ru" ? "Русский" : "English", delegate { ChangeLanguage(selectedLanguage); }, language == _context.Language);
+                languageButton.Padding = new Thickness(10, 6, 10, 6); languageButton.MinHeight = 34; languageButton.Margin = new Thickness(0, 0, 5, 0);
+                AutomationProperties.SetAutomationId(languageButton, "language-" + language);
+                actions.Children.Add(languageButton);
+            }
+            _windowActions = new StackPanel { Orientation = Orientation.Horizontal }; actions.Children.Add(_windowActions);
+            _themeButton = Button(_dark ? "☼" : "☾", ToggleTheme, false); _themeButton.Style = (Style)FindResource("Quiet"); _themeButton.FontSize = 21; _themeButton.Width = 36; _themeButton.MinHeight = 34; _themeButton.Padding = new Thickness(0); AutomationProperties.SetName(_themeButton, InstallerText.Get("Переключить светлую и тёмную тему")); _windowActions.Children.Add(_themeButton);
+            Button minimize = Button("−", delegate { WindowState = WindowState.Minimized; }, false); minimize.Style = (Style)FindResource("Quiet"); minimize.Width = 34; minimize.MinHeight = 34; minimize.Padding = new Thickness(0); AutomationProperties.SetName(minimize, InstallerText.Get("Свернуть установщик")); _windowActions.Children.Add(minimize);
+            Button close = Button("×", RequestClose, false); close.Style = (Style)FindResource("Quiet"); close.FontSize = 21; close.Width = 34; close.MinHeight = 34; close.Padding = new Thickness(0); AutomationProperties.SetName(close, InstallerText.Get("Закрыть установщик")); _windowActions.Children.Add(close);
         }
 
         private void ToggleTheme()
@@ -255,7 +360,7 @@ namespace RemCard.Setup
                 if (current) Color(button, Control.BackgroundProperty, "Soft");
                 button.IsEnabled = !_installing && !_context.UninstallMode && i < _step && _step < 4;
                 button.Opacity = current || past ? 1 : .55;
-                AutomationProperties.SetName(button, (i + 1).ToString() + ". " + labels[i]); _rail.Children.Add(button);
+                AutomationProperties.SetName(button, (i + 1).ToString() + ". " + InstallerText.Get(labels[i])); _rail.Children.Add(button);
             }
         }
 
@@ -285,6 +390,7 @@ namespace RemCard.Setup
             else if (_step == 4) RenderProgress();
             else RenderSuccess();
             RenderFooter();
+            if (_step == 4 && _failed) ApplyFailureState();
         }
 
         private void RenderWelcome()
@@ -292,9 +398,9 @@ namespace RemCard.Setup
             Header("Больше времени\nдля пациента.", "Ремкарта — рабочее пространство команды реанимации. Назначения, наблюдение и документация в одной системе.");
             Grid hero = new Grid { Height = Height < 700 ? 166 : 182, ClipToBounds = true };
             _welcomePhoto = new Image { Source = _dark ? _darkPhoto : _lightPhoto, Stretch = Stretch.UniformToFill }; hero.Children.Add(_welcomePhoto);
-            TextBlock upper = new TextBlock { Text = "АНЕСТЕЗИОЛОГИЯ И РЕАНИМАТОЛОГИЯ", FontSize = 10.5, Margin = new Thickness(17, 14, 17, 0), VerticalAlignment = VerticalAlignment.Top }; Color(upper, TextBlock.ForegroundProperty, "HeroCaption"); hero.Children.Add(upper);
-            StackPanel preview = new StackPanel(); StackPanel brand = new StackPanel { Orientation = Orientation.Horizontal }; Image smallLogo = Logo(20); smallLogo.Margin = new Thickness(0, 0, 7, 0); brand.Children.Add(smallLogo); brand.Children.Add(new TextBlock { Text = "Реанимационная карта", Foreground = Brushes.White, FontSize = 11, VerticalAlignment = VerticalAlignment.Center }); preview.Children.Add(brand);
-            FrameworkElement pulse = StaticPulse(180, 28); Color(pulse, Shape.StrokeProperty, "PreviewAccent"); pulse.Margin = new Thickness(0, 9, 0, 6); preview.Children.Add(pulse); preview.Children.Add(new TextBlock { Text = "Наблюдение · Назначения · Баланс", Foreground = new SolidColorBrush(ColorFrom("#A9C1D2")), FontSize = 10.5 });
+            TextBlock upper = new TextBlock { Text = InstallerText.Get("АНЕСТЕЗИОЛОГИЯ И РЕАНИМАТОЛОГИЯ"), TextWrapping = TextWrapping.Wrap, FontSize = 10.5, Margin = new Thickness(17, 14, 17, 0), VerticalAlignment = VerticalAlignment.Top }; Color(upper, TextBlock.ForegroundProperty, "HeroCaption"); hero.Children.Add(upper);
+            StackPanel preview = new StackPanel(); StackPanel brand = new StackPanel { Orientation = Orientation.Horizontal }; Image smallLogo = Logo(20); smallLogo.Margin = new Thickness(0, 0, 7, 0); brand.Children.Add(smallLogo); brand.Children.Add(new TextBlock { Text = InstallerText.Get("Реанимационная карта"), Foreground = Brushes.White, FontSize = 11, VerticalAlignment = VerticalAlignment.Center }); preview.Children.Add(brand);
+            FrameworkElement pulse = StaticPulse(180, 28); Color(pulse, Shape.StrokeProperty, "PreviewAccent"); pulse.Margin = new Thickness(0, 9, 0, 6); preview.Children.Add(pulse); preview.Children.Add(new TextBlock { Text = InstallerText.Get("Наблюдение · Назначения · Баланс"), TextWrapping = TextWrapping.Wrap, Foreground = new SolidColorBrush(ColorFrom("#A9C1D2")), FontSize = 10.5 });
             Border previewBox = new Border { Child = preview, Width = 220, Padding = new Thickness(14, 12, 14, 12), Background = new SolidColorBrush(ColorFrom("#EE0C1B2D")), BorderBrush = new SolidColorBrush(ColorFrom("#55738FA1")), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(9), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(15) }; hero.Children.Add(previewBox);
             Border heroBox = new Border { Child = hero, CornerRadius = new CornerRadius(12), ClipToBounds = true, Margin = new Thickness(0, 2, 0, 17) }; hero.SizeChanged += delegate { hero.Clip = new RectangleGeometry(new Rect(0, 0, hero.ActualWidth, hero.ActualHeight), 12, 12); }; _page.Children.Add(heroBox);
             WrapPanel features = new WrapPanel();
@@ -341,23 +447,23 @@ namespace RemCard.Setup
         {
             CheckBox box = new CheckBox { Content = Text(label, 13), IsChecked = selected, VerticalContentAlignment = VerticalAlignment.Top };
             box.Checked += delegate { change(true); }; box.Unchecked += delegate { change(false); };
-            AutomationProperties.SetName(box, label); return box;
+            AutomationProperties.SetName(box, InstallerText.Get(label)); return box;
         }
 
         private void RenderLocation()
         {
             Header("Где разместим Ремкарту?", "Выберите локальную папку программы. Общая база данных подключается отдельно.");
-            bool isDefault = String.Equals(_target.TrimEnd('\\'), DefaultTarget().TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+            bool isDefault = !_customLocation;
             _defaultRadio = Choice("Рекомендуемая папка", "Для текущего пользователя · без прав администратора", isDefault);
             _customRadio = Choice("Другая папка", "Например, D:\\RemCard", !isDefault);
             _page.Children.Add(TextWithMargin("Папка установки", 13, "Text", new Thickness(0, 17, 0, 8)));
             Grid pathRow = new Grid(); pathRow.ColumnDefinitions.Add(new ColumnDefinition()); pathRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             _pathBox = new TextBox { Text = _target, FontFamily = new FontFamily("Consolas"), IsReadOnly = isDefault, MinHeight = 42 };
-            AutomationProperties.SetName(_pathBox, "Папка установки"); _pathBox.TextChanged += delegate { _target = _pathBox.Text; if (_pathError != null) _pathError.Visibility = Visibility.Collapsed; }; pathRow.Children.Add(_pathBox);
+            AutomationProperties.SetName(_pathBox, InstallerText.Get("Папка установки")); _pathBox.TextChanged += delegate { _target = _pathBox.Text; _pathErrorSource = null; if (_pathError != null) _pathError.Visibility = Visibility.Collapsed; }; pathRow.Children.Add(_pathBox);
             Button browse = Button("Обзор  ▱", ShowFolderPicker, false); browse.Margin = new Thickness(8, 0, 0, 0); Grid.SetColumn(browse, 1); pathRow.Children.Add(browse); _page.Children.Add(pathRow);
-            _defaultRadio.Checked += delegate { _target = DefaultTarget(); _pathBox.Text = _target; _pathBox.IsReadOnly = true; };
-            _customRadio.Checked += delegate { _pathBox.IsReadOnly = false; _pathBox.Focus(); _pathBox.SelectAll(); };
-            _pathError = Text("", 12, "Error"); _pathError.Margin = new Thickness(0, 8, 0, 0); _pathError.Visibility = Visibility.Collapsed; _page.Children.Add(_pathError);
+            _defaultRadio.Checked += delegate { _customLocation = false; _target = DefaultTarget(); _pathBox.Text = _target; _pathBox.IsReadOnly = true; };
+            _customRadio.Checked += delegate { _customLocation = true; _pathBox.IsReadOnly = false; _pathBox.Focus(); _pathBox.SelectAll(); };
+            _pathError = Text(_pathErrorSource ?? "", 12, "Error"); _pathError.Margin = new Thickness(0, 8, 0, 0); _pathError.Visibility = _pathErrorSource == null ? Visibility.Collapsed : Visibility.Visible; _page.Children.Add(_pathError);
             WrapPanel options = new WrapPanel { Margin = new Thickness(0, 17, 0, 0) };
             CheckBox desktop = Check("Ярлык на рабочем столе", _desktop, delegate(bool value) { _desktop = value; }); desktop.Margin = new Thickness(0, 0, 22, 9); options.Children.Add(desktop);
             options.Children.Add(Check("В меню «Пуск»", _menu, delegate(bool value) { _menu = value; })); _page.Children.Add(options);
@@ -399,7 +505,7 @@ namespace RemCard.Setup
 
         private void AddPathSummary(string label, string path)
         {
-            StackPanel details = new StackPanel(); details.Children.Add(Text(label, 11, "Muted")); TextBlock location = Text(path, 12); location.FontFamily = new FontFamily("Consolas"); location.Margin = new Thickness(0, 5, 0, 0); details.Children.Add(location);
+            StackPanel details = new StackPanel(); details.Children.Add(Text(label, 11, "Muted")); TextBlock location = RawText(path, 12, "Text"); location.FontFamily = new FontFamily("Consolas"); location.Margin = new Thickness(0, 5, 0, 0); details.Children.Add(location);
             Border folder = Box(details, "Soft", false, new Thickness(17, 14, 17, 14)); folder.Margin = new Thickness(0, 18, 0, 0); _page.Children.Add(folder);
         }
 
@@ -409,15 +515,18 @@ namespace RemCard.Setup
             Grid progressHeading = new Grid { Margin = new Thickness(0, 3, 0, 10) }; progressHeading.ColumnDefinitions.Add(new ColumnDefinition()); progressHeading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             _phase = Text("Подготовка", 13); _phase.VerticalAlignment = VerticalAlignment.Center; progressHeading.Children.Add(_phase);
             _percentage = Text("0%", 28, "Accent"); Grid.SetColumn(_percentage, 1); progressHeading.Children.Add(_percentage); _page.Children.Add(progressHeading);
-            _bar = new ProgressBar { Minimum = 0, Maximum = 100, Value = _percent }; AutomationProperties.SetName(_bar, "Ход установки"); _page.Children.Add(_bar);
+            _bar = new ProgressBar { Minimum = 0, Maximum = 100, Value = _percent }; AutomationProperties.SetName(_bar, InstallerText.Get("Ход установки")); _page.Children.Add(_bar);
             _detail = Text("Проверяем готовность пакета", 11, "Muted"); _detail.TextTrimming = TextTrimming.CharacterEllipsis; _detail.TextWrapping = TextWrapping.NoWrap; _detail.Margin = new Thickness(0, 9, 0, 17); _page.Children.Add(_detail);
             Grid logHeading = new Grid { Margin = new Thickness(0, 0, 0, 8) }; logHeading.Children.Add(Text(_context.UninstallMode ? "ЖУРНАЛ УДАЛЕНИЯ" : "ЖУРНАЛ УСТАНОВКИ", 11, "Muted"));
-            Button toggle = Link("Скрыть", delegate { bool visible = _journalScroll.Visibility == Visibility.Visible; _journalScroll.Visibility = visible ? Visibility.Collapsed : Visibility.Visible; }); toggle.HorizontalAlignment = HorizontalAlignment.Right; toggle.MinHeight = 18;
-            toggle.Click += delegate { toggle.Content = _journalScroll.Visibility == Visibility.Visible ? "Скрыть" : "Показать"; }; logHeading.Children.Add(toggle); _page.Children.Add(logHeading);
+            Button toggle = Link(_journalHidden ? "Показать" : "Скрыть", delegate { _journalHidden = !_journalHidden; _journalScroll.Visibility = _journalHidden ? Visibility.Collapsed : Visibility.Visible; }); toggle.HorizontalAlignment = HorizontalAlignment.Right; toggle.MinHeight = 18;
+            toggle.Click += delegate { toggle.Content = InstallerText.Get(_journalHidden ? "Показать" : "Скрыть"); }; logHeading.Children.Add(toggle); _page.Children.Add(logHeading);
             _journal = new StackPanel(); _journalScroll = new ScrollViewer { Content = _journal, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Height = Height < 700 ? 112 : 140 };
+            _journalScroll.Visibility = _journalHidden ? Visibility.Collapsed : Visibility.Visible;
+            foreach (JournalEntry entry in _log.Skip(Math.Max(0, _log.Count - 24))) RenderJournalEntry(entry);
             Border journalBox = Box(_journalScroll, "Well", false, new Thickness(14, 11, 14, 11)); _page.Children.Add(journalBox);
             _ecg = new EcgMonitor(); _ecg.SetResourceReference(EcgMonitor.StrokeBrushProperty, "Accent");
             Border monitor = Box(_ecg, "Well", false, new Thickness(0)); monitor.CornerRadius = new CornerRadius(6); monitor.ClipToBounds = true; monitor.Margin = new Thickness(0, 17, 0, 0); _page.Children.Add(monitor);
+            if (_currentProgress != null) ApplyProgressVisuals(_currentProgress);
         }
 
         private void RenderSuccess()
@@ -442,7 +551,7 @@ namespace RemCard.Setup
             _footerActions.Children.Clear(); _nextButton = null;
             if (_step == 4)
             {
-                _footerHint.Text = _failed ? (_context.UninstallMode ? "Удаление остановлено" : "Установка остановлена") : "Пожалуйста, дождитесь завершения";
+                _footerHint.Text = InstallerText.Get(_failed ? (_context.UninstallMode ? "Удаление остановлено" : "Установка остановлена") : "Пожалуйста, дождитесь завершения");
                 if (_failed)
                 {
                     if (!_context.UninstallMode) FooterButton("Другая папка", delegate { _failed = false; _step = 2; Render(); }, false);
@@ -451,10 +560,10 @@ namespace RemCard.Setup
                 else FooterButton("Отмена", RequestClose, false);
                 return;
             }
-            if (_step == 5) { _footerHint.Text = "Хорошей и спокойной смены!"; FooterButton("Завершить  ✓", Finish, true); return; }
-            if (_context.UninstallMode) { _footerHint.Text = "Пользовательские данные сохранятся"; FooterButton("Отмена", ExitWindow, false); FooterButton("Удалить Ремкарту", BeginInstall, true); return; }
+            if (_step == 5) { _footerHint.Text = InstallerText.Get("Хорошей и спокойной смены!"); FooterButton("Завершить  ✓", Finish, true); return; }
+            if (_context.UninstallMode) { _footerHint.Text = InstallerText.Get("Пользовательские данные сохранятся"); FooterButton("Отмена", ExitWindow, false); FooterButton("Удалить Ремкарту", BeginInstall, true); return; }
             string[] hints = { "Настройка за несколько шагов", "Пожалуйста, ознакомьтесь с условиями", "Папка программы на этом компьютере", "Можно вернуться и изменить параметры" };
-            _footerHint.Text = hints[Math.Min(3, _step)];
+            _footerHint.Text = InstallerText.Get(hints[Math.Min(3, _step)]);
             if (_step > 0) FooterButton("Назад", delegate { _step--; Render(); }, false);
             FooterButton(_step == 3 ? "Установить  ↓" : "Далее  →", delegate { if (_step == 3) BeginInstall(); else Next(); }, true);
             if (_step == 1) _nextButton.IsEnabled = _accepted;
@@ -466,7 +575,7 @@ namespace RemCard.Setup
             if (_step == 2)
             {
                 try { _target = InstallerEngine.ValidateTarget(Environment.ExpandEnvironmentVariables(_pathBox.Text.Trim())); }
-                catch (Exception error) { _pathError.Text = error.Message; _pathError.Visibility = Visibility.Visible; return; }
+                catch (Exception error) { _pathErrorSource = error.Message; _pathError.Text = InstallerText.Get(error.Message); _pathError.Visibility = Visibility.Visible; return; }
             }
             _step++; Render();
         }
@@ -475,7 +584,7 @@ namespace RemCard.Setup
         {
             if (_installing) return;
             if (!_context.UninstallMode && !_accepted) { _step = 1; Render(); return; }
-            HideDialog(); _failed = false; _errorCode = null; _percent = 0; _lastPhase = null; _lastLogPercent = -10; _log.Clear();
+            HideDialog(); _failed = false; _errorCode = null; _currentProgress = null; _percent = 0; _lastPhase = null; _lastLogPercent = -10; _log.Clear();
             _installing = true; _step = 4; _closeAfterCancel = false; _cancel = new CancellationTokenSource(); Render();
             CancellationToken token = _cancel.Token;
             int runId = ++_runId;
@@ -519,18 +628,29 @@ namespace RemCard.Setup
                 InstallProgress latest; int generation;
                 lock (_progressLock) { latest = _pendingProgress; generation = _pendingRunId; _progressScheduled = false; }
                 if (generation != _runId || !_installing || _failed || latest == null || _bar == null) return;
-                _percent = Math.Max(0, Math.Min(100, latest.Percent)); _bar.Value = _percent; _percentage.Text = _percent.ToString() + "%";
-                _phase.Text = latest.Phase; _detail.Text = latest.Message; _detail.ToolTip = latest.Message;
+                _currentProgress = latest; ApplyProgressVisuals(latest);
                 if (!String.Equals(_lastPhase, latest.Phase, StringComparison.Ordinal) || _percent - _lastLogPercent >= 12)
                 { AppendLog(latest.Message, false); _lastPhase = latest.Phase; _lastLogPercent = _percent; }
             }), DispatcherPriority.Background);
         }
 
+        private void ApplyProgressVisuals(InstallProgress latest)
+        {
+            _percent = Math.Max(0, Math.Min(100, latest.Percent)); _bar.Value = _percent; _percentage.Text = _percent.ToString() + "%";
+            _phase.Text = InstallerText.Get(latest.Phase); _detail.Text = InstallerText.Get(latest.Message); _detail.ToolTip = _detail.Text;
+        }
+
+        private sealed class JournalEntry
+        { public string Time, Message; public bool Error; }
+        private void RenderJournalEntry(JournalEntry entry)
+        {
+            TextBlock line = RawText(entry.Time + (entry.Error ? "  ERR  " : "  OK   ") + InstallerText.Get(entry.Message), 11, entry.Error ? "Error" : "Muted"); line.FontFamily = new FontFamily("Consolas"); line.LineHeight = 18; line.Margin = new Thickness(0, 0, 0, 2); _journal.Children.Add(line);
+        }
         private void AppendLog(string message, bool error)
         {
-            string entry = DateTime.Now.ToString("HH:mm:ss") + (error ? "  ERR  " : "  OK   ") + message;
+            JournalEntry entry = new JournalEntry { Time = DateTime.Now.ToString("HH:mm:ss"), Message = message, Error = error };
             _log.Add(entry); if (_journal == null) return;
-            TextBlock line = Text(entry, 11, error ? "Error" : "Muted"); line.FontFamily = new FontFamily("Consolas"); line.LineHeight = 18; line.Margin = new Thickness(0, 0, 0, 2); _journal.Children.Add(line);
+            RenderJournalEntry(entry);
             while (_journal.Children.Count > 24) _journal.Children.RemoveAt(0);
             _journalScroll.ScrollToEnd();
         }
@@ -540,7 +660,7 @@ namespace RemCard.Setup
             ShowDialog(_context.UninstallMode ? "Удаление прервано." : "Установка прервана.", message, true,
                 delegate(StackPanel panel)
                 {
-                    TextBlock path = Text(_target, 11, "Muted"); path.FontFamily = new FontFamily("Consolas"); path.TextWrapping = TextWrapping.NoWrap; path.TextTrimming = TextTrimming.CharacterEllipsis; path.ToolTip = _target; panel.Children.Add(Box(path, "Well", false, new Thickness(12, 9, 12, 9)));
+                    TextBlock path = RawText(_target, 11, "Muted"); path.FontFamily = new FontFamily("Consolas"); path.TextWrapping = TextWrapping.Wrap; path.ToolTip = _target; panel.Children.Add(Box(path, "Well", false, new Thickness(12, 9, 12, 9)));
                     panel.Children.Add(TextWithMargin(_errorCode, 11, "Error", new Thickness(0, 10, 0, 0)));
                 },
                 new DialogAction("Показать журнал", delegate { HideDialog(); _journalScroll.Visibility = Visibility.Visible; _journalScroll.ScrollToEnd(); }, false),
@@ -552,13 +672,18 @@ namespace RemCard.Setup
             _installing = false; _failed = true;
             InstallFailureException installationError = error as InstallFailureException;
             _errorCode = installationError == null ? "RC-INSTALL-UNEXPECTED" : installationError.Code;
+            ApplyFailureState();
+            AppendLog(_errorCode + " · " + error.Message, true); RenderFooter(); ShowFailure(error.Message);
+        }
+
+        private void ApplyFailureState()
+        {
             if (_ecg != null) _ecg.MarkFailed();
-            _title.Text = _context.UninstallMode ? "Удаление остановлено." : "Установка остановлена.";
-            _lead.Text = "Посмотрите причину ошибки и повторите попытку.";
-            _phase.Text = _context.UninstallMode ? "Удаление прервано" : "Установка прервана";
+            _title.Text = InstallerText.Get(_context.UninstallMode ? "Удаление остановлено." : "Установка остановлена.");
+            _lead.Text = InstallerText.Get("Посмотрите причину ошибки и повторите попытку.");
+            _phase.Text = InstallerText.Get(_context.UninstallMode ? "Удаление прервано" : "Установка прервана");
             Color(_phase, TextBlock.ForegroundProperty, "Error"); Color(_percentage, TextBlock.ForegroundProperty, "Error"); Color(_bar, Control.ForegroundProperty, "Error");
             _detail.Text = _errorCode; Color(_detail, TextBlock.ForegroundProperty, "Error");
-            AppendLog(_errorCode + " · " + error.Message, true); RenderFooter(); ShowFailure(error.Message);
         }
 
         private void ApplyAutomationPreview()
@@ -566,10 +691,15 @@ namespace RemCard.Setup
             if (!_context.NoRegistration || String.IsNullOrWhiteSpace(_context.AutomationPreview)) return;
             if (String.Equals(_context.AutomationPreview, "review", StringComparison.OrdinalIgnoreCase))
             { _step = 3; Render(); return; }
+            if (String.Equals(_context.AutomationPreview, "license", StringComparison.OrdinalIgnoreCase))
+            { _step = 1; Render(); return; }
+            if (String.Equals(_context.AutomationPreview, "location", StringComparison.OrdinalIgnoreCase))
+            { _step = 2; Render(); return; }
+            if (String.Equals(_context.AutomationPreview, "progress", StringComparison.OrdinalIgnoreCase))
+            { _step = 4; _currentProgress = new InstallProgress(58, "Подготовка файлов", "Проверяем готовность пакета"); Render(); return; }
             if (!String.Equals(_context.AutomationPreview, "error", StringComparison.OrdinalIgnoreCase)) return;
             _step = 4; _installing = false; _failed = false; Render();
-            _percent = 58; _bar.Value = 58; _percentage.Text = "58%";
-            _phase.Text = "Общие компоненты"; _detail.Text = "Проверка экрана ошибки без записи на диск";
+            _currentProgress = new InstallProgress(58, "Общие компоненты", "Проверка экрана ошибки без записи на диск"); ApplyProgressVisuals(_currentProgress);
             AppendLog("Пакет Ремкарты " + _context.Version + " подготовлен к проверке интерфейса", false);
             AppendLog("Проверка оформления сообщения об ошибке", false);
             Dispatcher.BeginInvoke(new Action(delegate
@@ -583,30 +713,36 @@ namespace RemCard.Setup
             public readonly string Label; public readonly Action Action; public readonly bool Primary;
             public DialogAction(string label, Action action, bool primary) { Label = label; Action = action; Primary = primary; }
         }
+        private sealed class DialogState
+        {
+            public string Title, Body; public bool Error; public Action<StackPanel> Extra; public DialogAction[] Actions;
+        }
 
         private void ShowDialog(string title, string body, bool error, Action<StackPanel> extra, params DialogAction[] actions)
         {
+            _dialogState = new DialogState { Title = title, Body = body, Error = error, Extra = extra, Actions = actions };
             _previousFocus = Keyboard.FocusedElement; _dialogVisible = true; _overlay.Children.Clear();
             _overlay.Background = error ? Brushes.Transparent : new SolidColorBrush(ColorFrom(_dark ? "#BB020B17" : "#80233443"));
             _dialogContent = new StackPanel(); StackPanel brand = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, error ? 14 : 20) }; Image logo = Logo(error ? 23 : 27); logo.Margin = new Thickness(0, 0, 10, 0); brand.Children.Add(logo); brand.Children.Add(Text("РЕМКАРТА", error ? 11 : 12, "Muted")); _dialogContent.Children.Add(brand);
             TextBlock heading = Text(title, error ? 20 : 21); heading.FontWeight = FontWeights.SemiBold; heading.Margin = new Thickness(0, 0, 0, error ? 8 : 10); _dialogContent.Children.Add(heading);
-            if (!String.IsNullOrWhiteSpace(body)) { TextBlock message = Text(body, error ? 12 : 13, "Muted"); message.LineHeight = error ? 19 : 21; message.Margin = new Thickness(0, 0, 0, error ? 12 : 18); if (error) { message.MaxHeight = 57; message.TextTrimming = TextTrimming.CharacterEllipsis; message.ToolTip = body; } _dialogContent.Children.Add(message); }
+            if (!String.IsNullOrWhiteSpace(body)) { TextBlock message = Text(body, error ? 12 : 13, "Muted"); message.LineHeight = error ? 19 : 21; message.Margin = new Thickness(0, 0, 0, error ? 12 : 18); _dialogContent.Children.Add(message); }
             if (extra != null) extra(_dialogContent);
             WrapPanel buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, error ? 16 : 22, 0, 0) }; Button initial = null;
             foreach (DialogAction action in actions) { DialogAction selected = action; Button button = Button(selected.Label, selected.Action, selected.Primary); button.Margin = new Thickness(8, 4, 0, 0); buttons.Children.Add(button); if (selected.Primary) initial = button; }
             _dialogContent.Children.Add(buttons);
-            Border dialog = Box(_dialogContent, "Panel", true, new Thickness(error ? 22 : 25)); dialog.CornerRadius = new CornerRadius(17); dialog.Width = Math.Min(460, Math.Max(300, Width - 70)); dialog.HorizontalAlignment = HorizontalAlignment.Center; dialog.VerticalAlignment = VerticalAlignment.Top;
+            ScrollViewer dialogScroll = new ScrollViewer { Content = _dialogContent, MaxHeight = Math.Max(280, Height - 170), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+            Border dialog = Box(dialogScroll, "Panel", true, new Thickness(error ? 22 : 25)); dialog.CornerRadius = new CornerRadius(17); dialog.Width = Math.Min(500, Math.Max(300, Width - 70)); dialog.HorizontalAlignment = HorizontalAlignment.Center; dialog.VerticalAlignment = VerticalAlignment.Top;
             dialog.Margin = new Thickness(20, 82, 20, 20); dialog.Effect = new DropShadowEffect { BlurRadius = 40, ShadowDepth = 10, Opacity = .34, Color = Colors.Black };
-            _overlay.Children.Add(dialog); _overlay.Visibility = Visibility.Visible; _body.IsEnabled = false; _headerActions.IsEnabled = false;
+            _overlay.Children.Add(dialog); _overlay.Visibility = Visibility.Visible; _body.IsEnabled = false; _windowActions.IsEnabled = false;
             _dismissDialog = HideDialog;
             if (_ecg != null) _ecg.Paused = !error;
-            AutomationProperties.SetName(dialog, title);
+            AutomationProperties.SetName(dialog, InstallerText.Get(title));
             if (initial != null) Dispatcher.BeginInvoke(new Action(delegate { initial.Focus(); }), DispatcherPriority.Input);
         }
 
         private void HideDialog()
         {
-            _dialogVisible = false; _overlay.Visibility = Visibility.Collapsed; _overlay.Children.Clear(); _body.IsEnabled = true; _headerActions.IsEnabled = true;
+            _dialogVisible = false; _dialogState = null; _overlay.Visibility = Visibility.Collapsed; _overlay.Children.Clear(); _body.IsEnabled = true; _windowActions.IsEnabled = true;
             if (_ecg != null) _ecg.Paused = false;
             _dismissDialog = null;
             if (_previousFocus != null) { try { Keyboard.Focus(_previousFocus); } catch (InvalidOperationException) { } }
@@ -620,7 +756,7 @@ namespace RemCard.Setup
             ShowDialog("Лицензия Ремкарты", "Полный текст действующей лицензии проекта.", false,
                 delegate(StackPanel panel)
                 {
-                    TextBlock text = Text(InstallerResources.ReadText("RemCard.LICENSE"), 12, "Muted"); text.LineHeight = 19;
+                    TextBlock text = RawText(InstallerResources.ReadText("RemCard.LICENSE"), 12, "Muted"); text.LineHeight = 19;
                     ScrollViewer scroll = new ScrollViewer { Content = text, MaxHeight = Math.Max(170, Height - 370), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Padding = new Thickness(13) };
                     panel.Children.Add(Box(scroll, "Well", false, new Thickness(0)));
                 }, new DialogAction("К условиям", HideDialog, true));
@@ -628,6 +764,7 @@ namespace RemCard.Setup
 
         private void ShowFolderPicker()
         {
+            _folderPickerPath = _target;
             TextBox folderPath = null; TextBlock error = null; ListBox folders = null;
             Action refresh = delegate
             {
@@ -635,20 +772,20 @@ namespace RemCard.Setup
                 try
                 {
                     string current = Environment.ExpandEnvironmentVariables(folderPath.Text.Trim());
-                    if (current.StartsWith("\\\\", StringComparison.Ordinal)) { error.Text = "Для программы нужна локальная папка."; return; }
-                    if (!Directory.Exists(current)) { error.Text = "Эта папка будет создана при установке."; return; }
+                    if (current.StartsWith("\\\\", StringComparison.Ordinal)) { error.Text = InstallerText.Get("Для программы нужна локальная папка."); return; }
+                    if (!Directory.Exists(current)) { error.Text = InstallerText.Get("Эта папка будет создана при установке."); return; }
                     foreach (string child in Directory.GetDirectories(current).OrderBy(delegate(string path) { return path; }, StringComparer.CurrentCultureIgnoreCase).Take(200))
                     { ListBoxItem item = new ListBoxItem { Content = IOPath.GetFileName(child), Tag = child }; folders.Items.Add(item); }
                 }
-                catch (Exception exception) { error.Text = exception.Message; }
+                catch (Exception exception) { error.Text = InstallerText.Get(exception.Message); }
             };
             ShowDialog("Выберите папку", "Укажите место для программы. Общая папка базы данных выбирается после установки.", false,
                 delegate(StackPanel panel)
                 {
-                    folderPath = new TextBox { Text = _target, FontFamily = new FontFamily("Consolas"), Margin = new Thickness(0, 0, 0, 10) }; AutomationProperties.SetName(folderPath, "Путь к папке программы"); panel.Children.Add(folderPath);
+                    folderPath = new TextBox { Text = _folderPickerPath, FontFamily = new FontFamily("Consolas"), Margin = new Thickness(0, 0, 0, 10) }; folderPath.TextChanged += delegate { _folderPickerPath = folderPath.Text; }; AutomationProperties.SetName(folderPath, InstallerText.Get("Путь к папке программы")); panel.Children.Add(folderPath);
                     WrapPanel presets = new WrapPanel();
                     Button personal = Button("Личная папка", delegate { folderPath.Text = DefaultTarget(); refresh(); }, false); personal.Margin = new Thickness(0, 0, 8, 8); presets.Children.Add(personal);
-                    Button up = Button("На уровень выше", delegate { try { DirectoryInfo parent = Directory.GetParent(folderPath.Text.TrimEnd('\\')); if (parent != null) { folderPath.Text = parent.FullName; refresh(); } } catch (Exception exception) { error.Text = exception.Message; } }, false); up.Margin = new Thickness(0, 0, 0, 8); presets.Children.Add(up); panel.Children.Add(presets);
+                    Button up = Button("На уровень выше", delegate { try { DirectoryInfo parent = Directory.GetParent(folderPath.Text.TrimEnd('\\')); if (parent != null) { folderPath.Text = parent.FullName; refresh(); } } catch (Exception exception) { error.Text = InstallerText.Get(exception.Message); } }, false); up.Margin = new Thickness(0, 0, 0, 8); presets.Children.Add(up); panel.Children.Add(presets);
                     folders = new ListBox { Height = Math.Max(90, Math.Min(150, Height - 540)), FontSize = 12 }; panel.Children.Add(folders);
                     folders.MouseDoubleClick += delegate { ListBoxItem selected = folders.SelectedItem as ListBoxItem; if (selected != null) { folderPath.Text = (string)selected.Tag; refresh(); } };
                     folderPath.PreviewKeyDown += delegate(object sender, KeyEventArgs args) { if (args.Key == Key.Enter) { refresh(); args.Handled = true; } };
@@ -657,8 +794,8 @@ namespace RemCard.Setup
                 new DialogAction("Отмена", HideDialog, false),
                 new DialogAction("Выбрать папку", delegate
                 {
-                    try { _target = InstallerEngine.ValidateTarget(Environment.ExpandEnvironmentVariables(folderPath.Text.Trim())); HideDialog(); _step = 2; Render(); }
-                    catch (Exception exception) { error.Text = exception.Message; Color(error, TextBlock.ForegroundProperty, "Error"); }
+                    try { _target = InstallerEngine.ValidateTarget(Environment.ExpandEnvironmentVariables(folderPath.Text.Trim())); _customLocation = true; HideDialog(); _step = 2; Render(); }
+                    catch (Exception exception) { error.Text = InstallerText.Get(exception.Message); Color(error, TextBlock.ForegroundProperty, "Error"); }
                 }, true));
         }
 
@@ -669,7 +806,7 @@ namespace RemCard.Setup
             if (_installing)
             {
                 ShowDialog("Остановить операцию?", "Дождитесь остановки и завершения восстановления файлов. Не закрывайте установщик принудительно.", false, null,
-                    new DialogAction("Остановить", delegate { HideDialog(); _closeAfterCancel = true; _footerHint.Text = "Остановка операции…"; if (_cancel != null) _cancel.Cancel(); }, false),
+                    new DialogAction("Остановить", delegate { HideDialog(); _closeAfterCancel = true; _footerHint.Text = InstallerText.Get("Остановка операции…"); if (_cancel != null) _cancel.Cancel(); }, false),
                     new DialogAction("Продолжить", HideDialog, true));
             }
             else ShowDialog("Закрыть установщик?", "Вы можете вернуться к настройке в любой момент.", false, null, new DialogAction("Выйти", ExitWindow, false), new DialogAction("Остаться", HideDialog, true));

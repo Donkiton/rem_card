@@ -18,6 +18,7 @@ from importlib import import_module
 THRESHOLD_SEC = 5.0
 SNAPSHOT_INTERVAL_SEC = 60.0
 MAX_ACTIVE = 128
+MAX_READ_CANDIDATES = 4
 _lock = threading.RLock()
 _active = {}
 _thread = None
@@ -75,6 +76,10 @@ class Operation:
     def stage(self, value):
         with _lock:
             now = time.monotonic()
+            if value == 'rollback' and self.payload['stage'] in ('commit', 'sqlite_commit_wait'):
+                # Preserve the already tracked readers before rollback releases
+                # this failed COMMIT. This also covers errors below five seconds.
+                _attach_read_candidates(self.payload, self, now, 'commit_failure')
             history = self.payload['stage_history']
             history.append(dict(stage=self.payload['stage'],
                                 elapsed_ms=round((now-self.stage_started)*1000)))
@@ -137,6 +142,41 @@ def current_operation():
         return current[-1] if current else None
 
 
+def _attach_read_candidates(payload, operation, now, reason):
+    """Local intervals only; neither a lease nor a read proves a SQLite owner."""
+    try:
+        candidates = []
+        seen = set()
+        for candidate in sorted(_active.values(), key=lambda item: item.started):
+            row = candidate.payload
+            if (row.get('database_resource') != operation.payload.get('database_resource')
+                    or row['thread_id'] == operation.payload['thread_id']
+                    or not row.get('connection_id')
+                    or row.get('connection_id') == operation.payload.get('connection_id')):
+                continue
+            if not ((row['source'] in ('_fetch_one_central', '_fetch_all_central')
+                     and row['stage'] == 'central_read_execute')
+                    or (row['source'] == 'central_read_snapshot_scope'
+                        and row['stage'] == 'read_snapshot_active')):
+                continue
+            key = (row['thread_id'], row['connection_id'])
+            if key in seen:
+                continue
+            seen.add(key)
+            if len(candidates) < MAX_READ_CANDIDATES:
+                fields = ('operation_id', 'parent_id', 'thread_id', 'connection_id',
+                          'source', 'stage', 'started_at')
+                candidates.append({**{key: row[key] for key in fields if key in row},
+                                   'elapsed_ms': round(max(0.0, now - candidate.started) * 1000),
+                                   'stage_elapsed_ms': round(max(0.0, now - candidate.stage_started) * 1000)})
+        payload.update(local_read_candidates=candidates,
+                       read_candidates_truncated=len(seen) > MAX_READ_CANDIDATES,
+                       read_candidate_snapshot_reason=reason,
+                       holder_kind='sqlite_native', holder_confidence='unknown')
+    except Exception:
+        pass  # Observation cannot replace a COMMIT error or prevent rollback.
+
+
 def _operation_snapshot(op, now):
     result = dict(op.payload, stage_history=list(op.payload['stage_history']),
                   elapsed_ms=round((now-op.started)*1000),
@@ -156,6 +196,8 @@ def _operation_snapshot(op, now):
                       local_holders=holders)
     elif result['stage'] in ('sqlite_begin_wait', 'commit', 'sqlite_commit_wait'):
         result.update(holder_kind='sqlite_native', holder_confidence='unknown')
+        if result['stage'] in ('commit', 'sqlite_commit_wait'):
+            _attach_read_candidates(result, op, now, 'commit_wait')
     return result
 
 

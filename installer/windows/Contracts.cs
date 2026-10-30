@@ -18,6 +18,7 @@ namespace RemCard.Setup
         public bool NoRegistration;
         public string AutomationTargetDirectory;
         public string AutomationPreview;
+        public string Language = "ru";
         public int SimulateFailureAfterFiles = -1;
         public void Dispose() { if (Payload != null) Payload.Dispose(); }
     }

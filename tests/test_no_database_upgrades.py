@@ -11,7 +11,7 @@ from rem_card.app.operblock_schema import ensure_operblock_schema, _apply_operbl
 from rem_card.data.settings import settings_schema
 
 
-@pytest.mark.parametrize("client_version", ["5.1.11", "5.1.12", "5.1.13", "5.1.14"])
+@pytest.mark.parametrize("client_version", ["5.1.15"])
 def test_compatible_database_and_policy_are_unchanged(tmp_path, monkeypatch, client_version):
     conn = sqlite3.connect(':memory:')
     unified_db_schema.ensure_unified_schema(conn)
@@ -19,7 +19,7 @@ def test_compatible_database_and_policy_are_unchanged(tmp_path, monkeypatch, cli
     conn.commit()
     before = list(conn.iterdump())
     policy = tmp_path / 'client_policy.json'
-    policy.write_text('{"min_client_version": "5.1.11"}', encoding='utf-8')
+    policy.write_text('{"min_client_version": "5.1.15"}', encoding='utf-8')
     original_policy = policy.read_bytes()
     monkeypatch.setattr(client_build_profile, 'NO_DATABASE_UPGRADES', True)
     monkeypatch.setattr(schema_migration_guard, 'APP_VERSION', client_version)

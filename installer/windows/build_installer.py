@@ -8,15 +8,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import struct
 import subprocess
 import sys
 import zipfile
-
-from PIL import Image
-
 
 MAGIC = b"RCSETUP_PAYLOAD1"
 SOURCE = Path(__file__).resolve().parent
@@ -33,6 +31,8 @@ def sha256(path: Path) -> str:
 
 
 def prepare_assets(destination: Path) -> dict[str, Path]:
+    from PIL import Image
+
     destination.mkdir(parents=True, exist_ok=True)
     assets = {
         "RemCard.logo.png": ROOT / "icon/remcardicon.png",
@@ -80,7 +80,7 @@ def compile_stub(output: Path, assets: dict[str, Path], version: str, source_com
         f'[assembly: AssemblyVersion("{version}.0")]\n'
         f'[assembly: AssemblyFileVersion("{version}.0")]\n'
         f'[assembly: AssemblyInformationalVersion("{version}+{source_commit}")]\n', encoding="utf-8")
-    sources = [SOURCE / name for name in ("Contracts.cs", "PayloadArchive.cs", "InstallerEngine.cs", "EcgMonitor.cs", "InstallerWindow.cs", "App.cs")]
+    sources = [SOURCE / name for name in ("InstallerText.cs", "Contracts.cs", "PayloadArchive.cs", "InstallerEngine.cs", "EcgMonitor.cs", "InstallerWindow.cs", "App.cs")]
     missing = [str(path) for path in sources if not path.is_file()]
     if missing:
         raise RuntimeError("Ещё не готовы исходники установщика: " + ", ".join(missing))
@@ -97,7 +97,28 @@ def compile_stub(output: Path, assets: dict[str, Path], version: str, source_com
         raise RuntimeError("Компиляция установщика завершилась ошибкой.")
 
 
-def build(package: Path, output_dir: Path, expected_sha256: str) -> Path:
+def validate_release_profile(manifest: dict, *, expected_version: str,
+                             expected_min_client_version: str,
+                             database_upgrades_disabled: bool) -> dict:
+    """Check the explicitly accepted profile without changing the manifest."""
+    if manifest.get("package_type") != "full" or manifest.get("schema_version") != 2:
+        raise RuntimeError("Ожидался принятый полный релиз schema 2.")
+    if manifest.get("version") != expected_version:
+        raise RuntimeError("Версия payload не совпадает с VERSION исходников установщика.")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", expected_min_client_version):
+        raise RuntimeError("Ожидалась точная минимальная версия клиента MAJOR.MINOR.PATCH.")
+    if manifest.get("min_client_version") != expected_min_client_version:
+        raise RuntimeError("Минимальный клиент manifest не совпадает с принятым профилем.")
+    if type(manifest.get("database_upgrades_disabled")) is not bool or manifest["database_upgrades_disabled"] != database_upgrades_disabled:
+        raise RuntimeError("Профиль миграций manifest не совпадает с принятым профилем.")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", str(manifest.get("source_commit", ""))):
+        raise RuntimeError("В принятом manifest отсутствует точный source_commit.")
+    return {"min_client_version": expected_min_client_version,
+            "database_upgrades_disabled": database_upgrades_disabled}
+
+
+def build(package: Path, output_dir: Path, expected_sha256: str, *,
+          expected_min_client_version: str, database_upgrades_disabled: bool) -> Path:
     package = package.resolve()
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -109,21 +130,38 @@ def build(package: Path, output_dir: Path, expected_sha256: str) -> Path:
         manifest = json.loads(manifest_bytes)
         version = manifest["version"]
         source_commit = manifest["source_commit"]
-        if version != (ROOT / "VERSION").read_text(encoding="utf-8").strip():
-            raise RuntimeError("Версия payload не совпадает с VERSION исходников установщика.")
-        if manifest.get("package_type") != "full" or manifest.get("schema_version") != 2:
-            raise RuntimeError("Ожидался принятый полный релиз schema 2.")
-        if not manifest.get("database_upgrades_disabled"):
-            raise RuntimeError("Для принятого 5.1.12 ожидается профиль без миграций общей базы.")
+        profile = validate_release_profile(manifest,
+            expected_version=(ROOT / "VERSION").read_text(encoding="utf-8").strip(),
+            expected_min_client_version=expected_min_client_version,
+            database_upgrades_disabled=database_upgrades_disabled)
         files = [{"path": item["path"], "size": item["size"], "sha256": item["sha256"]} for item in manifest["files"]]
+        if not files or len({str(item["path"]).casefold() for item in files}) != len(files):
+            raise RuntimeError("Inventory пуст или содержит повторяющиеся имена.")
         files.append({"path": "manifest.json", "size": len(manifest_bytes), "sha256": hashlib.sha256(manifest_bytes).hexdigest()})
-        actual_names = {item.filename for item in archive.infolist() if not item.is_dir()}
+        names = [item.filename for item in archive.infolist() if not item.is_dir()]
+        if len({name.casefold() for name in names}) != len(names):
+            raise RuntimeError("В ZIP повторяется имя файла.")
+        actual_names = set(names)
         expected_names = {item["path"] for item in files} | {"ready.ok"}
         if actual_names != expected_names:
             raise RuntimeError("Состав ZIP отличается от принятого full-manifest.")
         for item in files:
+            path = item["path"]
+            if not isinstance(path, str) or "\\" in path or ":" in path or path.startswith("/") or any(part in {"", ".", ".."} for part in path.split("/")):
+                raise RuntimeError("Небезопасный путь в inventory ZIP.")
+            if type(item["size"]) is not int or item["size"] < 0 or not re.fullmatch(r"[0-9a-f]{64}", str(item["sha256"])):
+                raise RuntimeError("Некорректный размер или SHA-256 inventory ZIP.")
+            if archive.getinfo(path).external_attr >> 16 & 0xF000 == 0xA000:
+                raise RuntimeError("В ZIP обнаружена ссылка вместо файла.")
             if archive.getinfo(item["path"]).file_size != item["size"]:
                 raise RuntimeError("Размер файла в ZIP не совпадает: " + item["path"])
+            with archive.open(path) as entry:
+                digest = hashlib.sha256()
+                for chunk in iter(lambda: entry.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                if digest.hexdigest() != item["sha256"]:
+                    raise RuntimeError("SHA-256 файла в ZIP не совпадает: " + path)
+        archive.read("ready.ok")  # Read the last entry too, including its CRC.
     metadata = json.dumps({"format": 1, "app": "RemCard", "version": version, "source_commit": source_commit, "files": files}, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     assets = prepare_assets(output_dir / "assets")
     uninstaller = output_dir / "RemCardUninstall.exe"
@@ -151,7 +189,8 @@ def build(package: Path, output_dir: Path, expected_sha256: str) -> Path:
     report = {"version": version, "source_commit": source_commit, "package": str(package), "package_sha256": actual_hash,
               "installer": str(result), "installer_sha256": sha256(result), "installer_bytes": result.stat().st_size,
               "uninstaller_bytes": uninstaller.stat().st_size, "payload_files": len(files),
-              "unpacked_bytes": sum(item["size"] for item in files), "published": False}
+              "unpacked_bytes": sum(item["size"] for item in files), "release_profile": profile,
+              "languages": ["ru", "en"], "default_language": "ru", "published": False}
     (output_dir / "build-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     return result
@@ -162,8 +201,12 @@ def main() -> int:
     parser.add_argument("--package", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-sha256", required=True)
+    parser.add_argument("--expected-min-client-version", required=True)
+    parser.add_argument("--expected-database-upgrades", choices=("enabled", "disabled"), required=True)
     args = parser.parse_args()
-    build(args.package, args.output_dir, args.expected_sha256)
+    build(args.package, args.output_dir, args.expected_sha256,
+          expected_min_client_version=args.expected_min_client_version,
+          database_upgrades_disabled=args.expected_database_upgrades == "disabled")
     return 0
 
 

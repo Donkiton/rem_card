@@ -32,7 +32,7 @@ namespace RemCard.Setup
             SnapsToDevicePixels = true;
             ClipToBounds = true;
             Animate = SystemParameters.ClientAreaAnimation;
-            AutomationProperties.SetName(this, "Декоративная ЭКГ: комплексы P–QRS–T с бегущей развёрткой");
+            AutomationProperties.SetName(this, InstallerText.Get("Декоративная ЭКГ: комплексы P–QRS–T с бегущей развёрткой"));
             Loaded += delegate { Subscribe(); };
             Unloaded += delegate { Unsubscribe(); };
             SizeChanged += delegate { InvalidateVisual(); };
@@ -91,7 +91,7 @@ namespace RemCard.Setup
             if (_faultAt.HasValue) return;
             _pendingFailure = true;
             if (ActualWidth >= 2) CommitFailure(ActualWidth);
-            AutomationProperties.SetName(this, "ЭКГ после ошибки: прежние комплексы сохраняются, дальше рисуется изолиния");
+            AutomationProperties.SetName(this, InstallerText.Get("ЭКГ после ошибки: прежние комплексы сохраняются, дальше рисуется изолиния"));
             InvalidateVisual();
         }
 
