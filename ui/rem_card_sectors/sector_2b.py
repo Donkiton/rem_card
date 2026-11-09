@@ -7,6 +7,7 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QPixmap
 from rem_card.app.local_metrics import record_metric
 import os
+import time
 
 class Sector2b(BaseSectorWidget):
     tab_changed = Signal(str)
@@ -213,6 +214,7 @@ class Sector2b(BaseSectorWidget):
         return None
 
     def on_tab_clicked(self, tab_name):
+        started_at = time.perf_counter() if tab_name == "Назначения" else None
         record_metric(
             "tab_click_received",
             1,
@@ -220,7 +222,11 @@ class Sector2b(BaseSectorWidget):
             admission_id=self._current_admission_id_from_ui_tree(),
             source="click",
         )
-        self.select_tab(tab_name, emit=True)
+        self._orders_click_started_at = started_at
+        try:
+            self.select_tab(tab_name, emit=True)
+        finally:
+            self._orders_click_started_at = None
 
     def set_save_icon_visible(self, visible: bool):
         self._save_icon_requested_visible = bool(visible)

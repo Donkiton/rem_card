@@ -197,6 +197,30 @@ def _native_trace_event_type(content: str) -> str:
     return "native_crash"
 
 
+def _iso_timestamp(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:[+-]\d{2}:\d{2}|Z)", value,
+    ):
+        return ""
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return ""
+    return value
+
+
+def _native_trace_details(content: str) -> dict[str, Any]:
+    details: dict[str, Any] = {"native_trace": _native_trace_payload(content)}
+    first_dump = re.search(r"^=== REMCARD_THREAD_DUMP reason=[^\r\n]* ts=(\S+) ===$", content, re.MULTILINE)
+    if first_dump is not None:
+        details["first_dump_at"] = _iso_timestamp(first_dump.group(1))
+        resumed_marker = re.compile(r"^=== REMCARD_THREAD_DUMP_RESUMED ts=(\S+) ===$", re.MULTILINE)
+        resumed = resumed_marker.search(content, first_dump.end())
+        if resumed is not None:
+            details["ui_resumed_at"] = _iso_timestamp(resumed.group(1))
+    return details
+
+
 def _fingerprint(event_type: str, exception_type: str, frames: list[dict[str, Any]], details: dict[str, Any]) -> str:
     stable_details = {
         key: details.get(key)
@@ -262,6 +286,24 @@ def _allowed_details(details: dict[str, Any] | None) -> dict[str, Any]:
             result[key] = value
         else:
             result[key] = _sanitize_text(value, max_chars=500)
+    for key in ("sqlite_errorcode", "winerror", "errno"):
+        value = source.get(key)
+        if type(value) is int and -(2 ** 31) <= value < 2 ** 32:
+            result[key] = value
+    for key, pattern in (
+        ("sqlite_errorname", r"SQLITE_[A-Z0-9_]{1,64}"),
+        ("failure_phase", r"[a-z_]{1,64}"),
+        ("failure_source", r"[a-z_]{1,64}"),
+        ("diagnostic_operation_id", r"[0-9a-f]{32}"),
+        ("diagnostic_session_id", r"[0-9a-f]{32}"),
+    ):
+        value = source.get(key)
+        if isinstance(value, str) and re.fullmatch(pattern, value):
+            result[key] = value
+    for key in ("first_dump_at", "ui_resumed_at"):
+        value = _iso_timestamp(source.get(key))
+        if value:
+            result[key] = value
     native_trace = source.get("native_trace")
     if isinstance(native_trace, list):
         result["native_trace"] = [_sanitize_text(line, max_chars=1000) for line in native_trace[:MAX_NATIVE_TRACE_LINES]]
@@ -299,15 +341,17 @@ def capture_crash_event(
             else socket.gethostname()
         )
         reported_at = _now_iso()
+        first_dump_at = clean_details.get("first_dump_at") if event_type == "ui_hang" else None
+        timestamp_source = "detected_on_next_start" if subject is not None else "captured"
+        if first_dump_at:
+            timestamp_source = "first_watchdog_dump"
         payload = {
             "schema_version": SCHEMA_VERSION,
             "id": report_id,
             "event_type": event_type,
-            # Schema v1 requires occurred_at. For recovered material this is
-            # detection time; do not invent an unavailable historical crash time.
-            "occurred_at": reported_at,
+            "occurred_at": first_dump_at or reported_at,
             "reported_at": reported_at,
-            "timestamp_source": "detected_on_next_start" if subject is not None else "captured",
+            "timestamp_source": timestamp_source,
             "reporter_pid": os.getpid(),
             "app_version": app_version,
             "role": effective_role,
@@ -358,6 +402,7 @@ def capture_database_failure(
     role: str | None = None,
     phase: str = "",
     check_result: str = "",
+    diagnostic_details: dict[str, Any] | None = None,
 ) -> Path | None:
     event_type = "database_corruption" if failure_kind == "corruption" else (
         "database_unavailable_runtime" if phase == "runtime" else "database_unavailable_startup"
@@ -367,6 +412,16 @@ def capture_database_failure(
         "phase": phase,
         "check_result": check_result,
     }
+    diagnostics = diagnostic_details or {}
+    details.update({
+        key: diagnostics[key]
+        for key in ("sqlite_errorcode", "sqlite_errorname", "winerror", "errno", "failure_phase",
+                    "failure_source", "diagnostic_operation_id", "diagnostic_session_id")
+        if key in diagnostics
+    })
+    error_class = diagnostics.get("error_class")
+    if isinstance(error_class, str) and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]{0,63}", error_class):
+        details["error_class"] = error_class
     fingerprint = _fingerprint(event_type, "", [], _allowed_details(details))
     now = time.monotonic()
     with _STATE_LOCK:
@@ -557,7 +612,7 @@ def _process_stale_sessions() -> None:
                 _native_trace_event_type(native_content),
                 role=str(marker.get("role") or "unknown"),
                 details={
-                    "native_trace": _native_trace_payload(native_content),
+                    **_native_trace_details(native_content),
                     "previous_session_unclean": True,
                 },
                 session_id=str(marker.get("session_id") or ""),
@@ -698,6 +753,7 @@ def _write_ui_hang_summary_locked(fault_file, *, status: str, now: float) -> Non
 def dump_current_thread_stacks(*, reason: str = "ui_hang") -> str:
     """Append every Python thread stack to the current local native log."""
     global _UI_HANG_LAST_DUMP_MONO, _UI_HANG_STARTED_MONO, _UI_HANG_TOTAL_CAPTURED
+    dump_at = _now_iso()
     if not _STATE_LOCK.acquire(timeout=0.1):
         return THREAD_DUMP_UNAVAILABLE
     try:
@@ -748,7 +804,7 @@ def dump_current_thread_stacks(*, reason: str = "ui_hang") -> str:
                 return THREAD_DUMP_SUPPRESSED
         fault_file.write(
             f"\n=== REMCARD_THREAD_DUMP reason={_sanitize_text(reason or 'ui_hang', max_chars=80)} "
-            f"ts={_now_iso()} ===\n"
+            f"ts={dump_at} ===\n"
         )
         fault_file.flush()
         faulthandler.dump_traceback(file=fault_file, all_threads=True)
@@ -757,6 +813,18 @@ def dump_current_thread_stacks(*, reason: str = "ui_hang") -> str:
             _UI_HANG_TOTAL_CAPTURED += 1
             item["captured"] += 1
         return THREAD_DUMP_CAPTURED
+    finally:
+        _STATE_LOCK.release()
+
+
+def record_ui_hang_resumed(resumed_at: str) -> None:
+    """Append the first heartbeat after a captured dump from the watchdog thread."""
+    if not _iso_timestamp(resumed_at) or not _STATE_LOCK.acquire(timeout=0.1):
+        return
+    try:
+        if _FAULT_FILE is not None:
+            _FAULT_FILE.write(f"\n=== REMCARD_THREAD_DUMP_RESUMED ts={resumed_at} ===\n")
+            _FAULT_FILE.flush()
     finally:
         _STATE_LOCK.release()
 
@@ -801,7 +869,7 @@ def finalize_crash_session(exit_code: int | None = None, *, crash_recorded: bool
         report_path = capture_crash_event(
             _native_trace_event_type(native_content),
             role=role,
-            details={"native_trace": _native_trace_payload(native_content)},
+            details=_native_trace_details(native_content),
             session_id=session_id,
         )
     elif exit_code not in (None, 0) and not crash_recorded:
@@ -833,9 +901,10 @@ def flush_local_crash_outbox(data_root: str | os.PathLike[str] | None = None) ->
 
     for source in sorted(outbox.glob("*.json")):
         try:
-            raw = source.read_bytes()
-            payload = json.loads(raw.decode("utf-8"))
+            payload = json.loads(source.read_bytes().decode("utf-8"))
             report_id = str(payload.get("id") or source.stem)
+            payload["sent_at"] = _now_iso()
+            raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
             target = incoming / f"{report_id}.json"
             fd, tmp_name = tempfile.mkstemp(prefix=f".{report_id}.", suffix=".tmp", dir=str(incoming))
             try:
@@ -854,6 +923,10 @@ def flush_local_crash_outbox(data_root: str | os.PathLike[str] | None = None) ->
             sent_target.parent.mkdir(parents=True, exist_ok=True)
             _replace_with_retry(source, sent_target)
             result["delivered"] += 1
+            try:
+                _atomic_write_json(sent_target, payload)
+            except Exception:
+                pass  # The shared copy already has the delivery timestamp.
         except Exception:
             result["failed"] += 1
     result["remaining"] = len(list(outbox.glob("*.json")))

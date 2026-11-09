@@ -20,6 +20,7 @@ from rem_card.app.sqlite_shared import FileWriteLock, configure_connection, desc
 from rem_card.app.connection_diagnostics import connection_observation, connection_phase
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.replica_copy_diagnostics import current_copy, observed_copy
+from rem_card.app.write_operation_diagnostics import write_error_fields
 
 
 DEFAULT_REPLICA_SYNC_TIMEOUT_SEC = 30.0
@@ -34,11 +35,15 @@ STOPPED_WORKER_CLEANUP_TIMEOUT_SEC = 0.5
 
 class LocalReplicaWorkerError(RuntimeError):
     def __init__(self, message: str, *, remote_error_class: str = "", stage: str = "",
-                 sqlite_errorcode: int | None = None, sqlite_errorname: str = ""):
+                 sqlite_errorcode: int | None = None, sqlite_errorname: str = "",
+                 winerror: int | None = None, errno: int | None = None, worker_exitcode: int | None = None):
         self.remote_error_class = str(remote_error_class or "")
         self.stage = str(stage or getattr(self, "stage", ""))
         self.sqlite_errorcode = sqlite_errorcode
         self.sqlite_errorname = str(sqlite_errorname or "")
+        self.winerror = winerror
+        self.errno = errno
+        self.worker_exitcode = worker_exitcode
         super().__init__(str(message or "Ошибка процесса локальной реплики"))
 
 
@@ -738,15 +743,8 @@ def _sync_snapshot_with_network_lease_observed(
 
 
 def _send_error(pipe, exc: Exception, *, stage: str = "") -> None:
-    sqlite_error = exc
-    seen = set()
-    while not isinstance(sqlite_error, sqlite3.Error) and id(sqlite_error) not in seen:
-        seen.add(id(sqlite_error))
-        cause = sqlite_error.__cause__ or sqlite_error.__context__
-        if cause is None:
-            break
-        sqlite_error = cause
     try:
+        fields = write_error_fields(exc)
         pipe.send(
             {
                 "ok": False,
@@ -754,8 +752,7 @@ def _send_error(pipe, exc: Exception, *, stage: str = "") -> None:
                 "error": str(exc),
                 "gate_diagnostics": getattr(exc, "gate_diagnostics", {}),
                 "failure_stage": str(getattr(exc, "stage", "") or stage),
-                "sqlite_errorcode": getattr(sqlite_error, "sqlite_errorcode", None),
-                "sqlite_errorname": str(getattr(sqlite_error, "sqlite_errorname", "") or ""),
+                **{key: fields[key] for key in ("sqlite_errorcode", "sqlite_errorname", "winerror", "errno") if key in fields},
             }
         )
     except Exception:
@@ -771,6 +768,9 @@ def _worker_response_error(response: dict, last_stage: str) -> LocalReplicaWorke
     if remote_class == LocalReplicaWriterBusy.__name__:
         return LocalReplicaWriterBusy()
     code = response.get("sqlite_errorcode")
+    os_codes = {
+        key: response[key] for key in ("winerror", "errno") if type(response.get(key)) is int
+    }
     message = str(response.get("error") or "Ошибка процесса локальной реплики")
     stage = str(response.get("failure_stage") or last_stage)
     primary_code = (code & 0xFF) if isinstance(code, int) else None
@@ -784,12 +784,15 @@ def _worker_response_error(response: dict, last_stage: str) -> LocalReplicaWorke
         error.stage = stage
         error.sqlite_errorcode = code
         error.sqlite_errorname = str(response.get("sqlite_errorname") or "")
+        error.winerror = os_codes.get("winerror")
+        error.errno = os_codes.get("errno")
         return error
     return LocalReplicaWorkerError(
         message, remote_error_class=remote_class,
         stage=stage,
         sqlite_errorcode=code if isinstance(code, int) else None,
         sqlite_errorname=str(response.get("sqlite_errorname") or ""),
+        **os_codes,
     )
 
 
@@ -1307,10 +1310,15 @@ class LocalReplicaWorkerClient:
                     _remove_with_sidecars(temp_db_path)
                 raise
             except (EOFError, OSError) as exc:
+                try:
+                    exitcode = getattr(self._process, "exitcode", None)
+                except (OSError, ValueError):
+                    exitcode = None
                 if self._terminate():
                     _remove_with_sidecars(temp_db_path)
                 raise LocalReplicaWorkerError(
-                    f"Процесс локальной реплики завершился без результата: {exc}"
+                    f"Процесс локальной реплики завершился без результата: {exc}",
+                    stage=last_stage, worker_exitcode=exitcode,
                 ) from exc
 
             with self._state_lock:

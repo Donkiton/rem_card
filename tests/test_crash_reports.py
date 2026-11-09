@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -71,6 +72,95 @@ def test_clean_session_creates_no_crash_report(tmp_path, monkeypatch):
 
     assert list((spool / "outbox").glob("*.json")) == [] if (spool / "outbox").exists() else True
     assert list((spool / "sessions").glob("*.json")) == []
+
+
+def test_ui_hang_keeps_first_dump_resume_report_and_send_times(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    data_root = tmp_path / "shared"
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(spool))
+    monkeypatch.setattr(crash_reports.faulthandler, "enable", lambda **_kwargs: None)
+    monkeypatch.setattr(crash_reports.faulthandler, "disable", lambda: None)
+    monkeypatch.setattr(crash_reports.faulthandler, "dump_traceback", lambda **_kwargs: None)
+    first_dump = "2026-11-01T14:31:05+10:00"
+    resumed = "2026-11-01T14:31:17.235+10:00"
+    reported = "2026-11-01T18:10:00+10:00"
+    sent_at = "2026-11-01T18:10:30+10:00"
+    now = iter(("2026-11-01T14:00:00+10:00", first_dump, "2026-11-01T16:00:00+10:00", reported, sent_at))
+    monkeypatch.setattr(crash_reports, "_now_iso", lambda: next(now))
+
+    crash_reports.initialize_crash_session(role="nurse")
+    assert crash_reports.dump_current_thread_stacks() == "captured"
+    crash_reports.record_ui_hang_resumed(resumed)
+    assert crash_reports.dump_current_thread_stacks() == "captured"
+    crash_reports.finalize_crash_session(exit_code=0)
+
+    payload, = _payloads(spool / "outbox")
+    assert payload["schema_version"] == 1
+    assert payload["occurred_at"] == first_dump and payload["reported_at"] == reported
+    assert payload["timestamp_source"] == "first_watchdog_dump"
+    assert payload["details"]["first_dump_at"] == first_dump
+    assert payload["details"]["ui_resumed_at"] == resumed and "sent_at" not in payload
+    assert crash_reports.flush_local_crash_outbox(data_root)["delivered"] == 1
+    incoming, = _payloads(data_root / "logs" / "diagnostics" / "crashes" / "incoming")
+    local_sent, = _payloads(spool / "sent")
+    assert incoming == local_sent == {**payload, "sent_at": sent_at}
+    assert crash_reports.validate_crash_payload(incoming) == (True, "ok")
+
+
+def test_failed_delivery_keeps_original_pending_report(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    data_root = tmp_path / "shared"
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(spool))
+    report = crash_reports.capture_crash_event("ui_hang")
+    original = report.read_bytes()
+    replace = crash_reports._replace_with_retry
+
+    def fail_shared_replace(source, target):
+        if Path(target).parent.name == "incoming":
+            raise PermissionError("shared destination unavailable")
+        return replace(source, target)
+
+    monkeypatch.setattr(crash_reports, "_replace_with_retry", fail_shared_replace)
+    assert crash_reports.flush_local_crash_outbox(data_root) == {"delivered": 0, "failed": 1, "remaining": 1}
+    assert report.read_bytes() == original
+    assert _payloads(spool / "sent") == []
+
+
+def test_database_failure_keeps_safe_original_codes_without_new_fingerprints(tmp_path, monkeypatch):
+    from rem_card.app import db_availability, db_wait_diagnostics, role_admission
+
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(spool))
+    monkeypatch.setattr(crash_reports, "_DATABASE_LAST_REPORTED", {})
+    monkeypatch.setattr(crash_reports, "flush_local_crash_outbox", lambda: None)
+    monkeypatch.setattr(role_admission, "invalidate_role_admission", lambda: None)
+    monkeypatch.setattr(db_availability, "_incident_active", False)
+    monkeypatch.setattr(db_availability, "_warning_presented_for_incident", False)
+    monkeypatch.setattr(db_availability, "_publish_direct_central_failure", lambda _event: True)
+    monkeypatch.setattr(db_wait_diagnostics, "current_context", lambda: {
+        "operation_id": "a" * 32, "session_id": "b" * 32,
+    })
+    os_error = PermissionError(13, "secret-parameter")
+    os_error.winerror = 32
+    error = sqlite3.OperationalError("attempt to write a readonly database: SELECT secret-sql")
+    error.sqlite_errorcode = 776
+    error.sqlite_errorname = "SQLITE_READONLY_ROLLBACK"
+    error.__cause__ = os_error
+
+    for source in ("remcard_read_one", "remcard_write:secret-clinical-label"):
+        db_availability.notify_database_unavailable(
+            error, context=source, database_path=r"C:\private\secret-path", failure_phase="execute",
+        )
+
+    payload, = _payloads(spool / "outbox")
+    assert payload["event_type"] == "database_unavailable_runtime"
+    assert payload["details"] == {
+        "failure_kind": "runtime_unavailable", "phase": "runtime", "check_result": "runtime_database_unavailable",
+        "error_class": "OperationalError", "sqlite_errorcode": 776, "sqlite_errorname": "SQLITE_READONLY_ROLLBACK",
+        "winerror": 32, "errno": 13, "failure_source": "remcard_read_one", "failure_phase": "execute",
+        "diagnostic_operation_id": "a" * 32, "diagnostic_session_id": "b" * 32,
+    }
+    assert "secret-" not in json.dumps(payload)
 
 
 def test_stale_native_session_creates_one_native_report_without_generic_duplicate(tmp_path, monkeypatch):

@@ -143,6 +143,10 @@ class MainWindow(QMainWindow):
         self._initial_role_ui_ready = False
         self._initial_role_auto_refresh_started = False
         self._runtime_outage_handling = False
+        self._runtime_outage_worker = None
+        self._runtime_outage_context = None
+        self._runtime_outage_close_requested = False
+        self._runtime_outage_exit_callback = None
         self._restore_probe_dialog_active = False
         self._restore_probe_conflict_notified = False
         self._restore_probe_notice_deferred_until = 0.0
@@ -510,8 +514,8 @@ class MainWindow(QMainWindow):
         runtime_context = getattr(self.container, "runtime_context", None)
         return getattr(runtime_context, "mode", "") == "emergency"
 
-    def _runtime_outage_change_ids(self) -> tuple[int, int]:
-        data_service = getattr(self.container, "data_service", None)
+    @staticmethod
+    def _runtime_outage_change_ids(data_service) -> tuple[int, int]:
         observed = 0
         if data_service is not None:
             try:
@@ -535,8 +539,12 @@ class MainWindow(QMainWindow):
     def _handle_runtime_network_outage(self, payload: dict):
         if self._runtime_outage_handling or self._is_closing:
             return
+        container = self.container
+        data_service = getattr(container, "data_service", None)
+        sender = getattr(self, "sender", lambda: None)()
+        if sender is not None and sender is not data_service:
+            return
         self._runtime_outage_handling = True
-        data_service = getattr(self.container, "data_service", None)
         if data_service is not None:
             # The dialog may remain open indefinitely.  Repeat the service-side
             # idempotent gate here before opening it so synthetic/access-monitor
@@ -553,7 +561,13 @@ class MainWindow(QMainWindow):
                 focus_timer.stop()
             except RuntimeError:
                 pass
-        for role_widget in (getattr(self, "doctor_main", None), getattr(self, "nurse_main", None)):
+        from rem_card.ui.shared.async_patient_navigation import quiesce_patient_navigation
+
+        doctor_main = getattr(self, "doctor_main", None)
+        nurse_main = getattr(self, "nurse_main", None)
+        quiesce_patient_navigation(getattr(doctor_main, "remcard_widget", None))
+        quiesce_patient_navigation(nurse_main)
+        for role_widget in (doctor_main, nurse_main):
             stop_auto_refresh = getattr(role_widget, "stop_auto_refresh", None)
             if callable(stop_auto_refresh):
                 try:
@@ -568,18 +582,99 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        if role != "nurse":
-            from rem_card.app.runtime_outage import build_doctor_runtime_outage_message
-            from rem_card.ui.shared.custom_message_box import CustomMessageBox
-
-            CustomMessageBox.warning(None, "База данных недоступна", build_doctor_runtime_outage_message())
-            # The unified shell drains resources in its worker. Waiting here
-            # would block the GUI before its close button can handle another click.
-            if data_service is not None and getattr(self.window(), "unified_controller", None) is None:
-                data_service.prepare_runtime_outage_shutdown(timeout=5.0)
-            self.close()
+        # The unified doctor's role exit already owns its asynchronous drain.
+        if role != ROLE_NURSE and (
+            data_service is None or getattr(self.window(), "unified_controller", None) is not None
+        ):
+            MainWindow._show_doctor_runtime_outage_warning()
+            if not self._is_closing:
+                self.close()
             return
 
+        from rem_card.ui.shared.async_call import AsyncCallThread
+
+        # The shell also waits for retained AsyncCallThread workers before releasing the role.
+        worker = AsyncCallThread(self._drain_runtime_outage, data_service, role)
+        self._runtime_outage_worker = worker
+        self._runtime_outage_context = (container, data_service, role)
+        worker.succeeded.connect(self._on_runtime_outage_drained, Qt.QueuedConnection)
+        worker.failed.connect(self._on_runtime_outage_drain_failed, Qt.QueuedConnection)
+        try:
+            worker.start()
+        except Exception as exc:
+            self._complete_runtime_outage_drain(worker, error=exc)
+
+    @staticmethod
+    def _show_doctor_runtime_outage_warning():
+        from rem_card.app.runtime_outage import build_doctor_runtime_outage_message
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        CustomMessageBox.warning(None, "База данных недоступна", build_doctor_runtime_outage_message())
+
+    @staticmethod
+    def _drain_runtime_outage(data_service, role):
+        shutdown_ok = False
+        if data_service is not None:
+            shutdown_ok = bool(data_service.prepare_runtime_outage_shutdown(timeout=5.0))
+        if role != ROLE_NURSE:
+            return None
+        queue_state = data_service.get_write_queue_state() if data_service is not None else {}
+        observed_change_id, standby_change_id = MainWindow._runtime_outage_change_ids(data_service)
+        return shutdown_ok, queue_state, observed_change_id, standby_change_id
+
+    @Slot(object)
+    def _on_runtime_outage_drained(self, outcome):
+        self._complete_runtime_outage_drain(self.sender(), outcome=outcome)
+
+    @Slot(object)
+    def _on_runtime_outage_drain_failed(self, error):
+        self._complete_runtime_outage_drain(self.sender(), error=error)
+
+    def _runtime_outage_context_is_current(self, container, data_service):
+        return (
+            not self._is_closing
+            and self.container is container
+            and getattr(container, "data_service", None) is data_service
+        )
+
+    def defer_role_exit_for_runtime_outage(self, resume_exit):
+        if self._runtime_outage_worker is None:
+            return False
+        self._runtime_outage_close_requested = True
+        self._runtime_outage_exit_callback = resume_exit
+        return True
+
+    def _complete_runtime_outage_drain(self, worker, *, outcome=None, error=None):
+        if worker is None or worker is not self._runtime_outage_worker:
+            return
+        container, data_service, role = self._runtime_outage_context
+        self._runtime_outage_worker = None
+        self._runtime_outage_context = None
+        resume_exit = getattr(self, "_runtime_outage_exit_callback", None)
+        self._runtime_outage_exit_callback = None
+        if not self._runtime_outage_context_is_current(container, data_service):
+            return
+        try:
+            if error is not None:
+                raise error
+            if role == ROLE_NURSE:
+                self._finish_nurse_runtime_outage(container, data_service, outcome)
+            elif not self._runtime_outage_close_requested:
+                self._show_doctor_runtime_outage_warning()
+        except Exception:
+            from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+            logger.exception("Runtime outage transition failed")
+            if not self._runtime_outage_close_requested and self._runtime_outage_context_is_current(container, data_service):
+                CustomMessageBox.warning(
+                    None,
+                    "База данных недоступна",
+                    "Не удалось подтвердить завершение сохранений или подготовить переход. RemCard будет закрыта.",
+                )
+        if self._runtime_outage_context_is_current(container, data_service):
+            (resume_exit or self.close)()
+
+    def _finish_nurse_runtime_outage(self, container, data_service, outcome):
         from rem_card.app.runtime_outage import (
             build_runtime_outage_dialog_message,
             write_runtime_outage_startup_request,
@@ -587,11 +682,7 @@ class MainWindow(QMainWindow):
         from rem_card.services.settings.settings_service import reset_settings_service
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-        shutdown_ok = False
-        if data_service is not None:
-            shutdown_ok = bool(data_service.prepare_runtime_outage_shutdown(timeout=5.0))
-        queue_state = data_service.get_write_queue_state() if data_service is not None else {}
-        observed_change_id, standby_change_id = self._runtime_outage_change_ids()
+        shutdown_ok, queue_state, observed_change_id, standby_change_id = outcome
         unconfirmed_count = int(queue_state.get("unconfirmed_write_count") or 0)
         pending_count = int(queue_state.get("pending_count") or 0)
         queue_shutdown_result = str(queue_state.get("queue_shutdown_result") or ("settled" if shutdown_ok else "failed"))
@@ -614,6 +705,8 @@ class MainWindow(QMainWindow):
             queue_shutdown_result=queue_shutdown_result,
             queue_settled=queue_settled,
         )
+        if self._runtime_outage_close_requested:
+            return
         message = build_runtime_outage_dialog_message(
             unconfirmed_writes=bool(unconfirmed),
             unknown_active_write=bool(unknown_active),
@@ -628,11 +721,12 @@ class MainWindow(QMainWindow):
                 ("Закрыть RemCard", 0),
             ],
         )
+        if not self._runtime_outage_context_is_current(container, data_service):
+            return
         reset_settings_service()
         if int(result or 0) == 1:
             emergency_session_ready = self._prepare_runtime_outage_emergency_session(marker_payload)
-            if not emergency_session_ready:
-                self.close()
+            if not emergency_session_ready or not self._runtime_outage_context_is_current(container, data_service):
                 return
             launched = self._launch_runtime_emergency_restart(marker_path)
             if not launched:
@@ -641,7 +735,6 @@ class MainWindow(QMainWindow):
                     "Аварийный режим",
                     "RemCard будет закрыта. Запустите RemCard медсестры снова, чтобы открыть аварийный режим.",
                 )
-        self.close()
 
     def _handle_operblock_runtime_network_outage(self, payload: dict, *, data_service=None, role: str = ""):
         from rem_card.app.operblock_offline_store import (
@@ -800,6 +893,7 @@ class MainWindow(QMainWindow):
         return launch_emergency_restart(marker_path, role="nurse")
 
     def _prepare_runtime_outage_emergency_session(self, marker_payload: dict) -> bool:
+        container = self.container
         try:
             from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
             from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -819,6 +913,8 @@ class MainWindow(QMainWindow):
                     return False
                 if not self._confirm_emergency_password_for_transition(str(decision.password_settings_db_path or "")):
                     return False
+            if self._is_closing or self.container is not container:
+                return False
             start_or_resume_emergency_session(decision, startup_request=marker_payload)
             return True
         except Exception as exc:
@@ -1056,7 +1152,7 @@ class MainWindow(QMainWindow):
         self._event_loop_watchdog_timer = timer
 
         from rem_card.app.ui_hang_watchdog import UIHeartbeatWatchdog
-        from rem_card.services.crash_reports import dump_current_thread_stacks
+        from rem_card.services.crash_reports import dump_current_thread_stacks, record_ui_hang_resumed
 
         hard_threshold_sec = max(
             2.0,
@@ -1072,6 +1168,7 @@ class MainWindow(QMainWindow):
             dump_callback=lambda stalled_sec: dump_current_thread_stacks(
                 reason=f"ui_hang_{stalled_sec:.1f}s"
             ),
+            resume_callback=record_ui_hang_resumed,
         )
         hard_watchdog.start()
         self._hard_ui_watchdog = hard_watchdog
@@ -1812,6 +1909,8 @@ class MainWindow(QMainWindow):
         self.hide_loading_indicator(token or "maintenance", delay_ms=350)
 
     def show_roles(self):
+        if self._runtime_outage_handling:
+            return
         self.release_role_lock()
         if self._default_container is not None:
             self._activate_container(self._default_container)
@@ -2095,6 +2194,11 @@ class MainWindow(QMainWindow):
         return False
 
     def closeEvent(self, event):
+        if self._runtime_outage_worker is not None:
+            # Keep the service and its queue alive until the result is collected.
+            self._runtime_outage_close_requested = True
+            event.ignore()
+            return
         if not self._prepare_orders_draft_for_close(event):
             return
         self._is_closing = True

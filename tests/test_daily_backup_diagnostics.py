@@ -144,6 +144,39 @@ def test_cleanup_pending_preserves_successful_attempt_and_correlation(tmp_path, 
     assert stop and stop[0]["child_state"] == "stopped" and stop[0]["child_exitcode"] == 0
 
 
+@pytest.mark.parametrize("marker_completed, cleanup_completed, expected", [
+    (False, True, "failure"),
+    (True, True, "success"),
+    (True, False, "deferred"),
+])
+def test_prune_timeout_keeps_confirmed_publication_separate(
+    tmp_path, monkeypatch, telemetry, marker_completed, cleanup_completed, expected,
+):
+    scheduler = _scheduler(tmp_path)
+    messages = [{"message_type": "progress", "attempt_id": ATTEMPT,
+                 "stage": "done_marker", "state": "completed" if marker_completed else "started"}]
+    if marker_completed:
+        messages.append({"message_type": "progress", "attempt_id": ATTEMPT,
+                         "stage": "prune", "state": "started"})
+    _install_worker(monkeypatch, scheduler, messages, cleanup_completed=cleanup_completed)
+
+    result = scheduler._run_worker("2026-10-28")
+    scheduler._record_result(result, schedule_reason="night_window")
+
+    assert result["status"] == expected
+    assert result["attempt_reason"] == "worker_timeout"
+    assert result["publication_status"] == ("ready" if marker_completed else None)
+    assert result["prune_status"] == ("interrupted" if marker_completed else None)
+    if expected == "success":
+        assert result["reason"] == "created"
+        assert result["backup_path"].endswith("daily_medical_2026-10-28.db")
+    if expected == "deferred":
+        assert scheduler._has_owned_resources()
+    recorded = next(fields for name, fields in telemetry if name == "daily_central_backup_result")
+    assert recorded["publication_status"] == result["publication_status"]
+    assert recorded["prune_status"] == result["prune_status"]
+
+
 def test_timeout_after_copy_keeps_page_progress_age_separate_from_current_stage(tmp_path, monkeypatch, telemetry):
     scheduler = _scheduler(tmp_path)
     _install_worker(monkeypatch, scheduler, [

@@ -4,6 +4,7 @@ from PySide6.QtCore import QTimer, Signal, Qt
 from PySide6.QtWidgets import QStackedWidget, QVBoxLayout, QWidget
 
 from rem_card.app.logger import logger
+from rem_card.ui.shared.async_patient_navigation import cancel_card_date_lookup
 from rem_card.ui.shared.balance_snapshot_sync import BalanceSnapshotSync, show_balance_sync_status
 
 from .card_features.archive_context import DoctorArchiveContextMixin
@@ -246,6 +247,7 @@ class DoctorRemCardWidget(
 
     def shutdown(self):
         self._is_closing = True
+        cancel_card_date_lookup(self)
         from rem_card.ui.shared.pdf_report_jobs import shutdown_report_jobs
         shutdown_report_jobs(self)
         self._balance_engine_generation += 1

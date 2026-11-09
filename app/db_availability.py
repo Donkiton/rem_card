@@ -147,6 +147,7 @@ def notify_database_unavailable(
     logger: Optional[logging.Logger] = None,
     database_path: str = "",
     runtime_mode: str = "",
+    failure_phase: str = "",
 ) -> DatabaseUnavailableError:
     global _incident_active, _warning_presented_for_incident
     wrapped = to_database_unavailable_error(exc)
@@ -157,12 +158,26 @@ def notify_database_unavailable(
     active_logger = logger or logging.getLogger("RemCard")
     active_logger.error("%s unavailable: %s", context, exc, exc_info=True)
     try:
+        from rem_card.app.db_wait_diagnostics import current_context
+        from rem_card.app.write_operation_diagnostics import write_error_fields
         from rem_card.services.crash_reports import capture_database_failure, flush_local_crash_outbox
 
+        diagnostics = write_error_fields(exc)
+        diagnostics["failure_phase"] = failure_phase
+        source = context.partition(":")[0]
+        if source in {"remcard_init", "remcard_read_all", "remcard_read_one", "remcard_transaction", "remcard_write"}:
+            diagnostics["failure_source"] = source
+        try:
+            observed = current_context()
+            diagnostics["diagnostic_operation_id"] = observed.get("operation_id")
+            diagnostics["diagnostic_session_id"] = observed.get("session_id")
+        except Exception:
+            pass  # Keep the report and root error even if correlation is unavailable.
         report_path = capture_database_failure(
             "runtime_unavailable",
             phase="runtime",
             check_result="runtime_database_unavailable",
+            diagnostic_details=diagnostics,
         )
         if report_path is not None:
             threading.Thread(

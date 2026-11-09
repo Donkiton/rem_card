@@ -1,6 +1,7 @@
 from collections import OrderedDict
 import json
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +32,7 @@ def setup_probe(monkeypatch):
         error = None
         delayed_sql = ""
         delay = 0.0
+        close_error = None
 
         def create_function(self, *args, **kwargs):
             calls.append(("function", args[0]))
@@ -41,6 +43,11 @@ def setup_probe(monkeypatch):
                 clock.now += self.delay
                 if self.error is not None:
                     raise self.error
+
+        def close(self):
+            calls.append(("close", threading.get_ident()))
+            if self.close_error is not None:
+                raise self.close_error
 
     connection = Connection()
 
@@ -108,7 +115,8 @@ def test_connection_setup_separates_local_mutex_wait_from_sqlite(setup_probe, mo
     assert summary["phases"]["connection_configure"]["total_ms"] == 1500.0
 
 
-def test_connection_failure_preserves_original_exception_and_safe_codes(setup_probe):
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_connection_failure_preserves_original_exception_and_safe_codes(setup_probe, close_fails):
     probe = setup_probe
     error = sqlite3.OperationalError("sensitive patient details and SQL values")
     error.sqlite_errorcode = sqlite3.SQLITE_BUSY
@@ -116,11 +124,14 @@ def test_connection_failure_preserves_original_exception_and_safe_codes(setup_pr
     error.winerror = 5
     probe.connection.error = error
     probe.connection.delayed_sql = "PRAGMA foreign_keys = ON"
+    if close_fails:
+        probe.connection.close_error = RuntimeError("close also failed")
 
     with pytest.raises(sqlite3.OperationalError) as result:
         _open(probe)
 
     assert result.value is error
+    assert [call for call in probe.calls if call[0] == "close"] == [("close", threading.get_ident())]
     summary = probe.events[0]
     assert summary["failure_phase"] == "pragma_foreign_keys"
     assert summary["sqlite_errorcode"] == sqlite3.SQLITE_BUSY

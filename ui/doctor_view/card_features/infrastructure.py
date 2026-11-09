@@ -4,6 +4,7 @@ from PySide6.QtCore import QTimer
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.app.paths import get_role_lock_path
 from rem_card.app.logger import logger
+from rem_card.ui.shared.async_patient_navigation import add_patient_busy, release_add_patient_lock
 import os
 import socket
 from .constants import ADD_PATIENT_LOCK_KEY, PATIENT_BED_MANAGEMENT_MODE
@@ -52,24 +53,8 @@ class DoctorInfrastructureMixin:
         except Exception:
             return True
 
-    def _acquire_add_patient_lock(self) -> bool:
-        if self._add_patient_lock_held:
-            return True
-        if not self._add_patient_lock:
-            return True
-        acquired = self._add_patient_lock.acquire()
-        self._add_patient_lock_held = bool(acquired)
-        return self._add_patient_lock_held
-
     def _release_add_patient_lock(self):
-        if not self._add_patient_lock_held or not self._add_patient_lock:
-            return
-        try:
-            self._add_patient_lock.release()
-        except Exception as exc:
-            logger.warning("Failed to release add-patient lock (doctor): %s", exc)
-        finally:
-            self._add_patient_lock_held = False
+        release_add_patient_lock(self)
 
     def _set_add_patient_button_hint(self, text: str):
         panel = getattr(self, "sector8_panel", None)
@@ -153,7 +138,7 @@ class DoctorInfrastructureMixin:
         if not self._is_qobject_alive(panel):
             return
         is_beds_mode = self._selection_mode == "beds"
-        enabled = is_beds_mode
+        enabled = is_beds_mode and not add_patient_busy(self)
         try:
             panel.set_add_patient_enabled(enabled)
         except RuntimeError as exc:

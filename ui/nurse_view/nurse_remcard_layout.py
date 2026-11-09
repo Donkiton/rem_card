@@ -954,7 +954,11 @@ class NurseRemCardLayoutManager(QWidget):
                     # Мгновенно подтягиваем данные листа назначений при открытии вкладки,
                     # чтобы не ждать следующий тик автообновления (2с).
                     if is_orders and hasattr(self, 'orders_widget'):
+                        from rem_card.ui.shared.orders_display_diagnostics import begin_orders_display, finish_if_orders_already_visible
+
+                        begin_orders_display(self.orders_widget, self.sector_2b, role="nurse")
                         self.orders_widget.ensure_ready_for_show()
+                        finish_if_orders_already_visible(self.orders_widget)
 
                     if tab_name == "Баланс жидкости":
                         self.ensure_balance_tab_initialized()

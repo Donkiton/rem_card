@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.async_patient_navigation import cancel_card_date_lookup, patient_navigation
 from PySide6.QtWidgets import QDialog
 from PySide6.QtCore import QTimer
 from datetime import datetime
@@ -19,6 +20,7 @@ class DoctorNavigationMixin:
                 self.window().close()
 
     def on_back_clicked(self):
+        cancel_card_date_lookup(self)
         diagnostics = getattr(self, "_navigation_diagnostics", None)
         if diagnostics is not None:
             diagnostics.action("back_requested")
@@ -187,26 +189,11 @@ class DoctorNavigationMixin:
         if self._archive_read_only_mode:
             self._show_read_only_hint()
             return
-        if not self._acquire_add_patient_lock():
-            holder_role = self._add_patient_lock.holder_owner_role()
-            holder_label = {"doctor": "врача", "nurse": "медсестры"}.get(holder_role)
-            message = "Окно добавления пациента уже открыто.\nПожалуйста, подождите."
-            if holder_label:
-                message = f"Окно добавления пациента уже открыто у {holder_label}.\nПожалуйста, подождите."
-            CustomMessageBox.warning(
-                self,
-                "Добавление занято",
-                message,
-            )
-            self._refresh_add_patient_button_lock_state()
-            return
+        patient_navigation(self).request_add_patient(self._enter_patient_management)
 
-        try:
-            self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
-            self.layout_manager.bottom_row.hide()
-        except Exception:
-            self._release_add_patient_lock()
-            raise
+    def _enter_patient_management(self):
+        self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
+        self.layout_manager.bottom_row.hide()
 
     def on_refresh_beds_clicked(self):
         self.force_refresh_everywhere()
@@ -645,6 +632,7 @@ class DoctorNavigationMixin:
                 logger.warning("Failed to refresh opened card after archive patient edit: %s", exc, exc_info=True)
 
     def on_patient_selected_from_archive(self, patient):
+        cancel_card_date_lookup(self)
         self._card_return_mode = "archive"
         self._card_opened_from_global_archive = True
         if getattr(patient, "is_external_archive", False):
@@ -674,6 +662,8 @@ class DoctorNavigationMixin:
         self.layout_manager.sync_bottom_row_visibility_to_current_tab()
 
     def on_patient_selected_from_list(self, patient, action_type):
+        if action_type != "show":
+            cancel_card_date_lookup(self)
         self._exit_archive_read_only_mode()
         self._card_return_mode = None
         self._card_opened_from_global_archive = False
@@ -683,13 +673,10 @@ class DoctorNavigationMixin:
             action_type,
         )
         if action_type == "show":
-            target_date = self._resolve_current_or_latest_card_date(patient.id)
-            if target_date is None:
-                CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
-                return
-            self.load_patient_card(patient.id, target_date)
-            self._prime_patient_header_from_w1(patient, target_date)
-            self.layout_manager.set_patient_selection_mode("card")
+            patient_navigation(self).request_card(
+                self.service, patient.id, datetime.now(), True, "w1",
+                lambda target_date: self._open_resolved_w1_card(patient, target_date),
+            )
         elif action_type == "create":
             target_date = datetime.now()
             self.load_patient_card(patient.id, target_date, request_snapshot=False)
@@ -710,6 +697,14 @@ class DoctorNavigationMixin:
             )
         elif action_type == "archive":
             self.show_archive(patient)
+
+    def _open_resolved_w1_card(self, patient, target_date):
+        if target_date is None:
+            CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
+            return
+        self.load_patient_card(patient.id, target_date)
+        self._prime_patient_header_from_w1(patient, target_date)
+        self.layout_manager.set_patient_selection_mode("card")
 
     def _open_w1_yesterday_card(self, patient, target_date):
         if self._is_closing:

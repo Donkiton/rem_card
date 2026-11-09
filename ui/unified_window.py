@@ -931,6 +931,9 @@ class UnifiedWindow(QMainWindow):
             lifecycle_event("role_leave_confirmation_open", session_id=self.session_id, role=self.role)
             dialog.open()
             return
+        defer_outage_exit = getattr(self.role_window, "defer_role_exit_for_runtime_outage", None)
+        if callable(defer_outage_exit) and defer_outage_exit(self._finish_runtime_outage):
+            return
         self._leaving = True
         self._busy = True
         if self._local_operblock:

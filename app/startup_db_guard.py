@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
-from rem_card.app.startup_diagnostics import measured, event
+from rem_card.app.startup_diagnostics import measured, event, startup_span
 from rem_card.app.db_access_classifier import classify_database_access_error
 from rem_card.app.jsonl_audit_log import write_audit_event
 from rem_card.app.runtime_paths import (
@@ -747,16 +747,18 @@ def _apply_network_safe_profile_with_lock(
     db_lock = None
     db_heartbeat = None
     try:
-        db_lock, db_heartbeat = _acquire_lock_with_wait(
-            os.path.join(baza_dir, "archiv", "db.lock"),
-            stale_timeout_sec=120,
-            wait_sec=DB_LOCK_WAIT_SEC,
-            owner_id=owner_id,
-            source="db_profile",
-            role=role,
-            baza_dir=baza_dir,
-        )
-        profile = _apply_network_safe_profile(db_path)
+        with startup_span("db_guard_profile_lock"):
+            db_lock, db_heartbeat = _acquire_lock_with_wait(
+                os.path.join(baza_dir, "archiv", "db.lock"),
+                stale_timeout_sec=120,
+                wait_sec=DB_LOCK_WAIT_SEC,
+                owner_id=owner_id,
+                source="db_profile",
+                role=role,
+                baza_dir=baza_dir,
+            )
+        with startup_span("db_guard_apply_profile"):
+            profile = _apply_network_safe_profile(db_path)
         write_audit_event(
             "sqlite_pragmas_applied",
             baza_dir=baza_dir,
@@ -1346,10 +1348,12 @@ def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGua
         allow_malformed_cleanup=True,
         malformed_quarantine_dir=os.path.join(baza_dir, "quarantine", "locks"),
     )
-    if not rotation_gate.acquire(
-        owner_id=owner_id,
-        source="startup_db_guard_rotation_probe",
-    ):
+    with startup_span("db_guard_rotation_probe"):
+        rotation_acquired = rotation_gate.acquire(
+            owner_id=owner_id,
+            source="startup_db_guard_rotation_probe",
+        )
+    if not rotation_acquired:
         rotation_owner = describe_sqlite_lock_holder(rotation_lock_path)
         owner_text = _lock_owner_text(rotation_owner)
         technical_reason = (
@@ -1405,7 +1409,8 @@ def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGua
         reused = False
         if receipt:
             check_startup_cancelled()
-            state = admission_probe(db_path)
+            with startup_span("db_guard_recent_admission_probe"):
+                state = admission_probe(db_path)
             check_startup_cancelled()
             reused = state == receipt["state"] and role_admission.admission_still_valid(receipt)
             if not reused:
@@ -1418,9 +1423,10 @@ def _run_startup_db_guard(role: Optional[str], *, generation: int) -> StartupGua
         if reused:
             ok, result, confirmed_corruption = True, "ok", False
         else:
-            ok, result, confirmed_corruption = _check_quick_with_retries(
-                db_path, baza_dir=baza_dir, role=role,
-            )
+            with startup_span("db_guard_full_admission_check"):
+                ok, result, confirmed_corruption = _check_quick_with_retries(
+                    db_path, baza_dir=baza_dir, role=role,
+                )
         if reused:
             full_checked_monotonic = receipt["checked_monotonic"]
             full_checked_at_epoch = receipt["checked_at_epoch"]
