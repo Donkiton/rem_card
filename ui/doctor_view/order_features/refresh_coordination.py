@@ -7,6 +7,7 @@ from rem_card.app.logger import logger
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 from rem_card.ui.doctor_view.order_features.constants import ORDERS_POST_FINALIZE_WATCHDOG_MS
 from rem_card.ui.shared.async_call import AsyncCallThread
+from rem_card.ui.shared.orders_display_diagnostics import finish_orders_display
 from rem_card.ui.shared.orders_model import OrdersModel
 import time
 
@@ -34,6 +35,7 @@ class RefreshCoordinationMixin:
         self.shift_date = shift_date
         current_context_key = self._current_context_key()
         if previous_context_key != current_context_key:
+            finish_orders_display(self, "cancelled")
             self._balance_mark_overrides.clear()
             self._detach_active_snapshot_for_context_switch(
                 new_context_key=current_context_key,

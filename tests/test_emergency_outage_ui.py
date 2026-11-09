@@ -454,3 +454,273 @@ def test_runtime_outage_quiesces_monitor_and_repeated_maintenance_without_waitin
     assert scheduler_stop_timeouts == [0.0]
     assert maintenance_calls == []
     assert harness._network_outage_info == {"category": "network_unavailable"}
+
+
+@pytest.fixture
+def outage_window(qt_app, monkeypatch):
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtWidgets import QMainWindow, QWidget
+    from rem_card.app import local_metrics, runtime_outage
+    from rem_card.services.data_service import DataService
+    from rem_card.services.settings import settings_service
+    from rem_card.ui.main_window import MainWindow
+    from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+    events = []
+    monitor_release = threading.Event()
+    queue_release = threading.Event()
+
+    def wait_for_release(name, release, timeout, result=True):
+        events.append((name, timeout, threading.get_ident()))
+        assert release.wait(3)
+        return result
+
+    class Service(QObject):
+        network_outage_detected = Signal(dict)
+        prepare_runtime_outage_shutdown = DataService.prepare_runtime_outage_shutdown
+        stop_data_update_monitor = DataService.stop_data_update_monitor
+        queue_settles = True
+
+        def quiesce_runtime_outage_background_work(self, _payload):
+            events.append("quiesce")
+
+        def set_shutting_down(self):
+            pass
+
+        def _wait_for_write_submissions(self, _timeout):
+            return True
+
+        def _stop_emergency_schedulers(self, *, timeout):
+            return True
+
+        def unsettled_writes(self):
+            return []
+
+        def get_write_queue_state(self):
+            events.append("queue_state")
+            return {
+                "queue_shutdown_result": self._last_runtime_outage_shutdown_result,
+                "queue_settled": self._last_runtime_outage_queue_settled,
+                "pending_count": 0 if self.queue_settles else 2,
+                "unconfirmed_write_count": 0 if self.queue_settles else 1,
+            }
+
+        def get_observed_change_state(self):
+            return {"change_id": 19}
+
+    service = Service()
+    service._monitor = SimpleNamespace(
+        isRunning=lambda: True,
+        stop=lambda: None,
+        wait=lambda milliseconds: wait_for_release("monitor_wait", monitor_release, milliseconds),
+    )
+    service._queue = SimpleNamespace(
+        shutdown=lambda timeout: wait_for_release("queue_wait", queue_release, timeout, service.queue_settles),
+    )
+    service._emergency_standby_scheduler = SimpleNamespace(manager=SimpleNamespace(store=SimpleNamespace(
+        get_latest_valid_standby=lambda: SimpleNamespace(remote_last_change_id=12),
+    )))
+
+    class Window(MainWindow):
+        def __init__(self):
+            QMainWindow.__init__(self)
+            self.container = SimpleNamespace(data_service=service)
+            self.stack = QWidget(self)
+            self._is_closing = False
+            self._runtime_outage_handling = False
+            self._runtime_outage_worker = None
+            self._runtime_outage_context = None
+            self._runtime_outage_close_requested = False
+            self._connect_runtime_outage_signal()
+
+        def close(self):
+            events.append("close")
+            self._is_closing = True
+
+        def _prepare_runtime_outage_emergency_session(self, _marker_payload):
+            events.append("prepare_emergency")
+            return True
+
+        def _launch_runtime_emergency_restart(self, marker_path):
+            events.append(("restart", marker_path))
+            return True
+
+    def write_marker(**payload):
+        events.append(("marker", payload))
+        return "marker.json", payload
+
+    monkeypatch.setattr(local_metrics, "flush_metrics", lambda **kwargs: None)
+    monkeypatch.setattr(runtime_outage, "write_runtime_outage_startup_request", write_marker)
+    monkeypatch.setattr(settings_service, "reset_settings_service", lambda: events.append("reset_settings"))
+    monkeypatch.setattr(CustomMessageBox, "warning", lambda *_args: events.append("warning"))
+    monkeypatch.setattr(CustomMessageBox, "warning_with_actions", lambda *_args: events.append("dialog") or 1)
+    window = Window()
+    try:
+        yield window, service, events, monitor_release, queue_release
+    finally:
+        monitor_release.set()
+        queue_release.set()
+        if window._runtime_outage_worker is not None:
+            assert window._runtime_outage_worker.wait(2000)
+        qt_app.processEvents()
+
+
+def _wait_for_outage_ui(qt_app, predicate):
+    deadline = time.monotonic() + 2
+    while not predicate() and time.monotonic() < deadline:
+        qt_app.processEvents()
+        time.sleep(0.001)
+    assert predicate()
+
+
+@pytest.mark.parametrize("role, queue_settles", [("nurse", True), ("nurse", False), ("doctor", True)])
+def test_runtime_outage_drains_off_gui_and_uses_final_queue_state(qt_app, outage_window, role, queue_settles):
+    from PySide6.QtCore import QTimer
+
+    window, service, events, monitor_release, queue_release = outage_window
+    service.queue_settles = queue_settles
+    service.network_outage_detected.emit({"role": role})
+    _wait_for_outage_ui(qt_app, lambda: len(events) == 2)
+    gui_thread = threading.get_ident()
+    assert events[0] == "quiesce"
+    assert events[1][:2] == ("monitor_wait", 5000)
+    assert events[1][2] != gui_thread
+    assert not window.stack.isEnabled()
+    retained_worker = window._runtime_outage_worker
+    assert retained_worker.isRunning()
+
+    service.network_outage_detected.emit({"role": role})
+    QTimer.singleShot(0, lambda: events.append("gui_during_monitor_wait"))
+    _wait_for_outage_ui(qt_app, lambda: "gui_during_monitor_wait" in events)
+    monitor_release.set()
+    _wait_for_outage_ui(qt_app, lambda: len(events) == 4)
+    assert events[3] == ("queue_wait", 5.0, events[1][2])
+    QTimer.singleShot(0, lambda: events.append("gui_during_queue_wait"))
+    _wait_for_outage_ui(qt_app, lambda: "gui_during_queue_wait" in events)
+    assert window._runtime_outage_worker is retained_worker
+
+    queue_release.set()
+    _wait_for_outage_ui(qt_app, lambda: events[-1] == "close")
+    assert window._runtime_outage_worker is None
+    if role == "doctor":
+        assert events[5:] == ["warning", "close"]
+        return
+
+    assert events[5] == "queue_state"
+    marker_label, marker_payload = events[6]
+    assert marker_label == "marker"
+    assert marker_payload == {
+        "source_role": "nurse",
+        "last_observed_remote_change_id": 19,
+        "standby_last_change_id": 12,
+        "unconfirmed_writes": not queue_settles,
+        "pending_write_count": 0 if queue_settles else 2,
+        "unconfirmed_write_count": 0 if queue_settles else 1,
+        "unknown_active_write": not queue_settles,
+        "queue_shutdown_result": "settled" if queue_settles else "timeout",
+        "queue_settled": queue_settles,
+    }
+    assert events[7:] == ["dialog", "reset_settings", "prepare_emergency", ("restart", "marker.json"), "close"]
+
+
+@pytest.mark.parametrize("change", ["close", "leaving_role", "replaced_container"])
+def test_runtime_outage_lifecycle_ignores_late_transition(qt_app, outage_window, monkeypatch, change):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtGui import QCloseEvent
+    from rem_card.ui.main_window import MainWindow
+    from rem_card.ui.unified_window import UnifiedWindow
+
+    window, service, events, monitor_release, queue_release = outage_window
+    service.network_outage_detected.emit({"role": "nurse"})
+    _wait_for_outage_ui(qt_app, lambda: len(events) == 2)
+    if change == "close":
+        close_event = QCloseEvent()
+        MainWindow.closeEvent(window, close_event)
+        assert not close_event.isAccepted()
+        assert window._runtime_outage_close_requested
+        window.show_roles()
+    elif change == "leaving_role":
+        window._is_closing = True
+        shell = SimpleNamespace(
+            _shutdown=object(), _transition=SimpleNamespace(running=False), _workers=set(),
+            _wait_before_drain=lambda: None,
+            _role_threads_running=lambda: pytest.fail("Role drain began while the outage worker was still running"),
+        )
+        scheduled = []
+        with monkeypatch.context() as patch:
+            patch.setattr(QTimer, "singleShot", lambda delay, callback: scheduled.append((delay, callback)))
+            UnifiedWindow._wait_before_drain(shell)
+        assert scheduled == [(100, shell._wait_before_drain)]
+    else:
+        window.container = SimpleNamespace(data_service=None)
+    monitor_release.set()
+    queue_release.set()
+    _wait_for_outage_ui(qt_app, lambda: window._runtime_outage_worker is None)
+    assert events[3] == "queue_state"
+    if change == "close":
+        assert events[4][0] == "marker"
+        assert events[5:] == ["close"]
+    else:
+        assert events[4:] == []
+
+
+@pytest.mark.parametrize("exit_app", [True, False])
+def test_unified_exit_waits_for_outage_marker_before_teardown(qt_app, outage_window, monkeypatch, exit_app):
+    from rem_card.ui.unified_window import UnifiedWindow
+
+    window, service, events, monitor_release, queue_release = outage_window
+    old_unified = qt_app.property("unified_entry")
+    shell = UnifiedWindow()
+    shell.container, shell.role_window, shell.role = window.container, window, "nurse"
+    service.queue_settles = False
+    monkeypatch.setattr(shell, "_save_geometry", lambda _role: None)
+    monkeypatch.setattr(shell, "_wait_before_drain", lambda: events.append("shell_teardown"))
+    window.doctor_main = window.nurse_main = window.operblock_main = None
+    window.iter_runtime_containers = lambda: [window.container]
+    gui_thread = threading.get_ident()
+
+    def record_gui_shutdown():
+        if threading.get_ident() == gui_thread:
+            events.append("shutdown")
+
+    service.set_shutting_down = record_gui_shutdown
+    try:
+        service.network_outage_detected.emit({"role": "nurse"})
+        _wait_for_outage_ui(qt_app, lambda: len(events) == 2)
+        if exit_app:
+            shell.request_application_exit(confirmed=True)
+        else:
+            shell.request_role_exit(force=True)
+        assert window._runtime_outage_close_requested
+        assert not shell._leaving and not window._is_closing
+        assert "shutdown" not in events
+
+        monitor_release.set()
+        queue_release.set()
+        _wait_for_outage_ui(qt_app, lambda: "shell_teardown" in events)
+        marker = next(item[1] for item in events if isinstance(item, tuple) and item[0] == "marker")
+        assert marker["queue_shutdown_result"] == "timeout"
+        assert marker["unconfirmed_writes"] and marker["last_observed_remote_change_id"] == 19
+        assert events[-3:] == [("marker", marker), "shutdown", "shell_teardown"]
+        assert shell._pending_exit and shell._central_unavailable
+        assert "dialog" not in events and "prepare_emergency" not in events
+    finally:
+        shell.container = shell.role_window = None
+        shell._status_timer.stop()
+        shell.deleteLater()
+        qt_app.processEvents()
+        qt_app.setProperty("unified_entry", old_unified)
+
+
+def test_runtime_outage_queue_snapshot_failure_closes_without_restart(qt_app, outage_window, monkeypatch):
+    window, service, events, monitor_release, queue_release = outage_window
+
+    def failed_snapshot():
+        raise RuntimeError("queue snapshot unavailable")
+
+    monkeypatch.setattr(service, "get_write_queue_state", failed_snapshot)
+    monitor_release.set()
+    queue_release.set()
+    service.network_outage_detected.emit({"role": "nurse"})
+    _wait_for_outage_ui(qt_app, lambda: bool(events) and events[-1] == "close")
+    assert events[3:] == ["warning", "close"]

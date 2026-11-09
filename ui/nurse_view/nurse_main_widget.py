@@ -10,6 +10,12 @@ from rem_card.app.local_metrics import record_metric
 from rem_card.app.paths import get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.ui.shared.async_call import AsyncCallThread
+from rem_card.ui.shared.async_patient_navigation import (
+    add_patient_busy,
+    cancel_card_date_lookup,
+    patient_navigation,
+    release_add_patient_lock,
+)
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.shared.orders_balance_adapter import (
     apply_current_order_mark_overrides,
@@ -234,24 +240,8 @@ class NurseMainWidget(QWidget):
             logger=logger,
         )
 
-    def _acquire_add_patient_lock(self) -> bool:
-        if self._add_patient_lock_held:
-            return True
-        if not self._add_patient_lock:
-            return True
-        acquired = self._add_patient_lock.acquire()
-        self._add_patient_lock_held = bool(acquired)
-        return self._add_patient_lock_held
-
     def _release_add_patient_lock(self):
-        if not self._add_patient_lock_held or not self._add_patient_lock:
-            return
-        try:
-            self._add_patient_lock.release()
-        except Exception as exc:
-            logger.warning("Failed to release add-patient lock (nurse): %s", exc)
-        finally:
-            self._add_patient_lock_held = False
+        release_add_patient_lock(self)
 
     def _set_add_patient_button_hint(self, text: str):
         if hasattr(self, "sector8_panel") and hasattr(self.sector8_panel, "btn_add_patient"):
@@ -316,7 +306,7 @@ class NurseMainWidget(QWidget):
         if not hasattr(self, "sector8_panel") or not hasattr(self.sector8_panel, "set_add_patient_enabled"):
             return
         is_beds_mode = self._selection_mode == "beds"
-        enabled = is_beds_mode
+        enabled = is_beds_mode and not add_patient_busy(self)
         self.sector8_panel.set_add_patient_enabled(enabled)
 
         if is_beds_mode:
@@ -2226,39 +2216,27 @@ class NurseMainWidget(QWidget):
                     self._current_date
                 )
 
-    def _latest_created_card_date(self, admission_id: int):
-        try:
-            card_dates = self.remcard_service.get_all_card_dates(int(admission_id))
-            if card_dates:
-                return max(card_dates)
-        except Exception as exc:
-            logger.warning("Failed to resolve latest nurse card date admission_id=%s: %s", admission_id, exc)
-        return None
-
-    def _resolve_current_or_latest_card_date(self, admission_id: int):
-        now = datetime.now()
-        try:
-            if self.remcard_service.has_card(int(admission_id), now):
-                return now
-        except Exception as exc:
-            logger.warning("Failed to resolve current nurse card date admission_id=%s: %s", admission_id, exc)
-        return self._latest_created_card_date(int(admission_id))
-
     def on_show_card_clicked(self):
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
-
         admission_id = self.layout_manager.current_admission_id
         if not admission_id:
             return
-        target_date = self._resolve_current_or_latest_card_date(int(admission_id))
+        patient_navigation(self).request_card(
+            self.remcard_service, admission_id, datetime.now(), False, "card_button",
+            lambda target_date: self._show_resolved_card_date(int(admission_id), target_date),
+        )
+
+    def _show_resolved_card_date(self, admission_id, target_date):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
         if target_date is None:
             CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
             return
-        self.load_patient_card(int(admission_id), target_date)
+        self.load_patient_card(admission_id, target_date)
 
     def load_patient_card(self, admission_id, date):
         if self._is_closing:
             return
+        cancel_card_date_lookup(self)
         open_loading_key = show_app_loading(
             self,
             "Открытие карты пациента...",
@@ -2544,6 +2522,7 @@ class NurseMainWidget(QWidget):
             self.show_archive(patient)
 
     def show_archive(self, patient=None):
+        cancel_card_date_lookup(self)
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
         from ..shared.patient_archive_dialog import PatientArchiveDialog
         from PySide6.QtWidgets import QDialog
@@ -2930,26 +2909,10 @@ class NurseMainWidget(QWidget):
             self._settings_return_mode = mode
 
     def on_add_patient_clicked(self):
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        patient_navigation(self).request_add_patient(self._enter_patient_management)
 
-        if not self._acquire_add_patient_lock():
-            holder_role = self._add_patient_lock.holder_owner_role()
-            holder_label = {"doctor": "врача", "nurse": "медсестры"}.get(holder_role)
-            message = "Окно добавления пациента уже открыто.\nПожалуйста, подождите."
-            if holder_label:
-                message = f"Окно добавления пациента уже открыто у {holder_label}.\nПожалуйста, подождите."
-            CustomMessageBox.warning(
-                self,
-                "Добавление занято",
-                message,
-            )
-            self._refresh_add_patient_button_lock_state()
-            return
-        try:
-            self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
-        except Exception:
-            self._release_add_patient_lock()
-            raise
+    def _enter_patient_management(self):
+        self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
 
     def _on_selection_mode_changed(self, mode: str):
         if (
@@ -2959,6 +2922,8 @@ class NurseMainWidget(QWidget):
         ):
             logger.debug("Nurse ignored stale beds selection signal during card mode")
             return
+        if self._selection_mode != str(mode or ""):
+            cancel_card_date_lookup(self)
         self._selection_mode = str(mode or "")
         if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
             self._release_add_patient_lock()
@@ -2969,6 +2934,7 @@ class NurseMainWidget(QWidget):
             self.parent().setCurrentIndex(0)
 
     def on_back_clicked(self):
+        cancel_card_date_lookup(self)
         current_idx = self.layout_manager.selection_stack.currentIndex()
         journal_idx = -1
         if hasattr(self.layout_manager, "journal_view"):
@@ -3051,6 +3017,7 @@ class NurseMainWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        cancel_card_date_lookup(self)
         from rem_card.ui.shared.pdf_report_jobs import shutdown_report_jobs
         shutdown_report_jobs(self)
         self._balance_engine_generation += 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
@@ -19,6 +20,7 @@ class UIHeartbeatWatchdog:
         dump_callback: Callable[[float], object],
         poll_interval_sec: float = 0.25,
         resume_gap_sec: float | None = None,
+        resume_callback: Callable[[str], None] | None = None,
     ):
         self.threshold_sec = max(0.1, float(threshold_sec))
         self.cooldown_sec = max(self.threshold_sec, float(cooldown_sec))
@@ -35,6 +37,7 @@ class UIHeartbeatWatchdog:
             ),
         )
         self._dump_callback = dump_callback
+        self._resume_callback = resume_callback
         self._lock = threading.Lock()
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
@@ -42,6 +45,9 @@ class UIHeartbeatWatchdog:
         self._last_dump = 0.0
         self._last_poll = self._last_heartbeat
         self._pending_resume_gap_sec = 0.0
+        self._dump_in_progress = False
+        self._captured_stall = False
+        self._hang_resumed_at = ""
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -52,6 +58,9 @@ class UIHeartbeatWatchdog:
             self._last_heartbeat = now
             self._last_poll = now
             self._pending_resume_gap_sec = 0.0
+            self._dump_in_progress = False
+            self._captured_stall = False
+            self._hang_resumed_at = ""
         self._thread = threading.Thread(
             target=self._run,
             name="RemCardUIHeartbeatWatchdog",
@@ -68,6 +77,8 @@ class UIHeartbeatWatchdog:
         current = float(now if now is not None else time.perf_counter())
         resume_gap_to_record = 0.0
         with self._lock:
+            if (self._dump_in_progress or self._captured_stall) and not self._hang_resumed_at:
+                self._hang_resumed_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
             watchdog_poll_gap = max(0.0, current - self._last_poll)
             observed_gap = max(0.0, float(observed_gap_sec or 0.0))
             if observed_gap >= self.resume_gap_sec and watchdog_poll_gap >= self.resume_gap_sec:
@@ -89,8 +100,26 @@ class UIHeartbeatWatchdog:
             thread.join(timeout=max(0.0, float(timeout_sec)))
 
     def _run(self) -> None:
-        while not self._stop_evt.wait(self.poll_interval_sec):
-            self._poll_once(time.perf_counter())
+        try:
+            while not self._stop_evt.wait(self.poll_interval_sec):
+                self._poll_once(time.perf_counter())
+        finally:
+            self._report_hang_resumed()
+
+    def _report_hang_resumed(self) -> None:
+        callback = self._resume_callback
+        if callback is None:
+            return
+        with self._lock:
+            if not self._captured_stall or not self._hang_resumed_at:
+                return
+            resumed_at = self._hang_resumed_at
+            self._captured_stall = False
+            self._hang_resumed_at = ""
+        try:
+            callback(resumed_at)
+        except Exception:
+            logger.exception("UI heartbeat watchdog could not record recovery")
 
     @staticmethod
     def _dump_outcome(result: object) -> str:
@@ -119,6 +148,7 @@ class UIHeartbeatWatchdog:
 
     def _poll_once(self, now: float) -> str | None:
         """Evaluate one sample; a long watchdog-thread gap is a resume, not a UI hang."""
+        self._report_hang_resumed()
         resume_gap = 0.0
         with self._lock:
             poll_gap_sec = max(0.0, float(now) - self._last_poll)
@@ -138,6 +168,7 @@ class UIHeartbeatWatchdog:
                 )
                 if should_dump:
                     self._last_dump = float(now)
+                    self._dump_in_progress = self._resume_callback is not None
         if resume_gap:
             self._record_resume_gap(resume_gap)
             return None
@@ -148,6 +179,13 @@ class UIHeartbeatWatchdog:
         except Exception:
             outcome = "unavailable"
             logger.exception("UI heartbeat watchdog could not dump thread stacks")
+        if self._resume_callback is not None:
+            with self._lock:
+                self._dump_in_progress = False
+                self._captured_stall = self._captured_stall or outcome == "captured"
+                if not self._captured_stall:
+                    self._hang_resumed_at = ""
+            self._report_hang_resumed()
         try:
             record_metric(
                 "ui_hard_hang_stack_dump",

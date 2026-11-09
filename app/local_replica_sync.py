@@ -27,11 +27,22 @@ from rem_card.app.local_replica_worker import (
 )
 from rem_card.app.sqlite_shared import configure_connection
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
+from rem_card.app.write_operation_diagnostics import write_error_fields
 from rem_card.services.local_replica_health import LocalReplicaRoleHealth
 
 
 class _LocalReplicaStopping(RuntimeError):
     pass
+
+
+def _replica_failure_fields(exc: Exception) -> dict[str, Any]:
+    fields = write_error_fields(exc)
+    fields.setdefault("sqlite_errorcode", None)
+    fields.setdefault("sqlite_errorname", "")
+    worker_exitcode = getattr(exc, "worker_exitcode", None)
+    if type(worker_exitcode) is int:
+        fields["worker_exitcode"] = worker_exitcode
+    return fields
 
 
 def build_local_replica_path(
@@ -480,16 +491,14 @@ class LocalReplicaSync:
                     "local_replica_sync_failed",
                     1,
                     force_flush=failure_count >= 2,
-                    error_class=type(exc).__name__,
                     failure_stage=str(getattr(exc, "stage", "") or ""),
-                    sqlite_errorcode=getattr(exc, "sqlite_errorcode", None),
-                    sqlite_errorname=str(getattr(exc, "sqlite_errorname", "")),
                     consecutive_failures=failure_count,
                     retry_backoff_sec=self._current_backoff_sec,
                     duration_ms=round(
                         (time.perf_counter() - started) * 1000.0,
                         3,
                     ),
+                    **_replica_failure_fields(exc),
                 )
                 self.logger.warning(
                     "Local replica sync failed (%s -> %s), attempt=%s "

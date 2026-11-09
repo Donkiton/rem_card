@@ -8,7 +8,7 @@ import socket
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -2485,8 +2485,13 @@ class DatabaseManager:
                     isolation_level=None,
                     timeout=5.0,
                 )
-            with connection_phase("connection_configure"):
-                configure_connection(conn, readonly=True, profile="network")
+            try:
+                with connection_phase("connection_configure"):
+                    configure_connection(conn, readonly=True, profile="network")
+            except BaseException:
+                with suppress(Exception):
+                    conn.close()
+                raise
             return conn
 
     def _get_central_write_connection_for_read(self, context: str) -> sqlite3.Connection:
@@ -2837,6 +2842,8 @@ class DatabaseManager:
             return rows
         except sqlite3.OperationalError as exc:
             if bool(cancel_state.get("cancelled")) and "interrupted" in str(exc).lower():
+                if read_diagnostic is not None:
+                    read_diagnostic.phase = "cancelled"
                 raise self._cancelled_read_exception(cancel_state) from exc
             raise
         finally:
@@ -2890,7 +2897,11 @@ class DatabaseManager:
         except Exception as exc:
             read_diagnostic.report(exc)
             if is_database_unavailable_error(exc):
-                raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
+                raise notify_database_unavailable(
+                    exc, context="remcard_read_all", logger=logger, failure_phase=read_diagnostic.phase,
+                    database_path=getattr(self, "db_path", ""),
+                    runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", ""),
+                ) from exc
             raise
 
     @observed_call("central_read_execute")
@@ -2939,7 +2950,11 @@ class DatabaseManager:
         except Exception as exc:
             read_diagnostic.report(exc)
             if is_database_unavailable_error(exc):
-                raise notify_database_unavailable(exc, context="remcard_read_one", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
+                raise notify_database_unavailable(
+                    exc, context="remcard_read_one", logger=logger, failure_phase=read_diagnostic.phase,
+                    database_path=getattr(self, "db_path", ""),
+                    runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", ""),
+                ) from exc
             raise
 
     @staticmethod

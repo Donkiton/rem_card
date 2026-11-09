@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.async_patient_navigation import cancel_card_date_lookup, patient_navigation
 from PySide6.QtWidgets import QDialog
 from PySide6.QtCore import QTimer
 from PySide6.QtCore import Qt
@@ -18,7 +19,11 @@ from .constants import CARD_HYDRATION_FOREGROUND_IDLE_SEC
 
 class DoctorCardActionsMixin:
     def on_show_card_clicked(self):
-        target_date = self._resolve_current_or_latest_card_date(self.admission_id)
+        patient_navigation(self).request_card(
+            self.service, self.admission_id, datetime.now(), True, "card_button", self._show_resolved_card_date,
+        )
+
+    def _show_resolved_card_date(self, target_date):
         if target_date is None:
             CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
             return
@@ -265,6 +270,7 @@ class DoctorCardActionsMixin:
         QTimer.singleShot(0, lambda target_date=yest: self.safe_load_archived_card(target_date))
 
     def show_archive(self, patient=None):
+        cancel_card_date_lookup(self)
         if self._is_loading: return
         from rem_card.app.logger import logger
         from rem_card.ui.doctor_view.card_list_widget import PatientArchiveDialog
@@ -639,7 +645,11 @@ class DoctorCardActionsMixin:
                     and getattr(ow.model, "shift_date", None) == ow.shift_date
                     and not getattr(ow, "_snapshot_stale", False)
                 )
+                from rem_card.ui.shared.orders_display_diagnostics import begin_orders_display, finish_if_orders_already_visible
+
+                begin_orders_display(ow, self.layout_manager.sector_2b, role="doctor")
                 ow.ensure_ready_for_show()
+                finish_if_orders_already_visible(ow)
                 show_source = "cache" if had_ready_model and getattr(ow, "_snapshot_worker", None) is None else "refresh"
 
                 is_draft = ow.has_drafts()

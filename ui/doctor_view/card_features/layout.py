@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.async_patient_navigation import cancel_card_date_lookup
 from PySide6.QtCore import QTimer
 from rem_card.ui.shared.window_transition import after_window_transition
 from rem_card.services.archive_readonly_service import create_archive_readonly_service
@@ -441,6 +442,8 @@ class DoctorLayoutMixin:
         diagnostics = getattr(self, "_navigation_diagnostics", None)
         if diagnostics is not None:
             diagnostics.transition(self._selection_mode, str(mode or ""))
+        if self._selection_mode != str(mode or ""):
+            cancel_card_date_lookup(self)
         self._selection_mode = str(mode or "")
         if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
             self._release_add_patient_lock()

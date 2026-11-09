@@ -1215,7 +1215,7 @@ class DailyBackupScheduler:
         snapshot = {key: context.get(key) for key in (
             "attempt_id", "backup_date", "child_pid", "stage", "stage_state",
             "stage_reported_elapsed_ms", "copy_pages_remaining", "copy_pages_total",
-            "attempt_status", "attempt_reason", "outcome_origin",
+            "attempt_status", "attempt_reason", "outcome_origin", "publication_status", "prune_status",
         )}
         snapshot.update({key: context[key] for key in _FAILURE_DIAGNOSTIC_FIELDS if key in context})
         for key, source in (
@@ -1247,6 +1247,11 @@ class DailyBackupScheduler:
                        stage_reported_elapsed_ms=_diagnostic_number(message.get("elapsed_ms")),
                        _progress_received_at=now)
         context.update({key: message[key] for key in _FAILURE_DIAGNOSTIC_FIELDS if key in message})
+        if message.get("attempt_id") == context["attempt_id"]:
+            if stage == "done_marker" and context["stage_state"] == "completed":
+                context.update(publication_status="ready", prune_status="pending")
+            elif stage == "prune" and context.get("publication_status") == "ready":
+                context["prune_status"] = context["stage_state"]
         if stage == "copy" and "pages_remaining" in message:
             context.update(copy_pages_remaining=_diagnostic_number(message.get("pages_remaining")),
                            copy_pages_total=_diagnostic_number(message.get("pages_total")),
@@ -1445,6 +1450,10 @@ class DailyBackupScheduler:
                     "exitcode": process.exitcode,
                 }
         finally:
+            publication_ready = self._attempt_diagnostic.get("publication_status") == "ready"
+            if publication_ready and self._attempt_diagnostic.get("prune_status") != "completed":
+                failure_stage = (result or {}).get("failure_stage")
+                self._attempt_diagnostic["prune_status"] = "failed" if failure_stage == "prune" else "interrupted"
             self._attempt_diagnostic.update(
                 attempt_status=_diagnostic_token((result or {}).get("status")),
                 attempt_reason=_diagnostic_token((result or {}).get("reason")),
@@ -1462,6 +1471,10 @@ class DailyBackupScheduler:
                     "status": "deferred", "reason": "worker_cleanup_pending",
                     "stage": current_stage, "stage_state": stage_state,
                 }
+            elif publication_ready and result is not None and result.get("status") != "success":
+                # The child already verified the copy and atomically wrote its
+                # ready marker. A later maintenance failure cannot undo this.
+                result.update(status="success", reason="created", backup_path=paths["backup"])
         result.update({key: value for key, value in outcome_snapshot.items() if key not in result})
         self._diagnose("attempt_result", final_status=_diagnostic_token(result.get("status")),
                        final_reason=_diagnostic_token(result.get("reason")))
@@ -1651,6 +1664,8 @@ class DailyBackupScheduler:
             "stage": str(result.get("stage") or ""),
             "stage_state": str(result.get("stage_state") or ""),
             "stage_elapsed_ms": result.get("stage_elapsed_ms"),
+            "publication_status": result.get("publication_status"),
+            "prune_status": result.get("prune_status"),
         }
         diagnostic = result
         if reason == "worker_cleanup_pending" and not result.get("attempt_id"):
@@ -1659,6 +1674,7 @@ class DailyBackupScheduler:
             "attempt_id", "attempt_status", "attempt_reason", "outcome_origin", "child_pid",
             "progress_received", "attempt_elapsed_ms", "stage_wait_ms", "last_progress_age_ms",
             "stage_reported_elapsed_ms", "copy_pages_remaining", "copy_pages_total", "copy_progress_age_ms",
+            "publication_status", "prune_status",
         ) + _FAILURE_DIAGNOSTIC_FIELDS:
             if key in diagnostic:
                 fields[key] = diagnostic[key]

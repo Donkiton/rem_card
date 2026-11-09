@@ -214,9 +214,42 @@ def test_readonly_error_preserves_sqlite_code_and_original_stage_over_ipc():
     error.sqlite_errorcode = 776
     error.sqlite_errorname = "SQLITE_READONLY_ROLLBACK"
     error.stage = "central_open"
+    os_error = OSError(13, "private system error")
+    os_error.winerror = 32
+    error.__cause__ = os_error
     worker._send_error(Pipe(), error, stage="lease_release")
     received = worker._worker_response_error(messages[0], "lease_release")
     assert not isinstance(received, worker.LocalReplicaSourceBusy)
     assert received.sqlite_errorcode == 776
     assert received.sqlite_errorname == "SQLITE_READONLY_ROLLBACK"
     assert received.stage == "central_open"
+    assert received.winerror == 32 and received.errno == 13
+
+
+def test_worker_pipe_failure_keeps_observed_exit_code_and_stage(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    client = worker.LocalReplicaWorkerClient(central_db_path=str(tmp_path / "central.db"))
+    process = SimpleNamespace(pid=42, exitcode=3221225477)
+
+    class BrokenPipe:
+        def send(self, _payload):
+            raise EOFError("worker stopped")
+
+    def start():
+        client._process = process
+        client._pipe = BrokenPipe()
+
+    def terminate():
+        # A code observed only after forced cleanup would be misleading.
+        process.exitcode = 1
+        return True
+
+    monkeypatch.setattr(client, "_ensure_started", start)
+    monkeypatch.setattr(client, "_terminate", terminate)
+    with pytest.raises(worker.LocalReplicaWorkerError) as caught:
+        client.sync(local_state=None, temp_db_path=str(tmp_path / "snapshot.db"))
+
+    assert caught.value.worker_exitcode == 3221225477
+    assert caught.value.stage == "worker_start"
+    assert isinstance(caught.value.__cause__, EOFError)

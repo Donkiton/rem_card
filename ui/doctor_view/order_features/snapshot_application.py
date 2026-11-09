@@ -11,6 +11,7 @@ from rem_card.ui.doctor_view.order_features.constants import ORDERS_POST_FINALIZ
 from rem_card.ui.doctor_view.order_features.constants import ORDERS_POST_FINALIZE_RETRY_MAX_BACKOFF_MS
 from rem_card.ui.doctor_view.order_features.constants import ORDERS_POST_FINALIZE_WATCHDOG_MS
 from rem_card.ui.shared.orders_balance_adapter import build_balance_orders_from_orders_widget
+from rem_card.ui.shared.orders_display_diagnostics import finish_orders_display, observe_visible_orders_snapshot
 import time
 
 
@@ -233,6 +234,7 @@ class SnapshotApplicationMixin:
                 version=snapshot.get("version"),
             )
             self._clear_soft_update_state()
+            observe_visible_orders_snapshot(self, snapshot, role="doctor", change_cursor=snapshot_change_id, applied=False)
             return True
 
         self._ensure_model_initialized()
@@ -245,6 +247,7 @@ class SnapshotApplicationMixin:
             current_context_key=current_context_key,
             snapshot_signature=snapshot_signature,
         ):
+            observe_visible_orders_snapshot(self, snapshot, role="doctor", change_cursor=snapshot_change_id)
             return True
 
         logger.info(
@@ -302,6 +305,7 @@ class SnapshotApplicationMixin:
             snapshot.get("version"),
         )
         self._last_applied_snapshot_signature = snapshot_signature
+        observe_visible_orders_snapshot(self, snapshot, role="doctor", change_cursor=snapshot_change_id)
         if legacy_preflight_detected:
             QTimer.singleShot(
                 0,
@@ -453,6 +457,7 @@ class SnapshotApplicationMixin:
     def _on_snapshot_failed(self, exc):
         if self._is_closing:
             return
+        finish_orders_display(self, "cancelled" if isinstance(exc, OrdersRefreshCancelled) else "error")
         if isinstance(exc, OrdersRefreshCancelled):
             request_source = str(self._active_request_source or "refresh").strip().lower()
             if request_source == "post_finalize":

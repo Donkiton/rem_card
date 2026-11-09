@@ -9,20 +9,36 @@ from rem_card.services import crash_reports
 
 def test_watchdog_dumps_when_ui_heartbeat_stops():
     dumped = threading.Event()
+    recovered = threading.Event()
     observed = []
+    recovery_threads = []
+
+    def dump(stalled):
+        observed.append(stalled)
+        dumped.set()
+        return "captured"
+
+    def record_recovery(_timestamp):
+        recovery_threads.append(threading.get_ident())
+        recovered.set()
+
     watchdog = UIHeartbeatWatchdog(
         threshold_sec=0.1,
         cooldown_sec=1.0,
         poll_interval_sec=0.02,
-        dump_callback=lambda stalled: (observed.append(stalled), dumped.set()),
+        dump_callback=dump,
+        resume_callback=record_recovery,
     )
     try:
         watchdog.start()
         assert dumped.wait(1.0)
+        watchdog.beat()
+        assert recovered.wait(1.0)
     finally:
         watchdog.stop()
 
     assert observed[0] >= 0.1
+    assert len(recovery_threads) == 1 and recovery_threads[0] != threading.get_ident()
 
 
 def test_watchdog_does_not_dump_while_heartbeat_advances():
@@ -103,6 +119,33 @@ def test_watchdog_records_captured_and_suppressed_outcomes(monkeypatch):
 
 def test_watchdog_does_not_treat_ambiguous_none_as_captured():
     assert UIHeartbeatWatchdog._dump_outcome(None) == "unavailable"
+
+
+@pytest.mark.parametrize("outcome", ["captured", "suppressed", "unavailable"])
+def test_watchdog_records_only_first_resume_of_confirmed_dump(monkeypatch, outcome):
+    monkeypatch.setattr("rem_card.app.ui_hang_watchdog.record_metric", lambda *_args, **_kwargs: None)
+    resumed = []
+
+    def dump(_stalled):
+        # The GUI can resume while the watchdog is still writing the dump.
+        watchdog.beat(1.12)
+        watchdog.beat(1.13)
+        return outcome
+
+    watchdog = UIHeartbeatWatchdog(
+        threshold_sec=0.1, cooldown_sec=1.0, dump_callback=dump,
+        resume_callback=resumed.append,
+    )
+    watchdog._last_heartbeat = watchdog._last_poll = 1.0
+
+    assert watchdog._poll_once(1.11) == outcome
+    watchdog.beat(1.14)
+    assert watchdog._poll_once(1.15) is None
+    if outcome == "captured":
+        timestamp, = resumed
+        assert crash_reports._iso_timestamp(timestamp) == timestamp
+    else:
+        assert resumed == []
 
 
 def test_watchdog_treats_long_poll_gap_as_resume_but_detects_continuous_gui_block(monkeypatch):

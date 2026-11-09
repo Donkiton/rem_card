@@ -19,6 +19,7 @@ from ...shared.custom_message_box import CustomMessageBox
 from rem_card.app.local_metrics import record_metric
 from rem_card.services.read_coordinator import OrdersRefreshCancelled
 from rem_card.services.orders_sync_observability import record_orders_sync_event
+from rem_card.ui.shared.orders_display_diagnostics import finish_orders_display, observe_visible_orders_snapshot
 from rem_card.services.order_domain_service import (
     NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 )
@@ -402,6 +403,7 @@ class NurseOrdersWidget(QWidget):
         self.shift_date = shift_date
         current_context_key = self._current_context_key()
         if previous_context_key != current_context_key:
+            finish_orders_display(self, "cancelled")
             self._balance_mark_overrides.clear()
             self._detach_active_snapshot_for_context_switch(
                 new_context_key=current_context_key,
@@ -1198,6 +1200,7 @@ class NurseOrdersWidget(QWidget):
             )
             self._clear_soft_update_state()
             self._deferred_change_reload = False
+            observe_visible_orders_snapshot(self, snapshot, role="nurse", change_cursor=snapshot_change_id, applied=False)
             return True
 
         self._ensure_model_initialized()
@@ -1210,6 +1213,7 @@ class NurseOrdersWidget(QWidget):
             current_context_key=current_context_key,
             snapshot_signature=snapshot_signature,
         ):
+            observe_visible_orders_snapshot(self, snapshot, role="nurse", change_cursor=snapshot_change_id)
             return True
 
         logger.info(
@@ -1260,6 +1264,7 @@ class NurseOrdersWidget(QWidget):
         )
         self._last_applied_snapshot_signature = snapshot_signature
         self._deferred_change_reload = False
+        observe_visible_orders_snapshot(self, snapshot, role="nurse", change_cursor=snapshot_change_id)
         return True
 
     def _try_apply_admin_only_snapshot(
@@ -1361,6 +1366,7 @@ class NurseOrdersWidget(QWidget):
     def _on_snapshot_failed(self, exc):
         if self._is_closing:
             return
+        finish_orders_display(self, "cancelled" if isinstance(exc, OrdersRefreshCancelled) else "error")
         self._clear_soft_update_state()
         if isinstance(exc, OrdersRefreshCancelled):
             logger.info("[NurseOrdersWidget] Orders snapshot load cancelled: %s", exc)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.async_patient_navigation import cancel_card_date_lookup
 from PySide6.QtCore import QTimer
 from rem_card.ui.shared.loading_overlay import hide_app_loading
 from rem_card.app.logger import logger
@@ -19,6 +20,7 @@ class DoctorPatientCardMixin:
         """Обновляет данные карты для нового пациента/даты."""
         if self._is_closing:
             return
+        cancel_card_date_lookup(self)
         open_loading_key = show_app_loading(
             self,
             "Открытие карты пациента...",

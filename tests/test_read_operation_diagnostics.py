@@ -138,7 +138,48 @@ def test_notification_and_exception_chain_are_preserved(probe, monkeypatch):
     assert caught.value is wrapped and wrapped.__cause__ is original
     assert len(notified) == 1 and notified[0][0] is original
     assert notified[0][1]["context"] == "remcard_read_one"
+    assert notified[0][1]["failure_phase"] == "execute"
     assert len(probe.events) == 1 and probe.calls[-1] == ("close",)
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_only_confirmed_cancellation_skips_central_read_error(probe, cancelled):
+    from rem_card.services.read_coordinator import OrdersRefreshCancelled
+
+    original = sqlite3.OperationalError("interrupted")
+    original.sqlite_errorcode = sqlite3.SQLITE_INTERRUPT
+    original.sqlite_errorname = "SQLITE_INTERRUPT"
+    expected = OrdersRefreshCancelled("obsolete request") if cancelled else original
+    progress = None
+    started = False
+
+    def install(callback, _interval):
+        nonlocal progress
+        progress = callback
+
+    def execute(_sql, _params):
+        nonlocal started
+        started = True
+        assert progress() == int(cancelled)
+        raise original
+
+    def cancel_check():
+        if started and cancelled:
+            raise expected
+        return False
+
+    probe.connection.set_progress_handler = install
+    probe.connection.execute = execute
+    with pytest.raises(type(expected)) as caught:
+        db_manager.DatabaseManager._fetch_all_central(probe.manager, "SELECT 1", cancel_check=cancel_check)
+
+    assert caught.value is expected
+    assert probe.calls[-1] == ("close",) and progress is None
+    if cancelled:
+        assert expected.__cause__ is original and probe.events == []
+    else:
+        event, = probe.events
+        assert event["sqlite_errorname"] == "SQLITE_INTERRUPT" and event["phase"] == "execute"
 
 
 def test_repeated_errors_and_distinct_categories_have_bounded_output(probe, monkeypatch):

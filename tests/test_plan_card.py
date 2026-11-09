@@ -25,6 +25,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from rem_card.ui.doctor_view.card_features import card_actions as doctor_module  # noqa: E402
 from rem_card.ui.doctor_view.card_features import archive_context as archive_module  # noqa: E402
+from rem_card.ui.doctor_view.card_features import navigation as doctor_navigation_module  # noqa: E402
 from rem_card.services.remcard_facade import RemCardService  # noqa: E402
 from rem_card.services.shift_service import ShiftService  # noqa: E402
 from rem_card.ui.doctor_view.components.beds_selection_widget import BedsSelectionWidget  # noqa: E402
@@ -35,6 +36,7 @@ from rem_card.ui.rem_card_sectors import sector_7vit_b as notice_module  # noqa:
 from rem_card.ui.rem_card_sectors.sector_7vit_b import Sector7vit_b  # noqa: E402
 from rem_card.ui.rem_card_sectors.s_print.full_report_data import FullReportDataCollector  # noqa: E402
 from rem_card.ui.shared.patient_archive_dialog import CardListWidget  # noqa: E402
+from rem_card.ui.shared.async_patient_navigation import resolve_card_date  # noqa: E402
 from rem_card.ui.shared.remcard_layout import RemCardLayoutManager  # noqa: E402
 
 
@@ -156,7 +158,7 @@ def _bind_plan_methods(widget):
         "_is_same_medical_day",
         "_sector_4v_button_state",
         "_sector_4v_action_state",
-        "_resolve_current_or_latest_card_date",
+        "_show_resolved_card_date",
         "_set_create_card_controls_enabled",
         "on_yest_card_clicked",
     ):
@@ -182,6 +184,12 @@ def _freeze_doctor_datetime(now: datetime):
 def _restore_doctor_datetime(originals):
     for module, value in originals:
         module.datetime = value
+
+
+def _inline_card_lookup(_owner):
+    def request_card(service, admission_id, now, exclude_future, _source, deliver):
+        deliver(resolve_card_date(service, admission_id, now, exclude_future=exclude_future))
+    return SimpleNamespace(request_card=request_card)
 
 
 class _ButtonStub:
@@ -448,13 +456,13 @@ class PlanCardTest(unittest.TestCase):
             },
         )
         _bind_plan_methods(widget)
-        widget._latest_created_card_date = lambda _admission_id: historical_shift_start
+        service.get_all_card_dates = lambda _admission_id: [historical_shift_start]
         original_datetime = _freeze_doctor_datetime(now)
         try:
             current_exists, _yest_exists, _plan_available, open_available = widget._sector_4v_action_state(
                 widget._card_snapshot_cache
             )
-            target_date = widget._resolve_current_or_latest_card_date(1)
+            target_date = resolve_card_date(service, 1, now, exclude_future=True)
         finally:
             _restore_doctor_datetime(original_datetime)
 
@@ -478,7 +486,7 @@ class PlanCardTest(unittest.TestCase):
         _bind_plan_methods(widget)
         original_datetime = _freeze_doctor_datetime(now)
         try:
-            target_date = widget._resolve_current_or_latest_card_date(1)
+            target_date = resolve_card_date(service, 1, now, exclude_future=True)
         finally:
             _restore_doctor_datetime(original_datetime)
 
@@ -503,7 +511,8 @@ class PlanCardTest(unittest.TestCase):
         widget.on_show_card_clicked = MethodType(DoctorRemCardWidget.on_show_card_clicked, widget)
         original_datetime = _freeze_doctor_datetime(now)
         try:
-            widget.on_show_card_clicked()
+            with patch.object(doctor_module, "patient_navigation", _inline_card_lookup):
+                widget.on_show_card_clicked()
         finally:
             _restore_doctor_datetime(original_datetime)
 
@@ -546,19 +555,23 @@ class PlanCardTest(unittest.TestCase):
         now = datetime(2026, 6, 22, 12, 0)
         historical_date = ShiftService.get_day_period(now)[0] - timedelta(days=2)
         opened = []
+        service = _PlanCardServiceStub(now, {historical_date})
+        service.get_all_card_dates = lambda _admission_id: [historical_date]
         widget = SimpleNamespace(
             admission_id=1,
+            service=service,
             _current_date=now,
-            _resolve_current_or_latest_card_date=lambda _admission_id: historical_date,
             _is_same_medical_day=lambda left, right: ShiftService.get_day_period(left)[0]
             == ShiftService.get_day_period(right)[0],
             refresh_data=lambda **_kwargs: self.fail("current empty card must not be refreshed"),
             safe_load_archived_card=lambda target_date, **kwargs: opened.append((target_date, kwargs)),
         )
         widget.on_show_card_clicked = MethodType(DoctorRemCardWidget.on_show_card_clicked, widget)
+        widget._show_resolved_card_date = MethodType(DoctorRemCardWidget._show_resolved_card_date, widget)
         original_datetime = _freeze_doctor_datetime(now)
         try:
-            widget.on_show_card_clicked()
+            with patch.object(doctor_module, "patient_navigation", _inline_card_lookup):
+                widget.on_show_card_clicked()
         finally:
             _restore_doctor_datetime(original_datetime)
 
@@ -570,11 +583,14 @@ class PlanCardTest(unittest.TestCase):
         primed = []
         selection_modes = []
         patient = SimpleNamespace(id=1)
+        now = datetime(2026, 6, 22, 12)
+        service = _PlanCardServiceStub(now, {historical_date})
+        service.get_all_card_dates = lambda _admission_id: [historical_date]
         widget = SimpleNamespace(
             _exit_archive_read_only_mode=lambda: None,
             _card_return_mode="archive",
             _card_opened_from_global_archive=True,
-            _resolve_current_or_latest_card_date=lambda _admission_id: historical_date,
+            service=service,
             load_patient_card=lambda admission_id, target_date: loaded.append((admission_id, target_date)),
             _prime_patient_header_from_w1=lambda selected_patient, target_date: primed.append(
                 (selected_patient, target_date)
@@ -587,8 +603,14 @@ class PlanCardTest(unittest.TestCase):
             DoctorRemCardWidget.on_patient_selected_from_list,
             widget,
         )
+        widget._open_resolved_w1_card = MethodType(DoctorRemCardWidget._open_resolved_w1_card, widget)
 
-        widget.on_patient_selected_from_list(patient, "show")
+        original_datetime = _freeze_doctor_datetime(now)
+        try:
+            with patch.object(doctor_navigation_module, "patient_navigation", _inline_card_lookup):
+                widget.on_patient_selected_from_list(patient, "show")
+        finally:
+            _restore_doctor_datetime(original_datetime)
 
         self.assertEqual(loaded, [(1, historical_date)])
         self.assertEqual(primed, [(patient, historical_date)])

@@ -331,15 +331,6 @@ class DoctorArchiveContextMixin:
         open_card_available = bool(snapshot.get("has_any_card", selected_card_exists) or current_card_exists)
         return current_card_exists, yest_exists, plan_card_available, open_card_available
 
-    def _resolve_current_or_latest_card_date(self, admission_id: int):
-        now = datetime.now()
-        try:
-            if self.service.has_card(int(admission_id), now):
-                return now
-        except Exception as exc:
-            logger.warning("Failed to resolve current card date admission_id=%s: %s", admission_id, exc)
-        return self._latest_created_card_date(int(admission_id))
-
     def _sync_plan_card_ui_state(self):
         layout = getattr(self, "layout_manager", None)
         plan_card_open = self._is_plan_card_open()

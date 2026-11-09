@@ -594,17 +594,70 @@ def _check_runtime_outage_nurse_network_unavailable_requests_emergency_restart(t
 
 
 def _check_runtime_outage_doctor_gets_block_message_no_emergency(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.runtime_outage import build_doctor_runtime_outage_message
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
 
-    root = os.path.join(temp_root, "er")
-    message = build_doctor_runtime_outage_message()
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
+
+    from rem_card.app import runtime_outage
+    from rem_card.app.emergency_paths import EMERGENCY_ROOT_ENV
+    from rem_card.services.settings import settings_service
+    from rem_card.ui.main_window import MainWindow
+    from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+    app = QApplication.instance() or QApplication([])
+    root = Path(temp_root) / "er"
+    message = runtime_outage.build_doctor_runtime_outage_message()
     if "ПК медсестры" not in message:
         return False, f"doctor message must direct work to nurse PC: {message}"
-    if list(Path(root).rglob("rao_journal_emergency.db")):
-        return False, "doctor outage created emergency DB unexpectedly"
-    main_text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
-    if 'role != "nurse"' not in main_text or "write_runtime_outage_startup_request" not in main_text:
-        return False, "runtime outage UI branch does not separate doctor and nurse"
+
+    class DoctorWindow(MainWindow):
+        def __init__(self, data_service, *, unified):
+            QMainWindow.__init__(self)
+            self.container = SimpleNamespace(data_service=data_service)
+            self.stack = QWidget(self)
+            self._is_closing = False
+            self._runtime_outage_handling = False
+            self._runtime_outage_worker = None
+            self._runtime_outage_context = None
+            self._runtime_outage_close_requested = False
+            if unified:
+                self.unified_controller = object()
+
+    for unified in (True, False):
+        mode = "unified" if unified else "standalone"
+        drain = Mock(return_value=True)
+        window = DoctorWindow(SimpleNamespace(prepare_runtime_outage_shutdown=drain), unified=unified)
+        try:
+            with (
+                patch.dict(os.environ, {EMERGENCY_ROOT_ENV: str(root)}),
+                patch.object(settings_service, "reset_settings_service"),
+                patch.object(CustomMessageBox, "warning") as warning,
+                patch.object(CustomMessageBox, "warning_with_actions", return_value=1) as emergency_dialog,
+                patch.object(runtime_outage, "write_runtime_outage_startup_request", return_value=("marker", {})) as marker,
+                patch.object(window, "_prepare_runtime_outage_emergency_session", return_value=True) as prepare,
+                patch.object(window, "_launch_runtime_emergency_restart") as restart,
+                patch.object(window, "close") as close,
+            ):
+                window._handle_runtime_network_outage({"role": "doctor"})
+                worker = window._runtime_outage_worker
+                if worker is not None and not worker.wait(2000):
+                    return False, f"{mode} doctor outage worker did not finish"
+                app.processEvents()
+                if any(call.called for call in (marker, emergency_dialog, prepare, restart)):
+                    return False, f"{mode} doctor outage entered the nurse emergency path"
+                if warning.call_count != 1 or warning.call_args.args[-1] != message or close.call_count != 1:
+                    return False, f"{mode} doctor outage did not warn and close"
+                if drain.call_count != int(not unified):
+                    return False, f"{mode} doctor outage used the wrong drain path"
+        finally:
+            window.deleteLater()
+            QCoreApplication.sendPostedEvents(window, QEvent.DeferredDelete)
+
+    marker_path = Path(runtime_outage.runtime_outage_startup_request_path(str(root)))
+    if any(root.rglob("rao_journal_emergency.db")) or marker_path.exists():
+        return False, "doctor outage created an emergency DB or marker unexpectedly"
     return True, "ok"
 
 
