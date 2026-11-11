@@ -16,10 +16,10 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.10</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.16</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">リリース</a> ·
   <a href="#詳しく読む">ドキュメント</a> ·
-  <a href="https://donkiton.github.io/rem_site/#english">Webサイト</a> ·
+  <a href="https://donkiton.github.io/rem_site/ja/">Webサイト</a> ·
   <a href="LICENSE">ライセンス</a>
 </p>
 
@@ -27,6 +27,8 @@
 > **実験的なソフトウェアであり、医療機器ではありません。** 臨床での使用には、独立した技術・臨床検証、使用環境での受け入れ試験、および代替の業務手順が必要です。
 
 ## 利用画面を見る
+
+[PC向けブラウザーデモを開く](https://donkiton.github.io/rem_site/ja/demo/) — 架空の患者を使ったデスクトップ版のデモです。スマートフォン向けには調整されていないため、パソコンで開いてください。
 
 デモ患者を使用した**5.1.0**のスクリーンショットです。画面はロシア語です。各項目を開くと画像を表示できます。
 
@@ -70,7 +72,11 @@
 
 ## はじめに
 
-配布版を使用する場合は、`_internal` を含む配布フォルダー一式から **`RemCard.exe`** を起動してください。
+[RemCard 5.1.16 Windowsインストーラー](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard-Setup-5.1.16.exe)（ロシア語・英語を選択可能）、または[完全版ZIPパッケージ](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard_5.1.16_full.zip)をダウンロードしてください。[リリースノート](https://github.com/Donkiton/rem_card/releases/tag/v5.1.16) · [SHA-256チェックサム](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/SHA256SUMS.txt)。
+
+5.1.16では、患者記録を開く際、患者を追加する際、緊急モードに切り替える際も画面の操作を妨げません。操作の遅延とデータベースアクセスエラーの診断を改善しました。初回起動前に、共有データベースを使用している旧バージョンのクライアントをすべて終了してください。
+
+インストール後、**`RemCard.exe`** を起動してください。ZIPを使用する場合は、`_internal` を含む配布フォルダー一式を展開してください。
 
 ソースからの起動、データフォルダーの選択、更新については、[セットアップガイド](docs/guide/setup.ja.md)を参照してください。開発と試験には、独立したテスト用データベースが必要です。
 
@@ -86,5 +92,6 @@
 
 <p align="center">
   <a href="https://cliniciansthatcode.com/directory/#p-vadim-bityutsky"><img src="docs/assets/readme/clinicians-that-code-verified.svg" width="260" height="28" alt="Clinicians That Codeのディレクトリに掲載されたRemCard開発者"></a><br>
-  <sub>麻酔科・集中治療医Vadim Bityutskyが開発 · <a href="mailto:menfise@mail.ru">お問い合わせ</a></sub>
+  <sub>作者・開発者：麻酔科・集中治療医Vadim Bityutsky · <a href="mailto:menfise@mail.ru">お問い合わせ</a></sub><br>
+  <sub>AIは、個々の課題の解決や開発作業の一部を効率化するために活用しています。</sub>
 </p>

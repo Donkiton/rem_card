@@ -16,10 +16,10 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.10</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.16</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">Releases</a> ·
   <a href="#read-more">Documentation</a> ·
-  <a href="https://donkiton.github.io/rem_site/#english">Website</a> ·
+  <a href="https://donkiton.github.io/rem_site/en/">Website</a> ·
   <a href="LICENSE">License</a>
 </p>
 
@@ -27,6 +27,8 @@
 > **Experimental software, not a medical device.** Clinical use requires independent technical and clinical review, acceptance in the intended environment, and a backup workflow.
 
 ## Explore the interface
+
+[Open the browser demo for PCs](https://donkiton.github.io/rem_site/en/demo/) — a demonstration of the desktop version with fictional patients. Use a computer: the interface is not adapted for phones.
 
 Demo patients · screenshots from **5.1.0** · interface in Russian. Expand a group to view images.
 
@@ -70,7 +72,11 @@ Orders, completion marks and fluid balance across the 08:00–08:00 shift.
 
 ## Get started
 
-For an installed build, launch **`RemCard.exe`** from the complete distribution folder, including `_internal`.
+Download the [RemCard 5.1.16 Windows installer](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard-Setup-5.1.16.exe), with Russian and English language selection, or the [full ZIP package](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard_5.1.16_full.zip). [Release notes](https://github.com/Donkiton/rem_card/releases/tag/v5.1.16) · [File SHA-256 checksums](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/SHA256SUMS.txt).
+
+Version 5.1.16 keeps the interface responsive when opening a chart, adding a patient or switching to emergency mode. Diagnostics for delays and database access errors have been improved. Before the first launch, close all older clients using the shared database.
+
+After installation, launch **`RemCard.exe`**. If using the ZIP, extract the complete distribution folder, including `_internal`.
 
 For source setup, data-folder selection and updates, follow the [setup guide](docs/guide/setup.en.md). Development and testing require a separate test database.
 
@@ -86,5 +92,6 @@ Detailed technical procedures are listed in the [documentation index](docs/READM
 
 <p align="center">
   <a href="https://cliniciansthatcode.com/directory/#p-vadim-bityutsky"><img src="docs/assets/readme/clinicians-that-code-verified.svg" width="260" height="28" alt="RemCard author's listing in the Clinicians That Code directory"></a><br>
-  <sub>Built by anaesthesiologist-intensivist Vadim Bityutsky · <a href="mailto:menfise@mail.ru">Contact</a></sub>
+  <sub>Author and developer: anaesthesiologist-intensivist Vadim Bityutsky · <a href="mailto:menfise@mail.ru">Contact</a></sub><br>
+  <sub>AI helps me resolve specific questions and speed up parts of the development work.</sub>
 </p>

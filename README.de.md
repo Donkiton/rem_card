@@ -16,10 +16,10 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.10</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.16</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">Veröffentlichungen</a> ·
   <a href="#weiterführende-dokumentation">Dokumentation</a> ·
-  <a href="https://donkiton.github.io/rem_site/#english">Website</a> ·
+  <a href="https://donkiton.github.io/rem_site/de/">Website</a> ·
   <a href="LICENSE">Lizenz</a>
 </p>
 
@@ -28,7 +28,9 @@
 
 ## Einblick in die Oberfläche
 
-Demonstrationspatienten · Screenshots aus **5.1.0** · aktuelle Version **5.1.10** · Oberfläche auf Russisch. Klappen Sie eine Gruppe auf, um die Bilder anzuzeigen.
+[Browser-Demo für PCs öffnen](https://donkiton.github.io/rem_site/de/demo/) — eine Demonstration der Desktop-Version mit fiktiven Patienten. Bitte am Computer öffnen: Die Oberfläche ist nicht für Smartphones angepasst.
+
+Demonstrationspatienten · Screenshots aus **5.1.0** · aktuelle Version **5.1.16** · Oberfläche auf Russisch. Klappen Sie eine Gruppe auf, um die Bilder anzuzeigen.
 
 <details>
 <summary><strong>Arbeitsplätze und Rollenauswahl</strong></summary>
@@ -70,7 +72,11 @@ Anordnungen, Durchführungsnachweise und Flüssigkeitsbilanz über die Schicht v
 
 ## Erste Schritte
 
-Starten Sie bei einer installierten Version **`RemCard.exe`** aus dem vollständigen Programmordner einschließlich `_internal`.
+Laden Sie den [Windows-Installer für RemCard 5.1.16](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard-Setup-5.1.16.exe) mit russischer und englischer Sprachauswahl oder das [vollständige ZIP-Paket](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard_5.1.16_full.zip) herunter. [Versionshinweise](https://github.com/Donkiton/rem_card/releases/tag/v5.1.16) · [SHA-256-Prüfsummen](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/SHA256SUMS.txt).
+
+In Version 5.1.16 blockieren das Öffnen einer Patientenkurve, das Hinzufügen eines Patienten und der Wechsel in den Notfallmodus die Oberfläche nicht mehr. Die Diagnose von Verzögerungen und Datenbankzugriffsfehlern wurde verbessert. Schließen Sie vor dem ersten Start alle älteren Clients, die auf die gemeinsame Datenbank zugreifen.
+
+Starten Sie nach der Installation **`RemCard.exe`**. Entpacken Sie bei Verwendung des ZIP-Pakets den vollständigen Programmordner einschließlich `_internal`.
 
 Den Start aus dem Quellcode, die Auswahl des Datenordners und Updates beschreibt die [Startanleitung](docs/guide/setup.de.md). Entwicklung und Tests erfordern eine separate Testdatenbank.
 
@@ -86,5 +92,6 @@ Ausführliche technische Verfahren sind im [Dokumentationsverzeichnis](docs/READ
 
 <p align="center">
   <a href="https://cliniciansthatcode.com/directory/#p-vadim-bityutsky"><img src="docs/assets/readme/clinicians-that-code-verified.svg" width="260" height="28" alt="Eintrag des RemCard-Autors im Verzeichnis Clinicians That Code"></a><br>
-  <sub>Entwickelt vom Anästhesisten und Intensivmediziner Vadim Bityutsky · <a href="mailto:menfise@mail.ru">Kontakt</a></sub>
+  <sub>Autor und Entwickler: Anästhesist und Intensivmediziner Vadim Bityutsky · <a href="mailto:menfise@mail.ru">Kontakt</a></sub><br>
+  <sub>KI hilft mir, einzelne Fragen zu klären und Teile der Entwicklungsarbeit zu beschleunigen.</sub>
 </p>
