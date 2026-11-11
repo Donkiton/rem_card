@@ -16,10 +16,10 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.10</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.16</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">发布版本</a> ·
   <a href="#进一步了解">使用文档</a> ·
-  <a href="https://donkiton.github.io/rem_site/#english">项目网站</a> ·
+  <a href="https://donkiton.github.io/rem_site/zh-CN/">项目网站</a> ·
   <a href="LICENSE">许可证</a>
 </p>
 
@@ -27,6 +27,8 @@
 > **实验性软件，并非医疗器械。** 临床使用前，必须进行独立的技术与临床验证、目标环境验收，并准备备用工作流程。
 
 ## 浏览界面
+
+[打开适用于电脑的浏览器演示](https://donkiton.github.io/rem_site/zh-CN/demo/) — 使用虚构患者展示桌面版界面。请在电脑上打开：界面未针对手机适配。
 
 演示患者 · **5.1.0** 版本截图 · 界面为俄语。展开分类即可查看图片。
 
@@ -70,7 +72,11 @@
 
 ## 开始使用
 
-使用已构建版本时，请从包含 `_internal` 的完整分发文件夹中启动 **`RemCard.exe`**。
+下载 [RemCard 5.1.16 Windows 安装程序](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard-Setup-5.1.16.exe)（可选择俄语或英语），或[完整 ZIP 安装包](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard_5.1.16_full.zip)。[版本说明](https://github.com/Donkiton/rem_card/releases/tag/v5.1.16) · [文件 SHA-256 校验值](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/SHA256SUMS.txt)。
+
+5.1.16 在打开患者记录、添加患者或切换至应急模式时不再阻塞界面，并改进了操作延迟和数据库访问错误的诊断。首次启动前，请关闭所有使用共享数据库的旧版客户端。
+
+安装后启动 **`RemCard.exe`**。使用 ZIP 时，请解压包含 `_internal` 的完整分发文件夹。
 
 从源码运行、选择数据文件夹和安装更新的步骤见[安装与维护指南](docs/guide/setup.zh-CN.md)。开发与测试必须使用独立的测试数据库。
 
@@ -86,5 +92,6 @@
 
 <p align="center">
   <a href="https://cliniciansthatcode.com/directory/#p-vadim-bityutsky"><img src="docs/assets/readme/clinicians-that-code-verified.svg" width="260" height="28" alt="RemCard 作者在 Clinicians That Code 目录中的条目"></a><br>
-  <sub>由麻醉与重症医学医师 Vadim Bityutsky 开发 · <a href="mailto:menfise@mail.ru">联系作者</a></sub>
+  <sub>作者与开发者：麻醉与重症医学医师 Vadim Bityutsky · <a href="mailto:menfise@mail.ru">联系作者</a></sub><br>
+  <sub>AI 帮助我解决具体问题，并加快部分开发工作。</sub>
 </p>

@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.10</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.16</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">Релизы</a> ·
   <a href="#что-почитать">Документация</a> ·
   <a href="https://donkiton.github.io/rem_site/">Сайт</a> ·
@@ -27,6 +27,8 @@
 > **Экспериментальный проект, не медицинское изделие.** Клиническое применение требует независимой технической и клинической проверки, приёмки в конкретной среде и резервного рабочего процесса.
 
 ## Посмотреть интерфейс
+
+[Открыть браузерное демо для ПК](https://donkiton.github.io/rem_site/demo/) — демонстрация настольной версии с вымышленными пациентами. Открывайте на компьютере: интерфейс не адаптирован для телефонов.
 
 Демонстрационные пациенты · скриншоты **5.1.0** · интерфейс на русском. Раскройте нужную группу.
 
@@ -70,7 +72,11 @@
 
 ## Начать работу
 
-В установленной версии запустите **`RemCard.exe`** из полной папки поставки вместе с `_internal`.
+Скачайте [установщик RemCard 5.1.16 для Windows](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard-Setup-5.1.16.exe) с выбором русского и английского языков или [полный ZIP-пакет](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard_5.1.16_full.zip). [Описание выпуска](https://github.com/Donkiton/rem_card/releases/tag/v5.1.16) · [SHA-256 файлов](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/SHA256SUMS.txt).
+
+В 5.1.16 открытие карты, добавление пациента и переход в аварийный режим не блокируют интерфейс. Улучшена диагностика задержек и ошибок доступа к базе. Перед первым запуском новой версии закройте все прежние клиенты, работающие с общей базой.
+
+После установки запустите **`RemCard.exe`**. При использовании ZIP распакуйте всю папку поставки вместе с `_internal`.
 
 Запуск из исходников, выбор папки данных и обновления описаны в [руководстве по запуску](docs/guide/setup.ru.md). Для разработки и испытаний нужна отдельная тестовая база.
 
@@ -86,5 +92,6 @@
 
 <p align="center">
   <a href="https://cliniciansthatcode.com/directory/#p-vadim-bityutsky"><img src="docs/assets/readme/clinicians-that-code-verified.svg" width="260" height="28" alt="Карточка автора RemCard в каталоге Clinicians That Code"></a><br>
-  <sub>Автор — анестезиолог-реаниматолог Вадим Битюцкий · <a href="mailto:menfise@mail.ru">Связаться</a></sub>
+  <sub>Автор и разработчик — анестезиолог-реаниматолог Вадим Битюцкий · <a href="mailto:menfise@mail.ru">Связаться</a></sub><br>
+  <sub>ИИ помогает мне решать отдельные вопросы и ускорять часть работы над программой.</sub>
 </p>
