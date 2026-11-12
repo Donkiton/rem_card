@@ -220,17 +220,11 @@ class MainWindow(QMainWindow):
         self._emergency_banner = None
         runtime_context = getattr(self.container, "runtime_context", None)
         runtime_mode = getattr(runtime_context, "mode", "")
-        if runtime_mode in {"emergency", "opblock_offline"}:
-            if runtime_mode == "opblock_offline":
-                banner_text = (
-                    "Локальный режим оперблока: работа ведется на этом ПК. "
-                    "После освобождения стола завершённые случаи отправляются в общий архив при доступной сети."
-                )
-            else:
-                banner_text = (
-                    "Аварийный режим: работа ведется на локальной базе этого ПК. "
-                    "До восстановления сети работайте только здесь."
-                )
+        if runtime_mode == "emergency":
+            banner_text = (
+                "Аварийный режим: работа ведется на локальной базе этого ПК. "
+                "До восстановления сети работайте только здесь."
+            )
             self._emergency_banner = QLabel(
                 banner_text
             )
@@ -247,21 +241,18 @@ class MainWindow(QMainWindow):
                 """)
             self.main_layout.addWidget(self._emergency_banner)
 
-            if runtime_mode == "emergency":
-                self._restore_probe_status_label = QLabel("Ожидание восстановления сетевой базы")
-                self._restore_probe_status_label.setObjectName("EmergencyRestoreProbeStatus")
-                set_widget_style(self._restore_probe_status_label, """
-                    QLabel#EmergencyRestoreProbeStatus {
-                        background-color: #e8f2ff;
-                        color: #174264;
-                        border-bottom: 1px solid #9fc4e8;
-                        padding: 5px 14px;
-                        font-weight: 600;
-                    }
-                    """)
-                self.main_layout.addWidget(self._restore_probe_status_label)
-            else:
-                self._restore_probe_status_label = None
+            self._restore_probe_status_label = QLabel("Ожидание восстановления сетевой базы")
+            self._restore_probe_status_label.setObjectName("EmergencyRestoreProbeStatus")
+            set_widget_style(self._restore_probe_status_label, """
+                QLabel#EmergencyRestoreProbeStatus {
+                    background-color: #e8f2ff;
+                    color: #174264;
+                    border-bottom: 1px solid #9fc4e8;
+                    padding: 5px 14px;
+                    font-weight: 600;
+                }
+                """)
+            self.main_layout.addWidget(self._restore_probe_status_label)
         else:
             self._restore_probe_status_label = None
         
@@ -791,7 +782,6 @@ class MainWindow(QMainWindow):
     def _replace_operblock_container_after_runtime_drop(self, local_container, role_key: str) -> None:
         from .operblock_view.operblock_main_widget import OperBlockMainWidget
 
-        self._ensure_operblock_offline_banner()
         clean_role = role_key if is_operblock_role(role_key) else ROLE_OPERBLOCK
         old_widgets = list(dict.fromkeys((self._operblock_widgets or {}).values()))
         if self.operblock_main is not None and self.operblock_main not in old_widgets:
@@ -829,30 +819,6 @@ class MainWindow(QMainWindow):
         self._initial_role_ui_ready = True
         self._initial_role_auto_refresh_started = False
         QTimer.singleShot(0, self.operblock_main.start_auto_refresh)
-
-    def _ensure_operblock_offline_banner(self) -> None:
-        if getattr(self, "_emergency_banner", None) is not None:
-            self._emergency_banner.setText(
-                "Локальный режим оперблока: работа ведется на этом ПК. "
-                "После освобождения стола завершённые случаи отправляются в общий архив при доступной сети."
-            )
-            return
-        self._emergency_banner = QLabel(
-            "Локальный режим оперблока: работа ведется на этом ПК. "
-            "После освобождения стола завершённые случаи отправляются в общий архив при доступной сети."
-        )
-        self._emergency_banner.setObjectName("EmergencyModeBanner")
-        self._emergency_banner.setWordWrap(True)
-        set_widget_style(self._emergency_banner, """
-            QLabel#EmergencyModeBanner {
-                background-color: #fff3cd;
-                color: #5f4300;
-                border-bottom: 1px solid #e0b849;
-                padding: 8px 14px;
-                font-weight: 700;
-            }
-            """)
-        self.main_layout.insertWidget(1, self._emergency_banner)
 
     def _show_operblock_migration_dialog(self):
         from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout
