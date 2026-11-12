@@ -139,6 +139,7 @@
     "tests/test_update_launcher_startup.py"
   ],
   "ui": [
+    "tests/test_orders_snapshot_recovery.py",
     "tests/test_pdf_report_async.py",
     "tests/test_gui_network_reads.py",
     "tests/test_sector_ivl_event_edit.py",

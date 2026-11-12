@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
@@ -13,6 +14,13 @@ CVC_OUTCOME_STATUS_BY_PATIENT_STATUS = {
 }
 CPR_REASON_TYPE = "cpr"
 LATE_CARD_OUTCOME_WINDOW = timedelta(hours=2)
+_INITIAL_STATUS_COVERAGE_SQL = """
+    SELECT id FROM patient_status_events
+    WHERE admission_id = ?
+      AND DATETIME(start_time) <= DATETIME(?)
+      AND (end_time IS NULL OR DATETIME(end_time) >= DATETIME(?))
+    LIMIT 1
+"""
 
 
 class InitialStatusOutcome(str, Enum):
@@ -24,6 +32,10 @@ class InitialStatusOutcome(str, Enum):
     ALREADY_COVERED = "already_covered"
     SKIPPED_OUTSIDE_SHIFT = "skipped_outside_shift"
     NO_CHANGE = "no_change"
+
+    @property
+    def changed(self) -> bool:
+        return self in (self.CREATED, self.BRIDGED, self.REPAIRED)
 
 class PatientStatusDAO:
     def __init__(self, db_manager):
@@ -1890,26 +1902,40 @@ class PatientStatusDAO:
         Обеспечивает наличие начального статуса для карты.
         Учитывает время поступления и преемственность с прошлыми сутками.
         """
+        min_allowed = admission_datetime if admission_datetime else shift_start
+        min_allowed_str = min_allowed.replace(microsecond=0).isoformat()
+        shift_start_str = shift_start.replace(microsecond=0).isoformat()
+        shift_end = shift_start.replace(microsecond=0) + timedelta(days=1)
+        if admission_datetime and min_allowed.replace(microsecond=0) >= shift_end:
+            logger.info(
+                "[StatusDAO] Skip initial status for admission %s: admission time %s is outside current shift %s - %s",
+                admission_id,
+                min_allowed_str,
+                shift_start_str,
+                shift_end.isoformat(),
+            )
+            return InitialStatusOutcome.SKIPPED_OUTSIDE_SHIFT
+
+        # Only the budgeted central API may bypass the writer reservation.
+        # A generic read could use a stale replica or add a fresh 10 s wait.
+        operation_scope = getattr(self.db, "initial_status_operation_scope", None)
+        with operation_scope() if callable(operation_scope) else nullcontext(None) as central_fetch:
+            coverage_params = (admission_id, shift_start_str, shift_start_str)
+            if callable(central_fetch) and central_fetch(_INITIAL_STATUS_COVERAGE_SQL, coverage_params):
+                return InitialStatusOutcome.ALREADY_COVERED
+            return self._ensure_initial_status_in_transaction(admission_id, shift_start_str, min_allowed, user_id)
+
+    def _ensure_initial_status_in_transaction(self, admission_id, shift_start_str, min_allowed, user_id):
+        # Missing/unknown coverage follows the original serialized path. The
+        # scope above retains the preflight's absolute deadline for this recheck.
+        min_allowed_str = min_allowed.replace(microsecond=0).isoformat()
+        coverage_params = (admission_id, shift_start_str, shift_start_str)
         with self.db.remcard_transaction() as cursor:
             cursor.execute(
                 "SELECT count(*) as cnt FROM patient_status_events WHERE admission_id = ?",
                 (admission_id,),
             )
             total_cnt = cursor.fetchone()["cnt"]
-
-            min_allowed = admission_datetime if admission_datetime else shift_start
-            min_allowed_str = min_allowed.replace(microsecond=0).isoformat()
-            shift_start_str = shift_start.replace(microsecond=0).isoformat()
-            shift_end = shift_start.replace(microsecond=0) + timedelta(days=1)
-            if admission_datetime and min_allowed.replace(microsecond=0) >= shift_end:
-                logger.info(
-                    "[StatusDAO] Skip initial status for admission %s: admission time %s is outside current shift %s - %s",
-                    admission_id,
-                    min_allowed_str,
-                    shift_start_str,
-                    shift_end.isoformat(),
-                )
-                return InitialStatusOutcome.SKIPPED_OUTSIDE_SHIFT
 
             if total_cnt == 0:
                 cursor.execute(
@@ -1931,14 +1957,8 @@ class PatientStatusDAO:
                 return InitialStatusOutcome.CREATED
 
             cursor.execute(
-                """
-                SELECT id FROM patient_status_events
-                WHERE admission_id = ?
-                  AND DATETIME(start_time) <= DATETIME(?)
-                  AND (end_time IS NULL OR DATETIME(end_time) >= DATETIME(?))
-                LIMIT 1
-                """,
-                (admission_id, shift_start_str, shift_start_str),
+                _INITIAL_STATUS_COVERAGE_SQL,
+                coverage_params,
             )
             if cursor.fetchone():
                 return InitialStatusOutcome.ALREADY_COVERED

@@ -224,3 +224,141 @@ def test_local_cancel_during_fsync_rejects_candidate_even_with_separate_fence(tm
             request, check_cancel=check_cancel, check_boundary=lambda: None, progress=lambda _: None)
     assert cancelled and local.read_bytes() == local_before
     _assert_released(request)
+
+
+@pytest.mark.parametrize("scan_side", ["source", "local"])
+@pytest.mark.parametrize("lock_name,error_class", [
+    ("writer_lock_path", worker.LocalReplicaWriterBusy),
+    ("rotation_lock_path", worker.LocalReplicaRotationBusy),
+])
+def test_writer_interrupts_native_size_scan_before_it_finishes(
+    tmp_path, monkeypatch, scan_side, lock_name, error_class
+):
+    source, local, request = _databases(tmp_path)
+    clock = _clock(monkeypatch)
+    source_before, local_before = source.read_bytes(), local.read_bytes()
+    scanned = {"source": 0, "local": 0}
+    requested_at = []
+    original_size = replica_delta._row_size_expression
+    original_open = worker._open_central_readonly
+    original_connect = sqlite3.connect
+
+    def observe(value, side):
+        scanned[side] += 1
+        if side == scan_side:
+            clock.now += .001
+            if scanned[side] == 200:
+                Path(request[lock_name]).write_text("pending", encoding="utf-8")
+                requested_at.append(clock.now)
+        return len(value) + 32
+
+    def open_source(path):
+        connection = original_open(path)
+        connection.create_function("qa_native_size", 1, lambda value: observe(value, "source"))
+        return connection
+
+    def open_local(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.create_function("qa_native_size", 1, lambda value: observe(value, "local"))
+        return connection
+
+    def size_expression(info):
+        if info["columns"] == ["id", "payload"]:
+            return 'qa_native_size("payload")'
+        return original_size(info)
+
+    monkeypatch.setattr(worker, "_open_central_readonly", open_source)
+    monkeypatch.setattr(replica_refresh, "sqlite3", SimpleNamespace(
+        connect=open_local, Error=sqlite3.Error, OperationalError=sqlite3.OperationalError,
+        DatabaseError=sqlite3.DatabaseError))
+    monkeypatch.setattr(replica_delta, "_row_size_expression", size_expression)
+    with pytest.raises(error_class):
+        worker._sync_snapshot_with_network_lease(request)
+    assert requested_at and clock.now - requested_at[0] < .25
+    assert 200 <= scanned[scan_side] < 500  # The SUM itself has not finished.
+    assert source.read_bytes() == source_before and local.read_bytes() == local_before
+    _assert_released(request)
+
+
+def test_native_scan_boolean_cancel_restores_query_only_and_read_transactions():
+    from rem_card.app.replica_delta import ReplicaDeltaCancelled
+
+    with closing(sqlite3.connect(":memory:")) as source, closing(sqlite3.connect(":memory:")) as local:
+        source.executescript("""
+            CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO meta VALUES('db_cycle_started_at', 'synthetic');
+            INSERT INTO meta VALUES('unified_schema_fastpath_rev', '29');
+            CREATE TABLE change_log(id INTEGER PRIMARY KEY, entity_name TEXT,
+                entity_id INTEGER, admission_id INTEGER, action TEXT,
+                changed_at TEXT, changed_by TEXT, version INTEGER);
+            CREATE TABLE history(id INTEGER PRIMARY KEY, payload TEXT);
+        """)
+        source.executemany("INSERT INTO history VALUES (?, 'history')", ((i,) for i in range(5000)))
+        source.commit()
+        source.backup(local)
+        checks = 0
+
+        def cancelled():
+            nonlocal checks
+            checks += 1
+            return checks >= 20
+
+        with pytest.raises(ReplicaDeltaCancelled):
+            replica_refresh._collect_delta_interruptibly(source, local, cancelled)
+        assert not source.in_transaction and not local.in_transaction
+        assert source.execute("PRAGMA query_only").fetchone() == (0,)
+        # Interrupt handlers must not survive into source validation/cleanup.
+        for connection in (source, local):
+            assert connection.execute("SELECT SUM(id) FROM history").fetchone() == (12497500,)
+
+
+def test_native_scan_handlers_removed_after_successful_collection(tmp_path):
+    source_path, local_path, _ = _databases(tmp_path, changed=False)
+    cancelled = False
+
+    def check_cancel():
+        return cancelled
+
+    with closing(sqlite3.connect(source_path)) as source, closing(sqlite3.connect(local_path)) as local:
+        package = replica_refresh._collect_delta_interruptibly(source, local, check_cancel)
+        assert package["status"] == "unchanged"
+        cancelled = True
+        for connection in (source, local):
+            assert connection.execute("SELECT SUM(id) FROM history").fetchone() == (72006000,)
+
+
+def test_between_sql_cancellation_does_not_interrupt_native_rollback(tmp_path, monkeypatch):
+    source_path, local_path, _ = _databases(tmp_path, changed=False)
+    cancelled = False
+    original_prepare = replica_delta._prepare_collection
+
+    class EveryInstruction:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def set_progress_handler(self, callback, _count):
+            self.connection.set_progress_handler(callback, 1 if callback else 0)
+
+    def prepared(*args):
+        nonlocal cancelled
+        result = original_prepare(*args)
+        assert args[0].in_transaction and args[1].in_transaction
+        cancelled = True
+        return result
+
+    def check_cancel():
+        if cancelled:
+            raise worker.LocalReplicaWorkerCancelled("cancelled between statements")
+
+    monkeypatch.setattr(replica_delta, "_prepare_collection", prepared)
+    with closing(sqlite3.connect(source_path)) as source, closing(sqlite3.connect(local_path)) as local:
+        with pytest.raises(worker.LocalReplicaWorkerCancelled, match="between statements"):
+            replica_refresh._collect_delta_interruptibly(
+                EveryInstruction(source), EveryInstruction(local), check_cancel)
+        assert not source.in_transaction and not local.in_transaction
+        assert source.execute("PRAGMA query_only").fetchone() == (0,)
+        for connection in (source, local):
+            assert connection.execute("SELECT SUM(id) FROM history").fetchone() == (72006000,)

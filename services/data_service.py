@@ -29,6 +29,7 @@ from rem_card.app.runtime_outage import (
 )
 from rem_card.services.data_update_monitor import DataUpdateMonitor
 from rem_card.services.sync_coordinator import SyncCoordinator
+from rem_card.data.dao.patient_status_dao import InitialStatusOutcome
 
 
 OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS = 3
@@ -549,7 +550,8 @@ class DataService(QObject):
                 # local mirrors, and every user callback.
                 DataService._set_write_outcome(self, accepted_write_id, "committed")
                 self._mark_operblock_write_remote_committed(operation_uuid, description)
-                self.write_finished.emit(description)
+                if not DataService._is_initial_status_noop(description, result):
+                    self.write_finished.emit(description)
                 if DataService._should_refresh_after_write(description, result):
                     self.request_immediate_refresh(force_emit=True, source=description)
                 self._mirror_operblock_write_after_commit(
@@ -1393,7 +1395,8 @@ class DataService(QObject):
                             context=_operblock_description_context(description, metadata),
                         )
                         return
-                    self.write_finished.emit(description)
+                    if not DataService._is_initial_status_noop(description, result):
+                        self.write_finished.emit(description)
                     if DataService._should_refresh_after_write(description, result):
                         self.request_immediate_refresh(force_emit=True, source=description)
                     self._success_callback_requested.emit(on_success, result)
@@ -1437,8 +1440,18 @@ class DataService(QObject):
             DataService._finish_write_submission(self)
 
     @staticmethod
+    def _is_initial_status_noop(description: str, result: Any) -> bool:
+        return (
+            str(description or "").startswith("ensure_initial_patient_status:")
+            and isinstance(result, InitialStatusOutcome)
+            and not result.changed
+        )
+
+    @staticmethod
     def _should_refresh_after_write(description: str, result: Any) -> bool:
-        """Skip the forced refresh when auto-release found no beds to release."""
+        """Refresh only when the operation could have changed visible data."""
+        if DataService._is_initial_status_noop(description, result):
+            return False
         return not (description == "auto_release_outcome_beds" and result == 0)
 
     @Slot(object, object)

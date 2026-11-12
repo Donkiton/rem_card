@@ -163,6 +163,9 @@ class ApswConnectionAdapter:
     def executemany(self, sql: str, parameters):
         return ApswCursorAdapter(self._connection.executemany(sql, parameters))
 
+    def set_progress_handler(self, callback, instruction_count: int):
+        self._connection.setprogresshandler(callback, instruction_count)
+
     def backup(self, target, *, pages: int, progress, sleep: float) -> None:
         with target._connection.backup("main", self._connection, "main") as backup:
             while not backup.done:

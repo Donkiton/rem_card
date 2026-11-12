@@ -9,6 +9,7 @@ from rem_card.ui.doctor_view.order_features.constants import ORDERS_POST_FINALIZ
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.orders_display_diagnostics import finish_orders_display
 from rem_card.ui.shared.orders_model import OrdersModel
+from rem_card.ui.shared.orders_snapshot_recovery import orders_snapshot_recovery
 import time
 
 
@@ -29,18 +30,22 @@ class RefreshCoordinationMixin:
 
     def set_context(self, *, service=None, admission_id=None, shift_date=None):
         previous_context_key = self._current_context_key()
+        previous_service = self.service
         if service is not None:
             self.service = service
         self.admission_id = admission_id
         self.shift_date = shift_date
         current_context_key = self._current_context_key()
-        if previous_context_key != current_context_key:
+        if previous_context_key != current_context_key or previous_service is not self.service:
+            orders_snapshot_recovery(self, role="doctor").context_changed()
+            self._snapshot_seq += 1
             finish_orders_display(self, "cancelled")
             self._balance_mark_overrides.clear()
             self._detach_active_snapshot_for_context_switch(
                 new_context_key=current_context_key,
                 new_context_hash=None,
                 replacement_request_id=None,
+                force_detach=previous_service is not self.service,
             )
             self._clear_pending_reorder()
             if self.model is not None:
@@ -490,6 +495,10 @@ class RefreshCoordinationMixin:
         priority_name = self._normalize_priority(priority)
         context_key = context.cache_key()
         normalized_source = self._normalize_snapshot_source(source)
+        if orders_snapshot_recovery(self, role="doctor").before_request(context_key, {
+            "force": force, "source": source, "priority": priority, "invalidate_reason": invalidate_reason,
+        }):
+            return
         forced_reload_key = None
         if bool(force) and normalized_source == "monitor" and str(source or "").strip().lower() == "stale_snapshot":
             forced_reload_key = self._forced_reload_pending_key or self._forced_reload_key(

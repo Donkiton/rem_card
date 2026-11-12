@@ -2355,6 +2355,61 @@ class DatabaseManager:
         metadata = getattr(self._thread_state, "write_metadata", None)
         return dict(metadata or {}) if isinstance(metadata, dict) else {}
 
+    @contextmanager
+    def initial_status_operation_scope(self):
+        """Share one attempt deadline across the no-op probe and optional write."""
+        options = self._write_options_with_deadline(self._current_thread_write_metadata())
+        with self.write_metadata_context(options):
+            yield self._fetch_initial_status_preflight
+
+    @observed_call("initial_status_preflight")
+    def _fetch_initial_status_preflight(self, query, params):
+        """One authoritative SELECT on the existing connection; never open or BEGIN."""
+        deadline = self._current_thread_write_metadata().get("write_deadline_monotonic")
+        diagnostic = ReadOperationDiagnostics(getattr(self, "db_path", ""), "initial_status_preflight")
+        try:
+            with self._central_io_lock_scope("initial_status_preflight", deadline=deadline):
+                conn = self._get_central_write_connection_for_read("initial_status_preflight")
+                with self.write_controller.connection_guard(conn, deadline=deadline):
+                    diagnostic.bind(conn, scope="write_connection")
+                    cursor = None
+                    original_busy_timeout = None
+                    try:
+                        if isinstance(deadline, (int, float)):
+                            remaining_ms = max(0, int((deadline - time.perf_counter()) * 1000.0))
+                            if remaining_ms <= 0:
+                                raise QueuedWriteDeadlineExceeded("Write budget exhausted before initial status preflight")
+                            original_busy_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+                            remaining_ms = max(0, int((deadline - time.perf_counter()) * 1000.0))
+                            if remaining_ms <= 0:
+                                raise QueuedWriteDeadlineExceeded("Write budget exhausted before initial status preflight")
+                            conn.execute(f"PRAGMA busy_timeout={min(original_busy_timeout, remaining_ms)}")
+                        cursor = conn.cursor()
+                        diagnostic.phase = "execute"
+                        cursor.execute(query, params)
+                        diagnostic.phase = "fetch_one"
+                        row = cursor.fetchone()
+                        diagnostic.phase = "complete"
+                        if isinstance(deadline, (int, float)) and time.perf_counter() >= deadline:
+                            raise QueuedWriteDeadlineExceeded("Write budget exhausted during initial status preflight")
+                        return self._confirmed_central_read_result(row)
+                    finally:
+                        if cursor is not None:
+                            with suppress(Exception):
+                                cursor.close()
+                        if original_busy_timeout is not None:
+                            with suppress(Exception):
+                                conn.execute(f"PRAGMA busy_timeout={original_busy_timeout}")
+        except Exception as exc:
+            diagnostic.report(exc)
+            if is_database_unavailable_error(exc):
+                raise notify_database_unavailable(
+                    exc, context="initial_status_preflight", logger=logger, failure_phase=diagnostic.phase,
+                    database_path=getattr(self, "db_path", ""),
+                    runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", ""),
+                ) from exc
+            raise
+
     def _isolated_operation_id(self, metadata: dict[str, Any]) -> str:
         root_id = str(metadata.get("operation_id") or "").strip()
         if not root_id:

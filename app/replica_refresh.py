@@ -18,13 +18,65 @@ def incremental_enabled() -> bool:
     }
 
 
+def _collect_delta_interruptibly(source, local, check_cancel):
+    """Yield during native SQL scans as well as between historical rows.
+
+    These connections belong exclusively to this worker operation. The
+    existing callback amortizes network probes; installing it on the local
+    baseline too allows a writer to interrupt local sizing while the source
+    snapshot still holds a read lock. Never install this on a shared caller
+    connection, whose progress handler would have to be preserved.
+    """
+    from rem_card.app.replica_delta import collect_delta, ReplicaDeltaCancelled
+
+    interrupted = None
+
+    def checked_cancel():
+        nonlocal interrupted
+        try:
+            if check_cancel():
+                raise ReplicaDeltaCancelled("Сбор дельты отменён")
+        except BaseException as exc:
+            interrupted = exc
+            raise
+
+    def on_progress():
+        if interrupted is not None:
+            return 0  # ROLLBACK/query_only cleanup must remain executable.
+        try:
+            checked_cancel()
+        except BaseException:
+            # sqlite3 replaces callback exceptions with SQLITE_INTERRUPT.
+            # Restore the precise writer/rotation/cancellation classification.
+            return 1
+        return 0
+
+    installed = []
+    try:
+        for connection in (source, local):
+            connection.set_progress_handler(on_progress, 1000)
+            installed.append(connection)
+        try:
+            result = collect_delta(source, local, check_cancel=checked_cancel)
+            if interrupted is not None:
+                raise interrupted
+            return result
+        except BaseException:
+            if interrupted is not None:
+                raise interrupted from None
+            raise
+    finally:
+        for connection in installed:
+            connection.set_progress_handler(None, 0)
+
+
 def try_incremental_snapshot(message: dict, *, check_cancel, progress, check_boundary=None) -> dict:
     """Return a worker result, or full_required without touching the source.
 
     A full_required result MUST force a backup even when change_log's maximum
     ID is unchanged: untracked tables may have changed independently.
     """
-    from rem_card.app.replica_delta import collect_delta, apply_delta, ReplicaDeltaError
+    from rem_card.app.replica_delta import apply_delta, ReplicaDeltaError
     from rem_card.app.role_admission import read_admission_state
     from rem_card.app.replica_provenance import read_baseline
     from rem_card.app.replica_source_stamp import capture_source_stamp
@@ -78,7 +130,7 @@ def try_incremental_snapshot(message: dict, *, check_cancel, progress, check_bou
             if stamp and stamp == base_stamp and base_state and _read_database_state(local) == base_state:
                 package = {"status": "unchanged", "state": base_state, "metrics": {"source_unchanged": True}}
             else:
-                package = collect_delta(source, local, check_cancel=check_cancel)
+                package = _collect_delta_interruptibly(source, local, check_cancel)
             check_fence()
             if package["status"] == "full_required":
                 return package

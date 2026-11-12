@@ -1,6 +1,7 @@
 """SnapshotApplicationMixin for the doctor orders widget."""
 
 from PySide6.QtCore import QTimer
+from shiboken6 import isValid
 from datetime import datetime
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
@@ -12,6 +13,7 @@ from rem_card.ui.doctor_view.order_features.constants import ORDERS_POST_FINALIZ
 from rem_card.ui.doctor_view.order_features.constants import ORDERS_POST_FINALIZE_WATCHDOG_MS
 from rem_card.ui.shared.orders_balance_adapter import build_balance_orders_from_orders_widget
 from rem_card.ui.shared.orders_display_diagnostics import finish_orders_display, observe_visible_orders_snapshot
+from rem_card.ui.shared.orders_snapshot_recovery import orders_snapshot_recovery
 import time
 
 
@@ -61,8 +63,10 @@ class SnapshotApplicationMixin:
                 shift_date=payload.get("shift_date"),
                 context_key=payload.get("context_key"),
             )
-            if applied and str(payload.get("source") or "").strip().lower() == "post_finalize":
-                self._post_finalize_retry_count = 0
+            if applied:
+                orders_snapshot_recovery(self, role="doctor").applied()
+                if str(payload.get("source") or "").strip().lower() == "post_finalize":
+                    self._post_finalize_retry_count = 0
         except Exception:
             logger.exception("[OrdersWidget] Failed to apply orders snapshot")
 
@@ -457,6 +461,9 @@ class SnapshotApplicationMixin:
     def _on_snapshot_failed(self, exc):
         if self._is_closing:
             return
+        worker = self.sender()
+        if worker is not None and worker is not self._snapshot_worker:
+            return
         finish_orders_display(self, "cancelled" if isinstance(exc, OrdersRefreshCancelled) else "error")
         if isinstance(exc, OrdersRefreshCancelled):
             request_source = str(self._active_request_source or "refresh").strip().lower()
@@ -470,6 +477,9 @@ class SnapshotApplicationMixin:
                 logger.info("[OrdersWidget] post_finalize snapshot load cancelled; retry will be scheduled: %s", exc)
                 return
             self._clear_soft_update_state()
+            orders_snapshot_recovery(self, role="doctor").recover(
+                dict(self._active_snapshot_worker_state or {}), self._snapshot_worker,
+            )
             logger.info("[OrdersWidget] Orders snapshot load cancelled: %s", exc)
             return
         self._clear_soft_update_state()
@@ -528,7 +538,7 @@ class SnapshotApplicationMixin:
                 threshold_ms=ORDERS_POST_FINALIZE_WATCHDOG_MS,
             )
 
-        self._detach_snapshot_worker(
+        retired = self._detach_snapshot_worker(
             worker,
             state="detached",
             reason="watchdog_stalled",
@@ -538,6 +548,8 @@ class SnapshotApplicationMixin:
         if request_source == "post_finalize" and context is not None:
             self._set_refresh_status("Сохранено, данные обновляются...")
             self._schedule_post_finalize_retry(context_hash=context_hash)
+        else:
+            orders_snapshot_recovery(self, role="doctor").recover(retired, worker)
         if self._snapshot_pending:
             force = self._snapshot_force_pending
             source = self._snapshot_pending_source
@@ -597,14 +609,26 @@ class SnapshotApplicationMixin:
             delay_ms=delay_ms,
             context_hash=context_hash,
         )
+        retry_epoch = orders_snapshot_recovery(self, role="doctor").epoch
         QTimer.singleShot(
             delay_ms,
-            lambda: self._request_snapshot(
-                force=True,
-                source="post_finalize",
-                priority="HIGH",
-                invalidate_reason=f"post_finalize_retry_{retry_index}",
+            lambda context_key=self._current_context_key(), service=self.service: self._retry_post_finalize_snapshot(
+                context_key, service, retry_index, retry_epoch,
             ),
+        )
+
+    def _retry_post_finalize_snapshot(self, context_key, service, retry_index, retry_epoch):
+        if not isValid(self) or self._is_closing or not self.isVisible():
+            return
+        if orders_snapshot_recovery(self, role="doctor").epoch != retry_epoch:
+            return
+        if self.service is not service or self._current_context_key() != context_key:
+            return
+        if self._local_cell_draft_guard or self._has_local_draft_changes():
+            return
+        self._request_snapshot(
+            force=True, source="post_finalize", priority="HIGH",
+            invalidate_reason=f"post_finalize_retry_{retry_index}",
         )
 
     def _on_snapshot_finished(self):
@@ -616,6 +640,9 @@ class SnapshotApplicationMixin:
         self._retire_snapshot_worker_state(state="finished", reason="worker_finished")
         self._reset_active_snapshot_request()
         self._clear_soft_update_state()
+        recovery = getattr(self, "_orders_snapshot_recovery", None)
+        if recovery is not None:
+            recovery.show_limit_status()
         if self._is_closing:
             self._reset_pending_snapshot_request()
             return
