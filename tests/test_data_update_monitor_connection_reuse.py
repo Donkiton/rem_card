@@ -26,16 +26,18 @@ class _Db:
         self.connections: list[_Connection] = []
         self.scope_connections: list[_Connection] = []
 
-    def open_persistent_readonly_connection(self, *, source: str):
+    def open_persistent_readonly_connection(self, *, source: str, cancel_check=None, defer_to_writer=False):
         assert source == "data_update_monitor"
+        assert defer_to_writer is True
         self.open_count += 1
         conn = _Connection()
         self.connections.append(conn)
         return conn
 
     @contextmanager
-    def existing_central_read_scope(self, conn, *, force_central: bool):
+    def existing_central_read_scope(self, conn, *, force_central: bool, cancel_check=None, defer_to_writer=None):
         assert force_central is True
+        assert defer_to_writer is True
         self.scope_connections.append(conn)
         yield self
 

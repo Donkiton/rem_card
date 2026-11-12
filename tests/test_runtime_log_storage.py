@@ -397,15 +397,51 @@ def test_periodic_cleanup_runs_without_backup_or_more_log_writes(tmp_path, monke
     root = tmp_path / "logs"
     root.mkdir()
     retention.request_log_cleanup(str(root))
-    deadline = time.monotonic() + 5
-    while not list(root.glob("log_maintenance_*.log")) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert list(root.glob("log_maintenance_*.log"))
     late = old_file(root, "metrics_20260101.jsonl")
     deadline = time.monotonic() + 5
     while late.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not late.exists()
+    assert list(root.glob("log_maintenance_*.log"))
+
+
+def test_quiet_maintenance_volume_and_first_error_recovery(tmp_path, monkeypatch):
+    now = [0.0]
+    result = {"removed_files": 0, "freed_bytes": 0, "failed_files": 0, "skipped_files": 0,
+              "ordinary_bytes": 10, "budget_bytes": 512 * 1024 * 1024, "over_budget": False}
+    written = []
+    decide = retention._maintenance_report_due
+    monkeypatch.setattr(retention, "cleanup_logs", lambda *_args, **_kwargs: dict(result))
+    monkeypatch.setattr(retention, "_protected_crash_bytes", lambda _roots: 0)
+    monkeypatch.setattr(retention, "append_log_lines", lambda _root, _prefix, lines, **_kwargs: written.extend(lines))
+    monkeypatch.setattr(retention, "_maintenance_report_due",
+                        lambda roots, summary, warning, _now: decide(roots, summary, warning, now[0]))
+    for second in range(1000):
+        now[0] = second
+        retention.run_log_maintenance([str(tmp_path)])
+    assert written == []
+    now[0] = 3600
+    retention.run_log_maintenance([str(tmp_path)])
+    assert len(written) == 1 and '"quiet_passes_before": 1000' in written[-1]
+    result["failed_files"] = 1
+    retention.run_log_maintenance([str(tmp_path)])
+    assert len(written) == 2 and "WARNING" in written[-1]
+    result["failed_files"] = 0
+    retention.run_log_maintenance([str(tmp_path)])
+    assert len(written) == 3 and "INFO" in written[-1]
+    result["removed_files"] = 1
+    retention.run_log_maintenance([str(tmp_path)])
+    assert len(written) == 4 and '"removed_files": 1' in written[-1]
+
+
+def test_short_lived_maintenance_workers_do_not_create_empty_log_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(retention, "_REPORT_STATE", {})
+    for child in range(100):
+        root = tmp_path / str(child)
+        root.mkdir()
+        assert retention.run_log_maintenance([str(root)])["removed_files"] == 0
+        assert list(root.iterdir()) == []
+    assert len(retention._REPORT_STATE) == 16
 
 
 def test_concurrent_process_metrics_are_valid_complete_and_rotated(tmp_path):

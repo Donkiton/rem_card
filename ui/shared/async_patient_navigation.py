@@ -57,10 +57,10 @@ def resolve_card_date(
 
 
 def _context(owner):
+    # Prewarming can replace the layout while keeping the same patient selection.
     layout = getattr(owner, "layout_manager", None)
     service = getattr(owner, "service", None) or getattr(owner, "remcard_service", None)
     return (
-        id(layout),
         id(service),
         getattr(owner, "_selection_mode", None),
         getattr(layout, "current_admission_id", None),

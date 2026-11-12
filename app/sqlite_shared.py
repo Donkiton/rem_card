@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import weakref
 from contextlib import contextmanager
 from contextlib import nullcontext
 from contextlib import ExitStack
@@ -17,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from rem_card.app.db_wait_diagnostics import observe, mark_stage, mark_retry, current_context
+from rem_card.app.db_wait_diagnostics import observe, mark_stage, mark_retry, current_context, current_operation
 from rem_card.app.startup_diagnostics import measured
 from rem_card.app.connection_diagnostics import connection_phase
 from rem_card.app.local_metrics import record_metric
@@ -42,6 +43,79 @@ _LOCK_READ_UNAVAILABLE = object()
 _SQLITE_NATIVE_MAINTENANCE_LOCK = threading.RLock()
 _SQLITE_DIAGNOSTICS_LOCK = threading.Lock()
 _ACTIVE_SQLITE_OPERATIONS: dict[int, dict[str, Any]] = {}
+_LOCAL_PRIORITY_LOCK = threading.Lock()
+_LOCAL_PRIORITIES: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+
+
+class _LocalWriterPriority:
+    """Pause new local reads while an existing clinical write proceeds normally."""
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.writers: dict[int, int] = {}
+        self.readers: dict[int, int] = {}
+
+    @contextmanager
+    def write(self):
+        thread_id = threading.get_ident()
+        with self.condition:
+            self.writers[thread_id] = self.writers.get(thread_id, 0) + 1
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.writers[thread_id] -= 1
+                if not self.writers[thread_id]:
+                    del self.writers[thread_id]
+                self.condition.notify_all()
+
+    def _enter_read(self, thread_id, cancel_check, already_active):
+        deadline = time.perf_counter() + SQLITE_BUSY_TIMEOUT_MS / 1000.0
+        diagnostic = None
+        previous_stage = None
+        try:
+            while True:
+                if cancel_check is not None and cancel_check():
+                    raise RuntimeError("SQLite read cancelled")
+                with self.condition:
+                    if already_active or not self.writers or thread_id in self.readers or thread_id in self.writers:
+                        self.readers[thread_id] = self.readers.get(thread_id, 0) + 1
+                        return
+                    if diagnostic is None:
+                        diagnostic = current_operation()
+                        if diagnostic is not None:
+                            previous_stage = diagnostic.payload["stage"]
+                            diagnostic.stage("local_writer_wait")
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        raise sqlite3.OperationalError("database is locked: waiting for a local writer")
+                    self.condition.wait(timeout=min(0.05, remaining))
+        finally:
+            if previous_stage is not None:
+                diagnostic.stage(previous_stage)
+
+    @contextmanager
+    def read(self, *, cancel_check=None, already_active=False):
+        thread_id = threading.get_ident()
+        self._enter_read(thread_id, cancel_check, already_active)
+        try:
+            yield
+        finally:
+            with self.condition:
+                self.readers[thread_id] -= 1
+                if not self.readers[thread_id]:
+                    del self.readers[thread_id]
+
+
+def _local_writer_priority(database):
+    # Pure string normalization. No realpath, stat or network identity probe.
+    key = os.path.normcase(os.path.abspath(database))
+    with _LOCAL_PRIORITY_LOCK:
+        priority = _LOCAL_PRIORITIES.get(key)
+        if priority is None:
+            priority = _LocalWriterPriority()
+            _LOCAL_PRIORITIES[key] = priority
+        return priority
 
 
 @dataclass(frozen=True)
@@ -422,17 +496,26 @@ def configure_connection(
                     conn.execute(f"PRAGMA journal_mode = {settings['journal_mode']}")
                 with connection_phase("pragma_synchronous"):
                     conn.execute(f"PRAGMA synchronous = {settings['synchronous']}")
-            if settings["temp_store"] != "DEFAULT":
-                with connection_phase("pragma_temp_store"):
-                    conn.execute(f"PRAGMA temp_store = {settings['temp_store']}")
-            if settings["cache_kb"]:
-                with connection_phase("pragma_cache_size"):
-                    conn.execute(f"PRAGMA cache_size = {-int(settings['cache_kb'])}")
-            if settings["mmap_mb"] is not None:
-                with connection_phase("pragma_mmap_size"):
-                    conn.execute(f"PRAGMA mmap_size = {int(settings['mmap_mb']) * 1024 * 1024}")
-            with connection_phase("pragma_busy_timeout"):
-                conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+                _configure_connection_cache(conn, settings)
+    if readonly:
+        # This connection remains private to its opening thread. These settings
+        # do not alter the database profile, but cache_size can read its schema
+        # and wait on a remote writer. Keep that wait outside global native init.
+        _configure_connection_cache(conn, settings)
+
+
+def _configure_connection_cache(conn: sqlite3.Connection, settings: dict[str, Any]) -> None:
+    if settings["temp_store"] != "DEFAULT":
+        with connection_phase("pragma_temp_store"):
+            conn.execute(f"PRAGMA temp_store = {settings['temp_store']}")
+    if settings["cache_kb"]:
+        with connection_phase("pragma_cache_size"):
+            conn.execute(f"PRAGMA cache_size = {-int(settings['cache_kb'])}")
+    if settings["mmap_mb"] is not None:
+        with connection_phase("pragma_mmap_size"):
+            conn.execute(f"PRAGMA mmap_size = {int(settings['mmap_mb']) * 1024 * 1024}")
+    with connection_phase("pragma_busy_timeout"):
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
 
 
 def run_integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
@@ -1741,6 +1824,10 @@ class SQLiteWriteController:
         self.lock = FileWriteLock(lock_path, stale_timeout_sec=stale_timeout_sec, logger=self.logger)
         self._conn_locks: dict[int, threading.RLock] = {}
         self._conn_locks_mutex = threading.Lock()
+        self._read_priority = _local_writer_priority(db_path)
+
+    def read_guard(self, *, cancel_check=None, already_active=False):
+        return self._read_priority.read(cancel_check=cancel_check, already_active=already_active)
 
     def _is_retryable(self, exc: Exception) -> bool:
         message = str(exc).lower()
@@ -2500,7 +2587,7 @@ class SQLiteWriteController:
         state = self._make_write_transaction_state(source, write_options)
         trace = WriteOperationDiagnostics(source, state.options, clock=time.perf_counter, deadline=state.deadline)
         state.diagnostics = trace
-        with trace.summary("sqlite_write_transaction_diagnostic"), observe(
+        with trace.summary("sqlite_write_transaction_diagnostic"), self._read_priority.write(), observe(
             source, resource=f"{self.db_path}:{id(conn)}", database=self.db_path,
             connection=conn, stage="connection_guard_wait"
         ) as diagnostic, ExitStack() as guards:

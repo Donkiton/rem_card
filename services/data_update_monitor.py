@@ -176,9 +176,13 @@ class DataUpdateMonitor(QThread):
         if not callable(opener) or not callable(scope):
             return nullcontext()
         if self._persistent_read_conn is None:
-            self._persistent_read_conn = opener(source="data_update_monitor")
+            self._persistent_read_conn = opener(source="data_update_monitor", cancel_check=self._check_read_cancelled, defer_to_writer=True)
             record_metric("persistent_read_connection_open", 1, component="DataUpdateMonitor")
-        return scope(self._persistent_read_conn, force_central=True)
+        return scope(self._persistent_read_conn, force_central=True, cancel_check=self._check_read_cancelled, defer_to_writer=True)
+
+    def _check_read_cancelled(self):
+        if self._is_shutting_down():
+            raise DatabaseClosedError("Database connection is closed during monitor shutdown")
 
     def _close_persistent_read_connection(self) -> None:
         conn = self._persistent_read_conn

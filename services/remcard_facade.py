@@ -4,7 +4,7 @@ import threading
 import time
 from functools import wraps
 from typing import List, Optional, Tuple, Dict, Any, Callable, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 from PySide6.QtCore import QObject
@@ -102,16 +102,44 @@ def read_scoped_snapshot(method):
         db = getattr(getattr(self, "orders_dao", None), "db", None)
         scope = getattr(db, "snapshot_read_scope", None)
         if callable(scope):
-            with scope(
+            read_scope = scope(
                 method.__name__,
                 force_central=bool(kwargs.get("ensure_initial_status")),
-            ):
+            )
+        else:
+            scope = getattr(db, "central_read_scope", None)
+            if not callable(scope):
                 return method(self, *args, **kwargs)
-        scope = getattr(db, "central_read_scope", None)
-        if callable(scope):
-            with scope(method.__name__):
+            read_scope = scope(method.__name__)
+        observer = _ORDERS_SNAPSHOT_STEP_OBSERVER.get() if method.__name__ == "build_orders_snapshot" else None
+        if observer is None:
+            with read_scope:
                 return method(self, *args, **kwargs)
-        return method(self, *args, **kwargs)
+
+        def notify(event, **fields):
+            try:
+                observer(event, "read_scoped_snapshot", fields)
+            except OrdersSnapshotCancelled:
+                raise
+            except Exception:
+                logger.debug("Orders read preparation observer failed", exc_info=True)
+
+        cancel_scope = getattr(db, "central_read_cancel_scope", None)
+        background = (
+            _ORDERS_SNAPSHOT_CALLER.get() in {"read_coordinator", "legacy_fallback"}
+            and _ORDERS_SNAPSHOT_REQUEST_SOURCE.get() in {"monitor", "refresh"}
+        )
+        cancellation = cancel_scope(lambda: notify("poll"), defer_to_writer=background) if callable(cancel_scope) else nullcontext()
+        with cancellation, ExitStack() as scopes:
+            prepare_started = time.perf_counter()
+            status = "error"
+            notify("start")
+            try:
+                scopes.enter_context(read_scope)
+                status = "ok"
+            finally:
+                notify("end", elapsed_ms=(time.perf_counter() - prepare_started) * 1000.0, status=status)
+            return method(self, *args, **kwargs)
 
     return wrapper
 

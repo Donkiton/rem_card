@@ -13,7 +13,8 @@ from rem_card.app.logger import logger
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.pdf_opener import open_pdf_file
-from rem_card.ui.shared.report_guard import ensure_daily_card_exists
+from rem_card.ui.shared.pdf_report_jobs import ReportDataWorker, report_jobs, save_report_config
+from functools import partial
 from rem_card.services.report_balance import build_print_balance_final
 from rem_card.services.report_vitals_slotting import build_vitals_report_matrix
 from rem_card.services.shift_service import ShiftService
@@ -287,7 +288,14 @@ class NurseSectorPrint(BaseSectorWidget):
         c = self.config.load(); self.cb_vitals.setChecked(c["vitals"]); self.cb_balance.setChecked(c["balance"]); self.cb_prescriptions.setChecked(c["prescriptions"]); self.cb_events.setChecked(c["events"])
 
     def save_settings(self):
-        self.config.save(self.cb_vitals.isChecked(), self.cb_balance.isChecked(), self.cb_prescriptions.isChecked(), self.cb_events.isChecked(), False, False, False)
+        self.config.save(**self._print_options())
+
+    def _print_options(self):
+        return {
+            "vitals": self.cb_vitals.isChecked(), "balance": self.cb_balance.isChecked(),
+            "prescriptions": self.cb_prescriptions.isChecked(), "events": self.cb_events.isChecked(),
+            "ventilation": False, "labs": False, "procedures": False,
+        }
 
     def _get_ctx(self):
         p = self.parent()
@@ -303,44 +311,80 @@ class NurseSectorPrint(BaseSectorWidget):
     def generate_pdf(self):
         srv, adm, dt = self._get_ctx()
         if not adm: return
-        if not ensure_daily_card_exists(self, srv, adm, dt):
+        jobs = report_jobs(self)
+        if not jobs.available() or jobs.active("daily") or jobs.active("full"):
             return
+        jobs.begin("daily")
+        self._print_report_kind = "daily"
         self.remcard_service, self.admission_id, self.card_date = srv, adm, dt
-        self.save_settings(); self.status_label.setText("Сбор данных...")
-        self.worker = DataCollectorWorker(srv, adm, dt, self.config.load())
-        self.worker.finished.connect(self.on_data); self.worker.error.connect(self.on_err); self.worker.start()
+        self.status_label.setText("Сбор данных...")
+        try:
+            self.worker = ReportDataWorker.for_report(
+                self, "daily", srv, adm, dt,
+                collector=DataCollectorWorker(srv, adm, dt, {}),
+                config_loader=partial(save_report_config, self.config, self._print_options()),
+            )
+            self.worker.collected.connect(self.on_data)
+            self.worker.error.connect(self.on_err)
+            jobs.track("daily", self.worker)
+            self.worker.start()
+        except Exception as exc:
+            self.on_err(str(exc))
 
     def generate_full_report(self):
         srv, adm, dt = self._get_ctx()
         if not adm: return
+        jobs = report_jobs(self)
+        if not jobs.available() or jobs.active("daily") or jobs.active("full"):
+            return
+        jobs.begin("full")
+        self._print_report_kind = "full"
         self.remcard_service, self.admission_id = srv, adm
-        self.save_settings()
+        self.status_label.setText("Сбор данных...")
         try:
-            dates = srv.get_all_card_dates(adm)
-            if not dates: return
-            self.worker = FullReportWorker(srv, adm, dates, self.config.load())
-            self.worker.finished.connect(self.on_full); self.worker.error.connect(self.on_err); self.worker.start()
+            self.worker = ReportDataWorker.for_report(
+                self, "full", srv, adm,
+                collector=FullReportWorker(srv, adm, [], {}),
+                config_loader=partial(save_report_config, self.config, self._print_options()),
+            )
+            self.worker.collected.connect(self.on_full)
+            self.worker.error.connect(self.on_err)
+            jobs.track("full", self.worker)
+            self.worker.start()
         except Exception as e: self.on_err(str(e))
 
-    def on_err(self, m): self.status_label.setText("Ошибка"); CustomMessageBox.critical(self, "Ошибка", m)
+    def on_err(self, m):
+        jobs = report_jobs(self)
+        kind = getattr(self, "_print_report_kind", "")
+        if not jobs.active(kind):
+            return
+        jobs.finish(kind)
+        self.status_label.setText("Ошибка")
+        CustomMessageBox.critical(self, "Ошибка", m)
 
     def on_data(self, d):
+        if not report_jobs(self).active("daily"):
+            return
         try:
             from rem_card.app.paths import REPORT_DIR
             path = pathlib.Path(REPORT_DIR)
-            path.mkdir(parents=True, exist_ok=True)
             f_path = path / f"NURSE_{d['patient_name'].replace(' ','_')}_{d['start_dt'].strftime('%Y-%m-%d')}.pdf"
-            self._start_pdf_worker(d, self.config.load(), f_path, open_after=False, ready_text="Готово!")
+            self._start_pdf_worker(d, self._daily_report_config, f_path, open_after=False, ready_text="Готово!")
         except Exception as e: self.on_err(str(e))
 
     def on_full(self, res):
+        jobs = report_jobs(self)
+        if not jobs.active("full"):
+            return
         try:
-            if not res: return
+            if not res:
+                jobs.finish("full")
+                self.status_label.setText("Нет данных для формирования общего отчета.")
+                return
             from rem_card.app.paths import REPORT_DIR
             path = pathlib.Path(REPORT_DIR)
-            path.mkdir(parents=True, exist_ok=True)
             f_path = path / f"FULL_NURSE_{res[0]['patient_name'].replace(' ','_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-            self._start_pdf_worker(res, self.config.load(), f_path, open_after=True, ready_text="Готов!")
+            self._start_pdf_worker(res, self._full_report_config, f_path, open_after=True, ready_text="Готов!")
         except Exception as e: self.on_err(str(e))
 
     def _start_pdf_worker(self, data, cfg: dict, pdf_path: pathlib.Path, *, open_after: bool, ready_text: str):
@@ -354,9 +398,14 @@ class NurseSectorPrint(BaseSectorWidget):
         self.pdf_worker.completed.connect(lambda path: self._on_pdf_ready(path, open_after=open_after, ready_text=ready_text))
         self.pdf_worker.error.connect(self.on_err)
         self.pdf_worker.finished.connect(self._clear_pdf_worker)
+        report_jobs(self).track(self._print_report_kind, self.pdf_worker)
         self.pdf_worker.start()
 
     def _on_pdf_ready(self, pdf_path, *, open_after: bool, ready_text: str):
+        jobs = report_jobs(self)
+        if not jobs.active(self._print_report_kind):
+            return
+        jobs.finish(self._print_report_kind)
         self.last_pdf = pathlib.Path(pdf_path)
         self.status_label.setText(ready_text)
         self.btn_open.setEnabled(True)
@@ -367,4 +416,5 @@ class NurseSectorPrint(BaseSectorWidget):
         self.pdf_worker = None
 
     def open_pdf(self):
-        if self.last_pdf and self.last_pdf.exists(): open_pdf_file(self.last_pdf, parent=self)
+        if self.last_pdf:
+            open_pdf_file(self.last_pdf, parent=self)

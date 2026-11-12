@@ -1918,6 +1918,75 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _report_has_slot_decorator(method: ast.FunctionDef, slot_arg: str) -> bool:
+    for decorator in method.decorator_list:
+        if not isinstance(decorator, ast.Call):
+            continue
+        if not isinstance(decorator.func, ast.Name) or decorator.func.id != "Slot":
+            continue
+        if not decorator.args:
+            continue
+        arg = decorator.args[0]
+        if isinstance(arg, ast.Name) and arg.id == slot_arg:
+            return True
+    return False
+
+
+def _report_method_call_names(method: ast.FunctionDef) -> set[str]:
+    calls = set()
+    for node in ast.walk(method):
+        if isinstance(node, ast.Call):
+            calls.add(node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", ""))
+    return calls
+
+
+def _check_report_callback_methods(source_text, methods, *, role, class_name) -> tuple[bool, str]:
+    required_slots = {
+        "_on_daily_report_collected": "dict",
+        "_on_daily_report_error": "str",
+        "_on_full_report_collected": "list",
+        "_on_full_report_error": "str",
+    }
+    for method_name, slot_arg in required_slots.items():
+        method = methods.get(method_name)
+        if method is None:
+            return False, f"{role}: {method_name} not found"
+        if not _report_has_slot_decorator(method, slot_arg):
+            return False, f"{role}: {method_name} must be a Qt Slot({slot_arg})"
+
+    request_names = ("run_daily_report", "run_full_report") if class_name == "RemCardReportController" else (
+        "on_daily_report_requested", "on_full_report_requested",
+    )
+    for kind, method_name in zip(("daily", "full"), request_names):
+        method = methods.get(method_name)
+        if method is None:
+            return False, f"{role}: report request methods not found"
+        source = _cached_source_segment(source_text, method) or ""
+        if "def on_finished" in source or "def on_error" in source:
+            return False, f"{role}: {kind} report must not use nested callbacks"
+        if _report_method_call_names(method) & {"has_card", "get_all_card_dates", "ensure_daily_card_exists"}:
+            return False, f"{role}: {method.name} performs a report preparation read on the GUI thread"
+        if "ReportDataWorker.for_report(" not in source or f"collected.connect(self._on_{kind}_report_collected)" not in source:
+            return False, f"{role}: {kind} report must connect to QObject slot"
+        if f"error.connect(self._on_{kind}_report_error)" not in source:
+            return False, f"{role}: {kind} report error must connect to QObject slot"
+    return True, "ok"
+
+
+def _check_print_report_preparation(root, relative_path, class_name) -> tuple[bool, str]:
+    source_text, methods = _regression_class_methods(root, relative_path, class_name)
+    for name in ("generate_pdf", "generate_full_report"):
+        method = methods.get(name)
+        if method is None:
+            return False, f"{class_name}.{name} not found"
+        source = _cached_source_segment(source_text, method) or ""
+        if "ReportDataWorker.for_report(" not in source or "jobs.track(" not in source:
+            return False, f"{class_name}.{name} must use the retained report preparation worker"
+        if _report_method_call_names(method) & {"has_card", "get_all_card_dates", "ensure_daily_card_exists", "save_settings"}:
+            return False, f"{class_name}.{name} performs synchronous report preparation"
+    return True, "ok"
+
+
 def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     cases = [
@@ -1925,10 +1994,8 @@ def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool,
         ("nurse", "ui/nurse_view/components/nurse_beds_selection_widget.py", "NurseBedsSelectionWidget"),
         ("shared", "ui/shared/report_controller.py", "RemCardReportController"),
     ]
-    root = PROJECT_ROOT
     for role, relative_path, class_name in cases:
-        source_path = root / relative_path
-        source_text = read_widget_source(source_path)
+        source_text = read_widget_source(PROJECT_ROOT / relative_path)
         tree = ast.parse(source_text)
         class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
         if not class_defs:
@@ -1941,54 +2008,17 @@ def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool,
             if "QObject" not in base_names:
                 return False, "shared: RemCardReportController must inherit QObject for queued report callbacks"
         methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+        ok, details = _check_report_callback_methods(source_text, methods, role=role, class_name=class_name)
+        if not ok:
+            return False, details
 
-        required_slots = {
-            "_on_daily_report_collected": "dict",
-            "_on_daily_report_error": "str",
-            "_on_full_report_collected": "list",
-            "_on_full_report_error": "str",
-        }
-        def has_slot_decorator(method: ast.FunctionDef, slot_arg: str) -> bool:
-            for decorator in method.decorator_list:
-                if not isinstance(decorator, ast.Call):
-                    continue
-                if not isinstance(decorator.func, ast.Name) or decorator.func.id != "Slot":
-                    continue
-                if not decorator.args:
-                    continue
-                arg = decorator.args[0]
-                if isinstance(arg, ast.Name) and arg.id == slot_arg:
-                    return True
-            return False
-
-        for method_name, slot_arg in required_slots.items():
-            method = methods.get(method_name)
-            if method is None:
-                return False, f"{role}: {method_name} not found"
-            if not has_slot_decorator(method, slot_arg):
-                return False, f"{role}: {method_name} must be a Qt Slot({slot_arg})"
-
-        daily_method_name = "run_daily_report" if class_name == "RemCardReportController" else "on_daily_report_requested"
-        full_method_name = "run_full_report" if class_name == "RemCardReportController" else "on_full_report_requested"
-        daily_method = methods.get(daily_method_name)
-        full_method = methods.get(full_method_name)
-        if daily_method is None or full_method is None:
-            return False, f"{role}: report request methods not found"
-        daily_source = _cached_source_segment(source_text, daily_method) or ""
-        full_source = _cached_source_segment(source_text, full_method) or ""
-        if "def on_finished" in daily_source or "def on_error" in daily_source:
-            return False, f"{role}: daily report must not use nested callbacks"
-        if "def on_finished" in full_source or "def on_error" in full_source:
-            return False, f"{role}: full report must not use nested callbacks"
-        if "ReportDataWorker(" not in daily_source or "collected.connect(self._on_daily_report_collected)" not in daily_source:
-            return False, f"{role}: daily report must connect to QObject slot"
-        if "error.connect(self._on_daily_report_error)" not in daily_source:
-            return False, f"{role}: daily report error must connect to QObject slot"
-        if "ReportDataWorker(" not in full_source or "collected.connect(self._on_full_report_collected)" not in full_source:
-            return False, f"{role}: full report must connect to QObject slot"
-        if "error.connect(self._on_full_report_error)" not in full_source:
-            return False, f"{role}: full report error must connect to QObject slot"
-
+    for relative_path, class_name in (
+        ("ui/rem_card_sectors/sector_print.py", "SectorPrint"),
+        ("ui/nurse_view/sectors/nurse_sector_print.py", "NurseSectorPrint"),
+    ):
+        ok, details = _check_print_report_preparation(PROJECT_ROOT, relative_path, class_name)
+        if not ok:
+            return False, details
     return True, "ok"
 
 

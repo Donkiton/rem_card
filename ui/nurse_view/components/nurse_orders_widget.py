@@ -1,7 +1,7 @@
 from rem_card.ui.styles.theme_runtime import set_widget_style
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QTableView,
-    QHeaderView, QAbstractItemView, QFrame, QSizePolicy
+    QHeaderView, QAbstractItemView, QFrame, QSizePolicy, QLabel
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from datetime import datetime, timedelta
@@ -18,6 +18,7 @@ from PySide6.QtGui import QColor
 from ...shared.custom_message_box import CustomMessageBox
 from rem_card.app.local_metrics import record_metric
 from rem_card.services.read_coordinator import OrdersRefreshCancelled
+from rem_card.services.shift_service import ShiftService
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 from rem_card.ui.shared.orders_display_diagnostics import finish_orders_display, observe_visible_orders_snapshot
 from rem_card.services.order_domain_service import (
@@ -66,6 +67,7 @@ class NurseOrdersWidget(QWidget):
         
         self.main_layout = None
         self.model = None
+        self._orders_load_state = "idle"
         self.highlighted_order_id = None
         self._last_polled_change_id = 0
         self._last_polled_context_key = None
@@ -421,6 +423,7 @@ class NurseOrdersWidget(QWidget):
             self._pending_admin_ids.clear()
             self._reset_change_batch(stop_timer=True)
             self._clear_soft_update_state()
+            self._set_orders_load_state("idle")
 
     def _get_read_coordinator(self):
         return getattr(self.service, "read_coordinator", None)
@@ -854,6 +857,7 @@ class NurseOrdersWidget(QWidget):
 
         coordinator = self._get_read_coordinator()
         if coordinator is None:
+            self._set_orders_load_state("error")
             logger.error(
                 "[NurseOrdersWidget] ReadCoordinator unavailable admission_id=%s shift_date=%s",
                 self.admission_id,
@@ -865,6 +869,7 @@ class NurseOrdersWidget(QWidget):
             context = self._build_orders_context()
         except Exception as exc:
             logger.error("[NurseOrdersWidget] Failed to build orders context: %s", exc, exc_info=True)
+            self._set_orders_load_state("error")
             return
 
         priority_name = self._normalize_priority(priority)
@@ -970,6 +975,8 @@ class NurseOrdersWidget(QWidget):
             "force": bool(force),
         }
         self._schedule_soft_update_state(source=source)
+        if self._orders_load_state in {"idle", "loading", "error"}:
+            self._set_orders_load_state("loading")
 
         def cancel_check():
             return (
@@ -1065,6 +1072,8 @@ class NurseOrdersWidget(QWidget):
             )
         except Exception:
             logger.exception("[NurseOrdersWidget] Failed to apply orders snapshot")
+            self._set_orders_load_state("error")
+            finish_orders_display(self, "error")
 
     def _record_late_result_ignored(self, payload, *, reason: str):
         snapshot = (payload or {}).get("snapshot") or {}
@@ -1200,6 +1209,7 @@ class NurseOrdersWidget(QWidget):
             )
             self._clear_soft_update_state()
             self._deferred_change_reload = False
+            self._set_orders_load_state("ready" if self.model.orders else "empty")
             observe_visible_orders_snapshot(self, snapshot, role="nurse", change_cursor=snapshot_change_id, applied=False)
             return True
 
@@ -1213,6 +1223,7 @@ class NurseOrdersWidget(QWidget):
             current_context_key=current_context_key,
             snapshot_signature=snapshot_signature,
         ):
+            self._set_orders_load_state("ready" if self.model.orders else "empty")
             observe_visible_orders_snapshot(self, snapshot, role="nurse", change_cursor=snapshot_change_id)
             return True
 
@@ -1264,6 +1275,7 @@ class NurseOrdersWidget(QWidget):
         )
         self._last_applied_snapshot_signature = snapshot_signature
         self._deferred_change_reload = False
+        self._set_orders_load_state("ready" if self.model.orders else "empty")
         observe_visible_orders_snapshot(self, snapshot, role="nurse", change_cursor=snapshot_change_id)
         return True
 
@@ -1366,8 +1378,12 @@ class NurseOrdersWidget(QWidget):
     def _on_snapshot_failed(self, exc):
         if self._is_closing:
             return
+        worker = self.sender()
+        if worker is not None and worker is not self._snapshot_worker:
+            return
         finish_orders_display(self, "cancelled" if isinstance(exc, OrdersRefreshCancelled) else "error")
         self._clear_soft_update_state()
+        self._set_orders_load_state("error")
         if isinstance(exc, OrdersRefreshCancelled):
             logger.info("[NurseOrdersWidget] Orders snapshot load cancelled: %s", exc)
             return
@@ -1603,6 +1619,7 @@ class NurseOrdersWidget(QWidget):
                 self.model.clear_for_context(self.admission_id, self.shift_date)
             self._reset_change_cursor()
             self._reset_cached_state()
+            self._set_orders_load_state("idle")
             self._restore_highlight()
             self._apply_table_header_layout()
             self._request_snapshot(
@@ -1650,6 +1667,13 @@ class NurseOrdersWidget(QWidget):
         self.table_clip_layout.setContentsMargins(0, 0, 0, 0)
         self.frame_layout.addWidget(self.table_clip_widget, 1)
 
+        self.orders_status_label = QLabel()
+        self.orders_status_label.setObjectName("nurse_orders_load_status")
+        self.orders_status_label.setAlignment(Qt.AlignCenter)
+        self.orders_status_label.setWordWrap(True)
+        self.orders_status_label.setMinimumHeight(60)
+        self.table_clip_layout.addWidget(self.orders_status_label)
+
         self.table_view = QTableView()
         self.table_view.setMinimumHeight(120)
         self.table_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1668,9 +1692,33 @@ class NurseOrdersWidget(QWidget):
             f"QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 4px; border: 1 solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 9pt; }}"
             + STYLE_ORDERS_VERTICAL_SCROLLBAR)
         self.table_clip_layout.addWidget(self.table_view)
+        self._set_orders_load_state(self._orders_load_state)
 
 
         set_widget_style(self, f"NurseOrdersWidget {{ background-color: {BG_MAIN}; }} QWidget#table_clip {{ background-color: {BG_CARD}; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QWidget#orders_footer_frame {{ background-color: {BG_MAIN}; border-top: 1px solid {BORDER_COLOR}; border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }} QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; border-top-left-radius: 5px; border-top-right-radius: 5px; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 6px; border: none; border-bottom: 0.5px solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 10pt; }} QHeaderView {{ background-color: {BG_LIGHT}; border-top-left-radius: 5px; border-top-right-radius: 5px; }}")
+
+    def _set_orders_load_state(self, state):
+        self._orders_load_state = state
+        label = getattr(self, "orders_status_label", None)
+        table = getattr(self, "table_view", None)
+        if label is None or table is None:
+            return
+        messages = {
+            "idle": "Откройте карту пациента, чтобы увидеть назначения.",
+            "loading": "Загрузка назначений…",
+            "error": "Не удалось загрузить назначения. Откройте вкладку повторно.",
+            "empty": "На выбранные сутки назначений нет.",
+        }
+        label.setText(messages.get(state, ""))
+        label.setVisible(state != "ready")
+        has_current_rows = (
+            self.model is not None
+            and self.model.admission_id == self.admission_id
+            and self.model.shift_date is not None and self.shift_date is not None
+            and ShiftService.get_day_period(self.model.shift_date)[0] == ShiftService.get_day_period(self.shift_date)[0]
+            and bool(self.model.orders)
+        )
+        table.setVisible(state == "ready" or has_current_rows)
 
     def update_now_marker(self):
         if hasattr(self, 'table_view'): self.table_view.viewport().update()
@@ -1695,7 +1743,7 @@ class NurseOrdersWidget(QWidget):
             self.setup_data()
             return
 
-        if self._snapshot_stale or self._deferred_change_reload:
+        if self._snapshot_stale or self._deferred_change_reload or self._orders_load_state == "error":
             self._request_snapshot(
                 force=bool(self._deferred_change_reload),
                 source="user",

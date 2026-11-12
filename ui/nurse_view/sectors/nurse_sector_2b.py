@@ -4,6 +4,9 @@ from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, 
 from rem_card.ui.styles.sector_styles import build_remcard_tab_button_style, build_remcard_tab_frame_style
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget, QLabel
 from PySide6.QtCore import Signal
+import time
+
+from rem_card.app.local_metrics import record_metric
 
 class NurseSector2b(BaseSectorWidget):
     """Сектор переключения вкладок для медсестры (без ИВЛ)."""
@@ -163,7 +166,12 @@ class NurseSector2b(BaseSectorWidget):
             self.tab_changed.emit(tab_name)
 
     def on_tab_clicked(self, tab_name):
-        self.select_tab(tab_name, emit=True)
+        self._orders_click_started_at = time.perf_counter() if tab_name == "Назначения" else None
+        record_metric("tab_click_received", 1, role="nurse", tab_name=str(tab_name or ""), source="click")
+        try:
+            self.select_tab(tab_name, emit=True)
+        finally:
+            self._orders_click_started_at = None
 
     def set_save_icon_visible(self, visible: bool):
         self._save_icon_requested_visible = bool(visible)

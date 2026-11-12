@@ -8,7 +8,7 @@ import socket
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -2469,30 +2469,68 @@ class DatabaseManager:
     def _readonly_db_uri(self) -> str:
         return build_sqlite_file_uri(self.db_path, mode="ro")
 
+    def _central_read_priority_scope(self, *, cancel_check=None, defer_to_writer=None, existing_connection=None):
+        state = getattr(self, "_thread_state", None)
+        if defer_to_writer is None:
+            defer_to_writer = getattr(state, "central_read_defer_to_writer", False)
+        if existing_connection is None:
+            existing_connection = getattr(state, "central_read_scope_conn", None)
+        already_active = bool(getattr(existing_connection, "in_transaction", False))
+        if not defer_to_writer and not already_active:
+            return nullcontext()
+        guard = getattr(getattr(self, "write_controller", None), "read_guard", None)
+        if not callable(guard):
+            return nullcontext()
+        if cancel_check is None:
+            cancel_check = getattr(state, "central_read_cancel_check", None)
+        return guard(cancel_check=cancel_check, already_active=already_active)
+
+    @contextmanager
+    def central_read_cancel_scope(self, cancel_check, *, defer_to_writer=False):
+        state = self._thread_state
+        had_check = hasattr(state, "central_read_cancel_check")
+        previous = getattr(state, "central_read_cancel_check", None)
+        had_priority = hasattr(state, "central_read_defer_to_writer")
+        previous_priority = getattr(state, "central_read_defer_to_writer", False)
+        state.central_read_cancel_check = cancel_check
+        state.central_read_defer_to_writer = bool(defer_to_writer)
+        try:
+            yield
+        finally:
+            if had_check:
+                state.central_read_cancel_check = previous
+            else:
+                delattr(state, "central_read_cancel_check")
+            if had_priority:
+                state.central_read_defer_to_writer = previous_priority
+            else:
+                delattr(state, "central_read_defer_to_writer")
+
     @observed_call("read_connection_open")
     def _open_readonly_central_connection(self) -> sqlite3.Connection:
-        with connection_observation(self.db_path):
-            with connection_phase("connection_precondition"):
-                if self._closed or self._remcard_conn is None:
-                    raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
-            with connection_phase("connection_uri"):
-                uri = self._readonly_db_uri()
-            with connection_phase("sqlite_connect"):
-                conn = sqlite3.connect(
-                    uri,
-                    uri=True,
-                    check_same_thread=True,
-                    isolation_level=None,
-                    timeout=5.0,
-                )
-            try:
-                with connection_phase("connection_configure"):
-                    configure_connection(conn, readonly=True, profile="network")
-            except BaseException:
-                with suppress(Exception):
-                    conn.close()
-                raise
-            return conn
+        with DatabaseManager._central_read_priority_scope(self):
+            with connection_observation(self.db_path):
+                with connection_phase("connection_precondition"):
+                    if self._closed or self._remcard_conn is None:
+                        raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
+                with connection_phase("connection_uri"):
+                    uri = self._readonly_db_uri()
+                with connection_phase("sqlite_connect"):
+                    conn = sqlite3.connect(
+                        uri,
+                        uri=True,
+                        check_same_thread=True,
+                        isolation_level=None,
+                        timeout=5.0,
+                    )
+                try:
+                    with connection_phase("connection_configure"):
+                        configure_connection(conn, readonly=True, profile="network")
+                except BaseException:
+                    with suppress(Exception):
+                        conn.close()
+                    raise
+                return conn
 
     def _get_central_write_connection_for_read(self, context: str) -> sqlite3.Connection:
         if self._closed or self._remcard_conn is None:
@@ -2674,64 +2712,68 @@ class DatabaseManager:
             yield self
             return
 
-        state = self._thread_state
-        previous_depth = int(getattr(state, "central_read_scope_depth", 0) or 0)
-        had_connection = hasattr(state, "central_read_scope_conn")
-        previous_connection = getattr(state, "central_read_scope_conn", None)
-        had_force_central = hasattr(state, "force_central_reads")
-        previous_force_central = bool(getattr(state, "force_central_reads", False))
+        with DatabaseManager._central_read_priority_scope(
+            self, existing_connection=getattr(self._thread_state, "central_read_scope_conn", None)
+        ):
+            state = self._thread_state
+            previous_depth = int(getattr(state, "central_read_scope_depth", 0) or 0)
+            had_connection = hasattr(state, "central_read_scope_conn")
+            previous_connection = getattr(state, "central_read_scope_conn", None)
+            had_force_central = hasattr(state, "force_central_reads")
+            previous_force_central = bool(getattr(state, "force_central_reads", False))
 
-        conn = previous_connection
-        owns_connection = conn is None
-        owns_transaction = False
-        try:
-            if owns_connection:
-                conn = self._open_readonly_central_connection()
+            conn = previous_connection
+            owns_connection = conn is None
+            owns_transaction = False
+            try:
+                if owns_connection:
+                    conn = self._open_readonly_central_connection()
 
-            state.central_read_scope_depth = previous_depth + 1
-            state.central_read_scope_conn = conn
-            state.force_central_reads = True
+                state.central_read_scope_depth = previous_depth + 1
+                state.central_read_scope_conn = conn
+                state.force_central_reads = True
 
-            bind_connection(conn)
-            if not bool(getattr(conn, "in_transaction", False)):
-                conn.execute("BEGIN")
-                owns_transaction = True
-            mark_stage("read_snapshot_active")
-            yield self
-        finally:
-            if owns_transaction and conn is not None:
-                try:
-                    mark_stage("read_snapshot_rollback")
-                    conn.execute("ROLLBACK")
-                    mark_stage("read_snapshot_closed")
-                except sqlite3.Error as exc:
-                    logger.debug("Failed to finish central read snapshot: %s", exc)
+                bind_connection(conn)
+                if not bool(getattr(conn, "in_transaction", False)):
+                    conn.execute("BEGIN")
+                    owns_transaction = True
+                mark_stage("read_snapshot_active")
+                yield self
+            finally:
+                if owns_transaction and conn is not None:
+                    try:
+                        mark_stage("read_snapshot_rollback")
+                        conn.execute("ROLLBACK")
+                        mark_stage("read_snapshot_closed")
+                    except sqlite3.Error as exc:
+                        logger.debug("Failed to finish central read snapshot: %s", exc)
 
-            state.central_read_scope_depth = previous_depth
-            if had_connection:
-                state.central_read_scope_conn = previous_connection
-            elif hasattr(state, "central_read_scope_conn"):
-                delattr(state, "central_read_scope_conn")
-            if had_force_central:
-                state.force_central_reads = previous_force_central
-            elif hasattr(state, "force_central_reads"):
-                delattr(state, "force_central_reads")
+                state.central_read_scope_depth = previous_depth
+                if had_connection:
+                    state.central_read_scope_conn = previous_connection
+                elif hasattr(state, "central_read_scope_conn"):
+                    delattr(state, "central_read_scope_conn")
+                if had_force_central:
+                    state.force_central_reads = previous_force_central
+                elif hasattr(state, "force_central_reads"):
+                    delattr(state, "force_central_reads")
 
-            if owns_connection and conn is not None:
-                try:
-                    with self.write_controller.connection_guard(conn):
-                        conn.close()
-                except Exception as exc:
-                    logger.debug("Failed to close central read snapshot connection: %s", exc)
+                if owns_connection and conn is not None:
+                    try:
+                        with self.write_controller.connection_guard(conn):
+                            conn.close()
+                    except Exception as exc:
+                        logger.debug("Failed to close central read snapshot connection: %s", exc)
 
-    def open_persistent_readonly_connection(self, *, source: str = "persistent_reader") -> sqlite3.Connection:
+    def open_persistent_readonly_connection(self, *, source: str = "persistent_reader", cancel_check=None, defer_to_writer=False) -> sqlite3.Connection:
         """Open a readonly connection that must be closed by the calling thread.
 
         This is intentionally separate from ``_central_read_conns``: long-lived
         owners such as ``DataUpdateMonitor`` create, use and close the connection
         in the same thread, avoiding cross-thread sqlite close hazards on Windows.
         """
-        return self._open_readonly_central_connection()
+        with DatabaseManager._central_read_priority_scope(self, cancel_check=cancel_check, defer_to_writer=defer_to_writer):
+            return self._open_readonly_central_connection()
 
     @contextmanager
     def existing_central_read_scope(
@@ -2739,6 +2781,8 @@ class DatabaseManager:
         conn: sqlite3.Connection,
         *,
         force_central: bool = True,
+        cancel_check=None,
+        defer_to_writer=None,
     ):
         """Route reads in the current thread through an existing connection."""
         if conn is None:
@@ -2749,13 +2793,32 @@ class DatabaseManager:
         previous_connection = getattr(state, "central_read_scope_conn", None)
         had_force_central = hasattr(state, "force_central_reads")
         previous_force_central = bool(getattr(state, "force_central_reads", False))
+        had_cancel_check = hasattr(state, "central_read_cancel_check")
+        previous_cancel_check = getattr(state, "central_read_cancel_check", None)
+        had_priority = hasattr(state, "central_read_defer_to_writer")
+        previous_priority = getattr(state, "central_read_defer_to_writer", False)
         state.central_read_scope_depth = previous_depth + 1
         state.central_read_scope_conn = conn
+        state.central_read_cancel_check = cancel_check
+        if defer_to_writer is not None:
+            state.central_read_defer_to_writer = bool(defer_to_writer)
         if force_central:
             state.force_central_reads = True
         try:
-            yield self
+            # An adopted native read transaction may already own SHARED. It
+            # must finish rather than wait for the writer that needs its lock.
+            adopted = DatabaseManager._central_read_priority_scope(self, existing_connection=conn) if bool(getattr(conn, "in_transaction", False)) else nullcontext()
+            with adopted:
+                yield self
         finally:
+            if had_cancel_check:
+                state.central_read_cancel_check = previous_cancel_check
+            else:
+                delattr(state, "central_read_cancel_check")
+            if had_priority:
+                state.central_read_defer_to_writer = previous_priority
+            elif hasattr(state, "central_read_defer_to_writer"):
+                delattr(state, "central_read_defer_to_writer")
             state.central_read_scope_depth = previous_depth
             if had_connection:
                 state.central_read_scope_conn = previous_connection
@@ -2879,21 +2942,22 @@ class DatabaseManager:
                     read_diagnostic.bind(conn, scope="write_connection")
                     with self.write_controller.connection_guard(conn):
                         return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
-            scoped_conn = self._scoped_central_read_connection()
-            if scoped_conn is not None:
-                bind_connection(scoped_conn)
-                read_diagnostic.bind(scoped_conn, scope="scoped")
-                return self._confirmed_central_read_result(self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
-            conn = self._open_readonly_central_connection()
-            bind_connection(conn)
-            read_diagnostic.bind(conn, scope="short_lived", known_readonly=True)
-            try:
-                return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
-            finally:
+            with DatabaseManager._central_read_priority_scope(self, cancel_check=cancel_check):
+                scoped_conn = self._scoped_central_read_connection()
+                if scoped_conn is not None:
+                    bind_connection(scoped_conn)
+                    read_diagnostic.bind(scoped_conn, scope="scoped")
+                    return self._confirmed_central_read_result(self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
+                conn = self._open_readonly_central_connection()
+                bind_connection(conn)
+                read_diagnostic.bind(conn, scope="short_lived", known_readonly=True)
                 try:
-                    conn.close()
-                except Exception as close_exc:
-                    logger.debug("Failed to close short-lived central read connection: %s", close_exc)
+                    return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
+                finally:
+                    try:
+                        conn.close()
+                    except Exception as close_exc:
+                        logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
             read_diagnostic.report(exc)
             if is_database_unavailable_error(exc):
@@ -2920,33 +2984,34 @@ class DatabaseManager:
                         row = cursor.fetchone()
                         read_diagnostic.phase = "complete"
                         return self._confirmed_central_read_result(row)
-            scoped_conn = self._scoped_central_read_connection()
-            if scoped_conn is not None:
-                bind_connection(scoped_conn)
-                read_diagnostic.bind(scoped_conn, scope="scoped")
-                cursor = scoped_conn.cursor()
-                read_diagnostic.phase = "execute"
-                cursor.execute(query, params)
-                read_diagnostic.phase = "fetch_one"
-                row = cursor.fetchone()
-                read_diagnostic.phase = "complete"
-                return self._confirmed_central_read_result(row)
-            conn = self._open_readonly_central_connection()
-            bind_connection(conn)
-            read_diagnostic.bind(conn, scope="short_lived", known_readonly=True)
-            try:
-                cursor = conn.cursor()
-                read_diagnostic.phase = "execute"
-                cursor.execute(query, params)
-                read_diagnostic.phase = "fetch_one"
-                row = cursor.fetchone()
-                read_diagnostic.phase = "complete"
-                return self._confirmed_central_read_result(row)
-            finally:
+            with DatabaseManager._central_read_priority_scope(self):
+                scoped_conn = self._scoped_central_read_connection()
+                if scoped_conn is not None:
+                    bind_connection(scoped_conn)
+                    read_diagnostic.bind(scoped_conn, scope="scoped")
+                    cursor = scoped_conn.cursor()
+                    read_diagnostic.phase = "execute"
+                    cursor.execute(query, params)
+                    read_diagnostic.phase = "fetch_one"
+                    row = cursor.fetchone()
+                    read_diagnostic.phase = "complete"
+                    return self._confirmed_central_read_result(row)
+                conn = self._open_readonly_central_connection()
+                bind_connection(conn)
+                read_diagnostic.bind(conn, scope="short_lived", known_readonly=True)
                 try:
-                    conn.close()
-                except Exception as close_exc:
-                    logger.debug("Failed to close short-lived central read connection: %s", close_exc)
+                    cursor = conn.cursor()
+                    read_diagnostic.phase = "execute"
+                    cursor.execute(query, params)
+                    read_diagnostic.phase = "fetch_one"
+                    row = cursor.fetchone()
+                    read_diagnostic.phase = "complete"
+                    return self._confirmed_central_read_result(row)
+                finally:
+                    try:
+                        conn.close()
+                    except Exception as close_exc:
+                        logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
             read_diagnostic.report(exc)
             if is_database_unavailable_error(exc):
