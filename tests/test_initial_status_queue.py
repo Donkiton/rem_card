@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
+import re
+import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from rem_card.data.dao.patient_status_dao import InitialStatusOutcome, PatientStatusDAO
+from rem_card.data.dao.db_manager import DatabaseManager
 from rem_card.app.network_write_worker import NetworkWriteWorkerTimeout
 from rem_card.app.sqlite_shared import QueuedWriteDeadlineExceeded, SQLiteWriteController, configure_connection
 from rem_card.services import patient_status_service as patient_status_service_module
@@ -31,6 +34,7 @@ class _StatusDb:
                 created_by TEXT,
                 created_at TEXT,
                 updated_at TEXT,
+                last_modified_by TEXT,
                 revision INTEGER DEFAULT 0
             )
             """
@@ -53,6 +57,321 @@ class _Queue:
     def enqueue_write(self, **kwargs):
         self.calls.append(kwargs)
         return True
+
+
+class _AuthoritativeStatusDb(_StatusDb):
+    """Actual DBManager no-BEGIN preflight and the existing SQLite write protocol."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        configure_connection(self.conn, profile="network")
+        self.statements = []
+        self.write_entries = 0
+        self.before_write = None
+        self.local_reads = []
+        self.attempt_options = []
+        self.controller = SQLiteWriteController(str(path), str(path) + ".lock", "status-test")
+        controller_transaction = self.controller.transaction
+
+        def observed_transaction(conn, *args, **kwargs):
+            self.attempt_options.append(dict(kwargs.get("write_options") or {}))
+            return controller_transaction(conn, *args, **kwargs)
+
+        self.controller.transaction = observed_transaction
+        self.conn.set_trace_callback(lambda sql: self.statements.append(("writer", sql)))
+        self.manager = object.__new__(DatabaseManager)
+        self.manager.db_path = str(path)
+        self.manager._thread_state = threading.local()
+        self.manager._central_io_lock = threading.RLock()
+        self.manager._closed = False
+        self.manager._remcard_conn = self.conn
+        self.manager.write_controller = self.controller
+        self.manager.runtime_context = SimpleNamespace(mode="")
+        self.manager.remcard_transaction = self.remcard_transaction
+        self.manager._request_periodic_backup = lambda **_kwargs: None
+        self.manager._after_write_committed = lambda: None
+        self.manager._should_read_from_local = lambda: True
+        self.manager._local_replica = SimpleNamespace(fetch_one=self._stale_local_read)
+        self.manager._open_readonly_central_connection = lambda: pytest.fail("Initial status preflight opened a new connection")
+
+    def _stale_local_read(self, *_args):
+        self.local_reads.append(1)
+        return {"id": 999}
+
+    @contextmanager
+    def remcard_transaction(self):
+        self.write_entries += 1
+        if self.before_write is not None:
+            self.before_write()
+        with DatabaseManager.remcard_transaction(self.manager) as cursor:
+            yield cursor
+
+
+def _insert_initial_fixture_status(conn, start, *, end=None, status="ACTIVE"):
+    conn.execute(
+        "INSERT INTO patient_status_events(admission_id, status, start_time, end_time, created_at) "
+        "VALUES(7, ?, ?, ?, ?)",
+        (status, start.isoformat(), end.isoformat() if end else None, start.isoformat()),
+    )
+    conn.commit()
+
+
+@pytest.mark.parametrize("final_outcome", [False, True])
+def test_authoritative_covered_shift_uses_no_write_transaction(tmp_path, final_outcome):
+    db = _AuthoritativeStatusDb(tmp_path / "covered.db")
+    shift = datetime(2026, 11, 8, 8)
+    try:
+        outcome_time = shift + timedelta(hours=9)
+        _insert_initial_fixture_status(db.conn, shift, end=outcome_time if final_outcome else None)
+        if final_outcome:
+            _insert_initial_fixture_status(db.conn, outcome_time, status="DEAD")
+        db.statements.clear()
+
+        result = PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+
+        assert result == InitialStatusOutcome.ALREADY_COVERED
+        assert db.write_entries == 0 and db.local_reads == []
+        assert len(db.statements) == 1 and db.statements[0][0] == "writer"
+        assert db.statements[0][1].lstrip().upper().startswith("SELECT")
+        assert not db.conn.in_transaction
+    finally:
+        db.conn.close()
+
+
+def test_absent_authoritative_coverage_ignores_stale_replica_and_creates(tmp_path):
+    db = _AuthoritativeStatusDb(tmp_path / "uncovered.db")
+    shift = datetime(2026, 11, 8, 8)
+    try:
+        assert PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift) == InitialStatusOutcome.CREATED
+        assert db.local_reads == [] and db.write_entries == 1
+        writer_sql = [sql.strip().upper() for owner, sql in db.statements if owner == "writer"]
+        assert "BEGIN IMMEDIATE" in writer_sql and "COMMIT" in writer_sql
+        assert db.conn.execute("SELECT COUNT(*) FROM patient_status_events").fetchone()[0] == 1
+    finally:
+        db.conn.close()
+
+
+def test_initial_status_rechecks_concurrent_creator_under_original_write_lock(tmp_path):
+    path = tmp_path / "racing.db"
+    db = _AuthoritativeStatusDb(path)
+    shift = datetime(2026, 11, 8, 8)
+
+    def concurrent_create():
+        with closing(sqlite3.connect(path)) as other:
+            _insert_initial_fixture_status(other, shift)
+
+    db.before_write = concurrent_create
+    try:
+        result = PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+        assert result == InitialStatusOutcome.ALREADY_COVERED and db.write_entries == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM patient_status_events").fetchone()[0] == 1
+        assert not any(sql.lstrip().upper().startswith("INSERT") for owner, sql in db.statements if owner == "writer")
+    finally:
+        db.conn.close()
+
+
+def test_initial_status_coverage_sees_own_outer_transaction(tmp_path):
+    db = _AuthoritativeStatusDb(tmp_path / "nested.db")
+    shift = datetime(2026, 11, 8, 8)
+    try:
+        with db.manager.remcard_transaction() as cursor:
+            cursor.execute(
+                "INSERT INTO patient_status_events(admission_id, status, start_time) VALUES(7, 'ACTIVE', ?)",
+                (shift.isoformat(),),
+            )
+            assert PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift) == InitialStatusOutcome.ALREADY_COVERED
+            assert db.conn.in_transaction and db.write_entries == 1
+        assert db.conn.execute("SELECT COUNT(*) FROM patient_status_events").fetchone()[0] == 1
+        assert db.local_reads == []
+    finally:
+        db.conn.close()
+
+
+def test_initial_status_authoritative_read_error_does_not_enter_write_or_use_replica(tmp_path):
+    db = _AuthoritativeStatusDb(tmp_path / "missing.db")
+    shift = datetime(2026, 11, 8, 8)
+    try:
+        db.conn.execute("DROP TABLE patient_status_events")
+        db.conn.commit()
+        with db.manager.write_metadata_context({"write_budget_ms": 100}):
+            with pytest.raises(sqlite3.OperationalError, match="no such table"):
+                PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+        assert db.write_entries == 0 and db.local_reads == []
+        assert not db.conn.in_transaction
+        assert db.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
+    finally:
+        db.conn.close()
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_historical_initial_status_bridge_and_repair_keep_serialized_writes(tmp_path, repair):
+    db = _AuthoritativeStatusDb(tmp_path / "historical.db")
+    shift = datetime(2024, 5, 8, 8)
+    try:
+        if repair:
+            _insert_initial_fixture_status(db.conn, shift + timedelta(hours=2))
+        else:
+            _insert_initial_fixture_status(db.conn, shift - timedelta(days=1), end=shift - timedelta(hours=1))
+        db.statements.clear()
+
+        result = PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+
+        assert result == (InitialStatusOutcome.REPAIRED if repair else InitialStatusOutcome.BRIDGED)
+        assert db.write_entries == 1
+        writer_sql = [sql.strip().upper() for owner, sql in db.statements if owner == "writer"]
+        assert "BEGIN IMMEDIATE" in writer_sql and "COMMIT" in writer_sql
+        assert any(sql.startswith("UPDATE" if repair else "INSERT") for sql in writer_sql)
+        assert db.conn.execute("SELECT COUNT(*) FROM patient_status_events WHERE start_time=?", (shift.isoformat(),)).fetchone()[0] == 1
+    finally:
+        db.conn.close()
+
+
+def test_initial_status_outside_shift_needs_no_sql(tmp_path):
+    db = _AuthoritativeStatusDb(tmp_path / "outside.db")
+    shift = datetime(2026, 11, 8, 8)
+    try:
+        result = PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift + timedelta(days=1))
+        assert result == InitialStatusOutcome.SKIPPED_OUTSIDE_SHIFT
+        assert db.write_entries == 0 and db.statements == []
+    finally:
+        db.conn.close()
+
+
+@pytest.mark.parametrize("queue_remaining_sec", [1.0, 0.04])
+def test_blocked_initial_status_preflight_uses_remaining_budget_and_restores_connection(tmp_path, queue_remaining_sec):
+    path = tmp_path / "blocked.db"
+    db = _AuthoritativeStatusDb(path)
+    shift = datetime(2026, 11, 8, 8)
+    holder = sqlite3.connect(path, isolation_level=None)
+    try:
+        _insert_initial_fixture_status(db.conn, shift)
+        db.conn.execute("PRAGMA busy_timeout=7421")
+        db.statements.clear()
+        holder.execute("BEGIN EXCLUSIVE")
+        metadata = {"write_budget_ms": 100, "write_deadline_monotonic": time.perf_counter() + queue_remaining_sec}
+        started = time.perf_counter()
+        with db.manager.write_metadata_context(metadata):
+            with pytest.raises(sqlite3.OperationalError, match="locked") as error:
+                PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+            assert db.manager._current_thread_write_metadata() == metadata
+        assert error.value.sqlite_errorcode == sqlite3.SQLITE_BUSY
+        # Local SQLite lock fixture: detect accidentally using the former 5/10 s waits.
+        assert time.perf_counter() - started < 1.0
+        timeouts = [int(match[1]) for _owner, sql in db.statements
+                    if (match := re.fullmatch(r"PRAGMA busy_timeout\s*=\s*(\d+)", sql, re.IGNORECASE))]
+        assert 0 < timeouts[0] <= min(100, int(queue_remaining_sec * 1000))
+        assert timeouts[-1] == 7421
+        assert db.write_entries == 0 and db.local_reads == [] and not db.conn.in_transaction
+        assert not any(sql.strip().upper().startswith(("BEGIN", "COMMIT", "INSERT")) for _owner, sql in db.statements)
+        assert db.manager._central_io_lock.acquire(blocking=False)
+        db.manager._central_io_lock.release()
+        assert db.controller._get_conn_lock(db.conn).acquire(blocking=False)
+        db.controller._get_conn_lock(db.conn).release()
+        holder.execute("ROLLBACK")
+        assert db.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 7421
+        with db.manager.write_metadata_context({"write_budget_ms": 100}):
+            assert PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift) == InitialStatusOutcome.ALREADY_COVERED
+        assert db.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 7421
+    finally:
+        holder.close()
+        db.conn.close()
+
+
+def test_initial_status_preflight_and_commit_share_one_attempt_deadline(tmp_path):
+    path = tmp_path / "shared-budget.db"
+    db = _AuthoritativeStatusDb(path)
+    shift = datetime(2026, 11, 8, 8)
+    reader = sqlite3.connect(path, isolation_level=None)
+    pinned_deadlines = []
+    fetch = db.manager._fetch_initial_status_preflight
+
+    def delayed_preflight(query, params):
+        pinned_deadlines.append(db.manager._current_thread_write_metadata()["write_deadline_monotonic"])
+        time.sleep(0.04)  # Controlled source preparation inside the same attempt.
+        return fetch(query, params)
+
+    db.manager._fetch_initial_status_preflight = delayed_preflight
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM patient_status_events").fetchall()
+        metadata = {"write_budget_ms": 120, "write_deadline_monotonic": time.perf_counter() + 1.0}
+        with db.manager.write_metadata_context(metadata):
+            with pytest.raises(QueuedWriteDeadlineExceeded, match="at commit"):
+                PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+            assert db.manager._current_thread_write_metadata() == metadata
+        assert db.attempt_options[0]["write_deadline_monotonic"] == pinned_deadlines[0]
+        assert db.attempt_options[0]["write_budget_ms"] == 120
+        assert not db.conn.in_transaction
+        assert db.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
+        reader.execute("ROLLBACK")
+        assert db.conn.execute("SELECT COUNT(*) FROM patient_status_events").fetchone()[0] == 0
+    finally:
+        reader.close()
+        db.conn.close()
+
+
+def test_expired_initial_status_deadline_performs_no_sql(tmp_path):
+    db = _AuthoritativeStatusDb(tmp_path / "expired.db")
+    shift = datetime(2026, 11, 8, 8)
+    try:
+        with db.manager.write_metadata_context({"write_budget_ms": 100, "write_deadline_monotonic": time.perf_counter() - 1}):
+            with pytest.raises(QueuedWriteDeadlineExceeded, match="before initial status preflight"):
+                PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+        assert db.statements == [] and db.write_entries == 0 and db.local_reads == []
+    finally:
+        db.conn.close()
+
+
+def test_initial_status_does_not_accept_coverage_returned_after_deadline(tmp_path):
+    db = _AuthoritativeStatusDb(tmp_path / "late-row.db")
+    shift = datetime(2026, 11, 8, 8)
+    delayed = []
+
+    def slow_datetime(value):
+        if not delayed:
+            delayed.append(True)
+            time.sleep(0.08)  # A single native callback cannot be preempted by busy_timeout.
+        return value.replace("T", " ") if value is not None else None
+
+    try:
+        _insert_initial_fixture_status(db.conn, shift)
+        db.conn.create_function("DATETIME", 1, slow_datetime)
+        db.statements.clear()
+        with db.manager.write_metadata_context({"write_budget_ms": 30}):
+            with pytest.raises(QueuedWriteDeadlineExceeded, match="during initial status preflight"):
+                PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+        assert delayed and db.write_entries == 0 and db.local_reads == []
+        assert not db.conn.in_transaction
+        assert db.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
+    finally:
+        db.conn.close()
+
+
+@pytest.mark.parametrize("mutex", ["central_io", "connection"])
+def test_initial_status_preflight_mutex_wait_respects_attempt_deadline(tmp_path, mutex):
+    db = _AuthoritativeStatusDb(tmp_path / "mutex.db")
+    shift = datetime(2026, 11, 8, 8)
+    lock = db.manager._central_io_lock if mutex == "central_io" else db.controller._get_conn_lock(db.conn)
+    ready, release = threading.Event(), threading.Event()
+
+    def hold():
+        with lock:
+            ready.set()
+            assert release.wait(3)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert ready.wait(1)
+        with db.manager.write_metadata_context({"write_budget_ms": 100}):
+            with pytest.raises(QueuedWriteDeadlineExceeded, match="waiting"):
+                PatientStatusDAO(db.manager).ensure_initial_status(7, shift, shift)
+        assert db.write_entries == 0 and db.local_reads == [] and db.statements == []
+    finally:
+        release.set()
+        thread.join(3)
+        db.conn.close()
+    assert not thread.is_alive()
 
 
 class _RejectingQueue(_Queue):
@@ -330,7 +649,8 @@ def test_initial_status_retry_is_bounded_by_count_and_overall_deadline(monkeypat
     assert len(deadline_queue.calls) == 1
 
 
-def test_vitals_snapshot_enqueues_initial_status_without_waiting_or_inventing_status():
+@pytest.mark.parametrize("outcome", list(InitialStatusOutcome))
+def test_vitals_snapshot_enqueues_initial_status_without_waiting_or_inventing_status(outcome):
     facade = RemCardService.__new__(RemCardService)
     queued = []
     direct_calls = []
@@ -367,8 +687,11 @@ def test_vitals_snapshot_enqueues_initial_status_without_waiting_or_inventing_st
     assert direct_calls == []
     assert snapshot["initial_status_write_queued"] is True
     assert snapshot["status"] is None
-    queued[0][1]["on_success"](InitialStatusOutcome.CREATED)
-    assert [item[0] for item in invalidations] == ["vitals", "card"]
+    queued[0][1]["on_success"](outcome)
+    expected = ["vitals", "card"] if outcome in {
+        InitialStatusOutcome.CREATED, InitialStatusOutcome.BRIDGED, InitialStatusOutcome.REPAIRED,
+    } else []
+    assert [item[0] for item in invalidations] == expected
 
 
 def test_snapshot_queue_submission_failure_does_not_fail_the_read():

@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.17</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.18</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">Releases</a> ·
   <a href="#read-more">Documentation</a> ·
   <a href="https://donkiton.github.io/rem_site/en/">Website</a> ·
@@ -72,9 +72,9 @@ Orders, completion marks and fluid balance across the 08:00–08:00 shift.
 
 ## Get started
 
-Download the [RemCard 5.1.17 Windows installer](https://github.com/Donkiton/rem_card/releases/download/v5.1.17/RemCard-Setup-5.1.17.exe), with Russian and English language selection, or the [full ZIP package](https://github.com/Donkiton/rem_card/releases/download/v5.1.17/RemCard_5.1.17_full.zip). [Release notes](https://github.com/Donkiton/rem_card/releases/tag/v5.1.17) · [File SHA-256 checksums](https://github.com/Donkiton/rem_card/releases/download/v5.1.17/SHA256SUMS.txt).
+Download the [RemCard 5.1.18 Windows installer](https://github.com/Donkiton/rem_card/releases/download/v5.1.18/RemCard-Setup-5.1.18.exe), with Russian and English language selection, or the [full ZIP package](https://github.com/Donkiton/rem_card/releases/download/v5.1.18/RemCard_5.1.18_full.zip). [Release notes](https://github.com/Donkiton/rem_card/releases/tag/v5.1.18) · [File SHA-256 checksums](https://github.com/Donkiton/rem_card/releases/download/v5.1.18/SHA256SUMS.txt).
 
-Version 5.1.17 reduces connection setup contention and gives saves priority over new background reads. PDF preparation runs in the background, orders show an explicit loading state, and routine technical logs are smaller. Before the first launch, close all older clients using the shared database.
+Version 5.1.18 avoids write transactions when the initial patient status is already covered, adds bounded orders-load recovery, and lets long replica SQL scans yield to a pending writer. All 5.1.17 fixes are included; 5.1.16 clients can update directly to 5.1.18. Before the first launch, close all older clients using the shared database.
 
 After installation, launch **`RemCard.exe`**. If using the ZIP, extract the complete distribution folder, including `_internal`.
 

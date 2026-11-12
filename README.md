@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.17</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.18</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">Релизы</a> ·
   <a href="#что-почитать">Документация</a> ·
   <a href="https://donkiton.github.io/rem_site/">Сайт</a> ·
@@ -72,9 +72,9 @@
 
 ## Начать работу
 
-Скачайте [установщик RemCard 5.1.17 для Windows](https://github.com/Donkiton/rem_card/releases/download/v5.1.17/RemCard-Setup-5.1.17.exe) с выбором русского и английского языков или [полный ZIP-пакет](https://github.com/Donkiton/rem_card/releases/download/v5.1.17/RemCard_5.1.17_full.zip). [Описание выпуска](https://github.com/Donkiton/rem_card/releases/tag/v5.1.17) · [SHA-256 файлов](https://github.com/Donkiton/rem_card/releases/download/v5.1.17/SHA256SUMS.txt).
+Скачайте [установщик RemCard 5.1.18 для Windows](https://github.com/Donkiton/rem_card/releases/download/v5.1.18/RemCard-Setup-5.1.18.exe) с выбором русского и английского языков или [полный ZIP-пакет](https://github.com/Donkiton/rem_card/releases/download/v5.1.18/RemCard_5.1.18_full.zip). [Описание выпуска](https://github.com/Donkiton/rem_card/releases/tag/v5.1.18) · [SHA-256 файлов](https://github.com/Donkiton/rem_card/releases/download/v5.1.18/SHA256SUMS.txt).
 
-В 5.1.17 сокращено взаимное ожидание настройки SQLite-соединений, добавлен приоритет сохранения перед новыми фоновыми чтениями. Подготовка PDF выполняется в фоне, загрузка назначений отображается явно, штатные технические логи сокращены. Перед первым запуском новой версии закройте все прежние клиенты, работающие с общей базой.
+В 5.1.18 убраны лишние записывающие транзакции проверки существующего статуса, добавлено ограниченное восстановление загрузки назначений и прерывание длинных SQL-сканов реплики при ожидающей записи. Все исправления 5.1.17 включены; с 5.1.16 можно обновиться сразу до 5.1.18. Перед первым запуском новой версии закройте все прежние клиенты, работающие с общей базой.
 
 После установки запустите **`RemCard.exe`**. При использовании ZIP распакуйте всю папку поставки вместе с `_internal`.
 

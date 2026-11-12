@@ -109,6 +109,42 @@ def _wait_until(predicate, timeout: float = 1.0) -> bool:
     return bool(predicate())
 
 
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("outcome", list(InitialStatusOutcome))
+def test_initial_status_noop_settles_without_change_signal_or_forced_refresh(queued, outcome):
+    data = _service_harness()
+    refreshed, successes = [], []
+    data.request_immediate_refresh = lambda **fields: refreshed.append(fields)
+    description = "ensure_initial_patient_status:7"
+    try:
+        if queued:
+            assert data.enqueue_write(
+                description=description, operation=lambda: outcome, on_success=successes.append,
+            )
+            assert _wait_until(lambda: successes == [outcome])
+        else:
+            assert data.run_write(description, lambda _cursor: outcome) == outcome
+
+        assert len(data.write_outcomes()) == 1
+        assert data.write_outcomes()[0]["state"] == "committed"
+        assert data.unsettled_writes() == []
+        changed = outcome in {InitialStatusOutcome.CREATED, InitialStatusOutcome.BRIDGED, InitialStatusOutcome.REPAIRED}
+        assert data.write_finished.values == ([(description,)] if changed else [])
+        assert refreshed == ([{"force_emit": True, "source": description}] if changed else [])
+    finally:
+        data.shutdown(timeout=1, application_exit=True)
+
+
+def test_unrelated_operation_result_does_not_suppress_its_change_signal():
+    data = _service_harness()
+    try:
+        result = data.run_write("other_write", lambda _cursor: InitialStatusOutcome.NO_CHANGE)
+        assert result == InitialStatusOutcome.NO_CHANGE
+        assert data.write_finished.values == [("other_write",)]
+    finally:
+        data.shutdown(timeout=1, application_exit=True)
+
+
 @pytest.mark.parametrize("failure_kind", ["raw_busy", "precommit_busy", "commit_busy", "unknown", "permanent"])
 def test_initial_status_has_one_retry_owner_through_real_data_service_queue(failure_kind):
     data = _service_harness()

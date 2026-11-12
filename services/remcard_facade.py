@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from ..data.dao.sync_cursor import is_cursor_newer, normalize_sync_cursor
+from ..data.dao.patient_status_dao import InitialStatusOutcome
 from ..data.dto.remcard_dto import (
     PatientDTO,
     VitalDTO,
@@ -689,6 +690,8 @@ class RemCardService(QObject):
             return False
 
         def on_success(_outcome) -> None:
+            if isinstance(_outcome, InitialStatusOutcome) and not _outcome.changed:
+                return
             coordinator = getattr(self, "read_coordinator", None)
             for method_name in (
                 "invalidate_patient_vitals_for_admission",

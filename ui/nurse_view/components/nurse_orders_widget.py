@@ -21,6 +21,7 @@ from rem_card.services.read_coordinator import OrdersRefreshCancelled
 from rem_card.services.shift_service import ShiftService
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 from rem_card.ui.shared.orders_display_diagnostics import finish_orders_display, observe_visible_orders_snapshot
+from rem_card.ui.shared.orders_snapshot_recovery import orders_snapshot_recovery
 from rem_card.services.order_domain_service import (
     NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 )
@@ -310,6 +311,7 @@ class NurseOrdersWidget(QWidget):
         new_context_key,
         new_context_hash: str | None = None,
         replacement_request_id: str | None = None,
+        force_detach: bool = False,
     ) -> bool:
         worker = self._snapshot_worker
         if worker is None:
@@ -318,10 +320,10 @@ class NurseOrdersWidget(QWidget):
             worker_running = bool(worker.isRunning())
         except Exception:
             worker_running = False
-        if not worker_running:
+        if not worker_running and not force_detach:
             return False
         old_context_key = self._active_snapshot_context_key()
-        if old_context_key == new_context_key:
+        if old_context_key == new_context_key and not force_detach:
             return False
         retired = self._detach_snapshot_worker(
             worker,
@@ -339,6 +341,9 @@ class NurseOrdersWidget(QWidget):
 
     def shutdown(self, timeout_ms: int = 1200):
         self._is_closing = True
+        recovery = getattr(self, "_orders_snapshot_recovery", None)
+        if recovery is not None:
+            recovery.invalidate_pending()
         self._reset_pending_snapshot_request()
         for timer_name in (
             "_silent_sync_timer",
@@ -399,18 +404,22 @@ class NurseOrdersWidget(QWidget):
 
     def set_context(self, *, service=None, admission_id=None, shift_date=None):
         previous_context_key = self._current_context_key()
+        previous_service = self.service
         if service is not None:
             self.service = service
         self.admission_id = admission_id
         self.shift_date = shift_date
         current_context_key = self._current_context_key()
-        if previous_context_key != current_context_key:
+        if previous_context_key != current_context_key or previous_service is not self.service:
+            orders_snapshot_recovery(self, role="nurse").context_changed()
+            self._snapshot_seq += 1
             finish_orders_display(self, "cancelled")
             self._balance_mark_overrides.clear()
             self._detach_active_snapshot_for_context_switch(
                 new_context_key=current_context_key,
                 new_context_hash=None,
                 replacement_request_id=None,
+                force_detach=previous_service is not self.service,
             )
             if self.model is not None:
                 self.model.clear_for_context(self.admission_id, self.shift_date)
@@ -874,6 +883,10 @@ class NurseOrdersWidget(QWidget):
 
         priority_name = self._normalize_priority(priority)
         context_key = context.cache_key()
+        if orders_snapshot_recovery(self, role="nurse").before_request(context_key, {
+            "force": force, "source": source, "priority": priority, "invalidate_reason": invalidate_reason,
+        }):
+            return
         forced_reload_key = None
         if bool(force) and str(source or "").strip().lower() == "stale_snapshot":
             forced_reload_key = self._forced_reload_pending_key or self._forced_reload_key(
@@ -1064,12 +1077,14 @@ class NurseOrdersWidget(QWidget):
                     (payload.get("snapshot") or {}).get("load_trace_id"),
                 )
                 return
-            self._apply_snapshot_data(
+            applied = self._apply_snapshot_data(
                 snapshot=payload.get("snapshot") or {},
                 admission_id=payload.get("admission_id"),
                 shift_date=payload.get("shift_date"),
                 context_key=payload.get("context_key"),
             )
+            if applied:
+                orders_snapshot_recovery(self, role="nurse").applied()
         except Exception:
             logger.exception("[NurseOrdersWidget] Failed to apply orders snapshot")
             self._set_orders_load_state("error")
@@ -1385,6 +1400,9 @@ class NurseOrdersWidget(QWidget):
         self._clear_soft_update_state()
         self._set_orders_load_state("error")
         if isinstance(exc, OrdersRefreshCancelled):
+            orders_snapshot_recovery(self, role="nurse").recover(
+                dict(self._active_snapshot_worker_state or {}), self._snapshot_worker,
+            )
             logger.info("[NurseOrdersWidget] Orders snapshot load cancelled: %s", exc)
             return
         logger.warning("[NurseOrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)

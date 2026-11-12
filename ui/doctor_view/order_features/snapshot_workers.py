@@ -3,6 +3,7 @@
 from datetime import datetime
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
+from rem_card.ui.shared.orders_snapshot_recovery import orders_snapshot_recovery
 import time
 
 
@@ -88,6 +89,8 @@ class SnapshotWorkerLifecycleMixin:
             reason=reason,
             replacement_request_id=replacement_request_id,
         )
+        if reason == "watchdog_stalled":
+            orders_snapshot_recovery(self, role="doctor").retain_until_finished(worker, retired.get("context_key"))
         self._disconnect_snapshot_worker(worker)
         try:
             worker.quit()
@@ -164,6 +167,7 @@ class SnapshotWorkerLifecycleMixin:
         new_context_key,
         new_context_hash: str | None = None,
         replacement_request_id: str | None = None,
+        force_detach: bool = False,
     ) -> bool:
         worker = self._snapshot_worker
         if worker is None:
@@ -172,10 +176,10 @@ class SnapshotWorkerLifecycleMixin:
             worker_running = bool(worker.isRunning())
         except Exception:
             worker_running = False
-        if not worker_running:
+        if not worker_running and not force_detach:
             return False
         old_context_key = self._active_snapshot_context_key()
-        if old_context_key == new_context_key:
+        if old_context_key == new_context_key and not force_detach:
             return False
         retired = self._detach_snapshot_worker(
             worker,
@@ -206,6 +210,9 @@ class SnapshotWorkerLifecycleMixin:
 
     def shutdown(self, timeout_ms: int = 1200):
         self._is_closing = True
+        recovery = getattr(self, "_orders_snapshot_recovery", None)
+        if recovery is not None:
+            recovery.invalidate_pending()
         self._reset_pending_snapshot_request()
         for timer_name in (
             "_fast_sync_timer",
