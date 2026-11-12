@@ -6,7 +6,7 @@ import time
 from collections import Counter
 from contextlib import nullcontext
 from datetime import datetime
-from types import SimpleNamespace
+from types import SimpleNamespace, MethodType
 
 import pytest
 
@@ -14,6 +14,7 @@ from rem_card.data.dao import db_manager as db_manager_module
 from rem_card.data.dao.db_manager import DatabaseManager
 from rem_card.services import read_coordinator as coordinator_module
 from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
+from rem_card.services.remcard_facade import read_scoped_snapshot
 
 
 SHIFT = datetime(2026, 10, 28, 8)
@@ -158,6 +159,29 @@ def test_orders_reads_reuse_one_connection_without_skipping_authoritative_probe(
     assert len([sql for sql in service.statements if 'MAX(id)' in sql]) == 1 + expected_full
     service.assert_closed()
     assert coordinator._orders_reads_inflight == {}
+
+
+def test_full_orders_metrics_include_source_preparation_before_builder_body(tmp_path, monkeypatch):
+    service = _SqliteOrdersService(tmp_path / 'prepare.db', ['vitals'])
+    coordinator, context = _coordinator(service)
+    events = []
+    monkeypatch.setattr(coordinator_module, 'record_metric', lambda name, value=None, **fields: events.append((name, fields)))
+
+    @read_scoped_snapshot
+    def build_orders_snapshot(self, _admission_id, _shift_date, **_kwargs):
+        self.calls['full'] += 1
+        assert self.db.current_snapshot_read_source() == 'central'
+        rows = self.db._fetch_all_central('SELECT * FROM admin_rows')
+        return self.snapshot(self.db.get_latest_change_id(17, False), rows)
+
+    service.build_orders_snapshot = MethodType(build_orders_snapshot, service)
+    result = coordinator.load_orders_tab(context, source='click')
+
+    assert result['version'] == 11
+    fields = next(fields for name, fields in events if name == 'orders_load_time_ms')
+    assert 0 < fields['read_scoped_snapshot_ms'] <= fields['full_build_ms']
+    assert service.calls['full'] == 1
+    service.assert_closed()
 
 
 @pytest.mark.parametrize('full_version', [None, 11])

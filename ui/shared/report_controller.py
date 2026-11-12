@@ -9,7 +9,6 @@ from rem_card.app.paths import REPORT_DIR
 from rem_card.app.logger import logger
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.pdf_opener import open_pdf_file
-from rem_card.ui.shared.report_guard import ensure_daily_card_exists
 from rem_card.ui.shared.pdf_report_jobs import ReportDataWorker, report_jobs
 
 
@@ -51,16 +50,8 @@ class RemCardReportController(QObject):
         if not jobs.begin("daily"):
             CustomMessageBox.information(self.parent, "Инфо", "Отчет за сутки уже формируется.")
             return
-        if not ensure_daily_card_exists(self.parent, self.service, admission_id, shift_date):
-            jobs.finish("daily")
-            return
-
-        from ..rem_card_sectors.sector_print import DataCollectorWorker, PrintConfig
-
         try:
-            cfg = PrintConfig().load()
-            self.daily_worker = ReportDataWorker(DataCollectorWorker(self.service, admission_id, shift_date, cfg))
-            self._daily_report_config = cfg
+            self.daily_worker = ReportDataWorker.for_report(self, "daily", self.service, admission_id, shift_date)
             self._daily_admission_id = admission_id
             self.daily_worker.collected.connect(self._on_daily_report_collected)
             self.daily_worker.error.connect(self._on_daily_report_error)
@@ -180,22 +171,8 @@ class RemCardReportController(QObject):
             CustomMessageBox.information(self.parent, "Инфо", "Общий отчет уже формируется.")
             return
 
-        from ..rem_card_sectors.sector_print import FullReportWorker, PrintConfig
-
         try:
-            cfg = PrintConfig().load()
-            dates = self.service.get_all_card_dates(admission_id)
-            if not dates:
-                jobs.finish("full")
-                CustomMessageBox.information(
-                    self.parent,
-                    "Инфо",
-                    "Нет данных для формирования общего отчета.",
-                )
-                return
-
-            self.full_worker = ReportDataWorker(FullReportWorker(self.service, admission_id, dates, cfg))
-            self._full_report_config = cfg
+            self.full_worker = ReportDataWorker.for_report(self, "full", self.service, admission_id)
             self._full_admission_id = admission_id
             self.full_worker.collected.connect(self._on_full_report_collected)
             self.full_worker.error.connect(self._on_full_report_error)

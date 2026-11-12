@@ -59,9 +59,10 @@ def test_transition_input_and_modal_state_are_private_and_observational(owner):
                                "[DoctorNavigation] %s", (serialized,), None)
     assert not _is_routine_info(record)
     diagnostics.close()
+    count_after_close = len(captured)
     assert not diagnostics.eventFilter(owner, mouse)
     diagnostics.transition("beds", "card")
-    assert captured[-1] is payload
+    assert len(captured) == count_after_close and payload in captured
 
 
 def test_hidden_doctor_and_closed_diagnostics_do_not_observe_other_roles(owner):
@@ -139,3 +140,52 @@ def test_navigation_lines_are_included_in_existing_user_report(tmp_path, monkeyp
     now = datetime.now()
     logs = reports.collect_logs_for_period(now - timedelta(minutes=1), now + timedelta(seconds=1))
     assert "[DoctorNavigation]" in logs and "mode_changed" in logs
+
+
+def test_hour_of_focus_events_has_bounded_volume_and_manual_context(owner, monkeypatch):
+    monkeypatch.delenv("REMCARD_TEXT_LOG_DETAIL_UNTIL", raising=False)
+    captured = []
+    now = [0.0]
+    original_bytes = 0
+    diagnostics = DoctorNavigationDiagnostics(owner, submit=captured.append, clock=lambda: now[0])
+    try:
+        for second in range(1, 3601):
+            now[0] = second
+            diagnostics.eventFilter(owner, QEvent(QEvent.FocusIn))
+            original_bytes += len(json.dumps(diagnostics._recent_states[-1], ensure_ascii=True).encode())
+            diagnostics.eventFilter(owner, QEvent(QEvent.FocusOut))
+            original_bytes += len(json.dumps(diagnostics._recent_states[-1], ensure_ascii=True).encode())
+        assert len(captured) == 12
+        assert sum(sum(p["counts"].values()) for p in captured) + sum(diagnostics._routine_counts.values()) == 7200
+        assert len(diagnostics._recent_states) == 64
+        routine_bytes = len(json.dumps(captured, ensure_ascii=True).encode())
+        assert routine_bytes / original_bytes < 0.01
+        print(f"Focus volume for one hour: 7200 -> {len(captured)} records, {original_bytes} -> {routine_bytes} bytes")
+        manual = QKeyEvent(QEvent.KeyPress, Qt.Key_F12, Qt.ControlModifier | Qt.AltModifier)
+        diagnostics.eventFilter(owner, manual)
+        assert captured[-1]["event"] == "manual_snapshot"
+        assert len(captured[-1]["recent_states"]) == 64
+        assert len(json.dumps(captured).encode()) < 80_000
+    finally:
+        diagnostics.close()
+
+
+def test_focus_detail_expires_and_unexpected_transition_keeps_history(owner, monkeypatch):
+    from rem_card.app.compact_logging import enable_detailed_text_logs
+
+    monkeypatch.setenv("REMCARD_TEXT_LOG_DETAIL_UNTIL", "")
+    enable_detailed_text_logs(1800)
+    captured = []
+    now = [0.0]
+    diagnostics = DoctorNavigationDiagnostics(owner, submit=captured.append, clock=lambda: now[0])
+    try:
+        diagnostics.eventFilter(owner, QEvent(QEvent.FocusIn))
+        assert captured[-1]["event"] == "FocusIn"
+        now[0] = 1801
+        diagnostics.eventFilter(owner, QEvent(QEvent.FocusOut))
+        assert captured[-1]["event"] == "routine_summary"
+        diagnostics.transition("card", "beds")
+        assert captured[-1]["event"] == "mode_changed"
+        assert [p["event"] for p in captured[-1]["recent_states"]] == ["FocusIn", "FocusOut"]
+    finally:
+        diagnostics.close()

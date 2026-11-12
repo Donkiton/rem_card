@@ -21,6 +21,7 @@ from rem_card.ui.rem_card_sectors import sector_print
 from rem_card.ui.rem_card_sectors.s_print.builder import ReportBuilder
 from rem_card.ui.doctor_view.components import beds_selection_widget as doctor_beds
 from rem_card.ui.nurse_view.components import nurse_beds_selection_widget as nurse_beds
+from rem_card.ui.nurse_view.sectors import nurse_sector_print as nurse_print
 
 
 def _pump_until(predicate, timeout_ms=4000):
@@ -62,9 +63,11 @@ def report_fixture(app, monkeypatch, tmp_path):
         "icu_day": 1,
     }
     requests = []
+    collections = []
     built = []
     opened = []
     notices = []
+    config_saves = []
     directory = tmp_path / "reports"
     service = SimpleNamespace(has_card=lambda *_: True, get_all_card_dates=lambda *_: [data["start_dt"]])
 
@@ -74,9 +77,11 @@ def report_fixture(app, monkeypatch, tmp_path):
 
         def __init__(self, _service, admission_id, _date, _config):
             super().__init__()
+            self.admission_id = admission_id
             requests.append(admission_id)
 
         def run(self):
+            collections.append(self.admission_id)
             self.finished.emit(dict(data))
 
     class FullCollector(QThread):
@@ -85,9 +90,11 @@ def report_fixture(app, monkeypatch, tmp_path):
 
         def __init__(self, _service, admission_id, _dates, _config):
             super().__init__()
+            self.admission_id = admission_id
             requests.append(admission_id)
 
         def run(self):
+            collections.append(self.admission_id)
             self.finished.emit([dict(data)])
 
     def build(payload, config, path):
@@ -100,13 +107,21 @@ def report_fixture(app, monkeypatch, tmp_path):
 
     monkeypatch.setattr(sector_print, "DataCollectorWorker", DailyCollector)
     monkeypatch.setattr(sector_print, "FullReportWorker", FullCollector)
+    class NurseDailyCollector(DailyCollector):
+        pass
+
+    class NurseFullCollector(FullCollector):
+        pass
+
+    monkeypatch.setattr(nurse_print, "DataCollectorWorker", NurseDailyCollector)
+    monkeypatch.setattr(nurse_print, "FullReportWorker", NurseFullCollector)
     monkeypatch.setattr(sector_print.PrintConfig, "load", lambda _self: {"synthetic": True})
     monkeypatch.setattr(ReportBuilder, "build_pdf", staticmethod(build))
     monkeypatch.setattr(report_controller, "REPORT_DIR", str(directory))
     from rem_card.app import paths
 
     monkeypatch.setattr(paths, "REPORT_DIR", str(directory))
-    for module in (report_controller, doctor_beds, nurse_beds):
+    for module in (report_controller, doctor_beds, nurse_beds, sector_print, nurse_print):
         monkeypatch.setattr(module, "open_pdf_file", open_file)
         for name in ("information", "warning", "critical"):
             monkeypatch.setattr(module.CustomMessageBox, name,
@@ -118,6 +133,27 @@ def report_fixture(app, monkeypatch, tmp_path):
             parent._is_closing = False
             target = report_controller.RemCardReportController(service, parent)
             parent.report_controller = target
+        elif route in {"doctor_print", "nurse_print"}:
+            parent = QWidget()
+            parent._is_closing = False
+            parent.service, parent.admission_id, parent.current_date = service, 1, data["start_dt"]
+            source = sector_print.SectorPrint if route == "doctor_print" else nurse_print.NurseSectorPrint
+            monkeypatch.setattr(source, "load_settings", lambda _self: None)
+            target = source(parent)
+            target.cb_vitals.setChecked(True)
+
+            class Config:
+                def __init__(self):
+                    self.saved = {"profile": route}
+
+                def save(self, **options):
+                    self.saved.update(options)
+                    config_saves.append((route, dict(options), threading.get_ident()))
+
+                def load(self):
+                    return dict(self.saved)
+
+            target.config = Config()
         else:
             source = doctor_beds.BedsSelectionWidget if route == "doctor_w1" else nurse_beds.NurseBedsSelectionWidget
             names = (
@@ -145,14 +181,170 @@ def report_fixture(app, monkeypatch, tmp_path):
                     target.run_daily_report(admission_id, data["start_dt"])
                 else:
                     target.run_full_report(admission_id)
+            elif route in {"doctor_print", "nurse_print"}:
+                parent.admission_id = admission_id
+                (target.generate_pdf if kind == "daily" else target.generate_full_report)()
             else:
                 method = target.on_daily_report_requested if kind == "daily" else target.on_full_report_requested
                 method(SimpleNamespace(id=admission_id))
 
         return parent, target, request
 
-    return SimpleNamespace(data=data, requests=requests, built=built, opened=opened,
+    return SimpleNamespace(service=service, data=data, requests=requests, collections=collections,
+                           config_saves=config_saves, built=built, opened=opened,
                            notices=notices, directory=directory, make=make)
+
+
+@pytest.mark.parametrize("route", ["controller", "doctor_w1", "nurse_w1"])
+@pytest.mark.parametrize("kind", ["daily", "full"])
+def test_report_preparation_reads_off_gui_and_coalesces_clicks(report_fixture, monkeypatch, route, kind):
+    fixture = report_fixture
+    parent, target, request = fixture.make(route)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def slow_read(*_args):
+        calls.append(threading.get_ident())
+        entered.set()
+        assert release.wait(3)
+        return True if kind == "daily" else [fixture.data["start_dt"]]
+
+    monkeypatch.setattr(fixture.service, "has_card" if kind == "daily" else "get_all_card_dates", slow_read)
+    try:
+        request(kind)
+        _pump_until(entered.is_set)
+        request(kind, admission_id=2)
+        ticks = []
+        QTimer.singleShot(0, lambda: ticks.append(True))
+        _pump_until(lambda: bool(ticks))
+        assert len(calls) == 1 and calls[0] != threading.get_ident()
+        assert fixture.collections == [] and report_jobs(target).active(kind)
+        release.set()
+        _pump_until(lambda: len(fixture.opened) == 1)
+        assert fixture.requests == [1]
+    finally:
+        release.set()
+        shutdown_report_jobs(parent)
+
+
+@pytest.mark.parametrize("kind", ["daily", "full"])
+@pytest.mark.parametrize("stop", ["closed", "empty", "error"])
+def test_report_preparation_does_not_collect_after_close_or_failed_guard(report_fixture, monkeypatch, kind, stop):
+    fixture = report_fixture
+    parent, target, request = fixture.make("controller")
+    entered, release = threading.Event(), threading.Event()
+
+    def read(*_args):
+        entered.set()
+        assert release.wait(3)
+        if stop == "error":
+            raise RuntimeError("synthetic preparation failure")
+        return False if kind == "daily" else []
+
+    monkeypatch.setattr(fixture.service, "has_card" if kind == "daily" else "get_all_card_dates", read)
+    try:
+        request(kind)
+        _pump_until(entered.is_set)
+        worker = target.daily_worker if kind == "daily" else target.full_worker
+        if stop == "closed":
+            parent._is_closing = True
+            shutdown_report_jobs(parent)
+            parent.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            assert worker.isRunning() and worker in AsyncCallThread._keepalive_threads
+        release.set()
+        _pump_until(lambda: not worker.isRunning())
+        _pump_for(20)
+        assert fixture.collections == [] and fixture.built == [] and fixture.opened == []
+        if stop == "closed":
+            assert fixture.notices == []
+        else:
+            assert not report_jobs(target).active(kind)
+            assert fixture.notices == [("critical" if stop == "error" else
+                                        "warning" if kind == "daily" else "information", threading.get_ident())]
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("route", ["doctor_print", "nurse_print"])
+@pytest.mark.parametrize("kind", ["daily", "full"])
+def test_print_tab_prepares_off_gui_and_preserves_its_collector_and_options(report_fixture, monkeypatch, route, kind):
+    fixture = report_fixture
+    parent, target, request = fixture.make(route)
+    entered, release = threading.Event(), threading.Event()
+    threads = []
+
+    def read(*_args):
+        threads.append(threading.get_ident())
+        entered.set()
+        assert release.wait(3)
+        return True if kind == "daily" else [fixture.data["start_dt"]]
+
+    monkeypatch.setattr(fixture.service, "has_card" if kind == "daily" else "get_all_card_dates", read)
+    try:
+        request(kind)
+        _pump_until(entered.is_set)
+        request("full" if kind == "daily" else "daily", admission_id=2)
+        target.cb_vitals.setChecked(False)
+        ticks = []
+        QTimer.singleShot(0, lambda: ticks.append(True))
+        _pump_until(lambda: bool(ticks))
+        assert fixture.collections == [] and len(fixture.requests) == 1
+        module = nurse_print if route == "nurse_print" else sector_print
+        assert isinstance(target.worker.collector, module.DataCollectorWorker if kind == "daily" else module.FullReportWorker)
+        release.set()
+        _pump_until(lambda: not report_jobs(target).active(kind))
+        assert fixture.collections == [1] and len(fixture.built) == 1
+        assert len(fixture.config_saves) == 1
+        assert fixture.config_saves[0][1]["vitals"] is True
+        assert fixture.built[0][1]["profile"] == route
+        assert fixture.built[0][1]["vitals"] is True
+        assert threads[0] != threading.get_ident()
+        assert fixture.config_saves[0][2] != threading.get_ident()
+        assert target.btn_open.isEnabled()
+        assert len(fixture.opened) == int(kind == "full")
+    finally:
+        release.set()
+        shutdown_report_jobs(parent)
+
+
+@pytest.mark.parametrize("route", ["doctor_print", "nurse_print"])
+@pytest.mark.parametrize("kind", ["daily", "full"])
+@pytest.mark.parametrize("stop", ["closed", "empty"])
+def test_print_tab_preparation_cannot_deliver_after_close_or_empty_guard(report_fixture, monkeypatch, route, kind, stop):
+    fixture = report_fixture
+    parent, target, request = fixture.make(route)
+    entered, release = threading.Event(), threading.Event()
+
+    def read(*_args):
+        entered.set()
+        assert release.wait(3)
+        return False if kind == "daily" else []
+
+    monkeypatch.setattr(fixture.service, "has_card" if kind == "daily" else "get_all_card_dates", read)
+    try:
+        request(kind)
+        _pump_until(entered.is_set)
+        worker = target.worker
+        if stop == "closed":
+            parent._is_closing = True
+            shutdown_report_jobs(parent)
+            parent.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            assert worker.isRunning()
+        release.set()
+        _pump_until(lambda: not worker.isRunning())
+        _pump_for(20)
+        assert fixture.collections == [] and fixture.config_saves == []
+        assert fixture.built == [] and fixture.opened == []
+        if stop == "closed":
+            assert fixture.notices == []
+        else:
+            assert not report_jobs(target).active(kind)
+            assert fixture.notices[0][0] == ("warning" if kind == "daily" else "information")
+            assert target.status_label.text()
+    finally:
+        release.set()
 
 
 @pytest.mark.parametrize("route", ["controller", "doctor_w1", "nurse_w1"])

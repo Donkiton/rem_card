@@ -15,6 +15,7 @@ from typing import Any
 
 
 WINDOW_SEC = 60.0
+REPLICA_LOCK_WINDOW_SEC = 300.0
 MAX_GROUPS = 128
 MAX_DETAIL_SEC = 1800.0
 LATENCY_BOUNDS_MS = (10, 50, 100, 500, 1000)
@@ -229,6 +230,12 @@ class MetricAggregator:
     def drain(self, *, force: bool = False) -> list[dict[str, Any]]:
         now = self._clock()
         with self._lock:
-            keys = [key for key, bucket in self._buckets.items()
-                    if force or now - bucket.started >= WINDOW_SEC]
+            keys = []
+            for key, bucket in self._buckets.items():
+                window_sec = WINDOW_SEC
+                if (bucket.labels["source_metric"] in {"sqlite_write_lock_acquired", "sqlite_write_lock_released"}
+                        and bucket.labels.get("source") in _LOCK_SOURCES):
+                    window_sec = REPLICA_LOCK_WINDOW_SEC
+                if force or now - bucket.started >= window_sec:
+                    keys.append(key)
             return [self._buckets.pop(key).payload(now) for key in keys]

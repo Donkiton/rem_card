@@ -11,7 +11,6 @@ from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
 from rem_card.ui.shared.w1_beds_signature import build_w1_bed_row_signature
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.ui.shared.pdf_report_jobs import ReportDataWorker, report_jobs, shutdown_report_jobs
-from rem_card.ui.shared.report_guard import ensure_daily_card_exists
 from rem_card.ui.shared.recovery_bed_status_actions import (
     cancel_recovery_transfer,
     open_recovery_transfer_dialog,
@@ -579,21 +578,14 @@ class NurseBedsSelectionWidget(QWidget):
             CustomMessageBox.information(self, "Инфо", "Отчет за сутки уже формируется.")
             return
         
-        from ...rem_card_sectors.sector_print import DataCollectorWorker, PrintConfig
-        
         try:
-            cfg = PrintConfig().load()
             target_date = datetime.datetime.now()
-            if not ensure_daily_card_exists(self, self.remcard_service, patient.id, target_date):
-                jobs.finish("daily")
-                return
             logger.info(
                 "[W1Report] daily requested role=nurse admission_id=%s date=%s",
                 patient.id,
                 target_date.isoformat(),
             )
-            self.daily_worker = ReportDataWorker(DataCollectorWorker(self.remcard_service, patient.id, target_date, cfg))
-            self._daily_report_config = cfg
+            self.daily_worker = ReportDataWorker.for_report(self, "daily", self.remcard_service, patient.id, target_date)
             self.daily_worker.collected.connect(self._on_daily_report_collected)
             self.daily_worker.error.connect(self._on_daily_report_error)
             jobs.track("daily", self.daily_worker)
@@ -681,19 +673,9 @@ class NurseBedsSelectionWidget(QWidget):
             CustomMessageBox.information(self, "Инфо", "Общий отчет уже формируется.")
             return
         
-        from ...rem_card_sectors.sector_print import FullReportWorker, PrintConfig
-        
         try:
-            cfg = PrintConfig().load()
             logger.info("[W1Report] full requested role=nurse admission_id=%s", patient.id)
-            dates = self.remcard_service.get_all_card_dates(patient.id)
-            if not dates:
-                jobs.finish("full")
-                CustomMessageBox.information(self, "Инфо", "Нет данных для формирования общего отчета.")
-                return
-                
-            self.report_worker = ReportDataWorker(FullReportWorker(self.remcard_service, patient.id, dates, cfg))
-            self._full_report_config = cfg
+            self.report_worker = ReportDataWorker.for_report(self, "full", self.remcard_service, patient.id)
             self.report_worker.collected.connect(self._on_full_report_collected)
             self.report_worker.error.connect(self._on_full_report_error)
             jobs.track("full", self.report_worker)

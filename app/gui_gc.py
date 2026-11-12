@@ -16,12 +16,15 @@ from pathlib import Path
 from PySide6 import __version__ as pyside_version
 from PySide6.QtCore import QEvent, QObject, QThread, QTimer, qVersion
 
+from rem_card.app.compact_logging import CompactLogPolicy, compaction_enabled
+
 
 POLL_INTERVAL_MS = 1000
 FULL_COLLECTION_INTERVAL_SEC = 60.0
 SLOW_COLLECTION_MS = 100.0
 USER_IDLE_SEC = 5.0
 DEFERRED_WARNING_SEC = 60.0
+SUMMARY_INTERVAL_SEC = 300.0
 
 
 _USER_ACTIVITY_EVENTS = frozenset({
@@ -64,6 +67,13 @@ class GuiGarbageCollector(QObject):
         self._last_user_activity = float("-inf")
         self._deferred_since = None
         self._last_deferred_warning = 0.0
+        self._detail_policy = CompactLogPolicy()
+        self._summary_started = time.monotonic()
+        self._summary_generations = Counter()
+        self._summary_deferrals = Counter()
+        self._summary_elapsed_ms = 0.0
+        self._summary_max_ms = 0.0
+        self._summary_collected = 0
         self._callback = self._observe_gc
         gc.callbacks.append(self._callback)
         application.installEventFilter(self)
@@ -216,7 +226,12 @@ class GuiGarbageCollector(QObject):
     def _note_deferred(self, *, now, generation, reason):
         if self._deferred_since is None:
             self._deferred_since = now
-            self._log("info", "deferred", generation=generation, reason=reason)
+            self._summary_deferrals[reason.partition(":")[0]] += 1
+            if reason.endswith("_error"):
+                self._log("warning", "deferred", generation=generation, reason=reason)
+            elif not compaction_enabled() or self._detail_policy.detailed():
+                self._log("info", "deferred", generation=generation, reason=reason)
+            self._flush_summary(now)
             return
         elapsed = now - self._deferred_since
         if elapsed >= DEFERRED_WARNING_SEC and now - self._last_deferred_warning >= DEFERRED_WARNING_SEC:
@@ -265,25 +280,53 @@ class GuiGarbageCollector(QObject):
         sequence = self._sequence
         started = time.perf_counter()
         count_before = gc.get_count()
+        detailed = not compaction_enabled() or self._detail_policy.detailed()
+        routine = reason in {"periodic_full", "allocation_threshold"} and not detailed
         try:
             # The begin record survives a native failure inside gc.collect().
-            # Only full collections produce routine records (two per minute).
             if generation == 2:
-                self._log("info", "begin", sequence=sequence, generation=generation,
-                          reason=reason, count=count_before, windows=self._window_classes())
+                fields = {} if routine else {"count": count_before, "windows": self._window_classes()}
+                self._log("info", "begin", sequence=sequence, generation=generation, reason=reason, **fields)
             collected = gc.collect(generation)
             elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-            if generation == 2 or elapsed_ms >= SLOW_COLLECTION_MS:
+            if not routine or elapsed_ms >= SLOW_COLLECTION_MS:
                 self._log("warning" if elapsed_ms >= SLOW_COLLECTION_MS else "info", "end",
                           sequence=sequence, generation=generation, reason=reason,
                           collected=collected, uncollectable=len(gc.garbage),
-                          elapsed_ms=elapsed_ms, count_before=count_before, count_after=gc.get_count())
+                          elapsed_ms=elapsed_ms, count_before=count_before, count_after=gc.get_count(),
+                          windows=self._window_classes())
+            else:
+                self._summary_generations[generation] += 1
+                self._summary_elapsed_ms += elapsed_ms
+                self._summary_max_ms = max(self._summary_max_ms, elapsed_ms)
+                self._summary_collected += collected
+                self._flush_summary(time.monotonic())
             if generation == 2:
                 self._last_full = time.monotonic()
             self._minor_collections = self._minor_collections + 1 if generation == 0 else 0
             return collected
+        except Exception as exc:
+            self._log("error", "failed", sequence=sequence, generation=generation,
+                      reason=reason, error_class=type(exc).__name__,
+                      elapsed_ms=round((time.perf_counter() - started) * 1000, 3))
+            raise
         finally:
             self._collecting = False
+
+    def _flush_summary(self, now, *, force=False):
+        if not self._summary_generations and not self._summary_deferrals:
+            return
+        if not force and now - self._summary_started < SUMMARY_INTERVAL_SEC:
+            return
+        self._log("info", "summary", window_sec=round(max(0.0, now - self._summary_started), 3),
+                  generations=dict(self._summary_generations), deferrals=dict(self._summary_deferrals),
+                  elapsed_ms=round(self._summary_elapsed_ms, 3), max_ms=self._summary_max_ms,
+                  collected=self._summary_collected)
+        self._summary_generations.clear()
+        self._summary_deferrals.clear()
+        self._summary_elapsed_ms = self._summary_max_ms = 0.0
+        self._summary_collected = 0
+        self._summary_started = now
 
     def close(self):
         if threading.get_native_id() != self._gui_native_id:
@@ -291,6 +334,7 @@ class GuiGarbageCollector(QObject):
         if self._closed:
             return
         self._timer.stop()
+        self._flush_summary(time.monotonic(), force=True)
         self._closed = True
         self._application.removeEventFilter(self)
         if self._callback in gc.callbacks:

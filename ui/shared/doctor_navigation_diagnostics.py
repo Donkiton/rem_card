@@ -8,12 +8,21 @@ import queue
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from datetime import datetime
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 from shiboken6 import isValid
+
+from rem_card.app.compact_logging import CompactLogPolicy, compaction_enabled
+
+
+ROUTINE_SUMMARY_SEC = 300.0
+RECENT_STATE_LIMIT = 64
+_ROUTINE_EVENTS = frozenset({
+    "WindowActivate", "WindowDeactivate", "WindowStateChange", "FocusIn", "FocusOut",
+})
 
 
 class _DiagnosticWriter:
@@ -106,6 +115,12 @@ class DoctorNavigationDiagnostics(QObject):
         self._budget_started = clock()
         self._budget_count = 0
         self._suppressed = 0
+        self._detail_policy = CompactLogPolicy(clock=clock)
+        self._recent_states = deque(maxlen=RECENT_STATE_LIMIT)
+        self._routine_counts = Counter()
+        self._routine_suppressed = 0
+        self._summary_started = clock()
+        self._last_context_dump = float("-inf")
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
@@ -113,11 +128,13 @@ class DoctorNavigationDiagnostics(QObject):
     def close(self):
         if self.closed:
             return
+        self._flush_routine_summary(self.clock(), force=True)
         self.closed = True
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
         self.recent.clear()
+        self._recent_states.clear()
 
     def action(self, name):
         if not self.closed:
@@ -139,6 +156,7 @@ class DoctorNavigationDiagnostics(QObject):
             self._budget_started, self._budget_count = now, 0
         if self._budget_count >= 20:
             self._suppressed += 1
+            self._routine_suppressed += 1
             return
         self._budget_count += 1
         app = QApplication.instance()
@@ -149,7 +167,7 @@ class DoctorNavigationDiagnostics(QObject):
         tab = tab_getter() if callable(tab_getter) and isValid(sector) else None
         from rem_card.services.crash_reports import current_crash_session_id
 
-        self.submit({
+        payload = {
             "event": event, "event_time": time.time(), "role": "doctor",
             "session_id": current_crash_session_id(),
             "mode": getattr(self.owner, "_selection_mode", None),
@@ -167,8 +185,38 @@ class DoctorNavigationDiagnostics(QObject):
                               "age_ms": round((now - item["time"]) * 1000)}
                              for item in self.recent if now - item["time"] <= 10],
             **fields,
-        })
+        }
         self._suppressed = 0
+        if event in _ROUTINE_EVENTS:
+            self._recent_states.append(payload)
+            self._routine_counts[event] += 1
+            self._flush_routine_summary(now)
+            if not compaction_enabled() or self._detail_policy.detailed():
+                self.submit(payload)
+            return
+        # A mode change without recent input is the original navigation anomaly
+        # being investigated. Keep its preceding state while bounding repeats.
+        unexpected_transition = event == "mode_changed" and not payload["recent_input"]
+        if event == "manual_snapshot" or (unexpected_transition and now - self._last_context_dump >= 60):
+            payload["recent_states"] = list(self._recent_states)
+            self._last_context_dump = now
+        self.submit(payload)
+
+    def _flush_routine_summary(self, now, *, force=False):
+        if not self._routine_counts or (not force and now - self._summary_started < ROUTINE_SUMMARY_SEC):
+            return
+        try:
+            self.submit({
+                "event": "routine_summary", "event_time": time.time(), "role": "doctor",
+                "window_sec": round(max(0.0, now - self._summary_started), 3),
+                "counts": dict(self._routine_counts), "suppressed_before": self._routine_suppressed,
+                "retained_states": len(self._recent_states),
+            })
+        except Exception:
+            pass
+        self._routine_counts.clear()
+        self._routine_suppressed = 0
+        self._summary_started = now
 
     def eventFilter(self, obj, event):
         kind = event.type()

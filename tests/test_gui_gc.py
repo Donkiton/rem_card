@@ -104,8 +104,8 @@ def test_worker_allocations_leave_calendar_cycle_for_real_gui_timer(platform):
         assert worker_ids[0] != gui_id
         assert not gc.isenabled() and controller._closed
         assert controller._callback not in gc.callbacks
-        assert any('phase=begin' in line and 'Window' in line for line in records), records
-        assert any('phase=end' in line and 'elapsed_ms' in line for line in records)
+        assert any('phase=begin' in line and 'sequence' in line for line in records), records
+        assert any('phase=summary' in line and 'elapsed_ms' in line for line in records)
         assert any('phase=installed' in line and 'pyside' in line for line in records)
         assert not any('unexpected_worker' in line for line in records)
         gc.callbacks.remove(observe)
@@ -217,6 +217,68 @@ def test_collection_continues_when_diagnostics_fail():
         del obj
         controller.collect()
         assert released == [True] and not controller._collecting
+        controller.close()
+    """)
+
+
+def test_routine_gc_volume_detail_expiry_and_slow_failure_diagnostics():
+    run_probe("""
+        import gc
+        import logging
+        import time
+        from types import SimpleNamespace
+        from rem_card.app import gui_gc
+        from rem_card.app.compact_logging import enable_detailed_text_logs
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication([])
+        records = []
+        class Recorder(logging.Handler):
+            def emit(self, record):
+                records.append((record.levelname, record.getMessage()))
+        log = logging.Logger('probe')
+        log.addHandler(Recorder())
+        controller = gui_gc.install_gui_gc(app, logger=log)
+        now = [0.0]
+        gui_gc.time = SimpleNamespace(monotonic=lambda: now[0], perf_counter=time.perf_counter)
+        controller._summary_started = 0.0
+        controller._detail_policy._clock = lambda: now[0]
+        gc.collect = lambda generation: 2
+        for minute in range(60):
+            now[0] = minute * 60
+            assert controller.collect(2, reason='periodic_full') == 2
+        assert len(records) <= 73
+        assert sum(len(line.encode()) for _, line in records) < 20_000
+        starts = [line for _, line in records if 'phase=begin' in line]
+        assert len(starts) == 60 and all('windows' not in line for line in starts)
+        assert not any('phase=end' in line for _, line in records)
+
+        enable_detailed_text_logs(1800)
+        controller.collect(2, reason='periodic_full')
+        assert 'phase=end' in records[-1][1] and 'windows' in records[-1][1]
+        now[0] += 1801
+        before = len(records)
+        controller.collect(2, reason='periodic_full')
+        assert not any('phase=end' in line for _, line in records[before:])
+
+        def slow(generation):
+            time.sleep(0.12)
+            return 3
+        gc.collect = slow
+        controller.collect(0, reason='allocation_threshold')
+        assert records[-1][0] == 'WARNING' and 'phase=end' in records[-1][1]
+        assert 'elapsed_ms' in records[-1][1] and 'windows' in records[-1][1]
+        def failed(generation):
+            raise RuntimeError('synthetic collector failure')
+        gc.collect = failed
+        try:
+            controller.collect(2, reason='periodic_full')
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('collection exception must propagate')
+        assert records[-1][0] == 'ERROR' and 'phase=failed' in records[-1][1]
+        assert not controller._collecting
         controller.close()
     """)
 

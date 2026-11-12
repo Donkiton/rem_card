@@ -184,6 +184,38 @@ def test_changed_patient_replaces_pending_lookup_without_stale_fallback(app, rol
 
 
 @pytest.mark.parametrize("role", ["nurse", "doctor"])
+@pytest.mark.parametrize("change", ["equivalent_layout", "patient", "date", "generation", "service"])
+def test_layout_handoff_keeps_equivalent_lookup_and_rejects_changed_context(app, role, change):
+    entered, release = threading.Event(), threading.Event()
+
+    def has_card(*_args):
+        entered.set()
+        assert release.wait(3)
+        return True
+
+    window = _Window(role, SimpleNamespace(has_card=has_card))
+    try:
+        window.on_show_card_clicked()
+        _until(entered.is_set)
+        window.layout_manager = SimpleNamespace(**vars(window.layout_manager))
+        if change == "patient":
+            window.layout_manager.current_admission_id = 2
+        elif change == "date":
+            window._current_date = HISTORICAL_DATE
+        elif change == "generation":
+            window._patient_open_generation += 1
+        elif change == "service":
+            window.service = window.remcard_service = SimpleNamespace()
+        release.set()
+        _until(lambda: window._async_patient_navigation._card_worker is None)
+        assert len(window.loads) == int(change == "equivalent_layout")
+        if window.loads:
+            assert window.loads[0][0] == 1
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("role", ["nurse", "doctor"])
 @pytest.mark.parametrize("stop", ["mode_change", "runtime_outage"])
 def test_cancelled_card_lookup_does_not_open_a_card(app, role, stop):
     entered, release = threading.Event(), threading.Event()

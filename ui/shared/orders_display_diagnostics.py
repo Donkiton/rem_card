@@ -62,6 +62,8 @@ def finish_if_orders_already_visible(widget):
     probe = getattr(widget, "_orders_display_probe", None)
     if probe is None or probe.started_at is None:
         return
+    if getattr(widget, "_orders_load_state", None) in {"idle", "loading", "error"}:
+        return
     model = widget.model
     if (model is not None and model.admission_id == widget.admission_id and model.shift_date == widget.shift_date
             and not widget._snapshot_stale and not getattr(widget, "_deferred_change_reload", False)

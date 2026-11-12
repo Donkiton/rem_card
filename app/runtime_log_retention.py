@@ -18,6 +18,7 @@ from rem_card.app.runtime_log_storage import (
 
 
 DEFAULT_TOTAL_BYTES = 512 * 1024 * 1024
+MAINTENANCE_HEARTBEAT_SEC = 3600.0
 _TEXT_PREFIX = "(?:" + "|".join(KNOWN_TEXT_PREFIXES) + r"|runtime_[a-z0-9_-]+)"
 _SEGMENT_RE = re.compile(
     rf"^(?P<prefix>{_TEXT_PREFIX}|metrics|audit)_(?P<day>\d{{8}})"
@@ -31,6 +32,7 @@ _DIRECTORIES: dict[str, None] = {}
 _WAKE = threading.Event()
 _STOP = threading.Event()
 _THREAD: threading.Thread | None = None
+_REPORT_STATE: dict[tuple[str, ...], tuple[tuple, float, int]] = {}
 
 
 @dataclass(frozen=True)
@@ -279,6 +281,8 @@ def run_log_maintenance(roots: list[str]) -> dict:
         "REMCARD_LOG_TOTAL_BYTES", DEFAULT_TOTAL_BYTES,
     )
     warning = summary.get("failed_files") or summary.get("over_budget") or summary["protected_crash_over_budget"]
+    if not _maintenance_report_due(roots, summary, bool(warning), time.monotonic()):
+        return result
     level = "WARNING" if warning else "INFO"
     line = f"{datetime.now():%Y-%m-%d %H:%M:%S} | {level} | RemCard | Log storage maintenance: {json.dumps(summary)}\n"
     for directory in roots:
@@ -290,6 +294,29 @@ def run_log_maintenance(roots: list[str]) -> dict:
         except OSError:
             continue
     return result
+
+
+def _maintenance_report_due(roots, summary, warning, now):
+    # Byte totals normally change on every pass. Only policy/health changes,
+    # actual cleanup and a rare heartbeat deserve another log segment.
+    key = tuple(sorted(os.path.normcase(os.path.abspath(root)) for root in roots))
+    signature = tuple(summary.get(field, False) for field in (
+        "dry_run", "failed_files", "over_budget", "protected_crash_over_budget",
+    ))
+    with _LOCK:
+        previous = _REPORT_STATE.get(key)
+        meaningful = warning or summary.get("removed_files") or summary.get("skipped_files") or summary.get("candidate_files")
+        due = bool(meaningful or (previous is not None and (
+            signature != previous[0] or now - previous[1] >= MAINTENANCE_HEARTBEAT_SEC
+        )))
+        suppressed = previous[2] if previous is not None else 0
+        if due:
+            summary["quiet_passes_before"] = suppressed
+        if previous is None and len(_REPORT_STATE) >= 16:
+            _REPORT_STATE.pop(next(iter(_REPORT_STATE)))
+        last_report = now if due or previous is None else previous[1]
+        _REPORT_STATE[key] = (signature, last_report, 0 if due else suppressed + 1)
+        return due
 
 
 def _maintenance_worker() -> None:

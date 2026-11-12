@@ -351,6 +351,7 @@ def test_identical_workload_reduction_and_accounting():
         clock.now += 60
         reduced.extend({"ts": "2026-08-31T10:00:00+10:00", "host": "synthetic-test", "pid": 123, **s}
                        for s in agg.drain())
+    reduced.extend(agg.drain(force=True))
     original_bytes = sum(len(json.dumps(p, ensure_ascii=False).encode()) + 1 for p in original)
     reduced_bytes = sum(len(json.dumps(p, ensure_ascii=False).encode()) + 1 for p in reduced)
     print(f"Identical workload: {len(original)} -> {len(reduced)} records; "
@@ -358,6 +359,37 @@ def test_identical_workload_reduction_and_accounting():
     assert reduced_bytes / original_bytes < 0.15
     raw_count = sum(p["metric"] != "local_metrics_summary" for p in reduced)
     assert raw_count + sum(p.get("aggregated_count", 0) for p in reduced) == len(original)
+
+
+def test_replica_lock_summary_volume_keeps_outliers_histograms_and_write_records():
+    clock = Clock()
+    agg = policy.MetricAggregator(clock=clock)
+    summaries, raw = [], []
+    original = []
+    for cycle in range(1800):
+        clock.now = cycle * 2
+        for name, field in (("sqlite_write_lock_acquired", "total_wait_ms"),
+                            ("sqlite_write_lock_released", "held_ms")):
+            duration = 150 if cycle % 500 == 0 else 5
+            payload = event(name, 1, source="local_replica_snapshot", **{field: duration})
+            original.append(dict(payload))
+            if not agg.observe(payload):
+                raw.append(payload)
+            assert payload == original[-1]
+        summaries.extend(agg.drain())
+    clinical_write = event("sqlite_write_lock_acquired", 1, source="nurse_order_mark", accepted_write_id="retain")
+    assert not agg.observe(clinical_write)
+    assert clinical_write["accepted_write_id"] == "retain"
+    summaries.extend(agg.drain(force=True))
+    assert len(summaries) == 24  # Twelve five-minute windows for each half of the pair.
+    assert len(raw) == 8 and all(p.get("total_wait_ms", p.get("held_ms")) == 150 for p in raw)
+    assert sum(p["count"] for p in summaries) == len(original) == 3600
+    assert sum(p["raw_count"] for p in summaries) == len(raw)
+    assert sum(p["aggregated_count"] for p in summaries) + len(raw) == 3600
+    assert sum(sum(p["latency_counts"]) for p in summaries) == 3600
+    assert [sum(p["latency_counts"][i] for p in summaries) for i in range(6)] == [3592, 0, 0, 8, 0, 0]
+    assert all(p["summary_version"] == 1 and p["window_sec"] <= 300 for p in summaries)
+    assert all(p["duration_max_ms"] in (5, 150) for p in summaries)
 
 
 def test_latest_change_state_is_bounded_without_hiding_new_cursors(metrics, monkeypatch):

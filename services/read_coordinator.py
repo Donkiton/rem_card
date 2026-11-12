@@ -194,6 +194,7 @@ class OrdersLoadPhaseTimings:
     delta_attempt_ms: float = 0.0
     load_slot_wait_ms: float = 0.0
     full_build_ms: float = 0.0
+    read_scoped_snapshot_ms: float = 0.0
     finalize_ms: float = 0.0
     apply_handoff_ms: float = 0.0
 
@@ -204,9 +205,29 @@ class OrdersLoadPhaseTimings:
             "delta_attempt_ms": round(max(0.0, self.delta_attempt_ms), 3),
             "load_slot_wait_ms": round(max(0.0, self.load_slot_wait_ms), 3),
             "full_build_ms": round(max(0.0, self.full_build_ms), 3),
+            "read_scoped_snapshot_ms": round(max(0.0, self.read_scoped_snapshot_ms), 3),
             "finalize_ms": round(max(0.0, self.finalize_ms), 3),
             "apply_handoff_ms": round(max(0.0, self.apply_handoff_ms), 3),
         }
+
+
+def _orders_delta_category(reason) -> str:
+    reason = str(reason or "0")
+    if reason in {"0", "", "none"}:
+        return "none"
+    if reason.startswith("stale_base_age_exceeded"):
+        return "stale_base"
+    if reason.startswith("unsupported_entities:"):
+        return "unsupported_scope"
+    if reason == "empty_change_rows":
+        return "empty_changes"
+    if reason == "orders_context_superseded":
+        return "superseded"
+    if any(token in reason for token in (
+        "delta_unknown_order", "delta_no_effect", "delta_without_visible_orders", "empty_delta_rows",
+    )):
+        return "merge_error"
+    return "other_error"
 
 
 @dataclass
@@ -224,6 +245,7 @@ class OrdersTelemetryState:
     delta_skipped_stale: int = 0
     delta_failed: int = 0
     delta_skip_unsupported_scope_count: int = 0
+    delta_skip_other_count: int = 0
     delta_fail_merge_error_count: int = 0
     delta_fail_other_count: int = 0
     fallback_after_delta: int = 0
@@ -1617,6 +1639,20 @@ class ReadCoordinator:
         context_hash = context.hash()
         cache_key = context.cache_key()
         fallback_used = 0
+        observer = self._orders_step_observer(
+            step_state, cache_key=cache_key, request_id=trace_id, cancel_check=cancel_check,
+            cancel_context={
+                "context": context, "cache_key": cache_key, "request_id": trace_id,
+                "source": source, "priority": priority, "context_hash": context_hash,
+                "generation": generation, "started": started, "deadline": deadline,
+            },
+        )
+
+        def measured_observer(event, step, fields):
+            if event == "end" and step == "read_scoped_snapshot":
+                phase_timings.read_scoped_snapshot_ms += max(0.0, float(fields.get("elapsed_ms") or 0.0))
+            observer(event, step, fields)
+
         try:
             self._raise_if_orders_refresh_cancelled(
                 context=context,
@@ -1636,23 +1672,7 @@ class ReadCoordinator:
                 "read_coordinator",
                 context_hash=context_hash,
                 request_source=source,
-                step_observer=self._orders_step_observer(
-                    step_state,
-                    cache_key=cache_key,
-                    request_id=trace_id,
-                    cancel_check=cancel_check,
-                    cancel_context={
-                        "context": context,
-                        "cache_key": cache_key,
-                        "request_id": trace_id,
-                        "source": source,
-                        "priority": priority,
-                        "context_hash": context_hash,
-                        "generation": generation,
-                        "started": started,
-                        "deadline": deadline,
-                    },
-                ),
+                step_observer=measured_observer,
             ):
                 snapshot = self.remcard_service.build_orders_snapshot(
                     context.admission_id,
@@ -1739,23 +1759,7 @@ class ReadCoordinator:
                     "legacy_fallback",
                     context_hash=context_hash,
                     request_source=source,
-                    step_observer=self._orders_step_observer(
-                        step_state,
-                        cache_key=cache_key,
-                        request_id=trace_id,
-                        cancel_check=cancel_check,
-                        cancel_context={
-                            "context": context,
-                            "cache_key": cache_key,
-                            "request_id": trace_id,
-                            "source": source,
-                            "priority": priority,
-                            "context_hash": context_hash,
-                            "generation": generation,
-                            "started": started,
-                            "deadline": deadline,
-                        },
-                    ),
+                    step_observer=measured_observer,
                 ):
                     snapshot = self.remcard_service.build_orders_snapshot(
                         context.admission_id,
@@ -3617,6 +3621,7 @@ class ReadCoordinator:
         normalized_source = str(source or "refresh").strip().lower() or "refresh"
         metric_source = self._orders_metric_source(normalized_source, cache_hit=cache_hit)
         phase_fields = (phase_timings or OrdersLoadPhaseTimings()).metric_fields()
+        delta_category = _orders_delta_category(delta_failure_reason)
         record_metric(
             "orders_load_time_ms",
             round(float(elapsed_ms or 0.0), 3),
@@ -3626,7 +3631,8 @@ class ReadCoordinator:
             cache_hit=int(bool(cache_hit)),
             full_reload=int(not cache_hit and not delta_applied),
             delta_applied=int(bool(delta_applied)),
-            delta_failed=0 if str(delta_failure_reason or "0") in {"0", "", "none"} else 1,
+            delta_failed=int(delta_category in {"merge_error", "other_error"}),
+            delta_reason=delta_category,
             delta_time_ms=round(float(delta_time_ms or 0.0), 3),
             fallback_after_delta=int(bool(fallback_after_delta)),
             fallback_used=None if fallback_used is None else int(bool(fallback_used)),
@@ -3663,22 +3669,15 @@ class ReadCoordinator:
                 state.delta_time_ms_total += max(0.0, float(delta_time_ms or 0.0))
                 state.delta_time_samples += 1
             else:
-                reason = str(delta_failure_reason or "0")
-                if reason.startswith("stale_base_age_exceeded"):
+                if delta_category == "stale_base":
                     state.delta_skipped_stale += 1
-                elif reason.startswith("unsupported_entities:"):
+                elif delta_category == "unsupported_scope":
                     state.delta_skip_unsupported_scope_count += 1
-                elif reason not in {"0", "", "none"}:
+                elif delta_category in {"empty_changes", "superseded"}:
+                    state.delta_skip_other_count += 1
+                elif delta_category in {"merge_error", "other_error"}:
                     state.delta_failed += 1
-                    if any(
-                        token in reason
-                        for token in (
-                            "delta_unknown_order",
-                            "delta_no_effect",
-                            "delta_without_visible_orders",
-                            "empty_delta_rows",
-                        )
-                    ):
+                    if delta_category == "merge_error":
                         state.delta_fail_merge_error_count += 1
                     else:
                         state.delta_fail_other_count += 1
@@ -3708,7 +3707,8 @@ class ReadCoordinator:
             "total_loads": int(state.total_loads),
             "total_update_loads": int(state.total_update_loads),
             "delta_apply_rate": float(state.delta_applied) / float(total_update_loads),
-            "delta_skip_rate": float(state.delta_skipped_stale) / float(total_update_loads),
+            "delta_skip_rate": float(state.delta_skipped_stale + state.delta_skip_unsupported_scope_count
+                                     + state.delta_skip_other_count) / float(total_update_loads),
             "delta_fail_rate": float(state.delta_failed) / float(total_update_loads),
             "avg_delta_time_ms": float(state.delta_time_ms_total) / float(delta_samples),
             "avg_full_reload_time_ms": float(state.full_reload_time_ms_total) / float(full_reload_count),
@@ -3723,6 +3723,7 @@ class ReadCoordinator:
             "delta_skipped_stale": int(state.delta_skipped_stale),
             "delta_skip_stale_base_count": int(state.delta_skipped_stale),
             "delta_skip_unsupported_scope_count": int(state.delta_skip_unsupported_scope_count),
+            "delta_skip_other_count": int(state.delta_skip_other_count),
             "delta_failed": int(state.delta_failed),
             "delta_fail_merge_error_count": int(state.delta_fail_merge_error_count),
             "delta_fail_other_count": int(state.delta_fail_other_count),

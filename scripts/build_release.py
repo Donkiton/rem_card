@@ -23,6 +23,7 @@ from app.full_update_manifest import (
     verify_file_inventory,
 )
 from app.runtime_paths import DEFAULT_DEV_DATA_ROOT_NAME, get_dev_baza_dir
+from scripts.release_environment import validate_build_environment, verify_bundled_runtime_versions
 from bump_version import (
     find_changelog_entry,
     parse_version,
@@ -215,6 +216,7 @@ def run_build(root: Path) -> Path:
             "REMCARD_SKIP_SETTINGS_RELEASE_EXPORT=1 запрещён для release-сборки: "
             "production-пакет обязан содержать snapshot настроек."
         )
+    environment = validate_build_environment(root)
     cleanup_build_artifacts(root)
     os.environ.setdefault("REMCARD_SETTINGS_RELEASE_SOURCE_BAZA", get_dev_baza_dir())
     package_dir = root / "dist" / "Prog"
@@ -222,6 +224,13 @@ def run_build(root: Path) -> Path:
         run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)
         if not package_dir.is_dir():
             raise RuntimeError(f"PyInstaller не создал пакет: {package_dir}")
+        environment["bundled_runtime_versions"] = verify_bundled_runtime_versions(
+            package_dir / "RemCard.exe", environment["packages"],
+        )
+        manifest_path = package_dir / MANIFEST_FILE_NAME
+        manifest = _read_json_object(manifest_path)
+        manifest["build_environment"] = environment
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except BaseException:
         try:
             cleanup_build_artifacts(root)
