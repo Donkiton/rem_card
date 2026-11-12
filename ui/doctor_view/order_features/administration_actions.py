@@ -7,6 +7,7 @@ from datetime import timedelta
 from rem_card.app.logger import logger
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.data.dto.remcard_dto import OrderDTO
+from rem_card.services.order_service import OrderService
 from rem_card.ui.doctor_view.order_features.constants import ORDERS_CELL_REPEAT_GUARD_SEC
 import time
 from typing import TYPE_CHECKING
@@ -269,7 +270,25 @@ class AdministrationActionsMixin:
         except (TypeError, ValueError):
             pass
 
-    def _apply_committed_order_mark(self, index, admin, mark: str, *, sequence=None):
+    def _confirmed_order_mark(self, admin, mark, acknowledgement):
+        if not isinstance(acknowledgement, dict) or not acknowledgement.get("before") or not acknowledgement.get("after"):
+            return None
+        before = self.model._row_to_admin_dto(acknowledgement["before"])
+        after = self.model._row_to_admin_dto(acknowledgement["after"])
+        key = self._admin_key_from_admin(admin)
+        previous = (before.id, self._admin_key_from_admin(before), before.version)
+        expected = (admin.id, key, int(getattr(admin, "version", 0) or 0))
+        current = (after.id, self._admin_key_from_admin(after), after.version, after.comment)
+        if previous != expected or current != (admin.id, key, before.version + 1, mark or ""):
+            return None
+        if OrderService._draft_admin_shape(before) != OrderService._draft_admin_shape(after):
+            return None
+        for row in (acknowledgement["before"], acknowledgement["after"]):
+            if "admission_id" in row and int(row["admission_id"]) != int(self.admission_id):
+                return None
+        return before, after
+
+    def _apply_committed_order_mark(self, index, admin, mark: str, *, sequence=None, acknowledgement=None):
         override = self._balance_mark_overrides.get(int(admin.id)) if admin is not None else None
         if sequence is not None and (override is None or override.get("sequence") != sequence):
             self.balanceSnapshotRequired.emit()
@@ -282,12 +301,34 @@ class AdministrationActionsMixin:
         key = self._admin_key_from_admin(admin)
         if key is None:
             return
-        committed_admin = copy(admin)
-        committed_admin.version = int(getattr(admin, "version", 0) or 0) + 1
-        committed_admin.comment = mark or ""
-        committed_admin.actual_time = datetime.now() if mark else None
+        confirmed = self._confirmed_order_mark(admin, mark, acknowledgement)
+        if confirmed is not None:
+            before, committed_admin = confirmed
+            self._rebase_committed_doctor_mark(before, committed_admin, acknowledgement["after"])
+            rows = getattr(self, "_committed_doctor_mark_rows", None)
+            if rows is None:
+                rows = self._committed_doctor_mark_rows = {}
+            rows[key] = copy(committed_admin)
+            self._committed_doctor_mark_change_id = max(
+                int(getattr(self, "_committed_doctor_mark_change_id", 0)),
+                int(acknowledgement["after"].get("_change_id") or 0),
+            )
+        else:
+            committed_admin = copy(admin)
+            committed_admin.version = int(getattr(admin, "version", 0) or 0) + 1
+            committed_admin.comment = mark or ""
+            committed_admin.actual_time = datetime.now() if mark else None
         if hasattr(committed_admin, "_pending_mark"):
             delattr(committed_admin, "_pending_mark")
+        if key in self._local_draft_dirty_admin_keys:
+            desired = self.model.admin_map.get(key)
+            if desired is None:
+                self._emit_admin_cell_changes([key], mark_draft=False)
+                return
+            desired = copy(desired)
+            for field in ("version", "comment", "actual_time", "performer_id"):
+                setattr(desired, field, getattr(committed_admin, field))
+            committed_admin = desired
         self.model.admin_map[key] = committed_admin
         self._emit_admin_cell_changes([key], mark_draft=False)
 

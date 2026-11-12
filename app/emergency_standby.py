@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import re
 import shutil
 import sqlite3
 import time
@@ -34,6 +36,7 @@ from rem_card.app.emergency_compatibility import emergency_metadata_compatibilit
 from rem_card.app.emergency_store import EmergencyLocalStore
 from rem_card.app.emergency_validation import (
     SnapshotValidationResult,
+    compute_file_hash,
     probe_medical_db_snapshot,
     probe_settings_db_snapshot,
     validate_medical_db_snapshot,
@@ -67,6 +70,38 @@ EMERGENCY_STORAGE_PAIR_MULTIPLIER = max(
     3,
     int(float(os.environ.get("REMCARD_EMERGENCY_STORAGE_PAIR_MULTIPLIER", "6"))),
 )
+_SETTINGS_REUSE_PROOF_KEY = "settings_commit_proof_v1"
+
+
+def _source_file_identity(path: str, *, content: bool = True) -> dict:
+    stat = os.stat(path)
+    identity = {"path": os.path.normcase(os.path.abspath(path)),
+                "device": int(stat.st_dev), "inode": int(stat.st_ino)}
+    if not identity["inode"] or not identity["device"]:
+        raise ValueError("source file identity is unavailable")
+    if content:
+        identity.update(size_bytes=int(stat.st_size), mtime_ns=int(stat.st_mtime_ns), ctime_ns=int(stat.st_ctime_ns))
+    return identity
+
+
+def _settings_header_proof(path: str) -> dict:
+    with open(path, "rb") as handle:
+        header = handle.read(100)
+        stat = os.fstat(handle.fileno())
+    if len(header) != 100 or header[:16] != b"SQLite format 3\0" or header[18:20] != b"\x01\x01":
+        raise ValueError("source is not a rollback-mode SQLite database")
+    counter = int.from_bytes(header[24:28], "big")
+    valid_for = int.from_bytes(header[92:96], "big")
+    page_size = int.from_bytes(header[16:18], "big")
+    page_size = 65536 if page_size == 1 else page_size
+    page_count = int.from_bytes(header[28:32], "big")
+    if (counter in (0, 0xFFFFFFFF) or counter != valid_for or page_size < 512
+            or page_size > 65536 or page_size & (page_size - 1)
+            or page_count * page_size != stat.st_size):
+        raise ValueError("source SQLite header is not a stable committed revision")
+    return {"change_counter": counter, "schema_cookie": int.from_bytes(header[40:44], "big"),
+            "header_sha256": hashlib.sha256(header).hexdigest(),
+            "device": int(stat.st_dev), "inode": int(stat.st_ino)}
 
 
 class EmergencyStandbyError(RuntimeError):
@@ -544,8 +579,13 @@ class EmergencyStandbyManager:
             return True
         if not emergency_metadata_compatible(metadata):
             return True
-        if settings_fingerprint is not None and dict(settings_fingerprint) != dict(metadata.source_settings_fingerprint or {}):
-            return True
+        old_settings_fingerprint = dict(metadata.source_settings_fingerprint or {})
+        old_settings_fingerprint.pop(_SETTINGS_REUSE_PROOF_KEY, None)
+        if settings_fingerprint is not None:
+            current_settings_fingerprint = dict(settings_fingerprint)
+            current_settings_fingerprint.pop(_SETTINGS_REUSE_PROOF_KEY, None)
+            if current_settings_fingerprint != old_settings_fingerprint:
+                return True
         return False
 
     def mark_standby_invalid(self, reason: str) -> EmergencyStandbyRefreshResult:
@@ -794,6 +834,8 @@ class EmergencyStandbyManager:
                 )
 
             settings_validation = None
+            settings_reused = False
+            source_settings_validation = source_status.settings_validation
             if self.settings_required:
                 record_metric(
                     "emergency_settings_snapshot_rebuild_started",
@@ -804,12 +846,16 @@ class EmergencyStandbyManager:
                     target_settings_db_path=str(staging_settings_path),
                     generation_id=generation_id,
                 )
-                self._backup_sqlite_to_temp(
-                    self.source_settings_db_path,
-                    str(staging_settings_path),
-                    source="emergency_settings_standby",
+                settings_validation, proof, settings_reused = self._stage_settings_snapshot(
+                    str(staging_settings_path), previous_metadata, source_status,
                 )
-                settings_validation = validate_settings_db_snapshot(str(staging_settings_path))
+                if proof is not None and source_settings_validation is not None:
+                    source_settings_validation = replace(source_settings_validation, fingerprint={
+                        "path": self.source_settings_db_path,
+                        "size_bytes": proof["file_identity"]["size_bytes"],
+                        "mtime_ns": proof["file_identity"]["mtime_ns"],
+                        _SETTINGS_REUSE_PROOF_KEY: proof,
+                    })
                 if not settings_validation.ok:
                     record_metric(
                         "emergency_settings_snapshot_rebuild_failed",
@@ -832,7 +878,7 @@ class EmergencyStandbyManager:
                 medical_validation=medical_validation,
                 settings_validation=settings_validation,
                 source_medical_validation=source_status.medical_validation,
-                source_settings_validation=source_status.settings_validation,
+                source_settings_validation=source_settings_validation,
                 medical_db_path=final_medical_path,
                 settings_db_path=final_settings_path,
                 generation_id=generation_id,
@@ -879,6 +925,7 @@ class EmergencyStandbyManager:
                     actual_schema_version=final_settings_validation.schema_version,
                     settings_db_hash=final_settings_validation.file_hash,
                     generation_id=generation_id,
+                    copy_mode="local_reuse" if settings_reused else "source_backup",
                 )
             return EmergencyStandbyRefreshResult(
                 ok=True,
@@ -904,6 +951,114 @@ class EmergencyStandbyManager:
                 shutil.rmtree(staging_dir, ignore_errors=True)
             if generation_moved and not committed and os.path.isdir(final_generation_dir):
                 shutil.rmtree(final_generation_dir, ignore_errors=True)
+
+    def _settings_source_proof(self) -> dict | None:
+        """Read 100 header bytes under a real, short SQLite SHARED transaction.
+
+        Rollback-mode SQLite increments this counter on committed changes. WAL,
+        ambiguous file identity, sidecars and concurrent writers disable reuse.
+        Raw in-place rewrites with forged headers are outside this protocol.
+        """
+        # Closing a raw file descriptor can drop another SQLite connection's
+        # process-wide fcntl locks on POSIX. Windows byte locks are handle-owned.
+        if os.name != "nt":
+            return None
+        path = self.source_settings_db_path
+        fences = [path + suffix for suffix in ("-wal", "-shm", "-journal")]
+        fences.append(os.path.join(os.path.dirname(path), "settings.db.lock"))
+        conn = None
+        try:
+            if any(os.path.exists(fence) for fence in fences):
+                return None
+            before = _source_file_identity(path)
+            medical_identity = _source_file_identity(self.source_medical_db_path, content=False)
+            conn = sqlite3.connect(build_sqlite_file_uri(path, mode="ro"), uri=True,
+                                   isolation_level=None, timeout=0.1)
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()  # Obtain SHARED, not just deferred BEGIN.
+            if str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "delete":
+                return None
+            cookie = int(conn.execute("PRAGMA schema_version").fetchone()[0])
+            version = settings_schema.get_schema_version(conn)
+            header = _settings_header_proof(path)
+            if (version != settings_schema.SCHEMA_VERSION or cookie != header["schema_cookie"]
+                    or header["device"] != before["device"] or header["inode"] != before["inode"]
+                    or before != _source_file_identity(path)
+                    or medical_identity != _source_file_identity(self.source_medical_db_path, content=False)
+                    or any(os.path.exists(fence) for fence in fences)):
+                return None
+            return {"version": 1, "file_identity": before, "medical_identity": medical_identity,
+                    "settings_schema_version": version, **header}
+        except (OSError, ValueError, sqlite3.Error):
+            return None
+        finally:
+            if conn is not None:
+                try:
+                    if conn.in_transaction:
+                        conn.execute("ROLLBACK")
+                finally:
+                    conn.close()
+
+    def _trusted_settings_generation(self, previous, proof, source_status) -> bool:
+        if (previous is None or proof is None or not previous.settings_db_hash
+                or not re.fullmatch(r"[0-9a-f]{64}", previous.settings_db_hash)
+                or not re.fullmatch(r"gen_[A-Za-z0-9_-]+", previous.generation_id or "")
+                or not emergency_metadata_compatible(previous)
+                or not standby_metadata_age_info(previous).is_valid or standby_metadata_expired(previous)
+                or self._standby_generation_error(previous)):
+            return False
+        expected_settings = standby_generation_settings_db_path(self.root, previous.generation_id)
+        medical_source = source_status.medical_validation
+        if (os.path.normcase(previous.settings_db_path or "") != os.path.normcase(expected_settings)
+                or os.path.normcase(previous.source_settings_db_path or "") != os.path.normcase(self.source_settings_db_path)
+                or os.path.normcase(previous.source_remote_db_path) != os.path.normcase(self.source_medical_db_path)
+                or medical_source is None or previous.schema_version != medical_source.schema_version
+                or medical_source.last_change_id < previous.remote_last_change_id):
+            return False
+        manifest = standby_metadata_from_dict(read_json_file(standby_generation_metadata_path(self.root, previous.generation_id)))
+        if metadata_to_dict(manifest) != metadata_to_dict(previous):
+            return False
+        return (previous.source_settings_fingerprint or {}).get(_SETTINGS_REUSE_PROOF_KEY) == proof
+
+    def _stage_settings_snapshot(self, staging_path, previous, source_status):
+        before = self._settings_source_proof()
+        try:
+            if self._trusted_settings_generation(previous, before, source_status):
+                old = validate_settings_db_snapshot(previous.settings_db_path)
+                if (old.ok and old.schema_version == settings_schema.SCHEMA_VERSION
+                        and old.file_hash == previous.settings_db_hash and old.file_size == previous.settings_db_size):
+                    shutil.copy2(previous.settings_db_path, staging_path)
+                    copied = self._validate_identical_settings_copy(staging_path, old)
+                    after = self._settings_source_proof()
+                    if copied is not None and before == after:
+                        record_metric("emergency_settings_snapshot_reused", 1, size_bytes=copied.file_size)
+                        return copied, before, True
+                    before = after
+        except Exception:
+            # A cache is optional; only a newly validated source backup may
+            # replace it after missing/malformed manifests, corruption or a race.
+            pass
+        if os.path.exists(staging_path):
+            os.remove(staging_path)
+        self._backup_sqlite_to_temp(self.source_settings_db_path, staging_path, source="emergency_settings_standby")
+        validation = validate_settings_db_snapshot(staging_path)
+        proof = before if before is not None and before == self._settings_source_proof() else None
+        return validation, proof, False
+
+    @staticmethod
+    def _validate_identical_settings_copy(path, validated):
+        # Re-run full hashing on the new bytes. Identical bytes have the schema
+        # and integrity already established by the complete old-file validation.
+        before = _source_file_identity(path)
+        digest = compute_file_hash(path)
+        if (before != _source_file_identity(path) or digest != validated.file_hash
+                or before["size_bytes"] != validated.file_size):
+            return None
+        fingerprint = {**validated.fingerprint, "path": os.path.abspath(path),
+                       "size_bytes": before["size_bytes"], "mtime_ns": before["mtime_ns"], "sha256": digest}
+        return replace(validated, file_hash=digest, file_size=before["size_bytes"],
+                       file_mtime=os.path.getmtime(path), fingerprint=fingerprint)
 
     def _backup_sqlite_to_temp(self, source_path: str, temp_target_path: str, *, source: str) -> str:
         os.makedirs(os.path.dirname(temp_target_path), exist_ok=True)

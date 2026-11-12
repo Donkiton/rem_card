@@ -119,12 +119,11 @@ class SnapshotApplicationMixin:
         restore()
         QTimer.singleShot(0, restore)
 
-    def _apply_snapshot_data(self, *, snapshot, admission_id, shift_date, context_key=None) -> bool:
+    def _snapshot_matches_current_context(self, snapshot, admission_id, shift_date, context_key, current_context_key):
         if self._is_closing:
             return False
         if admission_id != self.admission_id:
             return False
-        current_context_key = self._current_context_key()
         if context_key is not None and current_context_key is not None and context_key != current_context_key:
             coordinator = self._get_read_coordinator()
             if coordinator is not None and hasattr(coordinator, "record_orders_ui_event"):
@@ -150,6 +149,12 @@ class SnapshotApplicationMixin:
                 snapshot.get("context_hash"),
                 snapshot.get("load_trace_id"),
             )
+            return False
+        return True
+
+    def _apply_snapshot_data(self, *, snapshot, admission_id, shift_date, context_key=None) -> bool:
+        current_context_key = self._current_context_key()
+        if not self._snapshot_matches_current_context(snapshot, admission_id, shift_date, context_key, current_context_key):
             return False
         snapshot_change_id = int(snapshot.get("change_id") or 0)
         known_change_id = int(self._last_polled_change_id or 0)
@@ -190,6 +195,10 @@ class SnapshotApplicationMixin:
             self._queue_forced_reload_after_stale_snapshot(
                 reason="stale_apply_blocked",
             )
+            return False
+
+        if self._snapshot_predates_committed_doctor_mark(snapshot):
+            self._queue_forced_reload_after_stale_snapshot(reason="snapshot_before_doctor_mark")
             return False
 
         if self._should_preserve_local_cell_draft(snapshot):
@@ -362,6 +371,7 @@ class SnapshotApplicationMixin:
         ):
             return False
 
+        self._capture_local_draft_baseline(snapshot)
         self._cached_has_drafts = bool(snapshot.get("has_any_draft", False))
         self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
         self._cached_has_orders = bool(snapshot.get("has_any_orders", False))

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -462,6 +464,230 @@ def test_concurrent_doctor_cell_shape_change_rejects_whole_patch(draft_context):
     ).fetchone()
     assert latest["big_chain_id"] == "remote-chain"
     assert latest["cell_role"] == "body"
+
+
+@pytest.mark.parametrize("mark", ["", "nurse_executed", "nurse_not_executed"])
+def test_same_admin_target_keeps_newer_execution_fact_and_commits_other_order(draft_context, mark):
+    db, service, shift, baseline_order, baseline_admin = draft_context
+    key = (baseline_order.id, baseline_admin.planned_time.isoformat())
+    db.conn.execute(
+        "UPDATE administrations SET version=version+1, comment=?, actual_time=?, performer_id=77 WHERE id=?",
+        (mark, shift.isoformat(), baseline_admin.id),
+    )
+    db.conn.commit()
+    before = [dict(row) for row in db.conn.execute("SELECT * FROM administrations")]
+    new_order = OrderDTO(
+        id=-1, admission_id=1, latin="Unrelated", type=OrderType.MEDICATION,
+        status=OrderStatus.ACTIVE, dose_value=10, dose_unit="ml", is_committed=0, created_at=shift,
+    )
+
+    mapping = service.commit_local_draft(
+        1, shift, orders=[baseline_order, new_order], admin_map={key: baseline_admin},
+        dirty_admin_keys=[key], baseline_admin_map={key: baseline_admin},
+        expected_revisions={baseline_order.id: baseline_order.revision},
+    )
+
+    assert mapping[-1] > 0 and db.rollback_count == 0
+    assert [dict(row) for row in db.conn.execute("SELECT * FROM administrations")] == before
+    assert db.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("mark", ["", "nurse_executed", "nurse_not_executed"])
+def test_changed_admin_target_rejects_newer_fact_and_rolls_back_other_order(draft_context, mark):
+    db, service, shift, baseline_order, baseline_admin = draft_context
+    key = (baseline_order.id, baseline_admin.planned_time.isoformat())
+    db.conn.execute(
+        "UPDATE administrations SET version=version+1, comment=?, actual_time=?, performer_id=77 WHERE id=?",
+        (mark, shift.isoformat(), baseline_admin.id),
+    )
+    db.conn.commit()
+    before = [dict(row) for row in db.conn.execute("SELECT * FROM administrations")]
+    desired = deepcopy(baseline_admin)
+    desired.status = "deleted"
+    unrelated = OrderDTO(
+        id=-1, admission_id=1, latin="Must rollback", type=OrderType.MEDICATION,
+        status=OrderStatus.ACTIVE, dose_value=10, dose_unit="ml", is_committed=0, created_at=shift,
+    )
+    with pytest.raises(OrderConflictError) as failure:
+        service.commit_local_draft(
+            1, shift, orders=[baseline_order, unrelated], admin_map={key: desired},
+            dirty_admin_keys=[key], baseline_admin_map={key: baseline_admin},
+            expected_revisions={baseline_order.id: baseline_order.revision},
+        )
+    assert failure.value.reason == ("committed_nurse_mark_present" if mark else "administration_version_mismatch")
+    assert db.rollback_count == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+    assert [dict(row) for row in db.conn.execute("SELECT * FROM administrations")] == before
+
+
+def _prepare_mark_writes(db, service):
+    db.conn.execute("ALTER TABLE administrations ADD COLUMN ui_color TEXT")
+    db.conn.execute("ALTER TABLE administrations ADD COLUMN ui_color_until TEXT")
+    db.conn.executescript("""
+        CREATE TABLE change_log (id INTEGER PRIMARY KEY AUTOINCREMENT, admission_id INTEGER);
+        CREATE INDEX change_log_admission ON change_log(admission_id, id);
+        CREATE TRIGGER administration_mark_change AFTER UPDATE ON administrations
+        BEGIN
+            INSERT INTO change_log(admission_id) SELECT admission_id FROM orders WHERE id=NEW.order_id;
+        END;
+        INSERT INTO change_log(id, admission_id) VALUES (100, 999);
+    """)
+    db.conn.commit()
+    service._domain_service._legacy_statuses_sanitized = True
+
+
+def test_doctor_mark_acknowledges_exact_rows_inside_the_committing_transaction(draft_context, monkeypatch):
+    db, service, _shift, _order, admin = draft_context
+    _prepare_mark_writes(db, service)
+    domain = service._domain_service
+    original = domain._fetch_admin_for_nurse_update
+    timings = []
+
+    def observed(cursor, identifier, **kwargs):
+        assert db.conn.in_transaction
+        started = time.perf_counter()
+        result = original(cursor, identifier, **kwargs)
+        timings.append((time.perf_counter() - started) * 1000)
+        return result
+
+    monkeypatch.setattr(domain, "_fetch_admin_for_nurse_update", observed)
+    before = dict(db.conn.execute("SELECT * FROM administrations WHERE id=?", (admin.id,)).fetchone())
+    for version, mark in enumerate(("nurse_executed", "nurse_not_executed", ""), start=admin.version):
+        acknowledgement = (
+            service.set_doctor_status(admin.id, mark, performer_id=77, expected_version=version)
+            if mark else service.cancel_doctor_action(admin.id, expected_version=version)
+        )
+        after = dict(db.conn.execute("SELECT * FROM administrations WHERE id=?", (admin.id,)).fetchone())
+        assert {key: acknowledgement["before"][key] for key in before} == before
+        assert {key: acknowledgement["after"][key] for key in after} == after
+        assert acknowledgement["after"]["_change_id"] == 101 + version - admin.version
+        assert after["version"] == version + 1 and after["comment"] == mark
+        before = after
+    assert len(timings) == 6  # Existing validation read plus one acknowledgement read per mark.
+    assert db.transaction_count == 3
+    print("Acknowledgement SELECT ms (synthetic in-memory):", timings[1::2])
+
+
+def test_nurse_mark_does_not_add_acknowledgement_select(draft_context, monkeypatch):
+    db, service, _shift, _order, admin = draft_context
+    _prepare_mark_writes(db, service)
+    domain = service._domain_service
+    original = domain._fetch_admin_for_nurse_update
+    reads = []
+
+    def observed(cursor, identifier, **kwargs):
+        reads.append(kwargs)
+        return original(cursor, identifier, **kwargs)
+
+    monkeypatch.setattr(domain, "_fetch_admin_for_nurse_update", observed)
+    assert service.set_nurse_status(admin.id, "nurse_executed", expected_version=admin.version) is None
+    assert service.cancel_nurse_action(admin.id, expected_version=admin.version + 1) is None
+    assert reads == [{}, {}]
+    assert db.transaction_count == 2
+
+
+def test_failed_doctor_acknowledgement_rolls_back_mark_and_change_log(draft_context, monkeypatch):
+    db, service, _shift, _order, admin = draft_context
+    _prepare_mark_writes(db, service)
+    before = dict(db.conn.execute("SELECT * FROM administrations WHERE id=?", (admin.id,)).fetchone())
+    original = service._domain_service._fetch_admin_for_nurse_update
+
+    def fail_ack(cursor, identifier, **kwargs):
+        if kwargs.get("include_change_id"):
+            raise sqlite3.OperationalError("synthetic acknowledgement failure")
+        return original(cursor, identifier, **kwargs)
+
+    monkeypatch.setattr(service._domain_service, "_fetch_admin_for_nurse_update", fail_ack)
+    with pytest.raises(sqlite3.OperationalError, match="synthetic acknowledgement failure"):
+        service.set_doctor_status(admin.id, "nurse_executed", expected_version=admin.version)
+    assert dict(db.conn.execute("SELECT * FROM administrations WHERE id=?", (admin.id,)).fetchone()) == before
+    assert db.conn.execute("SELECT MAX(id) FROM change_log").fetchone()[0] == 100
+    assert db.rollback_count == 1
+
+
+@pytest.mark.parametrize("existing_draft", [False, True])
+@pytest.mark.parametrize("foreign_after_ack", [False, True])
+def test_widget_own_marks_then_save_use_real_transaction_tokens(draft_context, existing_draft, foreign_after_ack):
+    from PySide6.QtWidgets import QApplication
+    from rem_card.services.shift_service import ShiftService
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
+    from rem_card.ui.shared.orders_model import OrdersModel
+
+    db, service, shift, order, admin = draft_context
+    _prepare_mark_writes(db, service)
+    app = QApplication.instance() or QApplication([])
+    del app
+    adapter = SimpleNamespace(
+        get_day_period=ShiftService.get_day_period,
+        set_doctor_order_mark=service.set_doctor_status,
+        cancel_doctor_order_mark=service.cancel_doctor_action,
+        commit_local_order_draft=service.commit_local_draft,
+    )
+
+    def enqueue(*, operation, on_success, on_error, **_kwargs):
+        try:
+            result = operation()
+        except Exception as exc:
+            on_error(exc)
+        else:
+            on_success(result)
+
+    adapter.enqueue_write = enqueue
+    widget = OrdersWidget(service=adapter, admission_id=1, shift_date=shift, defer_ui=True)
+    widget.model = OrdersModel(adapter, 1, shift)
+    errors = []
+    widget._show_write_error = lambda _description, exc: errors.append(exc)
+    widget._show_warning = lambda message: pytest.fail(message)
+    widget._schedule_fast_sync = lambda: None
+    widget._schedule_state_sync = lambda: None
+    widget._refresh_model = lambda **_kwargs: None
+    snapshot = {
+        "admission_id": 1, "shift_date": shift, "only_committed": True,
+        "orders": [order], "admin_rows": [dict(db.conn.execute("SELECT * FROM administrations").fetchone())],
+        "has_any_draft": False, "has_any_orders": True, "has_any_administrations": True,
+    }
+    widget.model.apply_snapshot(snapshot)
+    widget._capture_local_draft_baseline(snapshot)
+    key = (order.id, admin.planned_time.isoformat())
+    index = widget.model.index(0, widget.model.time_slots.index(admin.planned_time) + 1)
+    try:
+        if existing_draft:
+            unrelated = deepcopy(order)
+            unrelated.id, unrelated.is_committed, unrelated.revision = -1, 0, 0
+            unrelated.latin = "Unrelated local draft"
+            widget.model.orders.append(unrelated)
+            widget._mark_local_order_dirty(-1)
+        for mark in ("nurse_executed", "nurse_not_executed", ""):
+            widget._handle_doctor_order_mark(index)
+            assert not errors
+            current = dict(db.conn.execute("SELECT * FROM administrations WHERE id=?", (admin.id,)).fetchone())
+            baseline = widget._draft_baseline_admin_map[key]
+            assert baseline.comment == mark
+            assert OrderService._draft_admin_token(baseline) == OrderService._draft_admin_token(current)
+        assert db.transaction_count == 3
+        assert widget._local_draft_dirty_order_ids == ({-1} if existing_draft else set())
+        if foreign_after_ack:
+            db.conn.execute("UPDATE administrations SET version=version+1, performer_id=88 WHERE id=?", (admin.id,))
+            db.conn.commit()
+        before = [dict(row) for row in db.conn.execute("SELECT * FROM administrations")]
+        widget._handle_cell_action(index, "orders_left_click", lambda *_args: pytest.fail("local edit persisted"))
+        widget.finalize_card()
+        if foreign_after_ack:
+            assert len(errors) == 1 and isinstance(errors[0], OrderConflictError)
+            assert errors[0].reason == "administration_version_mismatch"
+            assert db.rollback_count == 1
+            assert db.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 1
+            assert [dict(row) for row in db.conn.execute("SELECT * FROM administrations")] == before
+            assert widget._local_draft_dirty_admin_keys == {key}
+        else:
+            assert not errors and db.rollback_count == 0
+            latest = db.conn.execute("SELECT * FROM administrations ORDER BY id DESC LIMIT 1").fetchone()
+            assert latest["status"] == "deleted"
+            assert latest["comment"] == "" and latest["actual_time"] is None and latest["performer_id"] is None
+            assert db.conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == (2 if existing_draft else 1)
+        assert db.transaction_count == 4
+    finally:
+        widget.shutdown()
 
 
 def test_concurrent_order_insert_rejects_stale_context_fingerprint(draft_context):

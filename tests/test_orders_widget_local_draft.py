@@ -5,12 +5,14 @@ from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtWidgets import QApplication
 
 from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
-from rem_card.services.order_service import OrderConflictError
+from rem_card.services.order_service import OrderConflictError, OrderService
 from rem_card.services.read_coordinator import OrdersContext
 from rem_card.ui.doctor_view.components.order_template_builder import build_orders_from_template
 from rem_card.ui.doctor_view.orders_widget import OrdersWidget
@@ -233,6 +235,217 @@ def _committed_snapshot_for_current_mark(widget, *, change_id=5):
         "source": "post_finalize",
         "load_trace_id": "test-write-result",
     }
+
+
+def _authoritative_mark(widget, admin, mark):
+    snapshot = _committed_snapshot_for_current_mark(widget)
+    before = snapshot["admin_rows"][0]
+    before.update(
+        id=admin.id, version=admin.version, comment=admin.comment,
+        actual_time=admin.actual_time.isoformat() if admin.actual_time else None,
+        performer_id=admin.performer_id,
+    )
+    after = dict(before, version=admin.version + 1, comment=mark,
+                 actual_time="2026-07-13T08:01:02.345678" if mark else None,
+                 performer_id=77 if mark else None)
+    return {"before": before, "after": after}
+
+
+def _capture_mark_baseline(widget):
+    snapshot = _committed_snapshot_for_current_mark(widget)
+    admin = next(iter(widget.model.admin_map.values()))
+    snapshot["admin_rows"][0].update(
+        version=admin.version, comment=admin.comment,
+        actual_time=admin.actual_time.isoformat() if admin.actual_time else None,
+        performer_id=admin.performer_id,
+    )
+    widget._capture_local_draft_baseline(snapshot)
+    return snapshot
+
+
+@pytest.mark.parametrize("existing_draft", [False, True])
+def test_own_mark_clear_rebases_exact_token_before_snapshot_and_preserves_order_draft(existing_draft):
+    widget, service, key, queued, _written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        _capture_mark_baseline(widget)
+        if existing_draft:
+            widget.model.orders[0].dose_value = 750
+            widget._mark_local_order_dirty(1)
+        for mark in ("nurse_executed", "nurse_not_executed", ""):
+            before = deepcopy(widget.model.admin_map[key])
+            acknowledgement = _authoritative_mark(widget, before, mark)
+            widget._handle_doctor_order_mark(widget.model.index(0, 1))
+            request = queued.pop()
+            request["operation"]()
+            request["on_success"](acknowledgement)
+            expected = widget.model._row_to_admin_dto(acknowledgement["after"])
+            assert OrderService._draft_admin_token(widget.model.admin_map[key]) == OrderService._draft_admin_token(expected)
+            assert OrderService._draft_admin_token(widget._draft_baseline_admin_map[key]) == OrderService._draft_admin_token(expected)
+        assert widget.model.orders[0].dose_value == (750 if existing_draft else 500)
+        assert widget._local_draft_dirty_order_ids == ({1} if existing_draft else set())
+        widget._handle_cell_action(widget.model.index(0, 1), "orders_left_click", service.forbidden_cell_write)
+        widget.finalize_card()
+        assert len(queued) == 1
+        queued[0]["operation"]()
+        payload = service.commit_payloads[-1]
+        assert payload["admin_map"][key].status == "deleted"
+        assert payload["baseline_admin_map"][key].version == 5
+        assert payload["baseline_admin_map"][key].actual_time is None
+        assert payload["baseline_admin_map"][key].performer_id is None
+    finally:
+        widget.shutdown()
+
+
+def test_own_clear_ack_keeps_cell_edit_made_while_mark_was_pending():
+    widget, service, key, queued, _written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        widget.model.admin_map[key].comment = "nurse_not_executed"
+        _capture_mark_baseline(widget)
+        before = deepcopy(widget.model.admin_map[key])
+        acknowledgement = _authoritative_mark(widget, before, "")
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        request = queued.pop()
+        widget._handle_cell_action(widget.model.index(0, 1), "orders_left_click", service.forbidden_cell_write)
+        assert widget.model.admin_map[key].status == "deleted"
+        request["on_success"](acknowledgement)
+        assert widget.model.admin_map[key].status == "deleted"
+        assert widget._local_draft_dirty_admin_keys == {key}
+        assert widget._draft_baseline_admin_map[key].status == "planned"
+        assert widget._draft_baseline_admin_map[key].version == 3
+        assert widget._restore_local_draft_baseline()
+        assert widget.model.admin_map[key].status == "planned"
+        assert widget.model.admin_map[key].version == 3
+        assert widget.model.admin_map[key].comment == ""
+    finally:
+        widget.shutdown()
+
+
+def test_finalize_waits_for_pending_own_mark_instead_of_capturing_old_baseline():
+    widget, _service, _key, queued, _written, _refreshes, warnings = _make_mark_widget()
+    try:
+        _capture_mark_baseline(widget)
+        widget._mark_local_order_dirty(1)
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        widget.finalize_card()
+        assert len(queued) == 1
+        assert warnings == ["Дождитесь подтверждения отметок перед сохранением назначений."]
+        assert not widget._local_draft_save_pending
+    finally:
+        widget.shutdown()
+
+
+def test_own_ack_cannot_rebase_a_baseline_with_unseen_external_changes():
+    widget, _service, key, queued, _written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        _capture_mark_baseline(widget)
+        original = deepcopy(widget._draft_baseline_admin_map[key])
+        widget._mark_local_order_dirty(1)
+        widget.model.admin_map[key].version += 1
+        widget.model.admin_map[key].performer_id = 88
+        before = deepcopy(widget.model.admin_map[key])
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        queued[0]["on_success"](_authoritative_mark(widget, before, "nurse_executed"))
+        assert widget._draft_baseline_admin_map[key] == original
+        assert widget._local_draft_dirty_order_ids == {1}
+    finally:
+        widget.shutdown()
+
+
+def test_admin_only_snapshot_advances_baseline_and_stale_snapshot_cannot_undo_own_ack():
+    widget, _service, key, queued, _written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        before_snapshot = _capture_mark_baseline(widget)
+        before = deepcopy(widget.model.admin_map[key])
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        acknowledgement = _authoritative_mark(widget, before, "nurse_executed")
+        queued[0]["on_success"](acknowledgement)
+        widget._queue_forced_reload_after_stale_snapshot = lambda **_kwargs: None
+        assert not widget._apply_snapshot_data(
+            snapshot=before_snapshot, admission_id=1, shift_date=widget.shift_date,
+        )
+        assert widget._draft_baseline_admin_map[key].version == 3
+        fresh = deepcopy(before_snapshot)
+        fresh["admin_rows"] = [dict(acknowledgement["after"], version=4, comment="nurse_not_executed", performer_id=99)]
+        assert widget._apply_snapshot_data(snapshot=fresh, admission_id=1, shift_date=widget.shift_date)
+        assert widget._draft_baseline_admin_map[key].version == 4
+        assert widget._draft_baseline_admin_map[key].performer_id == 99
+    finally:
+        widget.shutdown()
+
+
+def test_snapshot_during_existing_draft_cannot_silently_rebase_foreign_version():
+    widget, _service, key, _queued, _written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        snapshot = _capture_mark_baseline(widget)
+        widget.model.orders[0].dose_value = 750
+        widget._mark_local_order_dirty(1)
+        snapshot["admin_rows"][0].update(version=9, comment="nurse_executed", performer_id=99)
+        widget._queue_forced_reload_after_stale_snapshot = lambda **_kwargs: None
+        widget._apply_snapshot_data(snapshot=snapshot, admission_id=1, shift_date=widget.shift_date)
+        assert widget._draft_baseline_admin_map[key].version == 2
+        assert widget.model.orders[0].dose_value == 750
+    finally:
+        widget.shutdown()
+
+
+def test_ack_cursor_rejects_missing_old_row_without_advancing_poll_cursor():
+    widget, _service, key, queued, _written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        snapshot = _capture_mark_baseline(widget)
+        before = deepcopy(widget.model.admin_map[key])
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        acknowledgement = _authoritative_mark(widget, before, "nurse_executed")
+        acknowledgement["after"].update(admission_id=1, _change_id=11)
+        queued[0]["on_success"](acknowledgement)
+        assert widget._last_polled_change_id == 0
+        snapshot.update(admin_rows=[], change_id=10)
+        reloads = []
+        widget._queue_forced_reload_after_stale_snapshot = lambda **kwargs: reloads.append(kwargs)
+        assert not widget._apply_snapshot_data(snapshot=snapshot, admission_id=1, shift_date=widget.shift_date)
+        assert key in widget.model.admin_map
+        assert widget._draft_baseline_admin_map[key].version == 3
+        assert reloads == [{"reason": "snapshot_before_doctor_mark"}]
+    finally:
+        widget.shutdown()
+
+
+def test_later_delete_snapshot_passes_ack_cursor_and_context_reset_clears_fence():
+    widget, _service, key, queued, _written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        snapshot = _capture_mark_baseline(widget)
+        before = deepcopy(widget.model.admin_map[key])
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        acknowledgement = _authoritative_mark(widget, before, "nurse_executed")
+        acknowledgement["after"].update(admission_id=1, _change_id=11)
+        queued[0]["on_success"](acknowledgement)
+        snapshot.update(admin_rows=[], change_id=12, version=12, has_any_administrations=False)
+        widget._queue_forced_reload_after_stale_snapshot = lambda **_kwargs: pytest.fail("later delete rejected")
+        assert widget._apply_snapshot_data(snapshot=snapshot, admission_id=1, shift_date=widget.shift_date)
+        assert widget.model.admin_map == widget._draft_baseline_admin_map == {}
+        widget._reset_cached_state()
+        assert widget._committed_doctor_mark_rows == {}
+        assert widget._committed_doctor_mark_change_id == 0
+    finally:
+        widget.shutdown()
+
+
+@pytest.mark.parametrize("invalid_result", [None, {"before": {}, "after": {}}])
+def test_unconfirmed_mark_does_not_promote_synthetic_baseline(invalid_result):
+    widget, _service, key, queued, _written, _refreshes, _warnings = _make_mark_widget()
+    try:
+        snapshot = _capture_mark_baseline(widget)
+        before = deepcopy(widget.model.admin_map[key])
+        widget._handle_doctor_order_mark(widget.model.index(0, 1))
+        queued[0]["on_success"](invalid_result)
+        assert widget._draft_baseline_admin_map[key] == before
+        assert not getattr(widget, "_committed_doctor_mark_rows", {})
+        authoritative = _authoritative_mark(widget, before, "nurse_executed")
+        snapshot.update(admin_rows=[authoritative["after"]], change_id=20, version=20)
+        assert widget._apply_snapshot_data(snapshot=snapshot, admission_id=1, shift_date=widget.shift_date)
+        assert widget._draft_baseline_admin_map[key].performer_id == 77
+        assert widget._draft_baseline_admin_map[key].actual_time == datetime(2026, 7, 13, 8, 1, 2, 345678)
+    finally:
+        widget.shutdown()
 
 
 def test_cell_click_is_local_and_toggle_back_collapses_to_noop():

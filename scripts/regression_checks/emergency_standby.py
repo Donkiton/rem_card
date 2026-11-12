@@ -13,6 +13,8 @@ import shutil
 import sqlite3
 import time
 import uuid
+import ast
+import textwrap
 
 
 def _check_db_runtime_context_network_paths_match_existing_constants(temp_root: str) -> tuple[bool, str]:
@@ -1019,15 +1021,138 @@ def _check_emergency_standby_refresh_requires_existing_network_settings_db(temp_
     return True, "ok"
 
 
+def _copy_function_references(tree):
+    modules = {"shutil"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.asname or alias.name for alias in node.names if alias.name == "shutil")
+        if isinstance(node, ast.ImportFrom) and node.module == "shutil":
+            if any(alias.name == "*" or alias.name.startswith("copy") for alias in node.names):
+                return None  # An imported alias must not hide a direct-copy API.
+    references = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id in modules and node.attr.startswith("copy"):
+                references.append(node)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in {"copy2", "copyfile", "copyfileobj"}:
+            references.append(node)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+              and len(node.args) >= 2 and isinstance(node.args[0], ast.Name) and node.args[0].id in modules
+              and isinstance(node.args[1], ast.Constant) and str(node.args[1].value).startswith("copy")):
+            references.append(node)
+    return references
+
+
+def _copy_contract_body(method, expected):
+    """Pin the safety logic, not whitespace, comments or a whole-file baseline."""
+    wanted = ast.parse("def contract():\n" + textwrap.indent(textwrap.dedent(expected).strip(), "    ")).body[0]
+    return ast.dump(ast.Module(body=method.body, type_ignores=[])) == ast.dump(ast.Module(body=wanted.body, type_ignores=[]))
+
+
+def _settings_reuse_copy_contract(tree, call, parents):
+    classes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "EmergencyStandbyManager"]
+    if len(classes) != 1:
+        return False
+    methods = {node.name: node for node in classes[0].body if isinstance(node, ast.FunctionDef)}
+    required = {"_stage_settings_snapshot", "_trusted_settings_generation", "_validate_identical_settings_copy"}
+    if not required <= methods.keys() or ast.unparse(call) != "shutil.copy2(previous.settings_db_path, staging_path)":
+        return False
+    chain, node = [], call
+    while node in parents:
+        node = parents[node]
+        chain.append(node)
+    guarded = [node for node in chain if isinstance(node, ast.If)]
+    if len(guarded) != 2 or methods["_stage_settings_snapshot"] not in chain:
+        return False
+    validation, trusted = guarded
+    stage = methods["_stage_settings_snapshot"]
+    if (len(stage.body) < 2 or ast.unparse(stage.body[0]) != "before = self._settings_source_proof()"
+            or not isinstance(stage.body[1], ast.Try) or stage.body[1].body != [trusted]
+            or len(trusted.body) != 2 or len(validation.body) != 5):
+        return False
+    if ast.unparse(trusted.test) != "self._trusted_settings_generation(previous, before, source_status)":
+        return False
+    if ast.unparse(trusted.body[0]) != "old = validate_settings_db_snapshot(previous.settings_db_path)":
+        return False
+    expected_validation = "old.ok and old.schema_version == settings_schema.SCHEMA_VERSION and old.file_hash == previous.settings_db_hash and old.file_size == previous.settings_db_size"
+    if ast.dump(validation.test) != ast.dump(ast.parse(expected_validation, mode="eval").body):
+        return False
+    first_steps = [ast.unparse(statement) for statement in validation.body[:3]]
+    if first_steps != ["shutil.copy2(previous.settings_db_path, staging_path)",
+                       "copied = self._validate_identical_settings_copy(staging_path, old)",
+                       "after = self._settings_source_proof()"]:
+        return False
+    returns = [item for item in ast.walk(methods["_stage_settings_snapshot"]) if isinstance(item, ast.Return)]
+    if sorted(ast.unparse(item) for item in returns) != ["return (copied, before, True)", "return (validation, proof, False)"]:
+        return False
+    reuse_return = next(item for item in returns if ast.unparse(item) == "return (copied, before, True)")
+    return_guard = parents.get(reuse_return)
+    if (return_guard is not validation.body[3] or not isinstance(return_guard, ast.If)
+            or ast.unparse(return_guard.test) != "copied is not None and before == after"
+            or ast.unparse(validation.body[4]) != "before = after"):
+        return False
+    # A manifest cannot redirect the admitted source to a live DB, and a local
+    # staging copy cannot inherit validation without a fresh full SHA/size check.
+    trusted_contract = '''
+        if (previous is None or proof is None or not previous.settings_db_hash
+                or not re.fullmatch(r"[0-9a-f]{64}", previous.settings_db_hash)
+                or not re.fullmatch(r"gen_[A-Za-z0-9_-]+", previous.generation_id or "")
+                or not emergency_metadata_compatible(previous)
+                or not standby_metadata_age_info(previous).is_valid or standby_metadata_expired(previous)
+                or self._standby_generation_error(previous)):
+            return False
+        expected_settings = standby_generation_settings_db_path(self.root, previous.generation_id)
+        medical_source = source_status.medical_validation
+        if (os.path.normcase(previous.settings_db_path or "") != os.path.normcase(expected_settings)
+                or os.path.normcase(previous.source_settings_db_path or "") != os.path.normcase(self.source_settings_db_path)
+                or os.path.normcase(previous.source_remote_db_path) != os.path.normcase(self.source_medical_db_path)
+                or medical_source is None or previous.schema_version != medical_source.schema_version
+                or medical_source.last_change_id < previous.remote_last_change_id):
+            return False
+        manifest = standby_metadata_from_dict(read_json_file(standby_generation_metadata_path(self.root, previous.generation_id)))
+        if metadata_to_dict(manifest) != metadata_to_dict(previous):
+            return False
+        return (previous.source_settings_fingerprint or {}).get(_SETTINGS_REUSE_PROOF_KEY) == proof
+    '''
+    target_contract = '''
+        before = _source_file_identity(path)
+        digest = compute_file_hash(path)
+        if (before != _source_file_identity(path) or digest != validated.file_hash
+                or before["size_bytes"] != validated.file_size):
+            return None
+        fingerprint = {**validated.fingerprint, "path": os.path.abspath(path),
+                       "size_bytes": before["size_bytes"], "mtime_ns": before["mtime_ns"], "sha256": digest}
+        return replace(validated, file_hash=digest, file_size=before["size_bytes"],
+                       file_mtime=os.path.getmtime(path), fingerprint=fingerprint)
+    '''
+    return (_copy_contract_body(methods["_trusted_settings_generation"], trusted_contract)
+            and _copy_contract_body(methods["_validate_identical_settings_copy"], target_contract))
+
+
+def _standby_direct_copy_policy(text, *, allow_settings_reuse=False):
+    try:
+        tree = ast.parse(text)
+        references = _copy_function_references(tree)
+        if references is None:
+            return False, "direct-copy imports/aliases are forbidden"
+        if not references:
+            return True, "ok"
+        if not allow_settings_reuse or len(references) != 1:
+            return False, "direct copy is forbidden outside the single validated settings-generation path"
+        parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+        call = parents.get(references[0])
+        if not isinstance(call, ast.Call) or not _settings_reuse_copy_contract(tree, call, parents):
+            return False, "direct copy does not satisfy the immutable generation/path/hash/race protocol"
+        return True, "ok"
+    except (SyntaxError, ValueError, TypeError, KeyError, IndexError):
+        return False, "direct-copy safety source could not be verified"
+
+
 def _check_emergency_standby_refresh_uses_sqlite_backup_api(temp_root: str) -> tuple[bool, str]:
     text = (PROJECT_ROOT / "app" / "emergency_standby.py").read_text(encoding="utf-8")
     if "backup_connection(" not in text or "conn.backup" not in (PROJECT_ROOT / "app" / "sqlite_shared.py").read_text(encoding="utf-8"):
         return False, "EmergencyStandbyManager must use SQLite Backup API helper"
-    forbidden = ("shutil.copy", "copy2(", "copyfile(")
-    for token in forbidden:
-        if token in text:
-            return False, f"EmergencyStandbyManager must not direct-copy live DB: {token}"
-    return True, "ok"
+    return _standby_direct_copy_policy(text, allow_settings_reuse=True)
 
 
 def _check_emergency_standby_refresh_writes_temp_then_atomic_replace(temp_root: str) -> tuple[bool, str]:
@@ -1090,11 +1215,15 @@ def _check_emergency_standby_refresh_preserves_old_valid_pair_on_settings_failur
             return temp_target_path
         return original_backup(source_path, temp_target_path, source=source)
 
+    original_proof = manager._settings_source_proof
     try:
+        # Exercise failure of an actual source backup, not the optional cache.
+        manager._settings_source_proof = lambda: None
         manager._backup_sqlite_to_temp = fail_settings_backup
         result = manager.create_or_refresh_standby(forced=True)
     finally:
         manager._backup_sqlite_to_temp = original_backup
+        manager._settings_source_proof = original_proof
     if result.ok or result.status != "validation_failed":
         return False, f"settings temp failure did not stop refresh: {result}"
     current = manager.store.read_standby_metadata()
@@ -1680,9 +1809,9 @@ def _check_emergency_standby_scheduler_no_direct_file_copy_live_db(temp_root: st
     _ = temp_root
     for relative in ("app/emergency_standby_scheduler.py", "app/emergency_standby.py"):
         text = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
-        for token in ("shutil.copy", "copy2(", "copyfile("):
-            if token in text:
-                return False, f"direct file copy token in {relative}: {token}"
+        ok, reason = _standby_direct_copy_policy(text, allow_settings_reuse=relative == "app/emergency_standby.py")
+        if not ok:
+            return False, f"{relative}: {reason}"
     return True, "ok"
 
 

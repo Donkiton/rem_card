@@ -131,6 +131,14 @@ def _release_manifest_identity(snapshot_path: str) -> dict[str, str] | None:
     return {key: str(manifest.get(key) or "") for key in ("content_hash", "release_version", "release_commit")}
 
 
+def _read_complete_app_settings(db) -> tuple[list[dict], int]:
+    with db.read_connection() as connection:
+        connection.execute("BEGIN")
+        change_id = int(connection.execute("SELECT COALESCE(MAX(id), 0) FROM settings_change_log").fetchone()[0])
+        rows = [dict(row) for row in connection.execute("SELECT scope, key, value_json FROM app_settings").fetchall()]
+    return rows, change_id
+
+
 def _deferred_settings_release_worker(job: dict, sender: Any) -> None:
     """Apply one fixed package to one already admitted settings DB; never migrate."""
     from rem_card.data.settings import settings_schema
@@ -151,7 +159,7 @@ def _deferred_settings_release_worker(job: dict, sender: Any) -> None:
         class AdmittedSettingsDatabase(SettingsDatabase):
             @contextmanager
             def transaction(self, source="settings_write"):
-                if source != _RELEASE_APPLY_SOURCE:
+                if job.get("refresh_only") or source != _RELEASE_APPLY_SOURCE:
                     raise RuntimeError("settings_retry_unexpected_write")
                 with super().transaction(source) as cursor:
                     # Recheck after taking the real writer lock, immediately
@@ -166,7 +174,7 @@ def _deferred_settings_release_worker(job: dict, sender: Any) -> None:
             context=job.get("runtime_context"), baza_dir=job["baza_dir"],
             settings_db_path=job["database_path"], settings_db_lock_path=job["lock_path"],
             settings_backups_dir=job["backups_dir"], settings_backup_health_dir=job["backup_health_dir"],
-            readonly=job["readonly"],
+            readonly=bool(job.get("refresh_only") or job["readonly"]),
         )
         # Do not call ensure_ready(): a retry is not permission to initialise or
         # migrate a replacement DB, regardless of the client's build profile.
@@ -175,22 +183,22 @@ def _deferred_settings_release_worker(job: dict, sender: Any) -> None:
                 raise RuntimeError("settings_retry_schema_changed")
         db.write_controller.owner_id = f"settings-release:{job['job_token']}"
         service = SettingsService(db)
-        report = service._settings_startup_write_precheck_report(
+        report = None if job.get("refresh_only") else service._settings_startup_write_precheck_report(
             source=_RELEASE_APPLY_SOURCE, operation_label="отложенное обновление настроек из пакета",
             applied=False, changed_rows=0,
         )
         if report:
             result = {"status": "deferred", "reason": SETTINGS_STARTUP_WRITE_BUSY_REASON}
         else:
-            attempted = True
-            report = apply_settings_release_snapshot(db, job["snapshot_path"], bump_catalog_version=service._bump_catalog_version)
+            if not job.get("refresh_only"):
+                attempted = True
+                report = apply_settings_release_snapshot(db, job["snapshot_path"], bump_catalog_version=service._bump_catalog_version)
             # Cache refresh must remain inside the owned, killable worker too.
             # The coordinator installs only plain rows and never reads SMB.
-            with db.read_connection() as connection:
-                rows = [dict(row) for row in connection.execute(
-                    "SELECT scope, key, value_json FROM app_settings"
-                ).fetchall()]
-            result = {"status": "success", "report": report, "app_setting_rows": rows}
+            rows, change_id = _read_complete_app_settings(db)
+            check_target()
+            result = {"status": "success", "report": report,
+                      "app_setting_rows": rows, "app_setting_change_id": change_id}
     except Exception as exc:
         result = {
             "status": "deferred" if SettingsService._is_settings_startup_write_busy(exc) else "failure",
@@ -230,6 +238,8 @@ class _SettingsReleaseRetry:
         self.cleanup_result: dict = {}
         self.job: dict | None = None
         self.result: dict | None = None
+        self._attempt_epoch = 0
+        self._applied_report: dict | None = None
         self.status = "scheduled"
         self.thread = threading.Thread(target=self._run, name="RemCardSettingsReleaseRetry", daemon=True)
 
@@ -254,7 +264,10 @@ class _SettingsReleaseRetry:
                 if state != "stopped":
                     return False
                 self.result = self._receive(self.receiver) or self.result
-            needs_cleanup = self.job is not None and (self.result or {}).get("write_attempted", True)
+            needs_cleanup = (
+                self.job is not None and not self.job.get("refresh_only")
+                and (self.result or {}).get("write_attempted", True)
+            )
             if needs_cleanup:
                 if self.cleanup_process is None:
                     if time.monotonic() >= deadline:
@@ -317,11 +330,15 @@ class _SettingsReleaseRetry:
     def _attempt(self) -> dict:
         if not self._finish_owned():
             return {"status": "deferred", "reason": "owned_worker_pending"}
+        if self.result is not None:
+            return self._take_result()
         if not self.service._release_retry_context_is_current(self.config):
             return {"status": "cancelled", "reason": "context_changed"}
         context = multiprocessing.get_context("spawn")
         receiver, sender = context.Pipe(duplex=False)
-        job = {**self.config, "job_token": uuid.uuid4().hex}
+        with self.service._value_cache_lock:
+            self._attempt_epoch = self.service._app_setting_cache_epoch
+        job = {**self.config, "job_token": uuid.uuid4().hex, "refresh_only": self._applied_report is not None}
         process = context.Process(
             target=_deferred_settings_release_worker, args=(job, sender),
             name="RemCardSettingsReleaseWorker", daemon=True,
@@ -348,7 +365,12 @@ class _SettingsReleaseRetry:
                 break
         if not self._finish_owned():
             return {"status": "deferred", "reason": "owned_worker_pending"}
-        return self.result or {"status": "failure", "reason": "worker_timeout_or_exit"}
+        return self._take_result()
+
+    def _take_result(self) -> dict:
+        result = self.result or {"status": "failure", "reason": "worker_timeout_or_exit"}
+        self.result = None
+        return {**result, "expected_epoch": self._attempt_epoch}
 
     def _run(self) -> None:
         delay = _RELEASE_RETRY_DELAY_SEC
@@ -361,8 +383,15 @@ class _SettingsReleaseRetry:
                 self.status = str(result.get("reason") or result["status"])
                 record_metric("settings_release_retry_result", 1, status=result["status"], reason=self.status)
                 if result["status"] == "success":
-                    self.service._release_retry_applied(self.config, result["report"], result["app_setting_rows"])
-                    return
+                    report = result["report"] if self._applied_report is None else None
+                    if report is not None:
+                        self._applied_report = dict(report)
+                    if self.service._release_retry_applied(
+                        self.config, report, result["app_setting_rows"],
+                        change_id=result["app_setting_change_id"], expected_epoch=result["expected_epoch"],
+                    ):
+                        return
+                    self.status = "cache_refresh_superseded"
                 if result["status"] == "cancelled" or self.status.startswith("settings_retry_"):
                     return
                 delay = min(5.0, _RELEASE_RETRY_INTERVAL_SEC) if self.job else _RELEASE_RETRY_INTERVAL_SEC
@@ -660,6 +689,9 @@ class SettingsService:
         self._snapshot_cache: dict[str, tuple[int, str, Any]] = {}
         self._value_cache_lock = threading.RLock()
         self._app_setting_cache: dict[tuple[str, str], Any] = {}
+        self._app_setting_cache_complete = False
+        self._app_setting_cache_change_id: int | None = None
+        self._app_setting_cache_epoch = 0
         self._diet_templates_cache: list[DietTemplateDTO] | None = None
         self._last_seen_settings_change_id = 0
         self.source_client_id = PROCESS_SOURCE_CLIENT_ID
@@ -905,17 +937,22 @@ class SettingsService:
             }
         )
 
-    def _release_retry_applied(self, config: dict, report: dict, app_setting_rows: list[dict]) -> None:
+    def _release_retry_applied(
+        self, config: dict, report: dict | None, app_setting_rows: list[dict], *, change_id: int, expected_epoch: int,
+    ) -> bool:
         if not self._release_retry_context_is_current(config):
-            return
-        self.invalidate_cache()
-        self._install_app_setting_cache(app_setting_rows)
-        with self._ready_lock:
-            self._ready_info["settings_release_snapshot"] = dict(report)
-            warnings = [item for item in self._ready_info.get("settings_startup_warnings", [])
-                        if item.get("source") != _RELEASE_APPLY_SOURCE]
-            self._ready_info["settings_startup_warnings"] = warnings
-        logger.info("Deferred settings release snapshot result: %s", report)
+            return False
+        accepted = self._install_app_setting_cache(
+            app_setting_rows, change_id=change_id, expected_epoch=expected_epoch, invalidate_catalogs=True,
+        )
+        if report is not None:
+            with self._ready_lock:
+                self._ready_info["settings_release_snapshot"] = dict(report)
+                warnings = [item for item in self._ready_info.get("settings_startup_warnings", [])
+                            if item.get("source") != _RELEASE_APPLY_SOURCE]
+                self._ready_info["settings_startup_warnings"] = warnings
+            logger.info("Deferred settings release snapshot result: %s", report)
+        return accepted
 
     def stop_deferred_release_retry(self, timeout_sec: float = 2.0) -> bool:
         """Stop only this service's existing retry owner; never create a service."""
@@ -956,9 +993,9 @@ class SettingsService:
         if report:
             logger.info("Operblock icons prepared on demand: %s", report)
 
-    def invalidate_cache(self, catalog_key: str | None = None) -> None:
+    def invalidate_cache(self, catalog_key: str | None = None, *, app_settings: bool = True) -> None:
         with self._value_cache_lock:
-            if catalog_key in {
+            if app_settings and catalog_key in {
                 None,
                 DISPLAY_SETTINGS_KEY,
                 BACKGROUND_SETTINGS_KEY,
@@ -968,6 +1005,9 @@ class SettingsService:
                 LAB_ANALYSIS_KEY,
             }:
                 self._app_setting_cache.clear()
+                self._app_setting_cache_complete = False
+                self._app_setting_cache_change_id = None
+                self._app_setting_cache_epoch += 1
             if catalog_key in {None, DIET_TEMPLATES_KEY}:
                 self._diet_templates_cache = None
         if catalog_key:
@@ -976,13 +1016,13 @@ class SettingsService:
         self._snapshot_cache.clear()
 
     def _prime_app_setting_cache(self) -> None:
-        with self.db.read_connection() as conn:
-            rows = conn.execute(
-                "SELECT scope, key, value_json FROM app_settings"
-            ).fetchall()
-        self._install_app_setting_cache(rows)
+        rows, change_id = _read_complete_app_settings(self.db)
+        self._install_app_setting_cache(rows, change_id=change_id)
 
-    def _install_app_setting_cache(self, rows) -> None:
+    def _install_app_setting_cache(
+        self, rows, *, change_id: int | None = None,
+        expected_epoch: int | None = None, invalidate_catalogs: bool = False,
+    ) -> bool:
         primed: dict[tuple[str, str], Any] = {}
         for row in rows:
             try:
@@ -991,7 +1031,25 @@ class SettingsService:
                 value = _APP_SETTING_MISSING
             primed[(str(row["scope"]), str(row["key"]))] = value
         with self._value_cache_lock:
+            if expected_epoch is not None and expected_epoch != self._app_setting_cache_epoch:
+                return False
             self._app_setting_cache = primed
+            self._app_setting_cache_complete = True
+            self._app_setting_cache_change_id = change_id
+            self._app_setting_cache_epoch += 1
+            if invalidate_catalogs:
+                self._snapshot_cache.clear()
+                self._diet_templates_cache = None
+        return True
+
+    def app_setting_cache_covers(self, change_id: int) -> bool:
+        """Check an already prepared snapshot without doing network I/O in a GUI slot."""
+        with self._value_cache_lock:
+            return bool(
+                self._app_setting_cache_complete
+                and self._app_setting_cache_change_id is not None
+                and self._app_setting_cache_change_id >= int(change_id)
+            )
 
     def _schedule_background_cache_warmup(self) -> None:
         if not self._should_repair_backgrounds_on_startup():
@@ -2553,6 +2611,7 @@ class SettingsService:
         source_client_id: str | None = None,
         before: Any = None,
         after: Any = None,
+        invalidate_app_settings: bool = True,
     ) -> tuple[int, str]:
         current_row = cursor.execute(
             "SELECT version FROM settings_catalog_versions WHERE catalog_key = ?",
@@ -2621,7 +2680,7 @@ class SettingsService:
                 effective_source_client_id,
             ),
         )
-        self.invalidate_cache(catalog_key)
+        self.invalidate_cache(catalog_key, app_settings=invalidate_app_settings)
         return version, content_hash
 
     def get_catalog_version(self, catalog_key: str) -> tuple[int, str]:
@@ -2641,9 +2700,24 @@ class SettingsService:
             row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM settings_change_log").fetchone()
         return int(row[0] or 0) if row else 0
 
-    def fetch_changes_since(self, last_change_id: int) -> list[dict[str, Any]]:
+    def fetch_changes_since(self, last_change_id: int, *, refresh_app_settings: bool = False) -> list[dict[str, Any]]:
         self.ensure_ready()
+        for _attempt in range(2 if refresh_app_settings else 1):
+            rows = self._fetch_changes_with_app_cache(last_change_id, refresh_app_settings=refresh_app_settings)
+            if rows is not None:
+                return rows
+        # Both snapshots lost to a concurrent local write/invalidation. The
+        # caller must retry without acknowledging its settings change cursor.
+        raise SettingsDbError("Настройки изменились во время обновления кэша. Повторите чтение.")
+
+    def _fetch_changes_with_app_cache(self, last_change_id, *, refresh_app_settings):
+        with self._value_cache_lock:
+            epoch = self._app_setting_cache_epoch
         with self.db.read_connection() as conn:
+            if refresh_app_settings:
+                # The monitor reads both the changes and values from one SQLite
+                # snapshot before notifying the GUI. Never warm the cache there.
+                conn.execute("BEGIN")
             rows = conn.execute(
                 """
                 SELECT id, entity_type, entity_id, operation, scope, version,
@@ -2654,6 +2728,14 @@ class SettingsService:
                 """,
                 (int(last_change_id or 0),),
             ).fetchall()
+            if refresh_app_settings:
+                app_rows = conn.execute("SELECT scope, key, value_json FROM app_settings").fetchall()
+                change_id = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM settings_change_log").fetchone()[0])
+        if refresh_app_settings:
+            if not self._install_app_setting_cache(
+                app_rows, change_id=change_id, expected_epoch=epoch, invalidate_catalogs=True,
+            ):
+                return None
         return [dict(row) for row in rows]
 
     def load_prescription_datasets(self) -> dict[str, dict[str, Any]]:
@@ -3384,10 +3466,16 @@ class SettingsService:
             self._ensure_operblock_settings_on_demand()
         with self._value_cache_lock:
             cached = self._app_setting_cache.get(scope_key, _CACHE_NOT_FOUND)
+            complete = self._app_setting_cache_complete
+            epoch = self._app_setting_cache_epoch
         if cached is _APP_SETTING_MISSING:
             return default
         if cached is not _CACHE_NOT_FOUND:
             return copy.deepcopy(cached)
+        if complete:
+            # A complete snapshot also proves absence. Each caller keeps its
+            # own default; opening a new print/display tab must not query SMB.
+            return default
         with self.db.read_connection() as conn:
             row = conn.execute(
                 "SELECT value_json FROM app_settings WHERE scope = ? AND key = ?",
@@ -3395,14 +3483,16 @@ class SettingsService:
             ).fetchone()
         if not row:
             with self._value_cache_lock:
-                self._app_setting_cache[scope_key] = _APP_SETTING_MISSING
+                if epoch == self._app_setting_cache_epoch:
+                    self._app_setting_cache[scope_key] = _APP_SETTING_MISSING
             return default
         try:
             value = json.loads(row["value_json"])
         except Exception:
             return default
         with self._value_cache_lock:
-            self._app_setting_cache[scope_key] = value
+            if epoch == self._app_setting_cache_epoch:
+                self._app_setting_cache[scope_key] = value
         return copy.deepcopy(value)
 
     def set_app_setting(
@@ -3442,9 +3532,11 @@ class SettingsService:
                 changed_by_user=changed_by_user,
                 before=before,
                 after=value,
+                invalidate_app_settings=False,
             )
         with self._value_cache_lock:
             self._app_setting_cache[(str(scope), str(key))] = copy.deepcopy(value)
+            self._app_setting_cache_epoch += 1
 
     def _select_app_setting(self, cursor, scope: str, key: str) -> dict[str, Any] | None:
         row = cursor.execute(

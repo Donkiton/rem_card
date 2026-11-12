@@ -565,14 +565,19 @@ class OrderDomainService:
             return dict(row)
         return {desc[0]: row[idx] for idx, desc in enumerate(cursor.description or [])}
 
-    def _fetch_admin_for_nurse_update(self, cursor, admin_id: int) -> Optional[dict]:
+    def _fetch_admin_for_nurse_update(self, cursor, admin_id: int, *, include_change_id: bool = False) -> Optional[dict]:
+        change_id_column = (
+            ", (SELECT COALESCE(MAX(id), 0) FROM change_log WHERE admission_id = o.admission_id) AS _change_id"
+            if include_change_id else ""
+        )
         cursor.execute(
-            """
+            f"""
             SELECT
                 a.*,
                 o.admission_id AS admission_id,
                 o.status AS order_status,
                 o.updated_at AS order_updated_at
+                {change_id_column}
             FROM administrations a
             JOIN orders o ON o.id = a.order_id
             WHERE a.id = ?
@@ -907,7 +912,7 @@ class OrderDomainService:
         if obsolete:
             cursor.executemany("DELETE FROM transfusions WHERE id = ?", obsolete)
 
-    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
+    def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None, return_ack: bool = False):
         """Устанавливает отметку выполнения медсестрой в поле comment."""
         self._sanitize_legacy_statuses_once()
         with self.db.remcard_transaction() as cursor:
@@ -951,8 +956,10 @@ class OrderDomainService:
                 )
             self._sync_transfusion_for_admin(cursor, admin_id)
             logger.info(f"[NurseAction] Admin ID {admin_id} mark set to {mark} at {now_str}.")
+            if return_ack:
+                return {"before": row, "after": self._fetch_admin_for_nurse_update(cursor, admin_id, include_change_id=True)}
 
-    def cancel_nurse_action(self, admin_id: int, *, allow_late_cancel: bool = False, expected_version: Optional[int] = None):
+    def cancel_nurse_action(self, admin_id: int, *, allow_late_cancel: bool = False, expected_version: Optional[int] = None, return_ack: bool = False):
         """Отменяет действие медсестры (очищает comment и actual_time)."""
         with self.db.remcard_transaction() as cursor:
             row = self._fetch_admin_for_nurse_update(cursor, admin_id)
@@ -991,12 +998,14 @@ class OrderDomainService:
                 )
             self._sync_transfusion_for_admin(cursor, admin_id)
             logger.info(f"[NurseAction] Admin ID {admin_id} mark cleared.")
+            if return_ack:
+                return {"before": row, "after": self._fetch_admin_for_nurse_update(cursor, admin_id, include_change_id=True)}
 
     def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
-        self.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
+        return self.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version, return_ack=True)
 
     def cancel_doctor_action(self, admin_id: int, *, expected_version: Optional[int] = None):
-        self.cancel_nurse_action(admin_id, allow_late_cancel=True, expected_version=expected_version)
+        return self.cancel_nurse_action(admin_id, allow_late_cancel=True, expected_version=expected_version, return_ack=True)
 
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime) -> List[Dict]:
         """Получает данные для сектора 1а. Просроченность больше не создается."""
