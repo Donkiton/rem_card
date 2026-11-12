@@ -13,7 +13,7 @@ from rem_card.data.dto.remcard_dto import OrderStatus
 from rem_card.data.dto.remcard_dto import OrderType
 from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
 from rem_card.services.order_domain_service import NURSE_MARK_NOT_EXECUTED
-from rem_card.services.order_service import OrderConflictError
+from rem_card.services.order_service import OrderConflictError, OrderService
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 import time
 
@@ -41,6 +41,8 @@ class DraftManagementMixin:
         # or restore marks belonging to a new visit to the same card.
         self._pending_doctor_mark_writes = {}
         self._doctor_mark_required_versions = {}
+        self._committed_doctor_mark_rows = {}
+        self._committed_doctor_mark_change_id = 0
         self._discard_deferred_forced_reload_after_guard(discard_reason="context_reset")
         self._clear_local_cell_draft_guard()
         self._reset_local_draft_tracking(clear_baseline=True)
@@ -76,6 +78,33 @@ class DraftManagementMixin:
             or self._local_draft_dirty_admin_keys
             or self._pending_reorder_order_ids
         )
+
+    def _rebase_committed_doctor_mark(self, before, after, row):
+        key = self._admin_key_from_admin(after)
+        baseline = self._draft_baseline_admin_map.get(key)
+        if OrderService._draft_admin_token(baseline) != OrderService._draft_admin_token(before):
+            return
+        self._draft_baseline_admin_map[key] = deepcopy(after)
+        if self._draft_baseline_snapshot is not None:
+            rows = self._draft_baseline_snapshot.get("admin_rows") or []
+            self._draft_baseline_snapshot["admin_rows"] = [
+                dict(item) for item in rows
+                if OrderService._draft_admin_key(item["order_id"], item["planned_time"]) != key
+            ] + [dict(row)]
+
+    def _snapshot_predates_committed_doctor_mark(self, snapshot) -> bool:
+        if int(snapshot.get("change_id") or 0) < int(getattr(self, "_committed_doctor_mark_change_id", 0)):
+            return True
+        confirmed = getattr(self, "_committed_doctor_mark_rows", {})
+        for row in snapshot.get("admin_rows") or []:
+            key = OrderService._draft_admin_key(row["order_id"], row["planned_time"])
+            after = confirmed.get(key)
+            if after is None:
+                continue
+            observed = (int(row["id"]), int(row.get("version") or 0))
+            if observed < (after.id, after.version):
+                return True
+        return False
 
     def _allocate_local_order_id(self) -> int:
         value = int(self._next_local_order_id)
@@ -382,6 +411,9 @@ class DraftManagementMixin:
     def finalize_card(self):
         if not self.admission_id or self._forced_read_only: return
         if self._local_draft_save_pending:
+            return
+        if getattr(self, "_pending_doctor_mark_writes", None):
+            self._show_warning("Дождитесь подтверждения отметок перед сохранением назначений.")
             return
         if not self._has_local_draft_changes():
             if self._legacy_central_draft_detected:

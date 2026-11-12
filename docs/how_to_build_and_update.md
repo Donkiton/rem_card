@@ -60,7 +60,7 @@ C:\Project\RemCardTestData\UPD\releases\<новая версия>
 
 ## Шаг 2. Проверить релиз на тестовой базе
 
-### Необязательные обновления 5.1.16 и 5.1.17
+### Необязательные обновления 5.1.16–5.1.19
 
 Собирать с `REMCARD_BUILD_NO_DATABASE_UPGRADES=1` для базы, уже обновлённой
 до схемы 29. В full-manifest проверить `database_upgrades_disabled: true`

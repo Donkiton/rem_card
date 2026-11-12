@@ -444,7 +444,7 @@ class DataService(QObject):
     def fetch_settings_changes_since(self, last_change_id: int) -> list[dict[str, Any]]:
         from rem_card.services.settings.settings_service import get_settings_service
 
-        return get_settings_service().fetch_changes_since(last_change_id)
+        return get_settings_service().fetch_changes_since(last_change_id, refresh_app_settings=True)
 
     def get_changed_entities_since(
         self,
@@ -1590,7 +1590,15 @@ class DataService(QObject):
             try:
                 from rem_card.services.settings.settings_service import get_settings_service
 
-                get_settings_service().invalidate_cache()
+                settings = get_settings_service()
+                settings_change_id = int((payload or {}).get("last_settings_change_id") or 0)
+                if settings_change_id <= 0 or not settings.app_setting_cache_covers(settings_change_id):
+                    settings.invalidate_cache()
+                else:
+                    # A GUI catalog getter may have completed an old read after
+                    # the worker prepared app_settings. Retire those catalogs
+                    # at notification time while keeping the complete values.
+                    settings.invalidate_cache(app_settings=False)
             except Exception as exc:
                 logger.warning("Не удалось инвалидировать кэш settings DB: %s", exc, exc_info=True)
         self.changes_detected.emit(self._sync_coordinator.classify(payload or {}))

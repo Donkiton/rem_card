@@ -5,9 +5,12 @@ import os
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -446,6 +449,162 @@ class SettingsStartupWritesTest(unittest.TestCase):
                 if isinstance(item, dict)
             ]
             self.assertIn("blob_bg", saved_ids)
+
+
+class SettingsMonitorCacheTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.db = SettingsDatabase(baza_dir=str(Path(self.temp.name) / "baza"))
+        self.service = SettingsService(self.db)
+        self.service.ensure_ready()
+
+    def test_complete_startup_snapshot_proves_missing_keys_without_read_and_keeps_defaults(self):
+        from rem_card.ui.nurse_view.sectors.nurse_sector_print import NursePrintConfig
+
+        with (
+            patch.object(self.db, "read_connection", side_effect=AssertionError("GUI opened settings DB")),
+            patch("rem_card.services.settings.settings_service.get_settings_service", return_value=self.service),
+        ):
+            self.assertEqual(self.service.get_app_setting("nurse", "absent_print_key", default={"a": 1}), {"a": 1})
+            self.assertEqual(self.service.get_app_setting("nurse", "absent_print_key", default={"b": 2}), {"b": 2})
+            self.assertEqual(NursePrintConfig().load(), {
+                "vitals": True, "balance": True, "prescriptions": True, "events": True,
+            })
+
+    def test_monitor_prepares_changed_values_before_gui_notification(self):
+        from rem_card.services.data_service import DataService
+        from rem_card.services.sync_coordinator import SyncCoordinator
+
+        self.service.set_app_setting("nurse", "print_config", {"value": "old"})
+        cursor = self.service.latest_change_id()
+        other = SettingsService(self.db)
+        other.ensure_ready()
+        other.set_app_setting("nurse", "print_config", {"value": "new"})
+        self.assertEqual(self.service.get_app_setting("nurse", "print_config"), {"value": "old"})
+        reads, changes, errors = [], [], []
+        original_read = self.db.read_connection
+
+        @contextmanager
+        def background_only_read():
+            reads.append(threading.current_thread())
+            self.assertIsNot(threading.current_thread(), threading.main_thread())
+            with original_read() as connection:
+                yield connection
+
+        def poll():
+            try:
+                changes.extend(DataService.fetch_settings_changes_since(None, cursor))
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch("rem_card.services.settings.settings_service.get_settings_service", return_value=self.service):
+            with patch.object(self.db, "read_connection", background_only_read):
+                worker = threading.Thread(target=poll)
+                worker.start()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(len(reads), 1)
+            change_id = max(row["id"] for row in changes)
+            # A catalog read started before the worker snapshot may finish in
+            # the GUI before its queued notification. It must not survive it.
+            self.service._diet_templates_cache = ["stale catalog read"]
+            self.service._snapshot_cache["stale_catalog"] = (1, "old", {})
+            emitted = []
+            receiver = SimpleNamespace(
+                _shutting_down=False, _network_outage_detected=False,
+                _sync_coordinator=SyncCoordinator(),
+                changes_detected=SimpleNamespace(emit=emitted.append),
+            )
+            with patch.object(self.db, "read_connection", side_effect=AssertionError("GUI opened settings DB")):
+                DataService._emit_coordinated_changes(receiver, {
+                    "changes": [{"settings_change": True, "entity_name": "print_settings"}],
+                    "last_settings_change_id": change_id,
+                })
+                self.assertIsNone(self.service._diet_templates_cache)
+                self.assertEqual(self.service._snapshot_cache, {})
+                value = self.service.get_app_setting("nurse", "print_config")
+                value["value"] = "mutated by caller"
+                self.assertEqual(self.service.get_app_setting("nurse", "print_config"), {"value": "new"})
+                self.assertEqual(self.service.get_app_setting("nurse", "still_absent", default=37), 37)
+            self.assertEqual(len(emitted), 1)
+
+    def test_local_save_keeps_other_primed_settings_available_without_read(self):
+        self.service.set_app_setting("nurse", "other", {"keep": True})
+        self.service.set_app_setting("nurse", "print_config", {"changed": True})
+        with patch.object(self.db, "read_connection", side_effect=AssertionError("cache was unnecessarily cleared")):
+            self.assertEqual(self.service.get_app_setting("nurse", "other"), {"keep": True})
+            self.assertEqual(self.service.get_app_setting("nurse", "print_config"), {"changed": True})
+            self.assertEqual(self.service.get_app_setting("nurse", "absent", default=37), 37)
+
+    def test_slow_background_refresh_does_not_hold_gui_cache_lock(self):
+        self.service.set_app_setting("nurse", "print_config", "old")
+        other = SettingsService(self.db)
+        other.ensure_ready()
+        other.set_app_setting("nurse", "print_config", "new")
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        original_read = self.db.read_connection
+
+        @contextmanager
+        def slow_network_read():
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("GUI could not use its cache while background read waited")
+            with original_read() as connection:
+                yield connection
+
+        def poll():
+            try:
+                self.service.fetch_changes_since(0, refresh_app_settings=True)
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(self.db, "read_connection", slow_network_read):
+            worker = threading.Thread(target=poll)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(self.service.get_app_setting("nurse", "print_config"), "old")
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(self.service.get_app_setting("nurse", "print_config"), "new")
+
+    def test_concurrent_local_save_rejects_old_monitor_snapshot_and_retry_sees_new_value(self):
+        self.service.set_app_setting("nurse", "print_config", {"value": "old"})
+        cursor = self.service.latest_change_id()
+        install = self.service._install_app_setting_cache
+        raced = False
+
+        def race(rows, **kwargs):
+            nonlocal raced
+            if not raced:
+                raced = True
+                self.service.set_app_setting("nurse", "print_config", {"value": "new"})
+            return install(rows, **kwargs)
+
+        with patch.object(self.service, "_install_app_setting_cache", race):
+            changes = self.service.fetch_changes_since(cursor, refresh_app_settings=True)
+        self.assertEqual(self.service.get_app_setting("nurse", "print_config"), {"value": "new"})
+        self.assertTrue(changes)
+        self.assertTrue(self.service.app_setting_cache_covers(max(row["id"] for row in changes)))
+
+    def test_failed_refresh_keeps_previous_snapshot_and_explicit_invalidation_reads_latest(self):
+        self.service.set_app_setting("nurse", "print_config", "old")
+        with patch.object(self.db, "read_connection", side_effect=OSError("network unavailable")):
+            with self.assertRaises(OSError):
+                self.service.fetch_changes_since(0, refresh_app_settings=True)
+            self.assertEqual(self.service.get_app_setting("nurse", "print_config"), "old")
+        other = SettingsService(self.db)
+        other.ensure_ready()
+        other.set_app_setting("nurse", "print_config", "new")
+        self.service.invalidate_cache()
+        self.assertFalse(self.service.app_setting_cache_covers(0))
+        self.assertEqual(self.service.get_app_setting("nurse", "print_config"), "new")
 
 
 if __name__ == "__main__":

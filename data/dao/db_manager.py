@@ -3800,6 +3800,63 @@ class DatabaseManager:
         )
         return current
 
+    def get_orders_change_window(
+        self, last_change_id: int, *, admission_id: int, required_version: int, max_events: int = 512,
+    ) -> dict[str, Any]:
+        """Read a bounded, gap-checked log window in one SQLite statement.
+
+        Count global IDs, but return only this admission and unscoped events.
+        Missing IDs (including prefix pruning) fail closed. No local fallback
+        or long read transaction may turn incomplete history into a no-op.
+        """
+        base = max(0, int(last_change_id))
+        limit = min(4096, max(1, int(max_events)))
+        query = """
+            WITH bounds AS (
+                SELECT (SELECT COALESCE(MIN(id), 0) FROM change_log) AS retained_min,
+                       (SELECT COALESCE(MAX(id), 0) FROM change_log) AS source_max,
+                       MAX(?, (SELECT COALESCE(MAX(id), 0) FROM change_log WHERE admission_id = ?)) AS watermark
+            ), window_ids AS (
+                SELECT id FROM change_log
+                WHERE id > ? AND id <= (SELECT watermark FROM bounds)
+                ORDER BY id LIMIT ?
+            ), proof AS (
+                SELECT retained_min, source_max, watermark,
+                       (SELECT COUNT(*) FROM window_ids) AS event_count FROM bounds
+            )
+            SELECT NULL AS id, NULL AS entity_name, NULL AS entity_id,
+                   NULL AS admission_id, NULL AS action, NULL AS changed_at,
+                   NULL AS changed_by, NULL AS version,
+                   retained_min, source_max, watermark, event_count
+            FROM proof
+            UNION ALL
+            SELECT c.id, c.entity_name, c.entity_id, c.admission_id, c.action,
+                   c.changed_at, c.changed_by, c.version,
+                   p.retained_min, p.source_max, p.watermark, p.event_count
+            FROM proof p CROSS JOIN change_log c
+            WHERE p.event_count <= ? AND c.id > ? AND c.id <= p.watermark
+              AND (c.admission_id = ? OR c.admission_id IS NULL)
+            ORDER BY id
+        """
+        result = self._fetch_all_central(
+            query, (int(required_version), int(admission_id), base, limit + 1, limit, base, int(admission_id)),
+        )
+        proof = dict(result[0])
+        watermark, count = int(proof["watermark"]), int(proof["event_count"])
+        complete = (
+            base > 0 and watermark >= max(base, int(required_version))
+            and int(proof["source_max"]) >= watermark
+            and int(proof["retained_min"]) <= base + 1
+            and count <= limit and count == watermark - base
+        )
+        return {
+            "complete": complete, "base_version": base, "admission_id": int(admission_id),
+            "watermark": watermark, "retained_min": int(proof["retained_min"]),
+            "source_max": int(proof["source_max"]),
+            "event_count": count,
+            "rows": [dict(row) for row in result[1:]],
+        }
+
     def fetch_changes_since(self, last_change_id: int, admission_id: Optional[int] = None, include_global: bool = True):
         query = "SELECT * FROM change_log WHERE id > ?"
         params = [last_change_id]

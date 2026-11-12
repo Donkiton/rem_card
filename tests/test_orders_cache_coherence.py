@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import threading
+import sqlite3
+from collections import Counter
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -9,9 +12,65 @@ import pytest
 from rem_card.services import read_coordinator as read_coordinator_module
 from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
 from rem_card.services.remcard_facade import RemCardService
+from rem_card.data.dao.db_manager import DatabaseManager
 
 
 SHIFT = datetime(2026, 8, 6, 8, 0)
+
+
+@pytest.fixture
+def window_service():
+    connections = []
+
+    def make(events, *, probe=None):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("CREATE TABLE change_log (id INTEGER PRIMARY KEY, entity_name TEXT, entity_id INTEGER, "
+                     "admission_id INTEGER, action TEXT, changed_at TEXT, changed_by TEXT, version INTEGER)")
+        conn.execute("INSERT INTO change_log VALUES (10, 'orders', 1, 17, 'update', NULL, NULL, NULL)")
+        for change_id, entity, admission in events:
+            conn.execute("INSERT INTO change_log VALUES (?, ?, 1, ?, 'update', NULL, NULL, NULL)",
+                         (change_id, entity, admission))
+        connections.append(conn)
+        calls = Counter()
+        db = object.__new__(DatabaseManager)
+        db.central_read_scope = lambda _source: nullcontext(db)
+
+        def fetch(query, params):
+            calls["window"] += 1
+            return conn.execute(query, params).fetchall()
+
+        db._fetch_all_central = fetch
+        order = SimpleNamespace(id=1, is_committed=1, draft_sort_order=None)
+
+        class Service:
+            orders_dao = SimpleNamespace(db=db)
+
+            def get_latest_change_id(self, **_kwargs):
+                calls["probe"] += 1
+                return probe if probe is not None else int(conn.execute(
+                    "SELECT MAX(id) FROM change_log WHERE admission_id=17",
+                ).fetchone()[0] or 0)
+
+            def get_orders_change_window(self, *args, **kwargs):
+                return RemCardService.get_orders_change_window(self, *args, **kwargs)
+
+            def get_latest_administrations(self, **kwargs):
+                calls["admin"] += 1
+                assert kwargs["admission_id"] == 17 and kwargs["shift_date"] == SHIFT
+                return [{"id": 2, "order_id": 1, "planned_time": "2026-08-06 10:00:00",
+                         "status": "done", "is_committed": 1}]
+
+            def build_orders_snapshot(self, admission_id, shift_date, **kwargs):
+                calls["full"] += 1
+                return _snapshot(admission_id, shift_date, self.get_latest_change_id(),
+                                 only_committed=kwargs["only_committed"], orders=[order])
+
+        return Service(), conn, calls, order
+
+    yield make
+    for conn in connections:
+        conn.close()
 
 
 def _snapshot(
@@ -485,6 +544,174 @@ def test_mixed_delta_entities_probe_once_and_fall_back_without_delta_rows() -> N
     assert version_probes == [(17, False)]
     assert delta_row_reads == []
     assert full_builds == [(17, SHIFT, True, True)]
+
+
+@pytest.mark.parametrize("role,variant", [("nurse", "committed"), ("doctor", "full")])
+@pytest.mark.parametrize("entity", ["vitals", "fluids", "oral_intake_events", "lab_orders"])
+def test_irrelevant_orders_window_advances_cursor_without_payload_fetch(window_service, monkeypatch, role, variant, entity):
+    service, _conn, calls, order = window_service([(11, entity, 17), (12, "orders", 18), (13, entity, 17)])
+    coordinator = ReadCoordinator(service)
+    context = coordinator.make_orders_context(
+        source_db="live", admission_id=17, shift_date=SHIFT, role=role, mode="live", variant=variant,
+    )
+    base = _snapshot(17, SHIFT, 10, only_committed=variant == "committed", orders=[order])
+    base["has_any_draft"] = role == "doctor"
+    _seed_context(coordinator, context, 10, snapshot=base)
+    recorded = []
+    monkeypatch.setattr(read_coordinator_module, "record_metric", lambda name, value, **fields: recorded.append((name, fields)))
+    snapshot = coordinator.load_orders_tab(context, source="click")
+    assert calls == {"probe": 1, "window": 1}
+    assert snapshot["version"] == snapshot["change_id"] == 13
+    assert snapshot["load_strategy"] == "orders_cursor_advance"
+    assert snapshot["orders"] == (order,) and snapshot["admin_rows"] == ()
+    assert snapshot["has_any_draft"] == base["has_any_draft"]
+    assert snapshot["only_committed"] == base["only_committed"]
+    assert snapshot["cache_key"] == context.cache_key()
+    fields = next(fields for name, fields in recorded if name == "orders_load_time_ms")
+    assert fields["cache_hit"] == 1 and fields["delta_applied"] == fields["full_reload"] == fields["delta_failed"] == 0
+
+
+@pytest.mark.parametrize("entity,admin_reads,full_reads", [
+    ("administrations", 1, 0), ("orders", 0, 1), ("future_entity", 0, 1),
+    ("patient_status_events", 0, 1),
+])
+def test_proven_window_keeps_relevant_and_unknown_events_conservative(window_service, entity, admin_reads, full_reads):
+    service, _conn, calls, order = window_service([(11, "vitals", 17), (12, entity, 17)])
+    coordinator = ReadCoordinator(service)
+    context = _context(coordinator)
+    _seed_context(coordinator, context, 10, snapshot=_snapshot(17, SHIFT, 10, orders=[order]))
+    snapshot = coordinator.load_orders_tab(context, source="click")
+    assert snapshot["version"] == 12
+    assert calls["admin"] == admin_reads and calls["full"] == full_reads
+    if admin_reads:
+        assert snapshot["admin_rows"][0]["status"] == "done"
+        assert snapshot["load_strategy"] == "orders_delta"
+
+
+@pytest.mark.parametrize("history", ["pruned_prefix", "interior_gap", "behind_probe", "unscoped"])
+def test_incomplete_or_unscoped_orders_window_never_authorizes_noop(window_service, history):
+    events = [(11, "vitals", 17), (12, "fluids", 17), (13, "vitals", 17)]
+    service, conn, calls, order = window_service(events, probe=14 if history == "behind_probe" else None)
+    if history == "pruned_prefix":
+        conn.execute("DELETE FROM change_log WHERE id <= 11")
+    elif history == "interior_gap":
+        conn.execute("DELETE FROM change_log WHERE id = 11")
+    elif history == "unscoped":
+        conn.execute("UPDATE change_log SET admission_id = NULL WHERE id = 11")
+    coordinator = ReadCoordinator(service)
+    context = _context(coordinator)
+    _seed_context(coordinator, context, 10, snapshot=_snapshot(17, SHIFT, 10, orders=[order]))
+    coordinator.load_orders_tab(context, source="click")
+    assert calls["full"] == 1 and calls["admin"] == 0
+
+
+def test_orders_window_is_one_bounded_indexed_statement(window_service):
+    service, conn, calls, _order = window_service([(n, "vitals", 17) for n in range(11, 17)])
+    statements = []
+    conn.set_trace_callback(statements.append)
+    window = service.orders_dao.db.get_orders_change_window(10, admission_id=17, required_version=16, max_events=2)
+    assert window["complete"] is False and window["event_count"] == 3 and window["rows"] == []
+    assert calls["window"] == len(statements) == 1
+    plan = conn.execute("EXPLAIN QUERY PLAN " + statements[0]).fetchall()
+    assert any("SEARCH c USING INTEGER PRIMARY KEY" in row[3] for row in plan)
+
+
+def test_noop_window_does_not_advance_to_another_admissions_global_cursor(window_service):
+    service, _conn, calls, order = window_service(
+        [(11, "vitals", 17)] + [(n, "orders", 18) for n in range(12, 21)],
+    )
+    coordinator = ReadCoordinator(service)
+    context = _context(coordinator)
+    _seed_context(coordinator, context, 10, snapshot=_snapshot(17, SHIFT, 10, orders=[order]))
+    assert coordinator.load_orders_tab(context, source="click")["version"] == 11
+    assert calls == {"probe": 1, "window": 1}
+
+
+def test_full_fallback_floor_excludes_other_admissions_global_cursor(window_service):
+    service, _conn, calls, order = window_service(
+        [(11, "orders", 17)] + [(n, "vitals", 18) for n in range(12, 21)],
+    )
+    coordinator = ReadCoordinator(service)
+    context = _context(coordinator)
+    _seed_context(coordinator, context, 10, snapshot=_snapshot(17, SHIFT, 10, orders=[order]))
+    assert coordinator.load_orders_tab(context, source="click")["version"] == 11
+    assert calls["full"] == 1 and calls["admin"] == 0
+
+
+def test_irrelevant_window_does_not_bypass_the_existing_stale_age_budget(window_service):
+    service, _conn, calls, order = window_service([(11, "vitals", 17)])
+    coordinator = ReadCoordinator(service)
+    context = _context(coordinator)
+    _seed_context(coordinator, context, 10, snapshot=_snapshot(17, SHIFT, 10, orders=[order]))
+    coordinator.invalidate_tab(context, reason="test")
+    with coordinator._orders_cache_lock:
+        old = dict(coordinator._orders_stale_snapshots[context.cache_key()])
+        old["timestamp"] = (datetime.now() - timedelta(seconds=60)).isoformat()
+        coordinator._orders_stale_snapshots[context.cache_key()] = old
+    coordinator.load_orders_tab(context, source="monitor")
+    assert calls["full"] == 1 and calls["window"] == calls["admin"] == 0
+
+
+def test_cancelled_noop_window_cannot_publish_or_issue_payload_reads(window_service):
+    service, _conn, calls, order = window_service([(11, "vitals", 17)])
+    coordinator = ReadCoordinator(service)
+    context = _context(coordinator)
+    _seed_context(coordinator, context, 10, snapshot=_snapshot(17, SHIFT, 10, orders=[order]))
+    original = service.get_orders_change_window
+    cancelled = False
+
+    def cancel_after_window(*args, **kwargs):
+        nonlocal cancelled
+        window = original(*args, **kwargs)
+        cancelled = True
+        return window
+
+    service.get_orders_change_window = cancel_after_window
+    with pytest.raises(OrdersRefreshCancelled):
+        coordinator.load_orders_tab(context, source="click", cancel_check=lambda: cancelled)
+    assert coordinator.get_cached_tab(context)["version"] == 10
+    assert calls["full"] == calls["admin"] == 0
+
+
+@pytest.mark.parametrize("mismatch", ["admission", "date", "variant", "cache_key"])
+def test_noop_window_cannot_relabel_a_snapshot_from_another_context(window_service, mismatch):
+    service, _conn, calls, order = window_service([(11, "vitals", 17)])
+    coordinator = ReadCoordinator(service)
+    context = _context(coordinator)
+    base = _snapshot(18 if mismatch == "admission" else 17,
+                     SHIFT + timedelta(days=1) if mismatch == "date" else SHIFT, 10, orders=[order],
+                     only_committed=mismatch != "variant")
+    _seed_context(coordinator, context, 10, snapshot=base)
+    if mismatch == "cache_key":
+        with coordinator._orders_cache_lock:
+            damaged = dict(coordinator._orders_tab_cache[context.cache_key()])
+            damaged["cache_key"] = ("another",)
+            coordinator._orders_tab_cache[context.cache_key()] = damaged
+    snapshot = coordinator.load_orders_tab(context, source="click")
+    assert calls["full"] == 1 and snapshot["load_strategy"] != "orders_cursor_advance"
+
+
+@pytest.mark.parametrize("committed_version,expected", [(20, None), (30, 30)])
+def test_noop_cursor_publication_obeys_epoch_and_window_floor(window_service, committed_version, expected):
+    service, _conn, calls, order = window_service([(n, "vitals", 17) for n in range(11, 27)], probe=11)
+    coordinator = ReadCoordinator(service)
+    context = _context(coordinator)
+    _seed_context(coordinator, context, 10, snapshot=_snapshot(17, SHIFT, 10, orders=[order]))
+    original = service.get_orders_change_window
+
+    def raced_window(*args, **kwargs):
+        window = original(*args, **kwargs)
+        coordinator.accept_committed_orders_snapshot(context, _snapshot(17, SHIFT, committed_version, orders=[order]))
+        return window
+
+    service.get_orders_change_window = raced_window
+    if expected is None:
+        with pytest.raises(OrdersRefreshCancelled, match="below required version"):
+            coordinator.load_orders_tab(context, source="click")
+        assert coordinator.get_cached_tab(context)["version"] == committed_version
+    else:
+        assert coordinator.load_orders_tab(context, source="click")["version"] == expected
+        assert calls["full"] == 0
 
 
 @pytest.mark.parametrize("probe,delta_cursor,entity,full_version", [

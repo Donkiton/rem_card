@@ -484,14 +484,14 @@ class OrdersInterfaceMixin:
         previous_by_key = self._apply_pending_order_mark(index, admin, next_mark)
         balance_sequence = self._balance_mark_override_seq
 
-        def on_success():
+        def on_success(result):
             if pending.get(admin_id) == click_seq:
                 pending.pop(admin_id, None)
             self._finish_admin_write()
             if (not self._is_current_context(target_admission_id, target_shift_date)
                     or self._pending_doctor_mark_writes is not pending):
                 return
-            self._apply_committed_order_mark(index, admin, next_mark, sequence=balance_sequence)
+            self._apply_committed_order_mark(index, admin, next_mark, sequence=balance_sequence, acknowledgement=result)
             self._schedule_fast_sync()
             self._schedule_state_sync()
 
@@ -522,6 +522,7 @@ class OrdersInterfaceMixin:
             on_success=on_success,
             on_error=on_error,
             block_ui=False,
+            pass_result_to_success=True,
         )
 
     def _next_orders_click_seq(self) -> int:

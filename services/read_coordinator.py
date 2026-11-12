@@ -221,6 +221,8 @@ def _orders_delta_category(reason) -> str:
         return "unsupported_scope"
     if reason == "empty_change_rows":
         return "empty_changes"
+    if reason == "orders_change_window_incomplete":
+        return "history_unavailable"
     if reason == "orders_context_superseded":
         return "superseded"
     if any(token in reason for token in (
@@ -265,6 +267,9 @@ class ChangeLogApplier:
     """Best-effort delta applier for cached snapshots. Must stay conservative."""
 
     SAFE_ORDERS_DELTA_ENTITIES = {"administrations"}
+    # build_orders_snapshot reads only orders + administrations (including
+    # draft/presence flags). These tables have separate snapshots/consumers.
+    IRRELEVANT_ORDERS_ENTITIES = frozenset({"vitals", "fluids", "oral_intake_events", "lab_orders"})
 
     def __init__(self, remcard_service):
         self.remcard_service = remcard_service
@@ -307,10 +312,11 @@ class ChangeLogApplier:
         *,
         base_snapshot,
         change_rows: Any,
+        complete_window: bool = False,
     ) -> Dict[str, Any]:
         rows = self.normalize_change_rows(change_rows)
         base_version = int((base_snapshot or {}).get("version") or 0)
-        if not rows:
+        if not rows and not complete_window:
             return {
                 "apply": False,
                 "reason": "empty_change_rows",
@@ -321,13 +327,15 @@ class ChangeLogApplier:
         changed_entities = {
             str(row.get("entity_name") or "")
             for row in rows
-            if row.get("entity_name")
         }
         latest_change_id = max(
             [base_version]
             + [int(row.get("id") or 0) for row in rows]
         )
-        unsupported_entities = changed_entities - self.SAFE_ORDERS_DELTA_ENTITIES
+        relevant_entities = changed_entities
+        if complete_window:
+            relevant_entities = changed_entities - self.IRRELEVANT_ORDERS_ENTITIES
+        unsupported_entities = relevant_entities - self.SAFE_ORDERS_DELTA_ENTITIES
         if unsupported_entities:
             return {
                 "apply": False,
@@ -338,7 +346,8 @@ class ChangeLogApplier:
             }
         return {
             "apply": True,
-            "reason": "administrations_only",
+            "reason": "administrations_only" if relevant_entities else "orders_payload_unchanged",
+            "payload_unchanged": not relevant_entities,
             "latest_change_id": latest_change_id,
             "rows": rows,
             "changed_entities": changed_entities,
@@ -2113,7 +2122,7 @@ class ReadCoordinator:
         delta_time_ms = (time.perf_counter() - delta_started) * 1000.0
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         result_trace_id = delta_snapshot.get("load_trace_id") or trace_id
-        delta_applied = int(bool(delta_published))
+        delta_applied = int(bool(delta_published) and delta_snapshot.get("load_strategy") != "orders_cursor_advance")
         delta_failure_reason = "0"
         metric_base = delta_base if delta_published else "accepted_newer"
         phase_fields = phase_timings.metric_fields()
@@ -3039,33 +3048,37 @@ class ReadCoordinator:
         delta_work_started = time.perf_counter()
         if check_step is not None:
             check_step("before_orders_change_rows")
-        change_rows = self.remcard_service.get_changes_since(
-            int((base_snapshot or {}).get("version") or 0),
-            admission_id=context.admission_id,
-            include_global=False,
+        change_rows, complete_window, window_floor = self._orders_change_window(
+            context, base_snapshot, current_change_id,
         )
         if check_step is not None:
             check_step("after_orders_change_rows")
         delta_plan = self._change_log_applier.get_orders_delta_plan(
             base_snapshot=base_snapshot,
             change_rows=change_rows,
+            complete_window=complete_window,
         )
         required_version = max(
-            int(current_change_id or 0), int(delta_plan.get("latest_change_id") or 0),
+            int(current_change_id or 0), int(delta_plan.get("latest_change_id") or 0), window_floor,
         )
         try:
             if not delta_plan.get("apply"):
                 raise ValueError(delta_plan.get("reason") or "delta_not_safe")
 
-            if check_step is not None:
-                check_step("before_admin_delta")
-            updated_snapshot = self._change_log_applier.apply_orders_delta(
-                context=context,
-                base_snapshot=base_snapshot,
-                latest_change_id=required_version,
-            )
-            if check_step is not None:
-                check_step("after_admin_delta")
+            payload_unchanged = bool(delta_plan.get("payload_unchanged"))
+            if payload_unchanged:
+                updated_snapshot = dict(base_snapshot)
+                updated_snapshot["change_id"] = required_version
+            else:
+                if check_step is not None:
+                    check_step("before_admin_delta")
+                updated_snapshot = self._change_log_applier.apply_orders_delta(
+                    context=context,
+                    base_snapshot=base_snapshot,
+                    latest_change_id=required_version,
+                )
+                if check_step is not None:
+                    check_step("after_admin_delta")
             phase_timings.delta_attempt_ms += (
                 time.perf_counter() - delta_work_started
             ) * 1000.0
@@ -3081,7 +3094,7 @@ class ReadCoordinator:
                     mode=context.mode,
                     source_db=context.source_db,
                     variant=context.variant,
-                    load_strategy="orders_delta",
+                    load_strategy="orders_cursor_advance" if payload_unchanged else "orders_delta",
                     load_trace_id=trace_id,
                     source=source,
                     stale=False,
@@ -3130,6 +3143,43 @@ class ReadCoordinator:
             # retain that floor, including unsupported/empty/failed deltas.
             raise OrdersDeltaUnavailable(required_version, str(exc) or type(exc).__name__) from exc
 
+    def _orders_change_window(self, context, base_snapshot, current_change_id):
+        base_version = int(base_snapshot.get("version") or 0)
+        read_window = getattr(self.remcard_service, "get_orders_change_window", None)
+        if not callable(read_window):
+            # Legacy adapters retain their old administration delta contract;
+            # they may never authorize ignoring an entity or advancing a no-op.
+            return self.remcard_service.get_changes_since(
+                base_version, admission_id=context.admission_id, include_global=False,
+            ), False, int(current_change_id)
+        window = read_window(
+            base_version, admission_id=context.admission_id, required_version=current_change_id,
+        )
+        floor = max(int(current_change_id), int(window.get("watermark") or 0))
+        if (
+            not window.get("complete") or floor <= base_version
+            or int(window.get("watermark") or 0) < int(current_change_id)
+            or int(window.get("retained_min") or 0) > base_version + 1
+            or int(window.get("event_count") or 0) != floor - base_version
+        ):
+            raise OrdersDeltaUnavailable(floor, "orders_change_window_incomplete")
+        try:
+            snapshot_shift = OrdersContext._normalize_shift_date(base_snapshot.get("shift_date"))
+        except (TypeError, ValueError):
+            raise OrdersDeltaUnavailable(floor, "orders_change_window_context_mismatch") from None
+        if (
+            window.get("base_version") != base_version or window.get("admission_id") != context.admission_id
+            or base_snapshot.get("cache_key") != context.cache_key()
+            or base_snapshot.get("admission_id") != context.admission_id
+            or snapshot_shift != context.shift_date
+            or bool(base_snapshot.get("only_committed")) != (context.variant == "committed")
+        ):
+            raise OrdersDeltaUnavailable(floor, "orders_change_window_context_mismatch")
+        rows = window.get("rows") or []
+        if any(row.get("admission_id") != context.admission_id for row in rows):
+            raise OrdersDeltaUnavailable(floor, "orders_change_window_unscoped_event")
+        return rows, True, floor
+
     @staticmethod
     def _orders_delta_fallback_log_level(reason: str) -> int:
         normalized = str(reason or "")
@@ -3138,6 +3188,7 @@ class ReadCoordinator:
             "empty_delta_rows",
             "delta_no_effect",
             "unsupported_entities:",
+            "orders_change_window_incomplete",
         )
         if normalized in expected_prefixes or normalized.startswith(expected_prefixes):
             return logging.INFO
@@ -3673,7 +3724,7 @@ class ReadCoordinator:
                     state.delta_skipped_stale += 1
                 elif delta_category == "unsupported_scope":
                     state.delta_skip_unsupported_scope_count += 1
-                elif delta_category in {"empty_changes", "superseded"}:
+                elif delta_category in {"empty_changes", "superseded", "history_unavailable"}:
                     state.delta_skip_other_count += 1
                 elif delta_category in {"merge_error", "other_error"}:
                     state.delta_failed += 1

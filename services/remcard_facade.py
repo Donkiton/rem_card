@@ -2274,16 +2274,16 @@ class RemCardService(QObject):
         return self._orders.apply_right_click(order, admin, planned_time)
 
     def set_nurse_order_mark(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
-        self._orders.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
+        return self._orders.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
     def cancel_nurse_order_mark(self, admin_id: int, *, expected_version: Optional[int] = None):
-        self._orders.cancel_nurse_action(admin_id, expected_version=expected_version)
+        return self._orders.cancel_nurse_action(admin_id, expected_version=expected_version)
 
     def set_doctor_order_mark(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
-        self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
+        return self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
     def cancel_doctor_order_mark(self, admin_id: int, *, expected_version: Optional[int] = None):
-        self._orders.cancel_doctor_action(admin_id, expected_version=expected_version)
+        return self._orders.cancel_doctor_action(admin_id, expected_version=expected_version)
 
     @staticmethod
     def _card_datetime(value: Any) -> Optional[datetime]:
@@ -2843,6 +2843,12 @@ class RemCardService(QObject):
         if self.data_service and hasattr(self.data_service, "get_observed_change_state"):
             return self.data_service.get_observed_change_state()
         return None
+
+    def get_orders_change_window(self, last_change_id: int, *, admission_id: int, required_version: int):
+        db = getattr(getattr(self, "data_service", None), "db", None) or self.orders_dao.db
+        return db.get_orders_change_window(
+            last_change_id, admission_id=admission_id, required_version=required_version,
+        )
 
     def get_changes_since(self, last_change_id: int, admission_id: Optional[int] = None, include_global: bool = True):
         if self.data_service:

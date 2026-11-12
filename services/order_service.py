@@ -640,11 +640,6 @@ class OrderService:
         normalized_baseline: Mapping[tuple, AdministrationDTO],
         temporary_chain_map: Mapping[tuple[int, str], str],
     ) -> None:
-        if local_order_id > 0:
-            baseline = normalized_baseline.get((local_order_id, planned_key))
-            if self._draft_admin_token(current) != self._draft_admin_token(baseline):
-                self._raise_order_conflict(local_order_id, reason="administration_version_mismatch")
-
         desired_status, desired_role, desired_chain, desired_volume = self._resolve_draft_admin_values(
             desired,
             current,
@@ -662,6 +657,10 @@ class OrderService:
         target_shape = (desired_status, desired_role, str(desired_chain or ""), desired_volume)
         if self._draft_admin_shape(current) == target_shape:
             return
+        if local_order_id > 0:
+            baseline = normalized_baseline.get((local_order_id, planned_key))
+            if self._draft_admin_token(current) != self._draft_admin_token(baseline):
+                self._raise_order_conflict(local_order_id, reason="administration_version_mismatch")
         self._insert_local_draft_admin(
             cursor,
             real_order_id,
@@ -1764,16 +1763,16 @@ class OrderService:
         self._domain_service.handle_right_click(order, admin, planned_time)
 
     def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
-        self._domain_service.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
+        return self._domain_service.set_nurse_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
     def cancel_nurse_action(self, admin_id: int, *, expected_version: Optional[int] = None):
-        self._domain_service.cancel_nurse_action(admin_id, expected_version=expected_version)
+        return self._domain_service.cancel_nurse_action(admin_id, expected_version=expected_version)
 
     def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None, *, expected_version: Optional[int] = None):
-        self._domain_service.set_doctor_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
+        return self._domain_service.set_doctor_status(admin_id, mark, performer_id=performer_id, expected_version=expected_version)
 
     def cancel_doctor_action(self, admin_id: int, *, expected_version: Optional[int] = None):
-        self._domain_service.cancel_doctor_action(admin_id, expected_version=expected_version)
+        return self._domain_service.cancel_doctor_action(admin_id, expected_version=expected_version)
 
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime):
         return self._domain_service.get_nurse_orders_data(admission_id, shift_date)
