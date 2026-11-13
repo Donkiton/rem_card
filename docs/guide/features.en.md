@@ -65,7 +65,7 @@ The settings center combines reference catalogs, OR parameters, nutrition templa
 
 ## See it in use
 
-Screenshots show **RemCard 5.1.0** with demonstration patients; the current release is **5.1.10**. Click an image to open it at full size. The interface shown is in Russian.
+Screenshots show **RemCard 5.1.0** with demonstration patients; the current release is **5.1.20**. Click an image to open it at full size. The interface shown is in Russian.
 
 ### One entry point and role selection
 

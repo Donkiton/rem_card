@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.16</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.20</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">Veröffentlichungen</a> ·
   <a href="#weiterführende-dokumentation">Dokumentation</a> ·
   <a href="https://donkiton.github.io/rem_site/de/">Website</a> ·
@@ -30,7 +30,7 @@
 
 [Browser-Demo für PCs öffnen](https://donkiton.github.io/rem_site/de/demo/) — eine Demonstration der Desktop-Version mit fiktiven Patienten. Bitte am Computer öffnen: Die Oberfläche ist nicht für Smartphones angepasst.
 
-Demonstrationspatienten · Screenshots aus **5.1.0** · aktuelle Version **5.1.16** · Oberfläche auf Russisch. Klappen Sie eine Gruppe auf, um die Bilder anzuzeigen.
+Demonstrationspatienten · Screenshots aus **5.1.0** · aktuelle Version **5.1.20** · Oberfläche auf Russisch. Klappen Sie eine Gruppe auf, um die Bilder anzuzeigen.
 
 <details>
 <summary><strong>Arbeitsplätze und Rollenauswahl</strong></summary>
@@ -72,9 +72,9 @@ Anordnungen, Durchführungsnachweise und Flüssigkeitsbilanz über die Schicht v
 
 ## Erste Schritte
 
-Laden Sie den [Windows-Installer für RemCard 5.1.16](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard-Setup-5.1.16.exe) mit russischer und englischer Sprachauswahl oder das [vollständige ZIP-Paket](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard_5.1.16_full.zip) herunter. [Versionshinweise](https://github.com/Donkiton/rem_card/releases/tag/v5.1.16) · [SHA-256-Prüfsummen](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/SHA256SUMS.txt).
+Laden Sie den [Windows-Installer für RemCard 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) mit russischer und englischer Sprachauswahl oder das [vollständige ZIP-Paket](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) herunter. [Versionshinweise](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20) · [SHA-256-Prüfsummen](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt).
 
-In Version 5.1.16 blockieren das Öffnen einer Patientenkurve, das Hinzufügen eines Patienten und der Wechsel in den Notfallmodus die Oberfläche nicht mehr. Die Diagnose von Verzögerungen und Datenbankzugriffsfehlern wurde verbessert. Schließen Sie vor dem ersten Start alle älteren Clients, die auf die gemeinsame Datenbank zugreifen.
+Version 5.1.20 verwendet beim Hinzufügen und Ändern eines Patienten ein gemeinsames Wartebudget von 15 Sekunden; Schreibvorgänge mit unbekanntem Ergebnis werden nicht erneut ausgeführt. Verbessert wurden die Freigabe von Datenbankressourcen nach Fehlern und die lokale Diagnose von Verzögerungen und Sperren ohne SQL oder medizinische Daten in den Diagnoseeinträgen. Datenbankschema 29 und die minimale Client-Version 5.1.15 bleiben unverändert. Schließen Sie vor dem ersten Start alle älteren Clients, die auf die gemeinsame Datenbank zugreifen.
 
 Starten Sie nach der Installation **`RemCard.exe`**. Entpacken Sie bei Verwendung des ZIP-Pakets den vollständigen Programmordner einschließlich `_internal`.
 

@@ -65,7 +65,7 @@ Die Einstellungszentrale vereint Stammdaten, OP-Parameter, Ernährungsvorlagen, 
 
 ## Die Anwendung im Einsatz
 
-Screenshots von **RemCard 5.1.0** mit Demonstrationspatienten; die aktuelle Version ist **5.1.10**. Ein Klick auf ein Bild öffnet es in voller Größe.
+Screenshots von **RemCard 5.1.0** mit Demonstrationspatienten; die aktuelle Version ist **5.1.20**. Ein Klick auf ein Bild öffnet es in voller Größe.
 
 ### Gemeinsamer Einstieg und Rollenauswahl
 
