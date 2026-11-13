@@ -11,6 +11,7 @@ from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MA
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.components.nurse_order_card import NurseOrderCard
+from rem_card.ui.shared.components.order_mark_state import OrderMarkState
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.display_settings_storage import (
     DisplaySettingsStorage,
@@ -71,7 +72,11 @@ class SectorW1a(BaseSectorWidget):
         self._card_signatures = {}
         self.groups = {}
         self._all_data = []
-        self._pending_marks = {}
+        self._mark_state = OrderMarkState(W1A_PENDING_MARK_TTL_SEC)
+        self._pending_marks = self._mark_state.pending
+        self._pending_mark_timer = QTimer(self)
+        self._pending_mark_timer.setSingleShot(True)
+        self._pending_mark_timer.timeout.connect(self._on_pending_mark_timeout)
         self._last_content_hash = None
         self._last_change_id = 0
         self._refresh_worker = None
@@ -196,6 +201,7 @@ class SectorW1a(BaseSectorWidget):
     def set_service(self, service):
         if self.service is service:
             return
+        self._clear_pending_marks()
         self.service = service
         if self._display_enabled:
             self.refresh_data(force=True)
@@ -230,7 +236,7 @@ class SectorW1a(BaseSectorWidget):
         self._refresh_worker = None
         if worker is not None:
             self._disconnect_worker(worker)
-        self._pending_marks.clear()
+        self._clear_pending_marks()
         self._all_data = []
         self._last_content_hash = None
         self._last_render_signature = None
@@ -333,7 +339,8 @@ class SectorW1a(BaseSectorWidget):
             return
 
         self._last_content_hash = content_hash or self._last_content_hash
-        self._all_data = [dict(item) for item in (snapshot.get("rows") or [])]
+        self._all_data = self._mark_state.reconcile(snapshot.get("rows") or [])
+        self._schedule_pending_mark_timeout()
         self._render_from_cache()
 
     def _on_refresh_failed(self, exc):
@@ -732,40 +739,32 @@ class SectorW1a(BaseSectorWidget):
         self._time_timer.start(min(delay_ms, W1A_TIME_RECOMPUTE_MAX_MS))
 
     def _set_pending_mark(self, admin_id: int, mark: str):
-        self._pending_marks[int(admin_id)] = {
-            "mark": str(mark or ""),
-            "started_mono": time.monotonic(),
-            "actual_time": datetime.now().isoformat(),
-        }
+        row = next((item for item in self._all_data if item.get("id") == admin_id), None)
+        self._mark_state.begin(admin_id, mark, row)
+        self._schedule_pending_mark_timeout()
 
     def _get_pending_mark(self, admin_id: int):
-        if admin_id is None:
-            return None
-        pending = self._pending_marks.get(int(admin_id))
-        if not pending:
-            return None
-        if (time.monotonic() - float(pending.get("started_mono") or 0.0)) > W1A_PENDING_MARK_TTL_SEC:
-            self._pending_marks.pop(int(admin_id), None)
-            return None
-        return pending
+        return self._mark_state.get(admin_id)
 
     def _apply_pending_marks(self, data_list):
-        if not self._pending_marks:
-            return data_list
+        return self._mark_state.overlay(data_list)
 
-        for admin_id, pending in list(self._pending_marks.items()):
-            if (time.monotonic() - float(pending.get("started_mono") or 0.0)) > W1A_PENDING_MARK_TTL_SEC:
-                self._pending_marks.pop(admin_id, None)
+    def _clear_pending_marks(self):
+        self._pending_mark_timer.stop()
+        self._mark_state.clear()
 
-        patched = []
-        for item in data_list:
-            patched_item = dict(item)
-            pending = self._get_pending_mark(patched_item.get("id"))
-            if pending:
-                patched_item["comment"] = pending.get("mark") or ""
-                patched_item["actual_time"] = patched_item.get("actual_time") or pending.get("actual_time")
-            patched.append(patched_item)
-        return patched
+    def _schedule_pending_mark_timeout(self):
+        self._pending_mark_timer.stop()
+        delay = self._mark_state.next_expiry_ms()
+        if delay is not None:
+            self._pending_mark_timer.start(delay)
+
+    def _on_pending_mark_timeout(self):
+        if self._is_shutting_down or not self._display_enabled:
+            return
+        self._render_from_cache()
+        self._schedule_pending_mark_timeout()
+        self.refresh_data(force=True)
 
     def _enqueue_write(self, description: str, operation, *, on_success, on_error):
         if hasattr(self.service, "enqueue_write"):
@@ -810,23 +809,34 @@ class SectorW1a(BaseSectorWidget):
             description = f"nurse_order_panel_mark:w1a:{admin_id}"
 
         self._set_pending_mark(admin_id, mark)
+        pending_mark = self._pending_marks.get(int(admin_id))
         self._render_from_cache()
         self._enqueue_write(
             description,
             operation,
-            on_success=lambda _result=None, aid=admin_id: self._on_mark_write_success(aid),
-            on_error=lambda exc, aid=admin_id: self._on_mark_write_error(aid, exc),
+            on_success=lambda _result=None, aid=admin_id: self._on_mark_write_success(aid, pending_mark=pending_mark),
+            on_error=lambda exc, aid=admin_id: self._on_mark_write_error(aid, exc, pending_mark=pending_mark),
         )
 
-    def _on_mark_write_success(self, admin_id: int):
-        pending = self._pending_marks.get(int(admin_id))
-        if pending:
-            pending["started_mono"] = time.monotonic()
+    def _on_mark_write_success(self, admin_id: int, *, pending_mark=None):
+        if self._is_shutting_down or (
+            pending_mark is not None and self._pending_marks.get(int(admin_id)) is not pending_mark
+        ):
+            return
+        self._mark_state.confirm(admin_id)
+        self._all_data = self._mark_state.reconcile(self._all_data)
+        self._render_from_cache()
+        self._schedule_pending_mark_timeout()
         self.refresh_data(force=True)
 
-    def _on_mark_write_error(self, admin_id: int, exc: Exception):
+    def _on_mark_write_error(self, admin_id: int, exc: Exception, *, pending_mark=None):
+        if self._is_shutting_down or (
+            pending_mark is not None and self._pending_marks.get(int(admin_id)) is not pending_mark
+        ):
+            return
         self._pending_marks.pop(int(admin_id), None)
         self._render_from_cache()
+        self._schedule_pending_mark_timeout()
         self.refresh_data(force=True)
         CustomMessageBox.warning(self, "Предупреждение", f"Ошибка сохранения: {exc}")
 
@@ -843,6 +853,7 @@ class SectorW1a(BaseSectorWidget):
 
     def shutdown(self):
         self._is_shutting_down = True
+        self._clear_pending_marks()
         self._time_timer.stop()
         self._refresh_timer.stop()
         worker = self._refresh_worker

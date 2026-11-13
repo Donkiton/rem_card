@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QTimer, Signal
 from shiboken6 import isValid
 from .nurse_order_card import NurseOrderCard
+from .order_mark_state import OrderMarkState
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.app.logger import logger
 from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
@@ -45,7 +46,11 @@ class CurrentNurseOrdersWidget(QWidget):
         self._card_signatures_1a = {}
         self._last_render_signature_1a = None
         self._last_lock_warning_ts = 0.0
-        self._pending_marks = {}
+        self._mark_state = OrderMarkState(PENDING_MARK_TTL_SEC)
+        self._pending_marks = self._mark_state.pending
+        self._pending_mark_timer = QTimer(self)
+        self._pending_mark_timer.setSingleShot(True)
+        self._pending_mark_timer.timeout.connect(self._on_pending_mark_timeout)
         self._all_data = []
         self._snapshot_cache = OrderedDict()
         self._is_shutting_down = False
@@ -68,7 +73,7 @@ class CurrentNurseOrdersWidget(QWidget):
         if self._cache_key_for(self.admission_id, self.shift_date) != self._cache_key_for(admission_id, shift_date):
             self._refresh_generation += 1
             self._clear_all_cards()
-            self._pending_marks.clear()
+            self._clear_pending_marks()
             self._all_data = []
 
         self.admission_id = admission_id
@@ -92,7 +97,7 @@ class CurrentNurseOrdersWidget(QWidget):
         self._refresh_generation += 1
         self._refresh_request = None
         self._snapshot_cache.clear()
-        self._pending_marks.clear()
+        self._clear_pending_marks()
         self._all_data = []
         self._clear_all_cards()
 
@@ -146,7 +151,8 @@ class CurrentNurseOrdersWidget(QWidget):
             persistent_snapshot_cache.delete_snapshot("current_orders", key)
             return False
         self._snapshot_cache.move_to_end(key)
-        self._all_data = self._apply_pending_marks(list(snapshot.get("data") or []))
+        self._all_data = self._mark_state.reconcile(snapshot.get("data") or [])
+        self._schedule_pending_mark_timeout()
         self._render_from_cache()
         return True
 
@@ -228,7 +234,7 @@ class CurrentNurseOrdersWidget(QWidget):
         self.cards_1a.clear()
         self._card_signatures_1a.clear()
         self._last_render_signature_1a = None
-        self._pending_marks.clear()
+        self._clear_pending_marks()
         self._all_data = []
         self._cancel_refresh_worker()
         self.sector_1a = None
@@ -241,7 +247,7 @@ class CurrentNurseOrdersWidget(QWidget):
         self._time_timer.stop()
         self._cancel_refresh_worker()
         self._clear_all_cards()
-        self._pending_marks.clear()
+        self._clear_pending_marks()
         self._all_data = []
         self.sector_1a = None
         self.sector_5 = None
@@ -368,9 +374,10 @@ class CurrentNurseOrdersWidget(QWidget):
                     exc_info=(type(exc), exc, exc.__traceback__),
                 )
             return
-        all_data = list(result.get("data") or [])
+        all_data = self._mark_state.reconcile(result.get("data") or [])
         self._store_snapshot_cache(all_data, version=int(result.get("version") or 0))
-        self._all_data = self._apply_pending_marks(all_data)
+        self._all_data = all_data
+        self._schedule_pending_mark_timeout()
         self._render_from_cache()
 
     def _on_refresh_finished(self):
@@ -603,60 +610,55 @@ class CurrentNurseOrdersWidget(QWidget):
         logger.warning("CurrentNurseOrdersWidget refresh skipped due to DB lock: %s", exc)
 
     def _set_pending_mark(self, admin_id: int, mark: str):
-        self._pending_marks[int(admin_id)] = {
-            "mark": str(mark or ""),
-            "started_mono": time.monotonic(),
-            "actual_time": datetime.now().isoformat(),
-        }
+        row = next((item for item in self._all_data if item.get("id") == admin_id), None)
+        self._mark_state.begin(admin_id, mark, row)
+        self._schedule_pending_mark_timeout()
 
     def _get_pending_mark(self, admin_id: int):
-        if admin_id is None:
-            return None
-        pending = self._pending_marks.get(int(admin_id))
-        if not pending:
-            return None
-        if (time.monotonic() - float(pending.get("started_mono") or 0.0)) > PENDING_MARK_TTL_SEC:
-            self._pending_marks.pop(int(admin_id), None)
-            return None
-        return pending
+        return self._mark_state.get(admin_id)
 
     def _apply_pending_marks(self, data_list):
-        if not self._pending_marks:
-            return data_list
+        return self._mark_state.overlay(data_list)
 
-        now_mono = time.monotonic()
-        for admin_id, pending in list(self._pending_marks.items()):
-            if (now_mono - float(pending.get("started_mono") or 0.0)) > PENDING_MARK_TTL_SEC:
-                self._pending_marks.pop(admin_id, None)
+    def _clear_pending_marks(self):
+        self._pending_mark_timer.stop()
+        self._mark_state.clear()
 
-        patched = []
-        for item in data_list:
-            patched_item = dict(item)
-            pending = self._get_pending_mark(patched_item.get("id"))
-            if pending:
-                mark = pending.get("mark") or ""
-                patched_item["comment"] = mark
-                patched_item["actual_time"] = patched_item.get("actual_time") or pending.get("actual_time")
-            patched.append(patched_item)
-        return patched
+    def _schedule_pending_mark_timeout(self):
+        self._pending_mark_timer.stop()
+        delay = self._mark_state.next_expiry_ms()
+        if delay is not None:
+            self._pending_mark_timer.start(delay)
 
-    def _on_mark_write_success(self, admin_id: int, _result=None):
+    def _on_pending_mark_timeout(self):
         if self._is_shutting_down:
             return
-        # Pending mark stays alive for a short grace window so stale read snapshots
-        # cannot briefly resurrect the card in sector 1a.
-        pending = self._pending_marks.get(int(admin_id))
-        if pending:
-            pending["started_mono"] = time.monotonic()
-        self.refresh_data()
+        self._render_from_cache()
+        self._schedule_pending_mark_timeout()
+        self.refresh_data(force=True)
+
+    def _on_mark_write_success(self, admin_id: int, _result=None, *, pending_mark=None):
+        if self._is_shutting_down or (
+            pending_mark is not None and self._pending_marks.get(int(admin_id)) is not pending_mark
+        ):
+            return
+        self._mark_state.confirm(admin_id)
+        self._all_data = self._mark_state.reconcile(self._all_data)
+        self._render_from_cache()
+        self._schedule_pending_mark_timeout()
+        self.refresh_data(force=True)
         self.localBalanceChanged.emit()
         self.balanceRefreshRequested.emit()
 
-    def _on_mark_write_error(self, admin_id: int, exc: Exception):
-        if self._is_shutting_down:
+    def _on_mark_write_error(self, admin_id: int, exc: Exception, *, pending_mark=None):
+        if self._is_shutting_down or (
+            pending_mark is not None and self._pending_marks.get(int(admin_id)) is not pending_mark
+        ):
             return
         self._pending_marks.pop(int(admin_id), None)
-        self.refresh_data()
+        self._render_from_cache()
+        self._schedule_pending_mark_timeout()
+        self.refresh_data(force=True)
         self.localBalanceChanged.emit()
         self.balanceRefreshRequested.emit()
         CustomMessageBox.warning(self, "Предупреждение", f"Ошибка сохранения: {exc}")
@@ -703,11 +705,12 @@ class CurrentNurseOrdersWidget(QWidget):
             description = f"nurse_order_panel_mark:{admin_id}"
 
         self._set_pending_mark(admin_id, mark)
+        pending_mark = self._pending_marks.get(int(admin_id))
         self._render_from_cache()
         self.localBalanceChanged.emit()
         self._enqueue_write(
             description,
             operation,
-            on_success=lambda result=None, aid=admin_id: self._on_mark_write_success(aid, result),
-            on_error=lambda exc, aid=admin_id: self._on_mark_write_error(aid, exc),
+            on_success=lambda result=None, aid=admin_id: self._on_mark_write_success(aid, result, pending_mark=pending_mark),
+            on_error=lambda exc, aid=admin_id: self._on_mark_write_error(aid, exc, pending_mark=pending_mark),
         )
