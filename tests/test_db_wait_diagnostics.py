@@ -21,7 +21,7 @@ def events(monkeypatch):
     return captured
 
 
-def test_nested_retries_delay_next_task_without_identifying_original_holder(tmp_path, events, monkeypatch):
+def test_native_begin_busy_retires_connection_without_identifying_original_holder(tmp_path, events, monkeypatch):
     db = tmp_path / 'synthetic.db'
     holder = sqlite3.connect(db, isolation_level=None)
     holder.execute('CREATE TABLE sample(value INTEGER)')
@@ -67,11 +67,16 @@ def test_nested_retries_delay_next_task_without_identifying_original_holder(tmp_
         assert native_wait['holder_confidence'] == 'unknown'
         release_begin.set()
         assert done.wait(3)
-        assert len(calls) == 2
-        assert attempts.count('sqlite_locked_count') == 4
+        assert len(calls) == 1  # Retired native BEGIN failures cannot replay on the queue.
+        assert attempts.count('sqlite_locked_count') == 2
         assert len(failures) == 1
+        assert isinstance(failures[0], sqlite_shared.SQLiteBeginBusyError)
+        assert isinstance(failures[0].__cause__, sqlite3.OperationalError)
         assert 'SECRET_PATIENT' not in str(events)
         holder.execute('ROLLBACK')
+        with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+            conn.execute('SELECT 1')
+        conn = sqlite3.connect(db, isolation_level=None, timeout=.05, check_same_thread=False)
         operation()
         assert holder.execute('SELECT count(*) FROM sample').fetchone()[0] == 1
     finally:
@@ -225,9 +230,10 @@ def test_native_blocker_is_not_misidentified_as_released_service_lock(tmp_path, 
     metrics = []
     monkeypatch.setattr(sqlite_shared, 'record_metric', lambda name, value, **kw: metrics.append((name, kw)))
     try:
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(sqlite_shared.SQLiteBeginBusyError) as failure:
             with controller.transaction(writer, source='test_write'):
                 pytest.fail('native lock must prevent entry into the body')
+        assert isinstance(failure.value.__cause__, sqlite3.OperationalError)
         retry = next(data for name, data in metrics if name == 'sqlite_write_lock_wait_retry')
         assert retry['phase'] == 'begin_immediate'
         assert retry['sqlite_holder_confidence'] == 'unknown'

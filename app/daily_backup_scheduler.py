@@ -24,6 +24,8 @@ from typing import Any, Callable
 
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
+from rem_card.app import sqlite_connection_diagnostics as connection_lifetimes
+from rem_card.app.db_wait_diagnostics import observe, bind_connection, mark_stage
 
 
 DAILY_BACKUP_ENV = "REMCARD_DAILY_CENTRAL_BACKUP_ENABLED"
@@ -311,6 +313,11 @@ def _bounded_sqlite_copy(
     *,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
+    with observe("daily_backup", resource=config.get("database_path", ""), stage="backup_open"):
+        _bounded_sqlite_copy_observed(config, staging_path, progress_callback=progress_callback)
+
+
+def _bounded_sqlite_copy_observed(config, staging_path, *, progress_callback=None):
     """Copy to local disk under the shared DB lock, then release it promptly."""
     from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
     from rem_card.app.sqlite_uri import build_sqlite_file_uri
@@ -338,7 +345,11 @@ def _bounded_sqlite_copy(
             isolation_level=None,
             timeout=max(0.1, float(config.get("sqlite_timeout_sec", 1.0))),
         )
+        connection_lifetimes.register_connection(source, database_path, source="daily_backup", readonly=True, scope="worker", new=True)
+        bind_connection(source)
+        mark_stage("backup_configure")
         configure_connection(source, readonly=True)
+        mark_stage("backup_file_lock_wait")
         lock_deadline = time.monotonic() + max(0.1, float(config.get("database_lock_wait_sec", 1.5)))
         while not database_lock.acquire(owner_id, DAILY_DATABASE_LOCK_SOURCE):
             if time.monotonic() >= lock_deadline:
@@ -387,12 +398,14 @@ def _bounded_sqlite_copy(
                     pages_total=max(0, int(total)),
                 )
 
-        source.backup(
-            target,
-            pages=max(16, int(config.get("copy_pages", 256))),
-            progress=_progress,
-            sleep=0.01,
-        )
+        with observe("daily_backup", database=database_path, connection=source, stage="backup_copy"), \
+                connection_lifetimes.statement_scope(source, source="daily_backup"):
+            source.backup(
+                target,
+                pages=max(16, int(config.get("copy_pages", 256))),
+                progress=_progress,
+                sleep=0.01,
+            )
         _emit_progress(
             progress_callback,
             "copy",
@@ -410,7 +423,7 @@ def _bounded_sqlite_copy(
         if acquired:
             database_lock.release()
         if source is not None:
-            source.close()
+            connection_lifetimes.close_connection(source)
 
 
 def _upload_local_staging(

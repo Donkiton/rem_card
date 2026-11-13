@@ -678,7 +678,8 @@ def _check_patient_form_enqueue_error_keeps_dialog(temp_root: str) -> tuple[bool
             self.enqueue_called = False
             self.on_error = None
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None,
+                          write_metadata=None, on_settled=None):
             self.enqueue_called = True
             self.description = description
             self.operation = operation

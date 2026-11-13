@@ -626,7 +626,14 @@ def _hold_daily_copy_lock(config, sender):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         lock = FileWriteLock(path)
         assert lock.acquire(owner, source)
-    sender.send({"message_type": "progress", "stage": "copy", "state": "started"})
+    # A deliberately unstoppable worker must outlive a parent that timed out
+    # before spawn/import completed. Losing progress transport is not the
+    # controlled child exit used by these ownership/cleanup scenarios.
+    try:
+        sender.send({"message_type": "progress", "stage": "copy", "state": "started"})
+    except (EOFError, OSError):
+        pass
+    Path(config["database_path"] + ".progress-attempted").touch()
     while not Path(config["database_path"] + ".exit-child").exists():
         time.sleep(0.01)
     os._exit(0)
@@ -647,6 +654,38 @@ class _FailingStopProcess:
         if self.kill_really:
             self.process.kill()
         raise PermissionError("simulated TerminateProcess exit race")
+
+
+def test_unstoppable_copy_fixture_keeps_locks_after_progress_pipe_is_closed(tmp_path):
+    source = tmp_path / "medical.db"
+    _make_database(source)
+    scheduler = daily.DailyBackupScheduler(
+        database_path=str(source), backup_dir=str(tmp_path / "backups"),
+        health_dir=str(tmp_path / "health"), invalid_dir=str(tmp_path / "invalid"),
+        database_lock_path=str(tmp_path / "db.lock"), role="nurse",
+    )
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    receiver.close()  # Deterministic late-progress failure, without a sleep race.
+    process = context.Process(target=_hold_daily_copy_lock,
+                              args=(scheduler._worker_config("2026-10-23", uuid.uuid4().hex), sender))
+    process.start()
+    sender.close()
+    try:
+        attempted = Path(str(source) + ".progress-attempted")
+        deadline = time.monotonic() + 8
+        while not attempted.exists() and process.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert attempted.exists() and process.is_alive()
+        assert (tmp_path / "db.lock").exists()
+    finally:
+        Path(str(source) + ".exit-child").touch()
+        process.join(5)
+        if process.is_alive():
+            process.kill()
+            process.join(5)
+        assert process.exitcode == 0
+        process.close()
 
 
 def _install_copy_stop_failure(monkeypatch, *, kill_really):

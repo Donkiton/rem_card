@@ -10,6 +10,8 @@ import sqlite3
 from contextlib import closing
 
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
+from rem_card.app import sqlite_connection_diagnostics as connection_lifetimes
+from rem_card.app.db_wait_diagnostics import bind_connection, mark_stage
 
 
 def incremental_enabled() -> bool:
@@ -57,6 +59,8 @@ def _collect_delta_interruptibly(source, local, check_cancel):
             connection.set_progress_handler(on_progress, 1000)
             installed.append(connection)
         try:
+            bind_connection(source)
+            mark_stage("replica_delta_collect")
             result = collect_delta(source, local, check_cancel=checked_cancel)
             if interrupted is not None:
                 raise interrupted
@@ -103,7 +107,7 @@ def try_incremental_snapshot(message: dict, *, check_cancel, progress, check_bou
     progress("delta_collect")
     # The package's source transaction ends before any local cloning/applying,
     # so local disk work cannot prolong the central clinical writer's wait.
-    with closing(_open_central_readonly(source_path)) as source:
+    with connection_lifetimes.closing_connection(_open_central_readonly(source_path)) as source:
         try:
             before = read_admission_state(source, source_path)
         except ValueError as exc:
@@ -120,9 +124,10 @@ def try_incremental_snapshot(message: dict, *, check_cancel, progress, check_bou
         try:
             local = sqlite3.connect(build_sqlite_file_uri(local_path, mode="ro"),
                                     uri=True, isolation_level=None, timeout=0.25)
+            connection_lifetimes.register_connection(local, local_path, source="replica_delta_local", readonly=True, new=True)
         except sqlite3.Error:
             return {"status": "full_required", "reason": "local_baseline_unreadable"}
-        with closing(local):
+        with connection_lifetimes.closing_connection(local):
             base_stamp = (message.get("baseline_source_stamp") if message.get("baseline_source_identity") == before["identity"]
                           else (baseline or {}).get("source_stamp"))
             base_state = (message.get("baseline_state") if message.get("baseline_source_identity") == before["identity"]

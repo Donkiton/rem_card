@@ -12,6 +12,7 @@ import pickle
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
+from rem_card.app import sqlite_connection_diagnostics as connection_lifetimes
 
 
 PROTOCOL_VERSION = 1
@@ -66,8 +67,31 @@ def _cancel(check_cancel: Callable[[], Any] | None) -> None:
 
 
 def _scalar(conn: sqlite3.Connection, sql: str, params: Sequence[Any] = ()) -> Any:
-    row = conn.execute(sql, params).fetchone()
-    return row[0] if row else None
+    cursor = None
+    with connection_lifetimes.statement_scope(conn, source="replica_delta_scalar"):
+        try:
+            cursor = conn.execute(sql, params)
+            connection_lifetimes.cursor_opened(conn, cursor, source="replica_delta_scalar")
+            row = cursor.fetchone()
+            return row[0] if row else None
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception as exc:
+                    connection_lifetimes.cleanup_failed(conn, phase="cursor_close", error_class=type(exc).__name__)
+                else:
+                    connection_lifetimes.cursor_closed(conn, cursor)
+
+
+def _rollback_collection_read(conn):
+    try:
+        conn.execute("ROLLBACK")
+    except BaseException as exc:
+        connection_lifetimes.cleanup_failed(conn, phase="rollback", error_class=type(exc).__name__)
+        raise
+    else:
+        connection_lifetimes.transaction_finished(conn, "rolled_back")
 
 
 def _table_names(conn: sqlite3.Connection) -> list[str]:
@@ -904,8 +928,10 @@ def collect_delta(
         source_query_only = int(_scalar(source_conn, "PRAGMA query_only") or 0)
         source_conn.execute("PRAGMA query_only=ON")
         source_conn.execute("BEGIN")
+        connection_lifetimes.transaction_started(source_conn, "read", source="replica_delta_collect")
     if local_owned:
         local_conn.execute("BEGIN")
+        connection_lifetimes.transaction_started(local_conn, "read", source="replica_delta_local")
     try:
         context, error = _prepare_collection(
             source_conn, local_conn, limits[0], limits[2], check_cancel
@@ -928,9 +954,9 @@ def collect_delta(
         )
     finally:
         if local_owned and local_conn.in_transaction:
-            local_conn.execute("ROLLBACK")
+            _rollback_collection_read(local_conn)
         if source_owned and source_conn.in_transaction:
-            source_conn.execute("ROLLBACK")
+            _rollback_collection_read(source_conn)
         if source_owned and source_query_only is not None:
             source_conn.execute(f"PRAGMA query_only={1 if source_query_only else 0}")
 

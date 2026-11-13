@@ -243,6 +243,9 @@ class DataService(QObject):
 
     @staticmethod
     def _terminal_write_state(exc: Exception) -> str:
+        if getattr(exc, "outcome_unknown", None) is True:
+            # A failed rollback/acknowledgement is not a confirmed failure.
+            return "unknown"
         if isinstance(exc, NetworkWriteWorkerTimeout):
             return "unknown" if bool(exc.outcome_unknown) else "failed"
         classification = classify_database_access(exc)
@@ -1431,6 +1434,7 @@ class DataService(QObject):
                             retryable=bool(metadata.get("queue_retryable", True)),
                             retries_left=max(0, int(metadata.get("queue_retries_left", 10))),
                             **({"deadline": queue_deadline} if queue_deadline is not None else {}),
+                            **({"cancel_before_start": True} if metadata.get("queue_cancel_before_start") else {}),
                         )
                 except Exception as exc:
                     handle_error(exc)

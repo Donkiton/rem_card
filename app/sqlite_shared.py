@@ -21,6 +21,7 @@ from typing import Any, Callable, Optional
 from rem_card.app.db_wait_diagnostics import observe, mark_stage, mark_retry, current_context, current_operation
 from rem_card.app.startup_diagnostics import measured
 from rem_card.app.connection_diagnostics import connection_phase
+from rem_card.app import sqlite_connection_diagnostics as connection_diagnostics
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.db_availability import DatabaseClosedError
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
@@ -472,6 +473,7 @@ def configure_connection(
     *,
     readonly: bool = False,
     profile: str = "network",
+    preserve_journal_mode: bool = False,
 ):
     settings = _resolve_sqlite_profile_settings(profile)
     with connection_phase("configure_mutex_wait") as waiting:
@@ -492,8 +494,9 @@ def configure_connection(
                 with connection_phase("pragma_query_only"):
                     conn.execute("PRAGMA query_only = ON")
             else:
-                with connection_phase("pragma_journal_mode"):
-                    conn.execute(f"PRAGMA journal_mode = {settings['journal_mode']}")
+                if not preserve_journal_mode:
+                    with connection_phase("pragma_journal_mode"):
+                        conn.execute(f"PRAGMA journal_mode = {settings['journal_mode']}")
                 with connection_phase("pragma_synchronous"):
                     conn.execute(f"PRAGMA synchronous = {settings['synchronous']}")
                 _configure_connection_cache(conn, settings)
@@ -1804,6 +1807,20 @@ class QueuedWriteDeadlineExceeded(sqlite3.OperationalError):
     """The operation has not committed and must not be replayed by the queue."""
 
 
+class SQLiteTransactionCleanupError(sqlite3.DatabaseError):
+    """An owned transaction could not be rolled back; replay is unsafe."""
+
+    outcome_unknown = True
+    database_outcome = "unknown"
+
+
+class SQLiteBeginBusyError(sqlite3.DatabaseError):
+    """Native BEGIN never started; its exhausted operation must not be replayed."""
+
+    outcome_unknown = False
+    database_outcome = "not_started"
+
+
 class SQLiteWriteController:
     def __init__(
         self,
@@ -1814,6 +1831,7 @@ class SQLiteWriteController:
         max_retries: int = 20,
         retry_delay_ms: int = 200,
         stale_timeout_sec: float = 60.0,
+        on_connection_quarantined: Optional[Callable[[Any, bool], None]] = None,
     ):
         self.db_path = db_path
         self.lock_path = lock_path
@@ -1825,6 +1843,76 @@ class SQLiteWriteController:
         self._conn_locks: dict[int, threading.RLock] = {}
         self._conn_locks_mutex = threading.Lock()
         self._read_priority = _local_writer_priority(db_path)
+        self._quarantined_connections: dict[int, Any] = {}
+        self._on_connection_quarantined = on_connection_quarantined
+
+    def is_connection_quarantined(self, conn) -> bool:
+        with self._conn_locks_mutex:
+            return self._quarantined_connections.get(id(conn)) is conn
+
+    def close_pending_quarantined_connections(self) -> None:
+        """One cleanup pass before a fresh owner-thread write; never replay SQL."""
+        with self._conn_locks_mutex:
+            connections = tuple(self._quarantined_connections.values())
+        for conn in connections:
+            try:
+                self.close_quarantined_connection(conn, raise_on_error=True)
+            except Exception as exc:
+                raise SQLiteTransactionCleanupError("Previous SQLite transaction cleanup remains incomplete") from exc
+
+    def close_quarantined_connection(self, conn, *, raise_on_error: bool = False) -> bool:
+        """Retry failed native cleanup without making the connection reusable."""
+        with self._conn_locks_mutex:
+            if self._quarantined_connections.get(id(conn)) is not conn:
+                return True
+        try:
+            conn.close()
+        except Exception as exc:
+            connection_diagnostics.cleanup_failed(conn, phase="close", error_class=type(exc).__name__)
+            if raise_on_error:
+                raise
+            return False
+        connection_diagnostics.connection_closed(conn)
+        with self._conn_locks_mutex:
+            self._quarantined_connections.pop(id(conn), None)
+            self._conn_locks.pop(id(conn), None)
+        return True
+
+    def _quarantine_owned_connection(self, conn, *, reason="cleanup_failed") -> None:
+        with self._conn_locks_mutex:
+            self._quarantined_connections[id(conn)] = conn
+        connection_diagnostics.quarantine_connection(conn, reason=reason)
+        closed = self.close_quarantined_connection(conn)
+        if self._on_connection_quarantined is not None:
+            # Notification cannot change the original uncertain write result.
+            try:
+                self._on_connection_quarantined(conn, closed)
+            except Exception:
+                pass
+
+    def _retire_after_native_begin_busy(self, conn, state, trace, exc) -> None:
+        native_code = getattr(state.last_exc, "sqlite_errorcode", None)
+        if trace.database_outcome != "not_started" or type(native_code) is not int or native_code & 255 != sqlite3.SQLITE_BUSY:
+            return
+        if exc is not state.last_exc and not isinstance(exc, (QueuedWriteDeadlineExceeded, OpBlockInteractiveWriteBusyTimeout)):
+            return
+        # This is reached only after the whole outer acquisition failed. Never
+        # recycle between retries or close a caller-owned/nested transaction.
+        self._quarantine_owned_connection(conn, reason="begin_busy_not_started")
+        if not isinstance(exc, (QueuedWriteDeadlineExceeded, OpBlockInteractiveWriteBusyTimeout)):
+            raise SQLiteBeginBusyError("SQLite BEGIN remained busy; the operation was not started") from exc
+
+    @staticmethod
+    def _close_transaction_cursor(conn, cursor) -> bool:
+        if cursor is None:
+            return True
+        try:
+            cursor.close()
+        except Exception as exc:
+            connection_diagnostics.cleanup_failed(conn, phase="cursor_close", error_class=type(exc).__name__)
+            return False
+        connection_diagnostics.cursor_closed(conn, cursor)
+        return True
 
     def read_guard(self, *, cancel_check=None, already_active=False):
         return self._read_priority.read(cancel_check=cancel_check, already_active=already_active)
@@ -2205,6 +2293,7 @@ class SQLiteWriteController:
         }
         if conn.in_transaction:
             conn.execute("ROLLBACK")
+            connection_diagnostics.transaction_finished(conn, "rolled_back")
         _write_metric(
             "sqlite_write_lock_released",
             1,
@@ -2270,6 +2359,7 @@ class SQLiteWriteController:
                 before_begin()
             mark_stage("sqlite_begin_wait")
             conn.execute("BEGIN IMMEDIATE")
+            connection_diagnostics.transaction_started(conn, "write", source=state.source)
             mark_stage("transaction_body")
             cursor = conn.cursor()
             _write_metric(
@@ -2579,9 +2669,11 @@ class SQLiteWriteController:
         source: str = "unknown",
         before_begin: Optional[Callable[[], None]] = None,
         write_options: Optional[dict[str, Any]] = None,
+        _retain_cursor_on_success: bool = False,
     ):
         if conn is None:
             raise DatabaseClosedError(f"SQLite connection is closed for {source}")
+        connection_diagnostics.register_connection(conn, self.db_path, source=source)
         started = time.perf_counter()
         status = "error"
         state = self._make_write_transaction_state(source, write_options)
@@ -2594,6 +2686,9 @@ class SQLiteWriteController:
             trace.context["diagnostic_operation_id"] = diagnostic.id
             with trace.phase("connection_guard"):
                 guards.enter_context(self.connection_guard(conn, deadline=state.deadline))
+            with self._conn_locks_mutex:
+                if self._quarantined_connections.get(id(conn)) is conn:
+                    raise SQLiteTransactionCleanupError("SQLite connection remains quarantined after failed cleanup")
             diagnostic.stage("connection_guard_acquired")
             # Deadline starts before mutex acquisition; diagnostic ownership is
             # bound only once the observed connection scope has been entered.
@@ -2602,12 +2697,16 @@ class SQLiteWriteController:
                 trace.nested = True
                 trace.database_outcome = "unknown"
                 cursor = conn.cursor()
+                if not _retain_cursor_on_success:
+                    connection_diagnostics.cursor_opened(conn, cursor, source=source)
                 try:
                     with trace.phase("body"):
                         yield cursor
                     status = "ok"
                     return
                 finally:
+                    if not _retain_cursor_on_success or status != "ok":
+                        self._close_transaction_cursor(conn, cursor)
                     _write_metric(
                         "write_duration_ms",
                         round((time.perf_counter() - started) * 1000.0, 3),
@@ -2619,6 +2718,7 @@ class SQLiteWriteController:
             committed = False
             original_busy_timeout_ms = None
             busy_timeout_overridden = False
+            cursor = None
 
             try:
                 with trace.phase("busy_timeout_setup"):
@@ -2632,6 +2732,8 @@ class SQLiteWriteController:
                     state,
                     before_begin,
                 )
+                if not _retain_cursor_on_success:
+                    connection_diagnostics.cursor_opened(conn, cursor, source=source)
                 trace.database_outcome = "unknown"
                 diagnostic.stage("transaction_body")
                 with trace.phase("body"):
@@ -2641,21 +2743,37 @@ class SQLiteWriteController:
                 diagnostic.stage("commit")
                 with trace.phase("commit"):
                     self._commit_transaction(conn, state)
+                connection_diagnostics.transaction_finished(conn, "committed")
                 trace.database_outcome = "committed"
                 diagnostic.stage("committed")
                 status = "ok"
                 committed = True
-            except Exception as exc:
+            except BaseException as exc:
                 trace.note_error(exc)
                 if conn.in_transaction:
                     trace.database_outcome = "unknown"
                     diagnostic.stage("rollback")
-                    with trace.phase("rollback"):
-                        conn.execute("ROLLBACK")
+                    try:
+                        with trace.phase("rollback"):
+                            conn.execute("ROLLBACK")
+                    except BaseException as cleanup_exc:
+                        connection_diagnostics.cleanup_failed(conn, phase="rollback", error_class=type(cleanup_exc).__name__)
+                        self._close_transaction_cursor(conn, cursor)
+                        cursor = None
+                        self._quarantine_owned_connection(conn)
+                        if isinstance(exc, Exception):
+                            raise SQLiteTransactionCleanupError("SQLite write outcome is unknown after failed rollback") from exc
+                        raise exc
+                    connection_diagnostics.transaction_finished(conn, "rolled_back")
                     trace.database_outcome = "rolled_back"
                     diagnostic.stage("rolled_back")
+                else:
+                    self._retire_after_native_begin_busy(conn, state, trace, exc)
                 raise
             finally:
+                if cursor is not None and (not _retain_cursor_on_success or not committed):
+                    if not self._close_transaction_cursor(conn, cursor):
+                        self._quarantine_owned_connection(conn, reason="cursor_close_failed")
                 with trace.phase("busy_timeout_restore"):
                     self._restore_busy_timeout(
                         conn,
@@ -2677,7 +2795,7 @@ class SQLiteWriteController:
                 _clear_active_sqlite_operation(state.thread_id)
 
     def execute(self, conn: sqlite3.Connection, query: str, params: tuple = (), source: str = "unknown", write_options: Optional[dict[str, Any]] = None):
-        with self.transaction(conn, source=source, write_options=write_options) as cursor:
+        with self.transaction(conn, source=source, write_options=write_options, _retain_cursor_on_success=True) as cursor:
             cursor.execute(query, params)
             return cursor
 
@@ -2694,6 +2812,9 @@ class QueuedWriteTask:
     diagnostic_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     deadline: float | None = None
     diagnostic_context: dict[str, Any] = field(default_factory=current_write_diagnostic_context)
+    _start_lock: Any = field(default=None, repr=False, compare=False)
+    _start_state: str = field(default="queued", repr=False, compare=False)
+    _deadline_timer: Any = field(default=None, repr=False, compare=False)
 
 
 class LocalWriteQueue:
@@ -2718,6 +2839,7 @@ class LocalWriteQueue:
         retryable: bool = True,
         retries_left: int = 10,
         deadline: float | None = None,
+        cancel_before_start: bool = False,
     ):
         with self._accepting_lock:
             if not self._accepting:
@@ -2727,8 +2849,7 @@ class LocalWriteQueue:
                     return
                 raise exc
 
-            self._queue.put(
-                QueuedWriteTask(
+            task = QueuedWriteTask(
                     func=func,
                     description=description,
                     on_success=on_success,
@@ -2737,7 +2858,46 @@ class LocalWriteQueue:
                     retries_left=retries_left,
                     deadline=deadline,
                 )
-            )
+            if cancel_before_start and deadline is not None:
+                task._start_lock = threading.Lock()
+                task._deadline_timer = threading.Timer(
+                    max(0.0, deadline - time.perf_counter()), self._expire_queued_task, args=(task,),
+                )
+                task._deadline_timer.daemon = True
+                # Thread creation can fail. Complete fallible setup before
+                # publishing func: submission failure must prove no execution.
+                # Expiry before publication is safe; dequeue skips that task.
+                task._deadline_timer.start()
+            self._queue.put(task)
+
+    @staticmethod
+    def _claim_queued_task(task: QueuedWriteTask) -> bool:
+        if task._start_lock is None:
+            return True
+        with task._start_lock:
+            if task._start_state != "queued":
+                return False
+            task._start_state = "running"
+            timer = task._deadline_timer
+        if timer is not None:
+            timer.cancel()
+        return True
+
+    def _expire_queued_task(self, task: QueuedWriteTask) -> None:
+        with task._start_lock:
+            if task._start_state != "queued":
+                return
+            task._start_state = "expired"
+        # The queued->expired CAS proves that func never started and will be
+        # skipped at dequeue. Never settle an already running mutation here.
+        exc = QueuedWriteDeadlineExceeded("Queued write budget exhausted before execution")
+        if task.on_error:
+            try:
+                task.on_error(exc)
+            except Exception:
+                self.logger.exception("Queued expiry notification failed for %s", task.description)
+        else:
+            self.logger.error("Queued SQLite write expired for %s", task.description)
 
     def shutdown(self, timeout: float = 1.0) -> bool:
         with self._accepting_lock:
@@ -2784,6 +2944,8 @@ class LocalWriteQueue:
             try:
                 if task.description == self._SHUTDOWN_TASK_DESCRIPTION:
                     return
+                if not self._claim_queued_task(task):
+                    continue
                 with self._active_lock:
                     self._active_count += 1
                     active_marked = True
