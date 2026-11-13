@@ -73,11 +73,9 @@ Orders, completion marks and fluid balance across the 08:00–08:00 shift.
 ## Get started
 
 <!-- remcard:release:start -->
+[Windows installer 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) · [Full ZIP 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) · [File SHA-256 checksums](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)
 
-Download the [RemCard 5.1.20 Windows installer](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe), with Russian and English language selection, or the [full ZIP package](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip). [Release notes](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20) · [File SHA-256 checksums](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt).
-
-Version 5.1.20 applies one 15-second waiting budget when adding or editing a patient and avoids repeating a write whose outcome is unknown. It improves database resource cleanup after errors and local diagnostics for delays and locks, without SQL or patient data in diagnostic records. Database schema 29 and minimum client version 5.1.15 remain unchanged. Before the first launch, close all older clients using the shared database.
-
+Read the full changes and upgrade requirements on the [release page 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20).
 <!-- remcard:release:end -->
 
 After installation, launch **`RemCard.exe`**. If using the ZIP, extract the complete distribution folder, including `_internal`.

@@ -73,11 +73,9 @@
 ## 开始使用
 
 <!-- remcard:release:start -->
+[Windows 安装程序 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) · [完整 ZIP 安装包 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) · [文件 SHA-256 校验值](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)
 
-下载 [RemCard 5.1.20 Windows 安装程序](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe)（可选择俄语或英语），或[完整 ZIP 安装包](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip)。[版本说明](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20) · [文件 SHA-256 校验值](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)。
-
-5.1.20 为添加和修改患者时的等待设置统一的 15 秒预算，并避免重复执行结果未知的写入。改进了出错后的数据库资源释放，以及延迟和锁定的本地诊断；诊断记录不包含 SQL 或医疗数据。数据库架构版本 29 和最低客户端版本 5.1.15 保持不变。首次启动前，请关闭所有使用共享数据库的旧版客户端。
-
+完整变更和更新要求见[版本 5.1.20 发布页](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20)。
 <!-- remcard:release:end -->
 
 安装后启动 **`RemCard.exe`**。使用 ZIP 时，请解压包含 `_internal` 的完整分发文件夹。

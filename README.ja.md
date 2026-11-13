@@ -73,11 +73,9 @@
 ## はじめに
 
 <!-- remcard:release:start -->
+[Windowsインストーラー 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) · [完全版ZIP 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) · [SHA-256チェックサム](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)
 
-[RemCard 5.1.20 Windowsインストーラー](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe)（ロシア語・英語を選択可能）、または[完全版ZIPパッケージ](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip)をダウンロードしてください。[リリースノート](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20) · [SHA-256チェックサム](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)。
-
-5.1.20では、患者の追加・変更時の待機に共通の15秒の上限を設け、結果が不明な書き込みは再実行しません。エラー後のデータベースリソースの解放と、遅延・ロックのローカル診断を改善しました。診断記録にはSQLや医療データを含めません。データベーススキーマ29とクライアントの最低バージョン5.1.15は変更ありません。初回起動前に、共有データベースを使用している旧バージョンのクライアントをすべて終了してください。
-
+変更点と更新要件の全文は[リリース 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20)を確認してください。
 <!-- remcard:release:end -->
 
 インストール後、**`RemCard.exe`** を起動してください。ZIPを使用する場合は、`_internal` を含む配布フォルダー一式を展開してください。
