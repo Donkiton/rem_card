@@ -280,8 +280,9 @@ def test_current_orders_async_reply_keeps_local_optimistic_mark(monkeypatch):
     release.set()
 
     assert _wait_until(lambda: bool(manager._all_data))
-    assert manager._all_data[0]["comment"] == "Выполнено"
-    assert manager._all_data[0]["actual_time"]
+    assert manager._all_data[0]["comment"] == ""
+    assert manager._all_data[0]["actual_time"] is None
+    assert manager._apply_pending_marks(manager._all_data)[0]["comment"] == "Выполнено"
     assert 17 not in manager.cards_1a
     manager.shutdown()
 
