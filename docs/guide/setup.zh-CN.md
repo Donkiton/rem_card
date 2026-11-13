@@ -104,13 +104,17 @@ git diff --check
 
 ## 当前版本说明
 
-本页介绍 <strong>RemCard 5.1.10</strong>，更新于 <strong>2026 年 10 月 22 日</strong>。统一的 `RemCard.exe` 提供四种角色入口；独立的 `RemCardUpdater.exe` 用于安装完整更新。源码版本号见 [`VERSION`](../../VERSION)，具体构建的组成见其清单。
+本页介绍 <strong>RemCard 5.1.20</strong>，更新于 <strong>2026 年 11 月 13 日</strong>。统一的 `RemCard.exe` 提供四种角色入口；独立的 `RemCardUpdater.exe` 用于安装完整更新。源码版本号见 [`VERSION`](../../VERSION)，具体构建的组成见其清单。
 
 RemCard 由麻醉与重症医学医师 Vadim Bityutsky 开发。应用界面和链接中的详细文档目前主要为俄语。本文档的语言切换仅改变说明文字，不会翻译应用界面或截图。
 
-在 [5.1.10 版本](https://github.com/Donkiton/rem_card/releases/tag/v5.1.10)中，即使历史记录较多，少量变更也可以通过增量方式传送至本地副本。通过网络获取患者状态的操作已移出护士界面线程；延迟到达的响应不会覆盖较新的数据。此外，改进了初始状态保存的安全重试，以及共享数据库锁释放后的夜间备份加载。医生与护士协作的检查结果见[同步验证报告](../sync_responsiveness_validation.md)；副本规则与测量范围见[副本契约](../source_of_truth_and_sync_contract.md)和[测量方法](../replica_delta_benchmark.md)。
+在 [5.1.20 版本](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20)中，添加和修改患者时，自写入请求被接受起，队列和 SQLite 等待共用 15 秒预算。这并不保证能够中断停滞的操作系统 SMB 调用。结果未知的写入不会自动重复执行；再次尝试前，请先检查患者记录。
 
-已构建的 5.1.10 软件包禁止迁移共享数据库，也禁止提高最低客户端版本。对于兼容的工作站，这是一次<strong>可选更新</strong>，无需在所有计算机上同时安装。首次完整快照的耗时仍取决于网络速度和数据库大小。
+回滚失败后，不再继续使用故障连接；读取操作会明确关闭游标。新增范围受限的本地诊断，用于分析延迟、连接及可能的锁定，不包含 SQL 或医疗数据。修改范围与验收检查见 [5.1.20 验证报告](../release_5_1_20_validation.md)。
+
+共享数据库架构版本保持为 <strong>29</strong>，最低客户端版本保持为 <strong>5.1.15</strong>；5.1.20 软件包已禁用迁移。首次启动前，请关闭使用共享数据库的旧版客户端。首次完整快照的耗时仍取决于网络速度和数据库大小。
+
+安装时可选择 [Windows 5.1.20 安装程序（支持俄语和英语）](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe)或[完整 ZIP 安装包](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip)。[文件 SHA-256 校验值](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)。
 
 > [!WARNING]
 > <strong>RemCard 不是医疗器械，不能替代临床规范、临床决策或专业人员的责任监督。</strong> 实际使用前，必须进行独立的技术与临床验证、目标环境验收，并准备备用工作流程。

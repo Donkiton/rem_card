@@ -106,11 +106,15 @@ Network test rigs, restore drills, emergency mode and offline mode read or modif
 
 The application interface, screenshots and linked technical documentation are primarily in Russian.
 
-Overview of **RemCard 5.1.10**, updated **October 22, 2026**. A single `RemCard.exe` opens a choice of four roles; the separate `RemCardUpdater.exe` installs full updates. The source version is recorded in [`VERSION`](../../VERSION), and each build's contents are recorded in its manifest.
+Overview of **RemCard 5.1.20**, updated **November 13, 2026**. A single `RemCard.exe` opens a choice of four roles; the separate `RemCardUpdater.exe` installs full updates. The source version is recorded in [`VERSION`](../../VERSION), and each build's contents are recorded in its manifest.
 
-In [release 5.1.10](https://github.com/Donkiton/rem_card/releases/tag/v5.1.10), small changes can reach the local replica as deltas even when the change history is large. Network reads of patient status run outside the nurse interface; late responses cannot replace newer data. The release also refines safe retries when saving initial status and loading the nightly backup after the shared database lock is released. Doctor–nurse collaboration checks are documented in the [synchronization validation report](../sync_responsiveness_validation.md); replica rules and measurement limits are described in the [replica contract](../source_of_truth_and_sync_contract.md) and [benchmark methodology](../replica_delta_benchmark.md).
+In [release 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20), adding or editing a patient has one 15-second budget for queue and SQLite waits, measured from acceptance of the write request. This does not guarantee interruption of a stalled operating-system SMB call. A write whose outcome is unknown is not repeated automatically; check the patient chart before another attempt.
 
-The packaged 5.1.10 build disables both shared-database migrations and any increase in the minimum required client version. It is an **optional update** for compatible workstations: there is no need to update every computer at the same time. The initial full snapshot still depends on network speed and database size.
+After a failed rollback, the faulty connection is taken out of use; reads explicitly close their cursors. Bounded local diagnostics cover delays, connections and possible locks without SQL or patient data. The scope and acceptance checks are documented in the [5.1.20 validation report](../release_5_1_20_validation.md).
+
+The shared database schema remains **29** and the minimum client version remains **5.1.15**; migrations are disabled in the 5.1.20 package. Before the first launch, close older clients using the shared database. The initial full snapshot still depends on network speed and database size.
+
+Installation options are the [5.1.20 Windows installer with Russian and English language selection](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) and the [full ZIP package](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip). [File SHA-256 checksums](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt).
 
 > [!WARNING]
 > **RemCard is not a medical device and does not replace clinical protocols, clinical decisions or responsible professional oversight.** Real-world use requires independent technical and clinical review, acceptance testing in the intended environment, and a backup workflow.

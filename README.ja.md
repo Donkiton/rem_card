@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="VERSION">v5.1.16</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
+  <a href="VERSION">v5.1.20</a> · Windows · Python 3.11 · PySide6 · SQLite<br>
   <a href="https://github.com/Donkiton/rem_card/releases">リリース</a> ·
   <a href="#詳しく読む">ドキュメント</a> ·
   <a href="https://donkiton.github.io/rem_site/ja/">Webサイト</a> ·
@@ -72,9 +72,9 @@
 
 ## はじめに
 
-[RemCard 5.1.16 Windowsインストーラー](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard-Setup-5.1.16.exe)（ロシア語・英語を選択可能）、または[完全版ZIPパッケージ](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/RemCard_5.1.16_full.zip)をダウンロードしてください。[リリースノート](https://github.com/Donkiton/rem_card/releases/tag/v5.1.16) · [SHA-256チェックサム](https://github.com/Donkiton/rem_card/releases/download/v5.1.16/SHA256SUMS.txt)。
+[RemCard 5.1.20 Windowsインストーラー](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe)（ロシア語・英語を選択可能）、または[完全版ZIPパッケージ](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip)をダウンロードしてください。[リリースノート](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20) · [SHA-256チェックサム](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)。
 
-5.1.16では、患者記録を開く際、患者を追加する際、緊急モードに切り替える際も画面の操作を妨げません。操作の遅延とデータベースアクセスエラーの診断を改善しました。初回起動前に、共有データベースを使用している旧バージョンのクライアントをすべて終了してください。
+5.1.20では、患者の追加・変更時の待機に共通の15秒の上限を設け、結果が不明な書き込みは再実行しません。エラー後のデータベースリソースの解放と、遅延・ロックのローカル診断を改善しました。診断記録にはSQLや医療データを含めません。データベーススキーマ29とクライアントの最低バージョン5.1.15は変更ありません。初回起動前に、共有データベースを使用している旧バージョンのクライアントをすべて終了してください。
 
 インストール後、**`RemCard.exe`** を起動してください。ZIPを使用する場合は、`_internal` を含む配布フォルダー一式を展開してください。
 
