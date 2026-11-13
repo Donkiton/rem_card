@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -20,6 +22,8 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
 from rem_card.data.settings.settings_db import SettingsDatabase, SettingsDbError  # noqa: E402
+from rem_card.app import sqlite_connection_diagnostics as connection_lifecycle  # noqa: E402
+from rem_card.app.sqlite_shared import SQLiteBeginBusyError, SQLiteTransactionCleanupError  # noqa: E402
 from rem_card.data.settings.settings_schema import now_text  # noqa: E402
 from rem_card.services.settings.settings_service import (  # noqa: E402
     BACKGROUND_SETTINGS_KEY,
@@ -605,6 +609,174 @@ class SettingsMonitorCacheTest(unittest.TestCase):
         self.service.invalidate_cache()
         self.assertFalse(self.service.app_setting_cache_covers(0))
         self.assertEqual(self.service.get_app_setting("nurse", "print_config"), "new")
+
+
+class SettingsConnectionLifecycleTest(unittest.TestCase):
+    def test_more_than_registry_capacity_writes_close_registered_handles(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(connection_lifecycle, "_connections", OrderedDict()), patch.object(connection_lifecycle, "_overflow", 0):
+            db = SettingsDatabase(baza_dir=str(Path(tmp) / "baza"))
+            db.ensure_ready()
+            with closing(db.connect(readonly=False)) as conn:
+                conn.execute("CREATE TABLE lifecycle_probe(value INTEGER)")
+            resource = connection_lifecycle.canonical_resource(db.db_path)
+            self.assertEqual(connection_lifecycle.candidates(resource)["connection_registry_size"], 0)
+            for index in range(connection_lifecycle.MAX_CONNECTIONS + 4):
+                with db.transaction(source="settings_lifecycle_probe") as cursor:
+                    cursor.execute("INSERT INTO lifecycle_probe VALUES(?)", (index,))
+                snapshot = connection_lifecycle.candidates(resource)
+                self.assertEqual(snapshot["connection_registry_size"], 0)
+                self.assertEqual(snapshot["connection_registry_overflow"], 0)
+            with db.read_connection() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM lifecycle_probe").fetchone()[0], connection_lifecycle.MAX_CONNECTIONS + 4)
+
+    def test_real_native_begin_busy_keeps_public_friendly_error_and_allows_next_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SettingsDatabase(baza_dir=str(Path(tmp) / "baza"))
+            db.ensure_ready()
+            with closing(db.connect(readonly=False)) as holder, closing(db.connect(readonly=False)) as blocked:
+                holder.execute("CREATE TABLE lifecycle_probe(value INTEGER)")
+                blocked.execute("PRAGMA busy_timeout=1")
+                db.write_controller.max_retries = 1
+                holder.execute("BEGIN IMMEDIATE")
+                try:
+                    with patch.object(db, "connect", return_value=blocked), self.assertRaises(SettingsDbError) as caught:
+                        with db.transaction(source="settings_lifecycle_busy"):
+                            self.fail("Native BEGIN must not execute the body")
+                    self.assertIn("временно занята", str(caught.exception))
+                    self.assertIn("Данные не сохранены", str(caught.exception))
+                    self.assertIsInstance(caught.exception.__cause__, SQLiteBeginBusyError)
+                    self.assertEqual(caught.exception.__cause__.__cause__.sqlite_errorcode & 255, sqlite3.SQLITE_BUSY)
+                    with self.assertRaises(sqlite3.ProgrammingError):
+                        blocked.execute("SELECT 1")
+                finally:
+                    holder.rollback()
+            with db.transaction(source="settings_lifecycle_next") as cursor:
+                cursor.execute("INSERT INTO lifecycle_probe VALUES(1)")
+            with db.read_connection() as conn:
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM lifecycle_probe").fetchone()[0], 1)
+
+    def test_unknown_cleanup_error_is_not_converted_to_friendly_known_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SettingsDatabase(baza_dir=str(Path(tmp) / "baza"))
+            db.ensure_ready()
+            unknown = SQLiteTransactionCleanupError("Outcome unknown after failed rollback")
+            with patch.object(db.write_controller, "transaction", side_effect=unknown), self.assertRaises(SQLiteTransactionCleanupError) as caught:
+                with db.transaction(source="settings_lifecycle_unknown"):
+                    self.fail("The body must not execute")
+            self.assertIs(caught.exception, unknown)
+            self.assertTrue(caught.exception.outcome_unknown)
+
+    def test_double_failure_preserves_unknown_and_owner_cleanup_drops_retained_connection(self):
+        from rem_card.services.data_service import DataService
+
+        for close_failures in (1, None):
+            with self.subTest(close_failures=close_failures), tempfile.TemporaryDirectory() as tmp:
+                db = SettingsDatabase(baza_dir=str(Path(tmp) / "baza"))
+                db.ensure_ready()
+                raw = db.connect(readonly=False)
+                raw.execute("CREATE TABLE lifecycle_probe(value INTEGER)")
+                proxy = _SettingsRollbackFailureConnection(raw, close_failures=close_failures)
+                try:
+                    with patch.object(db, "connect", return_value=proxy), self.assertRaises(SQLiteTransactionCleanupError) as caught:
+                        with db.transaction(source="settings_double_failure") as cursor:
+                            cursor.execute("INSERT INTO lifecycle_probe VALUES(9)")
+                    self.assertTrue(caught.exception.outcome_unknown)
+                    self.assertEqual(DataService._terminal_write_state(caught.exception), "unknown")
+                    self.assertIs(caught.exception.__cause__, proxy.commit_error)
+                    self.assertEqual(proxy.close_calls, 2)
+                    if close_failures is None:
+                        self.assertTrue(db.write_controller.is_connection_quarantined(proxy))
+                        with patch.object(db, "connect", side_effect=AssertionError("Cannot open a writer behind retained own transaction")), self.assertRaises(SQLiteTransactionCleanupError):
+                            with db.transaction():
+                                self.fail("New BEGIN/body must not execute behind incomplete cleanup")
+                        self.assertEqual(proxy.begin_calls, 1)
+                        self.assertEqual(proxy.close_calls, 3)
+                        proxy.close_failures = 0
+                    else:
+                        self.assertFalse(db.write_controller.is_connection_quarantined(proxy))
+                    with db.transaction(source="settings_next_after_cleanup") as cursor:
+                        cursor.execute("INSERT INTO lifecycle_probe VALUES(1)")
+                    self.assertFalse(db.write_controller.is_connection_quarantined(proxy))
+                    self.assertEqual(db.write_controller._quarantined_connections, {})
+                    with db.read_connection() as conn:
+                        self.assertEqual([row[0] for row in conn.execute("SELECT value FROM lifecycle_probe").fetchall()], [1])
+                finally:
+                    proxy.close_failures = 0
+                    if db.write_controller.is_connection_quarantined(proxy):
+                        db.write_controller.close_quarantined_connection(proxy, raise_on_error=True)
+                    else:
+                        connection_lifecycle.close_connection(proxy)
+
+    def test_schema_initialization_close_failure_preserves_primary_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SettingsDatabase(baza_dir=str(Path(tmp) / "baza"))
+            original_connect = db.connect
+            opened = []
+            unknown = SQLiteTransactionCleanupError("schema initialization outcome unknown")
+            def connected(*args, **kwargs):
+                conn = original_connect(*args, **kwargs)
+                proxy = _SettingsRollbackFailureConnection(conn, close_failures=None)
+                opened.append(proxy)
+                connection_lifecycle.register_connection(proxy, db.db_path, source="settings_schema_init", new=True)
+                return proxy
+            try:
+                with patch.object(db, "connect", side_effect=connected), patch.object(db.write_controller, "transaction", side_effect=unknown), self.assertRaises(SQLiteTransactionCleanupError) as caught:
+                    db.ensure_ready()
+                self.assertIs(caught.exception, unknown)
+                row, = connection_lifecycle.candidates(connection_lifecycle.canonical_resource(db.db_path))["local_connection_candidates"]
+                self.assertEqual(row["cleanup_phase"], "close")
+                self.assertEqual(row["cleanup_error"], "OSError")
+            finally:
+                for proxy in opened:
+                    proxy.close_failures = 0
+                    connection_lifecycle.close_connection(proxy)
+
+    def test_close_failure_without_primary_keeps_original_close_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = SettingsDatabase(baza_dir=str(Path(tmp) / "baza"))
+            db.ensure_ready()
+            proxy = _SettingsRollbackFailureConnection(db.connect(readonly=False), close_failures=None)
+            try:
+                with self.assertRaises(OSError) as caught:
+                    db._close_writer_connection(proxy, preserve_primary_error=False)
+                self.assertIs(caught.exception, proxy.close_error)
+            finally:
+                proxy.close_failures = 0
+                connection_lifecycle.close_connection(proxy)
+
+
+class _SettingsRollbackFailureConnection:
+    def __init__(self, connection, *, close_failures):
+        self.connection = connection
+        self.close_failures = close_failures
+        self.close_calls = 0
+        self.begin_calls = 0
+        self.commit_error = OSError("commit acknowledgement unavailable")
+        self.close_error = OSError("native connection close unavailable")
+
+    @property
+    def in_transaction(self):
+        return self.connection.in_transaction
+
+    def cursor(self):
+        return self.connection.cursor()
+
+    def execute(self, sql, *args):
+        if sql == "BEGIN IMMEDIATE":
+            self.begin_calls += 1
+        if sql == "COMMIT":
+            raise self.commit_error
+        if sql == "ROLLBACK":
+            raise sqlite3.OperationalError("rollback unavailable")
+        return self.connection.execute(sql, *args)
+
+    def close(self):
+        self.close_calls += 1
+        if self.close_failures is None or self.close_failures > 0:
+            if self.close_failures is not None:
+                self.close_failures -= 1
+            raise self.close_error
+        self.connection.close()
 
 
 if __name__ == "__main__":

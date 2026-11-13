@@ -1,5 +1,7 @@
 {
   "core": [
+    "tests/test_sqlite_connection_diagnostics.py",
+    "tests/test_sqlite_connection_cleanup.py",
     "tests/test_orders_delta_diagnostics.py",
     "tests/test_sqlite_read_priority.py",
     "tests/test_release_environment.py",

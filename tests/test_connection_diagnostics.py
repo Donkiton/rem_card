@@ -116,8 +116,14 @@ def test_connection_setup_separates_local_mutex_wait_from_sqlite(setup_probe, mo
 
 
 @pytest.mark.parametrize("close_fails", [False, True])
-def test_connection_failure_preserves_original_exception_and_safe_codes(setup_probe, close_fails):
+def test_connection_failure_preserves_original_exception_and_safe_codes(setup_probe, close_fails, monkeypatch):
     probe = setup_probe
+    cleanup_errors = []
+    original_cleanup = db_manager.connection_diagnostics.cleanup_failed
+    def observe_cleanup(conn, **fields):
+        cleanup_errors.append((conn, fields))
+        original_cleanup(conn, **fields)
+    monkeypatch.setattr(db_manager.connection_diagnostics, "cleanup_failed", observe_cleanup)
     error = sqlite3.OperationalError("sensitive patient details and SQL values")
     error.sqlite_errorcode = sqlite3.SQLITE_BUSY
     error.sqlite_errorname = "SQLITE_BUSY"
@@ -131,6 +137,7 @@ def test_connection_failure_preserves_original_exception_and_safe_codes(setup_pr
         _open(probe)
 
     assert result.value is error
+    assert cleanup_errors == ([(probe.connection, {"phase": "close", "error_class": "RuntimeError"})] if close_fails else [])
     assert [call for call in probe.calls if call[0] == "close"] == [("close", threading.get_ident())]
     summary = probe.events[0]
     assert summary["failure_phase"] == "pragma_foreign_keys"

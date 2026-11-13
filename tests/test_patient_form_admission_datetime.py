@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (  # noqa: E402
 )
 
 from rem_card.ui.patient_bed_management.patient_form import PatientForm  # noqa: E402
+from rem_card.ui.patient_bed_management import patient_form as patient_form_module  # noqa: E402
 from rem_card.ui.patient_bed_management.tabs.general_tab import GeneralTabWidget  # noqa: E402
 from rem_card.ui.shared.custom_message_box import CustomMessageBox  # noqa: E402
 from rem_card.ui.styles import theme_runtime  # noqa: E402
@@ -350,6 +352,130 @@ class PatientFormAdmissionDateTimeTest(unittest.TestCase):
         self.assertEqual(calls[0]["title"], "Проверка даты поступления")
         self.assertIn("Продолжить редактирование", [text for text, _code in calls[0]["action_buttons"]])
         self.assertIn("Изменить дату", [text for text, _code in calls[0]["action_buttons"]])
+
+
+@pytest.fixture
+def queued_patient_form(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    submitted, warnings = [], []
+    service = SimpleNamespace(enqueue_write=lambda *args, **kwargs: submitted.append((args, kwargs)))
+    monkeypatch.setattr(patient_form_module, "MKBService", lambda: SimpleNamespace(close_connection=lambda: None))
+    monkeypatch.setattr(CustomMessageBox, "warning", lambda *_args: warnings.append(_args[2]))
+    form = PatientForm(service, 2)
+    form.general_tab.get_data = lambda: {
+        "history_number": "synthetic", "full_name": "Synthetic fixture", "birth_date": datetime(1986, 1, 1).date(),
+        "birth_date_text": "01.01.1986", "admission_datetime": datetime.now(), "gender": "М",
+        "department_profile": "", "source_department": "",
+    }
+    form.diagnosis_tab.get_data = lambda: {"diagnosis_code": "", "diagnosis_text": "Synthetic fixture"}
+    try:
+        yield app, form, submitted, warnings
+    finally:
+        form.force_close_for_shutdown()
+        app.processEvents()
+
+
+def test_patient_form_queues_once_and_settled_failure_allows_explicit_retry(queued_patient_form):
+    app, form, submitted, warnings = queued_patient_form
+    form._save_data()
+    first = submitted[0][1]
+    form._save_data()
+    form.reject()
+    assert len(submitted) == 1 and form._write_pending and not form._closing
+    failure = RuntimeError("confirmed failure")
+    first["on_settled"]("failed", failure)
+    app.processEvents()
+    assert not form._write_pending and form.save_button.isEnabled()
+    assert warnings == ["Не удалось сохранить данные:\nconfirmed failure"]
+    form._save_data()
+    assert len(submitted) == 2 and form._write_pending
+    # Notifications from the failed first attempt cannot settle the new one.
+    first["on_success"](99)
+    first["on_error"](failure)
+    app.processEvents()
+    assert form._write_pending and not form._closing and len(warnings) == 1
+
+
+@pytest.mark.parametrize("error_type", ["QueuedWriteDeadlineExceeded", "SQLiteBeginBusyError"])
+def test_patient_form_confirmed_timeout_explains_retry_without_internal_details(queued_patient_form, error_type):
+    app, form, submitted, warnings = queued_patient_form
+    form._save_data()
+    error = getattr(patient_form_module, error_type)("internal SQLite deadline details")
+    submitted[0][1]["on_settled"]("failed", error)
+    app.processEvents()
+    assert not form._write_pending and form.save_button.isEnabled() and form.close_button.isEnabled()
+    assert len(warnings) == 1 and "Данные не сохранены" in warnings[0]
+    assert "internal" not in warnings[0] and "SQLite" not in warnings[0]
+
+
+@pytest.mark.parametrize("state", ["committed", "failed"])
+def test_patient_form_settles_from_worker_when_ui_callbacks_are_skipped(queued_patient_form, state):
+    app, form, submitted, warnings = queued_patient_form
+    form._save_data()
+    callback = submitted[0][1]["on_settled"]
+    payload = 7 if state == "committed" else RuntimeError("outage settled failure")
+    thread = threading.Thread(target=lambda: callback(state, payload))
+    thread.start()
+    thread.join(2)
+    assert not thread.is_alive()
+    # The worker emitted a queued signal; it did not mutate widgets.
+    assert form._write_pending and not form._closing
+    app.processEvents()
+    assert not form._write_pending
+    assert form._closing == (state == "committed")
+    assert len(warnings) == (state == "failed")
+
+
+@pytest.mark.parametrize("via_settled", [False, True])
+def test_patient_form_unknown_result_is_sticky_and_blocks_duplicate_save(queued_patient_form, via_settled):
+    app, form, submitted, warnings = queued_patient_form
+    class CleanupError(RuntimeError):
+        outcome_unknown = True
+    failure = CleanupError("rollback outcome unknown")
+    form._save_data()
+    call = submitted[0][1]
+    if via_settled:
+        call["on_settled"]("unknown", failure)
+    else:
+        call["on_error"](failure)
+    app.processEvents()
+    assert not form._write_pending and form._write_outcome_unknown and not form.save_button.isEnabled()
+    assert form.cancel_button.isEnabled() and form.close_button.isEnabled()
+    assert form.save_button.text() == "Результат не подтверждён"
+    call["on_success"](7)
+    call["on_error"](RuntimeError("late failure"))
+    app.processEvents()
+    form._save_data()
+    assert len(submitted) == 1 and len(warnings) == 1 and not form._closing
+    form.reject()
+    assert form._closing
+    call["on_settled"]("committed", 7)
+    app.processEvents()
+    assert len(warnings) == 1 and form._write_outcome_unknown
+
+
+def test_patient_form_late_and_duplicate_success_never_reopens_or_reaccepts(queued_patient_form):
+    app, form, submitted, warnings = queued_patient_form
+    accepted = QSignalSpy(form.accepted)
+    form._save_data()
+    call = submitted[0][1]
+    call["on_settled"]("committed", 7)
+    call["on_success"](7)
+    app.processEvents()
+    assert accepted.count() == 1 and form._closing
+    call["on_error"](RuntimeError("late failure"))
+    app.processEvents()
+    assert accepted.count() == 1 and warnings == []
+
+
+def test_patient_form_callback_after_shutdown_ignores_ui(queued_patient_form):
+    app, form, submitted, warnings = queued_patient_form
+    accepted = QSignalSpy(form.accepted)
+    form._save_data()
+    form.force_close_for_shutdown()
+    submitted[0][1]["on_settled"]("committed", 7)
+    app.processEvents()
+    assert form._closing and accepted.count() == 0 and warnings == []
 
 
 if __name__ == "__main__":

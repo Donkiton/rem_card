@@ -4,7 +4,7 @@ import hashlib
 import os
 import weakref
 
-from PySide6.QtCore import QSize, QTimer, Qt
+from PySide6.QtCore import QSize, Qt, Signal, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog,
@@ -20,8 +20,10 @@ from PySide6.QtWidgets import (
 
 from rem_card.app.logger import logger
 from rem_card.app.patient_age import storage_age_from_birth_date
+from rem_card.app.sqlite_shared import QueuedWriteDeadlineExceeded, SQLiteBeginBusyError
 from rem_card.services.mkb import MKBService
 from rem_card.services.patient_bed_management import AdmissionRecord, PatientBedManagementService, PatientRecord
+from rem_card.services.write_dispatch import service_write_failure_state
 from rem_card.ui.patient_bed_management.bed_labels import format_patient_bed_label
 from rem_card.ui.patient_bed_management.form_widgets import IconBadge, line_icon
 from rem_card.ui.patient_bed_management.tabs.diagnosis_tab import DiagnosisTabWidget
@@ -103,6 +105,8 @@ def _invoke_form_later(form_ref, method_name: str, *args):
 
 
 class PatientForm(SavedFramelessDialogMixin, QDialog):
+    _write_settled_requested = Signal(object, str, str, object)
+
     def __init__(
         self,
         patient_bed_service: PatientBedManagementService,
@@ -119,6 +123,10 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self.admission = admission
         self.is_new_admission = patient is None and admission is None
         self._write_pending = False
+        self._write_outcome_unknown = False
+        self._write_attempt = None
+        self._write_terminal_state = ""
+        self._write_settled_requested.connect(self._on_write_settled, Qt.QueuedConnection)
         self._closing = False
         self._mkb_closed = False
         self._write_description = ""
@@ -408,6 +416,9 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             int(self._write_pending),
             self._format_form_state(),
         )
+        if self._write_outcome_unknown:
+            logger.info("patient_form_save_ignored_unknown role=%s form_id=%s", _current_role(), self._form_log_id)
+            return
         if self._write_pending:
             logger.info(
                 "patient_form_save_ignored_pending role=%s form_id=%s bed=%s admission_id=%s op=%s",
@@ -509,9 +520,9 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                 operation,
                 on_success=self._make_write_success_callback(description),
                 on_error=self._make_write_error_callback(description),
+                on_settled=self._make_write_settled_callback(description),
             )
         except Exception as exc:
-            self._finish_write_pending()
             logger.exception(
                 "patient_form_save_exception role=%s form_id=%s bed=%s admission_id=%s op=%s state=%s error=%s",
                 _current_role(),
@@ -522,7 +533,7 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                 self._format_form_state(),
                 exc,
             )
-            CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
+            self._on_write_error(exc, self._write_description)
 
     def _confirm_non_today_admission_date(self, admission_datetime: datetime) -> bool:
         if not admission_datetime:
@@ -568,70 +579,60 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         return confirmed
 
     def _make_write_success_callback(self, description: str):
-        form_ref = weakref.ref(self)
+        settled = self._make_write_settled_callback(description)
 
         def _callback(_result):
-            form = form_ref()
-            if not _qt_is_valid(form) or getattr(form, "_closing", False):
-                logger.info(
-                    "patient_form_write_success_skip role=%s op=%s result=%s reason=invalid_or_closing",
-                    _current_role(),
-                    description,
-                    _result,
-                )
-                return
-            logger.info(
-                "patient_form_write_success_callback role=%s form_id=%s bed=%s admission_id=%s op=%s result=%s",
-                _current_role(),
-                form._form_log_id,
-                form.bed_number,
-                getattr(form.admission, "id", None),
-                description,
-                _result,
-            )
-            QTimer.singleShot(0, lambda ref=form_ref, result=_result: _invoke_form_later(ref, "_on_write_success", description, result))
+            settled("committed", _result)
 
         return _callback
 
     def _make_write_error_callback(self, description: str):
-        form_ref = weakref.ref(self)
+        settled = self._make_write_settled_callback(description)
 
         def _callback(exc):
-            form = form_ref()
-            if not _qt_is_valid(form) or getattr(form, "_closing", False):
-                logger.warning(
-                    "patient_form_write_error_skip role=%s op=%s error=%s",
-                    _current_role(),
-                    description,
-                    exc,
-                )
-                return
-            exc_info = (type(exc), exc, exc.__traceback__) if getattr(exc, "__traceback__", None) else None
-            logger.warning(
-                "patient_form_write_error_callback role=%s form_id=%s bed=%s admission_id=%s op=%s error=%s state=%s",
-                _current_role(),
-                form._form_log_id,
-                form.bed_number,
-                getattr(form.admission, "id", None),
-                description,
-                exc,
-                form._format_form_state(),
-                exc_info=exc_info,
-            )
-            QTimer.singleShot(
-                0,
-                lambda ref=form_ref, err=exc: _invoke_form_later(ref, "_on_write_error", err, description),
-            )
+            settled(service_write_failure_state(exc), exc)
 
         return _callback
 
+    def _make_write_settled_callback(self, description: str):
+        form_ref = weakref.ref(self)
+        attempt = self._write_attempt
+
+        def settled(state, payload):
+            # DataService invokes this on its terminal owner thread even when
+            # ordinary UI callbacks are skipped during an outage/shutdown.
+            # Signal emission is the only Qt operation on that thread.
+            form = form_ref()
+            if form is not None:
+                try:
+                    form._write_settled_requested.emit(attempt, state, description, payload)
+                except RuntimeError:
+                    pass  # The C++ form may already have been destroyed.
+
+        return settled
+
+    @Slot(object, str, str, object)
+    def _on_write_settled(self, attempt, state, description, payload):
+        if self._closing or attempt is not self._write_attempt or self._write_terminal_state:
+            return
+        if state not in {"committed", "failed", "unknown"}:
+            return
+        self._write_terminal_state = state
+        if state == "committed":
+            self._on_write_success(description, payload)
+        else:
+            self._on_write_error(payload, description)
+
     def _begin_write_pending(self):
+        self._write_attempt = object()
+        self._write_terminal_state = ""
         self._write_pending = True
         self._set_write_controls_enabled(False)
         if _qt_is_valid(self.save_button):
             self.save_button.setText("Сохранение...")
 
     def _finish_write_pending(self):
+        self._write_attempt = None
         self._write_pending = False
         self._set_write_controls_enabled(True)
         if _qt_is_valid(self.save_button):
@@ -648,7 +649,7 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                 widget.setEnabled(enabled)
 
     def _on_write_success(self, description: str = "", result=None):
-        if self._closing or not _qt_is_valid(self):
+        if self._closing or self._write_outcome_unknown or not _qt_is_valid(self):
             return
         logger.info(
             "patient_form_write_success role=%s form_id=%s bed=%s admission_id=%s op=%s result=%s",
@@ -677,7 +678,32 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             self._format_form_state(),
             exc_info=exc_info,
         )
+        if self._write_pending and (
+            self._write_terminal_state == "unknown" or service_write_failure_state(exc) == "unknown"
+        ):
+            self._write_terminal_state = "unknown"
+            self._write_outcome_unknown = True
+            self._write_pending = False
+            # The task has settled, so the user can dismiss this form. A new
+            # Save in the same context stays forbidden until reconciliation.
+            self._set_write_controls_enabled(True)
+            if _qt_is_valid(self.save_button):
+                self.save_button.setEnabled(False)
+                self.save_button.setText("Результат не подтверждён")
+            CustomMessageBox.warning(
+                self, "Результат сохранения не подтверждён",
+                "Не удалось подтвердить, сохранены ли данные. Повторное сохранение заблокировано.\n"
+                "Можно закрыть это окно. После восстановления соединения проверьте карточку пациента перед повторным вводом.",
+            )
+            return
         self._finish_write_pending()
+        if isinstance(exc, (QueuedWriteDeadlineExceeded, SQLiteBeginBusyError)):
+            CustomMessageBox.warning(
+                self, "Сохранение не выполнено",
+                "База данных занята или истекло время ожидания. Данные не сохранены.\n"
+                "Можно повторить сохранение позже или закрыть это окно.",
+            )
+            return
         CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
 
     def _close_mkb_service_once(self):

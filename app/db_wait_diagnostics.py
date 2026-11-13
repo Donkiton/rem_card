@@ -14,11 +14,13 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib import import_module
+from rem_card.app import sqlite_connection_diagnostics as connection_lifetimes
 
 THRESHOLD_SEC = 5.0
 SNAPSHOT_INTERVAL_SEC = 60.0
 MAX_ACTIVE = 128
 MAX_READ_CANDIDATES = 4
+MAX_DATABASE_SNAPSHOTS = 8
 _lock = threading.RLock()
 _active = {}
 _thread = None
@@ -63,11 +65,12 @@ class Operation:
         self.payload = dict(
             operation_id=self.id, thread_id=threading.get_ident(),
             source=_source(source), stage=stage, retries=0,
-            resource=_resource(resource), database_resource=_resource(database or resource),
+            resource=_resource(resource), database_resource=connection_lifetimes.canonical_resource(database or resource),
             started_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds'),
             stage_history=[], **identity(),
         )
         self.stage_started = self.started
+        self._connection_key = None
         if mutex is not None:
             self.payload['mutex_id'] = f'{_SESSION_ID}:{id(mutex):x}'
         if connection is not None:
@@ -92,7 +95,11 @@ class Operation:
     def bind_connection(self, connection):
         # Identity only: never execute SQL or inspect a connection from the watcher.
         with _lock:
+            self._connection_key = id(connection)
             self.payload['connection_id'] = f'{_SESSION_ID}:{id(connection):x}'
+            token = connection_lifetimes.connection_token(connection)
+            if token is not None:
+                self.payload['connection_token'] = token
 
     def worker(self, pid):
         with _lock:
@@ -150,7 +157,6 @@ def _attach_read_candidates(payload, operation, now, reason):
         for candidate in sorted(_active.values(), key=lambda item: item.started):
             row = candidate.payload
             if (row.get('database_resource') != operation.payload.get('database_resource')
-                    or row['thread_id'] == operation.payload['thread_id']
                     or not row.get('connection_id')
                     or row.get('connection_id') == operation.payload.get('connection_id')):
                 continue
@@ -177,10 +183,13 @@ def _attach_read_candidates(payload, operation, now, reason):
         pass  # Observation cannot replace a COMMIT error or prevent rollback.
 
 
-def _operation_snapshot(op, now):
+def _operation_snapshot(op, now, *, include_connections=True):
     result = dict(op.payload, stage_history=list(op.payload['stage_history']),
                   elapsed_ms=round((now-op.started)*1000),
                   stage_elapsed_ms=round((now-op.stage_started)*1000))
+    token = connection_lifetimes.connection_token_by_id(op._connection_key)
+    if token is not None:
+        result['connection_token'] = token
     held_stage = {'connection_guard_wait': 'connection_guard_held',
                   'central_io_wait': 'central_io_held'}.get(result['stage'])
     if held_stage:
@@ -198,7 +207,21 @@ def _operation_snapshot(op, now):
         result.update(holder_kind='sqlite_native', holder_confidence='unknown')
         if result['stage'] in ('commit', 'sqlite_commit_wait'):
             _attach_read_candidates(result, op, now, 'commit_wait')
+    if include_connections:
+        _attach_connection_candidates(result)
     return result
+
+
+def _attach_connection_candidates(payload):
+    try:
+        snapshot = connection_lifetimes.candidates(
+            payload.get('database_resource', ''),
+            exclude_connection_token=payload.get('connection_token'),
+        )
+        if snapshot:
+            payload.update(snapshot)
+    except Exception:
+        pass
 
 
 def _snapshot():
@@ -211,7 +234,13 @@ def _snapshot():
         if not overdue:
             return
         _last_snapshot = now
-        operations = [_operation_snapshot(op, now) for op in list(_active.values())[:MAX_ACTIVE]]
+        operations = [_operation_snapshot(op, now, include_connections=False) for op in list(_active.values())[:MAX_ACTIVE]]
+    resources = list(dict.fromkeys(op['database_resource'] for op in operations if op.get('database_resource')))
+    connection_snapshots = []
+    for resource in resources[:MAX_DATABASE_SNAPSHOTS]:
+        payload = {'database_resource': resource}
+        _attach_connection_candidates(payload)
+        connection_snapshots.append(payload)
     frames = sys._current_frames()
     stacks = {}
     for tid in {op['thread_id'] for op in operations}:
@@ -222,7 +251,9 @@ def _snapshot():
             frame = frame.f_back
         stacks[str(tid)] = entries
     del frames
-    _emit('DB_WAIT_SNAPSHOT', dict(**identity(), operations=operations, stacks=stacks))
+    _emit('DB_WAIT_SNAPSHOT', dict(**identity(), operations=operations, stacks=stacks,
+                                 connection_registry_snapshots=connection_snapshots,
+                                 connection_databases_truncated=len(resources) > MAX_DATABASE_SNAPSHOTS))
 
 
 def _watch():

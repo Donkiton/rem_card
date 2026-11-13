@@ -1,6 +1,7 @@
 from rem_card.app.db_wait_diagnostics import observe, observed_scope, observed_call, bind_connection, mark_stage
 from rem_card.app.connection_diagnostics import connection_observation, connection_phase
 from rem_card.app.read_operation_diagnostics import ReadOperationDiagnostics
+from rem_card.app import sqlite_connection_diagnostics as connection_diagnostics
 import json
 import os
 import random
@@ -85,6 +86,8 @@ from rem_card.app.sqlite_shared import (
     QueuedWriteDeadlineExceeded,
     NETWORK_SAFE_DB_PROFILE,
     SQLiteWriteController,
+    SQLiteTransactionCleanupError,
+    SQLiteBeginBusyError,
     backup_connection,
     configure_connection,
     find_latest_backup,
@@ -388,6 +391,8 @@ class DatabaseManager:
         self._thread_state = threading.local()
         self._central_io_lock = threading.RLock()
         self._closed = False
+        self._quarantined_write_conn = None
+        self._quarantined_write_closed = False
         self.startup_metrics: dict[str, float] = {}
         self._startup_pre_connect_fingerprint: Optional[dict[str, Any]] = self._startup_db_fingerprint()
         self._startup_quickcheck_ok_ts: Optional[int] = None
@@ -417,6 +422,7 @@ class DatabaseManager:
             lock_path=self.medical_db_lock_path,
             owner_id=owner_id,
             logger=logger,
+            on_connection_quarantined=self._on_write_connection_quarantined,
         )
 
         self._journal_conn: Optional[sqlite3.Connection] = None
@@ -958,7 +964,7 @@ class DatabaseManager:
                 self._close_central_read_connection()
                 if self._remcard_conn:
                     with self.write_controller.connection_guard(self._remcard_conn):
-                        self._remcard_conn.close()
+                        connection_diagnostics.close_connection(self._remcard_conn)
                 self._remcard_conn = None
                 self._journal_conn = None
 
@@ -1017,7 +1023,7 @@ class DatabaseManager:
                 self._close_central_read_connection()
                 if self._remcard_conn:
                     with self.write_controller.connection_guard(self._remcard_conn):
-                        self._remcard_conn.close()
+                        connection_diagnostics.close_connection(self._remcard_conn)
                 self._remcard_conn = None
                 self._journal_conn = None
                 result = cancel_manual_rotation(
@@ -1060,6 +1066,7 @@ class DatabaseManager:
         )
         owner_id = f"{socket.gethostname()}:{os.getpid()}:remcard_init"
         self._acquire_connection_profile_lock(profile_lock, owner_id)
+        conn = None
         try:
             if self._startup_pre_connect_fingerprint is None:
                 self._startup_pre_connect_fingerprint = self._startup_db_fingerprint()
@@ -1076,9 +1083,16 @@ class DatabaseManager:
                 isolation_level=None,
                 timeout=5.0,
             )
+            connection_diagnostics.register_connection(conn, self.db_path, source="central_write", readonly=False, scope="manager", new=True)
             configure_connection(conn, profile="network")
             self._record_startup_metric("sqlite_connect_ms", (time.perf_counter() - connect_started) * 1000.0)
-        except Exception as exc:
+        except BaseException as exc:
+            if conn is not None:
+                try:
+                    conn.close()
+                    connection_diagnostics.connection_closed(conn)
+                except Exception as close_exc:
+                    connection_diagnostics.cleanup_failed(conn, phase="close", error_class=type(close_exc).__name__)
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_init", logger=logger, database_path=getattr(self, "db_path", ""), runtime_mode=getattr(getattr(self, "runtime_context", None), "mode", "")) from exc
             raise
@@ -1154,10 +1168,62 @@ class DatabaseManager:
             self._close_central_read_connection()
             if self._remcard_conn:
                 with self.write_controller.connection_guard(self._remcard_conn):
-                    self._remcard_conn.close()
+                    connection_diagnostics.close_connection(self._remcard_conn)
             self._init_connections()
         if self._local_replica:
             self._local_replica.trigger_fast_sync()
+
+    def _on_write_connection_quarantined(self, conn, closed: bool) -> None:
+        if conn is self._remcard_conn:
+            self._quarantined_write_conn = conn
+            self._quarantined_write_closed = bool(closed)
+
+    def _ensure_connection_after_quarantine(self, *, deadline=None) -> None:
+        """Replace a poisoned handle only for a later independent operation."""
+        if getattr(self, "_quarantined_write_conn", None) is None:
+            return
+        if deadline is None:
+            deadline = self._current_thread_write_metadata().get("write_deadline_monotonic")
+        with self._central_io_lock_scope("quarantine_recovery", deadline=deadline):
+            poisoned = self._quarantined_write_conn
+            if poisoned is None:
+                return
+            if self._closed or getattr(self, "_closing", False):
+                raise DatabaseClosedError("Database connection is closed during quarantine recovery")
+            if not self._quarantined_write_closed:
+                self._quarantined_write_closed = self.write_controller.close_quarantined_connection(poisoned)
+                if not self._quarantined_write_closed:
+                    raise SQLiteTransactionCleanupError("SQLite connection cleanup remains incomplete")
+            self._replace_quarantined_write_connection(deadline)
+
+    def _replace_quarantined_write_connection(self, deadline) -> None:
+        timeout = 5.0
+        if isinstance(deadline, (int, float)):
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise QueuedWriteDeadlineExceeded("Write budget exhausted before connection recovery")
+            timeout = min(timeout, remaining)
+        # mode=rw cannot create a missing database. The live network profile was
+        # already initialized; recovery must not repeat journal/schema changes.
+        conn = sqlite3.connect(get_existing_sqlite_rw_uri(self.db_path), uri=True,
+                               check_same_thread=False, isolation_level=None, timeout=timeout)
+        connection_diagnostics.register_connection(conn, self.db_path, source="central_write_recovery", readonly=False, scope="manager", new=True)
+        try:
+            configure_connection(conn, profile="network", preserve_journal_mode=True)
+            if isinstance(deadline, (int, float)) and time.perf_counter() >= deadline:
+                raise QueuedWriteDeadlineExceeded("Write budget exhausted during connection recovery")
+            if self._closed or getattr(self, "_closing", False):
+                raise DatabaseClosedError("Database closed during connection recovery")
+        except BaseException:
+            try:
+                conn.close()
+                connection_diagnostics.connection_closed(conn)
+            except Exception as exc:
+                connection_diagnostics.cleanup_failed(conn, phase="close", error_class=type(exc).__name__)
+            raise
+        self._remcard_conn = self._journal_conn = conn
+        self._quarantined_write_conn = None
+        self._quarantined_write_closed = False
 
     @staticmethod
     def _is_managed_local_cache_file(name: str) -> bool:
@@ -1641,7 +1707,7 @@ class DatabaseManager:
         self._close_central_read_connection()
         if self._remcard_conn:
             try:
-                self._remcard_conn.close()
+                connection_diagnostics.close_connection(self._remcard_conn)
             except Exception:
                 pass
         self._remcard_conn = None
@@ -2037,6 +2103,7 @@ class DatabaseManager:
 
         with self._mark_write_activity():
             with self._central_io_lock:
+                self._ensure_connection_after_quarantine()
                 with self.write_controller.transaction(self._remcard_conn, source=f"outbox_replay:{operation.source}") as cursor:
                     cursor.execute(
                         """
@@ -2193,6 +2260,7 @@ class DatabaseManager:
         for _ in range(8):
             try:
                 with self._central_io_lock:
+                    self._ensure_connection_after_quarantine()
                     cursor = self.write_controller.execute(
                         self._remcard_conn,
                         """
@@ -2578,16 +2646,21 @@ class DatabaseManager:
                         isolation_level=None,
                         timeout=5.0,
                     )
+                    connection_diagnostics.register_connection(conn, self.db_path, source="central_read", readonly=True, scope="owner_thread", new=True)
                 try:
                     with connection_phase("connection_configure"):
                         configure_connection(conn, readonly=True, profile="network")
                 except BaseException:
-                    with suppress(Exception):
-                        conn.close()
+                    # Initialization's public error is the configure failure.
+                    # The close helper still records a failed cleanup, but it
+                    # must not replace that original exception or its codes.
+                    with suppress(BaseException):
+                        DatabaseManager._close_central_read_handle(conn)
                     raise
                 return conn
 
     def _get_central_write_connection_for_read(self, context: str) -> sqlite3.Connection:
+        DatabaseManager._ensure_connection_after_quarantine(self)
         if self._closed or self._remcard_conn is None:
             raise DatabaseClosedError(f"RemCard database connection is closed for {context}")
         return self._remcard_conn
@@ -2611,7 +2684,7 @@ class DatabaseManager:
                 continue
             try:
                 with self.write_controller.connection_guard(conn):
-                    conn.close()
+                    connection_diagnostics.close_connection(conn)
                 if self._central_read_conns.get(owner_thread) is conn:
                     self._central_read_conns.pop(owner_thread, None)
             except Exception as exc:
@@ -2635,7 +2708,7 @@ class DatabaseManager:
                 continue
             try:
                 with self.write_controller.connection_guard(conn):
-                    conn.close()
+                    connection_diagnostics.close_connection(conn)
             except Exception as exc:
                 logger.debug("Failed to close finished thread central read connection: %s", exc)
 
@@ -2668,11 +2741,8 @@ class DatabaseManager:
                 except Exception:
                     pass
             if conn is not None:
-                try:
-                    with self.write_controller.connection_guard(conn):
-                        conn.close()
-                except Exception as exc:
-                    logger.debug("Failed to close scoped central read connection: %s", exc)
+                with self.write_controller.connection_guard(conn):
+                    DatabaseManager._close_central_read_handle(conn)
 
     @contextmanager
     def snapshot_read_scope(
@@ -2791,34 +2861,81 @@ class DatabaseManager:
                 bind_connection(conn)
                 if not bool(getattr(conn, "in_transaction", False)):
                     conn.execute("BEGIN")
+                    connection_diagnostics.transaction_started(conn, "read", source=source)
                     owns_transaction = True
                 mark_stage("read_snapshot_active")
                 yield self
             finally:
-                if owns_transaction and conn is not None:
-                    try:
+                try:
+                    if owns_transaction and conn is not None:
                         mark_stage("read_snapshot_rollback")
-                        conn.execute("ROLLBACK")
+                        DatabaseManager._finish_central_read_snapshot(conn)
                         mark_stage("read_snapshot_closed")
-                    except sqlite3.Error as exc:
-                        logger.debug("Failed to finish central read snapshot: %s", exc)
+                finally:
+                    state.central_read_scope_depth = previous_depth
+                    if had_connection:
+                        state.central_read_scope_conn = previous_connection
+                    elif hasattr(state, "central_read_scope_conn"):
+                        delattr(state, "central_read_scope_conn")
+                    if had_force_central:
+                        state.force_central_reads = previous_force_central
+                    elif hasattr(state, "force_central_reads"):
+                        delattr(state, "force_central_reads")
 
-                state.central_read_scope_depth = previous_depth
-                if had_connection:
-                    state.central_read_scope_conn = previous_connection
-                elif hasattr(state, "central_read_scope_conn"):
-                    delattr(state, "central_read_scope_conn")
-                if had_force_central:
-                    state.force_central_reads = previous_force_central
-                elif hasattr(state, "force_central_reads"):
-                    delattr(state, "force_central_reads")
-
-                if owns_connection and conn is not None:
-                    try:
+                    if owns_connection and conn is not None:
                         with self.write_controller.connection_guard(conn):
-                            conn.close()
-                    except Exception as exc:
-                        logger.debug("Failed to close central read snapshot connection: %s", exc)
+                            DatabaseManager._close_central_read_handle(conn)
+
+    @staticmethod
+    def _finish_central_read_snapshot(conn) -> None:
+        try:
+            conn.execute("ROLLBACK")
+        except BaseException as exc:
+            connection_diagnostics.cleanup_failed(conn, phase="rollback", error_class=type(exc).__name__)
+            connection_diagnostics.quarantine_connection(conn)
+            # A borrowed handle must not silently retain this scope's snapshot.
+            # Closing it also makes every later use fail rather than reuse it.
+            DatabaseManager._close_central_read_handle(conn)
+            raise
+        connection_diagnostics.transaction_finished(conn, "rolled_back")
+
+    @staticmethod
+    def _close_central_read_handle(conn) -> None:
+        try:
+            conn.close()
+        except BaseException as exc:
+            connection_diagnostics.cleanup_failed(conn, phase="close", error_class=type(exc).__name__)
+            raise
+        connection_diagnostics.connection_closed(conn)
+
+    @staticmethod
+    @contextmanager
+    def _central_read_cursor(conn, source):
+        cursor = conn.cursor()
+        connection_diagnostics.cursor_opened(conn, cursor, source=source)
+        try:
+            yield cursor
+        finally:
+            try:
+                cursor.close()
+            except BaseException as exc:
+                connection_diagnostics.cleanup_failed(conn, phase="cursor_close", error_class=type(exc).__name__)
+                raise
+            connection_diagnostics.cursor_closed(conn, cursor)
+
+    @staticmethod
+    def _fetch_one_from_connection(conn, query, params, diagnostic):
+        with DatabaseManager._central_read_cursor(conn, "fetch_one") as cursor:
+            statement = connection_diagnostics.statement_started(conn, source="fetch_one")
+            try:
+                diagnostic.phase = "execute"
+                cursor.execute(query, params)
+                diagnostic.phase = "fetch_one"
+                row = cursor.fetchone()
+                diagnostic.phase = "complete"
+                return row
+            finally:
+                connection_diagnostics.statement_finished(conn, statement)
 
     def open_persistent_readonly_connection(self, *, source: str = "persistent_reader", cancel_check=None, defer_to_writer=False) -> sqlite3.Connection:
         """Open a readonly connection that must be closed by the calling thread.
@@ -2946,15 +3063,19 @@ class DatabaseManager:
         try:
             if should_cancel():
                 raise self._cancelled_read_exception(cancel_state)
-            cursor = conn.cursor()
-            if read_diagnostic is not None:
-                read_diagnostic.phase = "execute"
-            cursor.execute(query, params)
-            if read_diagnostic is not None:
-                read_diagnostic.phase = "fetch_all"
-            rows = cursor.fetchall()
-            if read_diagnostic is not None:
-                read_diagnostic.phase = "complete"
+            with DatabaseManager._central_read_cursor(conn, "fetch_all") as cursor:
+                statement = connection_diagnostics.statement_started(conn, source="fetch_all")
+                try:
+                    if read_diagnostic is not None:
+                        read_diagnostic.phase = "execute"
+                    cursor.execute(query, params)
+                    if read_diagnostic is not None:
+                        read_diagnostic.phase = "fetch_all"
+                    rows = cursor.fetchall()
+                    if read_diagnostic is not None:
+                        read_diagnostic.phase = "complete"
+                finally:
+                    connection_diagnostics.statement_finished(conn, statement)
             if should_cancel():
                 raise self._cancelled_read_exception(cancel_state)
             return rows
@@ -3009,10 +3130,7 @@ class DatabaseManager:
                 try:
                     return self._confirmed_central_read_result(self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check, read_diagnostic=read_diagnostic))
                 finally:
-                    try:
-                        conn.close()
-                    except Exception as close_exc:
-                        logger.debug("Failed to close short-lived central read connection: %s", close_exc)
+                    DatabaseManager._close_central_read_handle(conn)
         except Exception as exc:
             read_diagnostic.report(exc)
             if is_database_unavailable_error(exc):
@@ -3032,41 +3150,23 @@ class DatabaseManager:
                     conn = self._get_central_write_connection_for_read("remcard_read_one")
                     read_diagnostic.bind(conn, scope="write_connection")
                     with self.write_controller.connection_guard(conn):
-                        cursor = conn.cursor()
-                        read_diagnostic.phase = "execute"
-                        cursor.execute(query, params)
-                        read_diagnostic.phase = "fetch_one"
-                        row = cursor.fetchone()
-                        read_diagnostic.phase = "complete"
+                        row = DatabaseManager._fetch_one_from_connection(conn, query, params, read_diagnostic)
                         return self._confirmed_central_read_result(row)
             with DatabaseManager._central_read_priority_scope(self):
                 scoped_conn = self._scoped_central_read_connection()
                 if scoped_conn is not None:
                     bind_connection(scoped_conn)
                     read_diagnostic.bind(scoped_conn, scope="scoped")
-                    cursor = scoped_conn.cursor()
-                    read_diagnostic.phase = "execute"
-                    cursor.execute(query, params)
-                    read_diagnostic.phase = "fetch_one"
-                    row = cursor.fetchone()
-                    read_diagnostic.phase = "complete"
+                    row = DatabaseManager._fetch_one_from_connection(scoped_conn, query, params, read_diagnostic)
                     return self._confirmed_central_read_result(row)
                 conn = self._open_readonly_central_connection()
                 bind_connection(conn)
                 read_diagnostic.bind(conn, scope="short_lived", known_readonly=True)
                 try:
-                    cursor = conn.cursor()
-                    read_diagnostic.phase = "execute"
-                    cursor.execute(query, params)
-                    read_diagnostic.phase = "fetch_one"
-                    row = cursor.fetchone()
-                    read_diagnostic.phase = "complete"
+                    row = DatabaseManager._fetch_one_from_connection(conn, query, params, read_diagnostic)
                     return self._confirmed_central_read_result(row)
                 finally:
-                    try:
-                        conn.close()
-                    except Exception as close_exc:
-                        logger.debug("Failed to close short-lived central read connection: %s", close_exc)
+                    DatabaseManager._close_central_read_handle(conn)
         except Exception as exc:
             read_diagnostic.report(exc)
             if is_database_unavailable_error(exc):
@@ -3279,6 +3379,7 @@ class DatabaseManager:
         try:
             with maintenance_task(f"{prefix}_backup", source=str(source or "backup"), db_path=self.db_path):
                 with self._central_io_lock_scope(f"{prefix}_backup", source=str(source or "backup")):
+                    self._ensure_connection_after_quarantine()
                     with self.write_controller.connection_guard(self._remcard_conn):
                         backup_connection(
                             self._remcard_conn,
@@ -3499,6 +3600,7 @@ class DatabaseManager:
         try:
             with self._mark_write_activity():
                 with self._central_io_lock_scope(source, source=source, deadline=effective_write_options.get("write_deadline_monotonic")):
+                    self._ensure_connection_after_quarantine(deadline=effective_write_options.get("write_deadline_monotonic"))
                     if self._closed or self._remcard_conn is None:
                         raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
                     conn = self._remcard_conn
@@ -3510,7 +3612,7 @@ class DatabaseManager:
                         self._request_periodic_backup(source=source)
                         self._after_write_committed()
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
-            if isinstance(exc, QueuedWriteDeadlineExceeded) or effective_write_options.get("write_budget_ms") is not None:
+            if isinstance(exc, (QueuedWriteDeadlineExceeded, SQLiteTransactionCleanupError, SQLiteBeginBusyError)) or effective_write_options.get("write_budget_ms") is not None:
                 # The owning queue controls retries and the absolute deadline.
                 # Durable replay cannot carry this session-bound write budget.
                 raise
@@ -3600,6 +3702,7 @@ class DatabaseManager:
         try:
             with self._mark_write_activity():
                 with self._central_io_lock_scope(source, source=source, deadline=write_options.get("write_deadline_monotonic")):
+                    self._ensure_connection_after_quarantine(deadline=write_options.get("write_deadline_monotonic"))
                     if self._closed or self._remcard_conn is None:
                         raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
                     conn = self._remcard_conn
@@ -3609,7 +3712,7 @@ class DatabaseManager:
                         self._after_write_committed()
             return cursor
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
-            if isinstance(exc, QueuedWriteDeadlineExceeded) or write_options.get("write_budget_ms") is not None:
+            if isinstance(exc, (QueuedWriteDeadlineExceeded, SQLiteTransactionCleanupError, SQLiteBeginBusyError)) or write_options.get("write_budget_ms") is not None:
                 # Never hide a bounded failure behind an unbounded reconnect or
                 # replay; LocalWriteQueue retries retain the original deadline.
                 raise
@@ -4146,6 +4249,12 @@ class DatabaseManager:
                 return False
 
             logger.info("Database shutdown central IO lock acquired")
+            poisoned = getattr(self, "_quarantined_write_conn", None)
+            if poisoned is not None:
+                if not self._quarantined_write_closed and not self.write_controller.close_quarantined_connection(poisoned):
+                    return False
+                self._remcard_conn = self._journal_conn = None
+                self._quarantined_write_conn = None
             if not self._close_central_read_connection():
                 logger.warning("Database shutdown retained central read connections for retry")
                 return False
@@ -4156,7 +4265,7 @@ class DatabaseManager:
                         logger.info("Database shutdown backup step started")
                         self._create_shutdown_backup()
                         logger.info("Database shutdown closing SQLite connection")
-                        conn.close()
+                        connection_diagnostics.close_connection(conn)
                     self._remcard_conn = None
                     self._journal_conn = None
             else:

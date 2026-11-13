@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from typing import Any
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
@@ -21,6 +21,7 @@ from rem_card.app.connection_diagnostics import connection_observation, connecti
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.replica_copy_diagnostics import current_copy, observed_copy
 from rem_card.app.write_operation_diagnostics import write_error_fields
+from rem_card.app import sqlite_connection_diagnostics as connection_lifetimes
 
 
 DEFAULT_REPLICA_SYNC_TIMEOUT_SEC = 30.0
@@ -290,6 +291,8 @@ def _open_central_readonly(db_path: str) -> sqlite3.Connection:
                 isolation_level=None,
                 timeout=0.25,
             )
+        connection_lifetimes.register_connection(conn, db_path, source="replica_readonly", readonly=True, scope="worker", new=True)
+        bind_connection(conn)
         try:
             with connection_phase("connection_configure"):
                 configure_connection(conn, readonly=True, profile="network")
@@ -297,7 +300,7 @@ def _open_central_readonly(db_path: str) -> sqlite3.Connection:
                 conn.execute("PRAGMA busy_timeout = 250")
             return conn
         except Exception:
-            conn.close()
+            connection_lifetimes.close_connection(conn)
             raise
 
 
@@ -365,7 +368,7 @@ def _sync_snapshot(
                 "state": central_state,
             }
 
-        central_conn.close()
+        connection_lifetimes.close_connection(central_conn)
         central_conn = None
         if before_backup is not None:
             before_backup()
@@ -451,12 +454,13 @@ def _sync_snapshot(
         if progress_callback is not None:
             progress_callback("backup")
         try:
-            diagnostics.call("full_backup", central_conn.backup,
-                temp_conn,
-                pages=LOCAL_REPLICA_BACKUP_PAGES,
-                progress=yield_to_writer,
-                sleep=0.01,
-            )
+            with connection_lifetimes.statement_scope(central_conn, source="replica_backup"):
+                diagnostics.call("full_backup", central_conn.backup,
+                    temp_conn,
+                    pages=LOCAL_REPLICA_BACKUP_PAGES,
+                    progress=yield_to_writer,
+                    sleep=0.01,
+                )
         except Exception as exc:
             if backup_reported_full or _is_proven_backup_destination_failure(exc):
                 raise LocalReplicaDestinationError(str(exc)) from exc
@@ -512,7 +516,7 @@ def _sync_snapshot(
                 pass
         if central_conn is not None:
             try:
-                central_conn.close()
+                connection_lifetimes.close_connection(central_conn)
             except Exception:
                 pass
         if failed:
@@ -692,7 +696,7 @@ def _sync_snapshot_with_network_lease_observed(
             message = {**message, "local_state": {}}
         from rem_card.app.role_admission import file_identity
         from rem_card.app.replica_source_stamp import capture_source_stamp
-        with closing(diagnostics.call("source_open", _open_central_readonly, central_db_path)) as stamp_conn:
+        with connection_lifetimes.closing_connection(diagnostics.call("source_open", _open_central_readonly, central_db_path)) as stamp_conn:
             source_stamp = diagnostics.call("source_stamp", capture_source_stamp, stamp_conn, central_db_path)
             diagnostics.source_stamp("before", source_stamp)
         try:
@@ -709,7 +713,7 @@ def _sync_snapshot_with_network_lease_observed(
             _remove_with_sidecars(str(message["temp_db_path"]))
             raise LocalReplicaRotationBusy()
         result["source_identity"] = source_identity
-        with closing(diagnostics.call("source_open", _open_central_readonly, central_db_path)) as stamp_conn:
+        with connection_lifetimes.closing_connection(diagnostics.call("source_open", _open_central_readonly, central_db_path)) as stamp_conn:
             final_stamp = diagnostics.call("source_stamp", capture_source_stamp, stamp_conn, central_db_path)
             diagnostics.source_stamp("after", final_stamp)
             result["source_stamp"] = source_stamp if final_stamp == source_stamp else None

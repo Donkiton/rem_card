@@ -80,7 +80,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def test_background_write_budget_bounds_real_sqlite_busy_and_restores_timeout(tmp_path):
+def test_background_write_budget_bounds_real_sqlite_busy_and_retires_blocked_handle(tmp_path):
     path = tmp_path / "budget.db"
     with closing(sqlite3.connect(path, isolation_level=None)) as writer, closing(sqlite3.connect(path, isolation_level=None)) as blocked:
         writer.execute("CREATE TABLE entries(value TEXT)")
@@ -92,22 +92,32 @@ def test_background_write_budget_bounds_real_sqlite_busy_and_restores_timeout(tm
             with controller.transaction(blocked, source="auto_release", write_options={"write_budget_ms": 120}):
                 pytest.fail("native SQLite lock was bypassed")
         assert time.perf_counter() - started < 1.0
-        assert blocked.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            blocked.execute("PRAGMA busy_timeout")
         assert not (tmp_path / "db.lock").exists()
         writer.execute("ROLLBACK")
-        with controller.transaction(blocked, write_options={"write_budget_ms": 1000}) as cursor:
-            cursor.execute("INSERT INTO entries VALUES ('saved')")
+        with closing(sqlite3.connect(path, isolation_level=None)) as replacement:
+            assert replacement is not blocked
+            with controller.transaction(replacement, write_options={"write_budget_ms": 1000}) as cursor:
+                cursor.execute("INSERT INTO entries VALUES ('saved')")
         assert writer.execute("SELECT value FROM entries").fetchall() == [("saved",)]
+        assert not (tmp_path / "db.lock").exists()
 
 
-def test_expired_background_body_rolls_back_before_commit(tmp_path):
+def test_expired_background_body_rolls_back_before_commit_and_restores_timeout(tmp_path):
     path = tmp_path / "body.db"
     with closing(sqlite3.connect(path, isolation_level=None)) as conn:
         conn.execute("CREATE TABLE entries(value TEXT)")
+        conn.execute("PRAGMA busy_timeout=10000")
         controller = SQLiteWriteController(str(path), str(tmp_path / "db.lock"), "test")
         with pytest.raises(QueuedWriteDeadlineExceeded):
             with controller.transaction(conn, write_options={"write_budget_ms": 30}) as cursor:
                 cursor.execute("INSERT INTO entries VALUES ('discard')")
                 time.sleep(0.04)
         assert conn.execute("SELECT * FROM entries").fetchall() == []
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000
         assert not (tmp_path / "db.lock").exists()
+        with controller.transaction(conn, write_options={"write_budget_ms": 1000}) as cursor:
+            cursor.execute("INSERT INTO entries VALUES ('saved')")
+        assert conn.execute("SELECT * FROM entries").fetchall() == [("saved",)]
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10000

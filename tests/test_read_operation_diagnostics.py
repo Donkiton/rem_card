@@ -33,28 +33,38 @@ def probe(monkeypatch):
 
         def cursor(self):
             calls.append(("cursor",))
-            return self
+            return Cursor(self)
+
+        def close(self):
+            calls.append(("close",))
 
         def execute(self, sql, params=()):
             calls.append(("execute", sql, params))
             if self.error_phase == "execute":
                 raise self.error
+
+    class Cursor:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def execute(self, sql, params=()):
+            self.connection.execute(sql, params)
             return self
 
         def fetchone(self):
             calls.append(("fetch_one",))
-            if self.error_phase == "fetch_one":
-                raise self.error
+            if self.connection.error_phase == "fetch_one":
+                raise self.connection.error
             return (7,)
 
         def fetchall(self):
             calls.append(("fetch_all",))
-            if self.error_phase == "fetch_all":
-                raise self.error
+            if self.connection.error_phase == "fetch_all":
+                raise self.connection.error
             return [(7,)]
 
         def close(self):
-            calls.append(("close",))
+            calls.append(("cursor_close",))
 
     connection = Connection()
 
@@ -115,6 +125,7 @@ def test_external_scoped_connection_does_not_claim_readonly_or_close_owner(probe
     assert event["connection_scope"] == "scoped"
     assert event["uri_mode_at_creation"] == "unknown" and event["query_only_configured"] is None
     assert ("open",) not in probe.calls and ("close",) not in probe.calls
+    assert ("cursor_close",) in probe.calls
 
 
 @pytest.mark.parametrize("method,expected", [("_fetch_one_central", (7,)), ("_fetch_all_central", [(7,)])])
@@ -122,7 +133,7 @@ def test_healthy_read_has_no_event_or_additional_statements(probe, method, expec
     assert getattr(db_manager.DatabaseManager, method)(probe.manager, "SELECT 7") == expected
     assert probe.events == []
     assert probe.calls == [("open",), ("cursor",), ("execute", "SELECT 7", ()),
-                           ("fetch_one" if method == "_fetch_one_central" else "fetch_all",), ("close",)]
+                           ("fetch_one" if method == "_fetch_one_central" else "fetch_all",), ("cursor_close",), ("close",)]
 
 
 def test_notification_and_exception_chain_are_preserved(probe, monkeypatch):

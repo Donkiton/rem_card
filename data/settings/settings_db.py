@@ -15,6 +15,7 @@ from typing import Iterator
 
 from rem_card.app.db_runtime_context import DbRuntimeContext
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.sqlite_connection_diagnostics import close_connection
 from rem_card.app.logger import logger
 from rem_card.app.settings_db_paths import (
     get_settings_backup_dir,
@@ -30,6 +31,7 @@ from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import (
     FileWriteLock,
     SQLiteWriteController,
+    SQLiteBeginBusyError,
     backup_connection,
     backup_meta_path,
     configure_connection,
@@ -44,7 +46,7 @@ class SettingsDbError(RuntimeError):
     pass
 
 
-def _is_sqlite_busy_error(exc: sqlite3.OperationalError) -> bool:
+def _is_sqlite_busy_error(exc: sqlite3.DatabaseError) -> bool:
     message = str(exc).lower()
     return (
         "locked" in message
@@ -312,7 +314,9 @@ class SettingsDatabase:
         )
         record_metric("settings_integrity_check_skipped_reason", "not_skipped", reason=schema_status.reason)
 
+        self.write_controller.close_pending_quarantined_connections()
         conn = self.connect(readonly=False)
+        preserve_primary_error = False
         try:
             ok, reason = run_quick_check(conn)
             if not ok:
@@ -389,14 +393,18 @@ class SettingsDatabase:
                 "settings_schema_status_reason": schema_status.reason,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
             }
-        except sqlite3.OperationalError as exc:
+        except (sqlite3.OperationalError, SQLiteBeginBusyError) as exc:
+            preserve_primary_error = True
             if _is_sqlite_busy_error(exc):
                 raise SettingsDbError(
                     "БД настроек временно занята другим рабочим местом. Повторите действие позже."
                 ) from exc
             raise
+        except BaseException:
+            preserve_primary_error = True
+            raise
         finally:
-            conn.close()
+            self._close_writer_connection(conn, preserve_primary_error=preserve_primary_error)
 
     def _ensure_readonly_ready(self) -> dict[str, object]:
         started = time.perf_counter()
@@ -502,7 +510,9 @@ class SettingsDatabase:
         started = time.perf_counter()
         status = "error"
         backup_created = False
+        self.write_controller.close_pending_quarantined_connections()
         conn = self.connect(readonly=False)
+        preserve_primary_error = False
         try:
             def before_begin() -> None:
                 nonlocal backup_created
@@ -517,15 +527,19 @@ class SettingsDatabase:
             status = "ok"
             if backup_created:
                 self._maybe_cleanup_settings_backups(conn)
-        except sqlite3.OperationalError as exc:
+        except (sqlite3.OperationalError, SQLiteBeginBusyError) as exc:
+            preserve_primary_error = True
             if _is_sqlite_busy_error(exc):
                 raise SettingsDbError(
                     "БД настроек временно занята другим рабочим местом. Данные не сохранены."
                 ) from exc
             raise
+        except BaseException:
+            preserve_primary_error = True
+            raise
         finally:
             try:
-                conn.close()
+                self._close_writer_connection(conn, preserve_primary_error=preserve_primary_error)
             finally:
                 record_metric(
                     "settings_write_ms",
@@ -533,6 +547,16 @@ class SettingsDatabase:
                     source=source,
                     status=status,
                 )
+
+    def _close_writer_connection(self, conn, *, preserve_primary_error: bool) -> None:
+        try:
+            if self.write_controller.is_connection_quarantined(conn):
+                self.write_controller.close_quarantined_connection(conn, raise_on_error=True)
+            else:
+                close_connection(conn)
+        except BaseException:
+            if not preserve_primary_error:
+                raise
 
     def _backup_before_migration(self, conn: sqlite3.Connection) -> None:
         if not SETTINGS_AUTO_BACKUPS_ENABLED:

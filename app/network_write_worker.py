@@ -10,12 +10,13 @@ import time
 from collections.abc import Iterator, Mapping
 from datetime import date, datetime
 from typing import Any, Callable
-from contextlib import contextmanager, nullcontext, ExitStack
+from contextlib import contextmanager, nullcontext, ExitStack, suppress
 from contextvars import ContextVar
 from functools import wraps
 
 from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
 from rem_card.app.db_wait_diagnostics import observe, observed_call, bind_connection, mark_stage, mark_retry
+from rem_card.app import sqlite_connection_diagnostics as connection_lifetimes
 from rem_card.app.write_operation_diagnostics import (
     WriteOperationDiagnostics, write_diagnostic_scope, write_error_fields,
 )
@@ -180,9 +181,18 @@ def _open_network_connection(db_path: str) -> sqlite3.Connection:
         isolation_level=None,
         timeout=0.25,
     )
-    conn.row_factory = sqlite3.Row
-    configure_connection(conn, profile="network")
-    conn.execute("PRAGMA busy_timeout = 250")
+    connection_lifetimes.register_connection(conn, db_path, source="network_writer", readonly=False, scope="worker", new=True)
+    try:
+        bind_connection(conn)
+        conn.row_factory = sqlite3.Row
+        configure_connection(conn, profile="network")
+        conn.execute("PRAGMA busy_timeout = 250")
+    except BaseException:
+        # The caller has not received this handle. Preserve the setup failure
+        # even if closing it fails; close_connection records that cleanup error.
+        with suppress(BaseException):
+            connection_lifetimes.close_connection(conn)
+        raise
     return conn
 
 
@@ -235,6 +245,8 @@ def _affected_rows(conn: sqlite3.Connection, after_id: int) -> list[dict[str, An
 def _execute_sql(conn: sqlite3.Connection, message: dict[str, Any]) -> dict[str, Any]:
     command = str(message.get("cmd") or "")
     cursor = conn.cursor()
+    connection_lifetimes.cursor_opened(conn, cursor, source="network_worker_sql")
+    statement = connection_lifetimes.statement_started(conn, source="network_worker_sql")
     try:
         if command == "execute":
             cursor.execute(str(message.get("sql") or ""), tuple(message.get("params") or ()))
@@ -257,7 +269,15 @@ def _execute_sql(conn: sqlite3.Connection, message: dict[str, Any]) -> dict[str,
             "lastrowid": cursor.lastrowid,
         }
     finally:
-        cursor.close()
+        try:
+            cursor.close()
+        except BaseException as exc:
+            connection_lifetimes.cleanup_failed(conn, phase="cursor_close", error_class=type(exc).__name__)
+            raise
+        else:
+            connection_lifetimes.cursor_closed(conn, cursor)
+        finally:
+            connection_lifetimes.statement_finished(conn, statement)
 
 
 def _worker_write(pipe, message: dict[str, Any]) -> None:
@@ -307,6 +327,7 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
                 try:
                     conn.execute("BEGIN IMMEDIATE")
                     transaction_started = True
+                    connection_lifetimes.transaction_started(conn, "write", source=source)
                     if trace is not None:
                         trace.database_outcome = "unknown"
                     break
@@ -322,6 +343,7 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
         if receipt is not None:
             with _network_phase("rollback"):
                 conn.rollback()
+                connection_lifetimes.transaction_finished(conn, "rolled_back")
             transaction_started = False
             if trace is not None:
                 trace.database_outcome = "committed"
@@ -348,6 +370,7 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
                 mark_stage("rollback")
                 with _network_phase("rollback"):
                     conn.rollback()
+                    connection_lifetimes.transaction_finished(conn, "rolled_back")
                 if trace is not None:
                     trace.database_outcome = "rolled_back"
                 mark_stage("rolled_back")
@@ -389,6 +412,7 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
             mark_stage("commit")
             with _network_phase("commit"):
                 conn.commit()
+                connection_lifetimes.transaction_finished(conn)
             if trace is not None:
                 trace.database_outcome = "committed"
             mark_stage("committed")
@@ -413,10 +437,11 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
             try:
                 with _network_phase("rollback"):
                     conn.rollback()
+                    connection_lifetimes.transaction_finished(conn, "rolled_back")
                 if trace is not None:
                     trace.database_outcome = "rolled_back"
-            except Exception:
-                pass
+            except Exception as cleanup_exc:
+                connection_lifetimes.cleanup_failed(conn, phase="rollback", error_class=type(cleanup_exc).__name__)
         _send_error(pipe, exc, phase="worker")
     finally:
         if lock_acquired:
@@ -425,7 +450,7 @@ def _worker_write_observed(pipe, message: dict[str, Any]) -> None:
         if conn is not None:
             try:
                 with _network_phase("connection_close"):
-                    conn.close()
+                    connection_lifetimes.close_connection(conn)
             except Exception:
                 pass
 
@@ -449,7 +474,7 @@ def _worker_main(pipe) -> None:
                 _send_error(pipe, exc, phase="lookup")
             finally:
                 if conn is not None:
-                    conn.close()
+                    connection_lifetimes.close_connection(conn)
             continue
         if command != "write":
             _send_error(pipe, ValueError(f"Unsupported worker request: {command}"), phase="dispatch")

@@ -5,6 +5,7 @@ import sqlite3
 import time
 import unittest
 import pytest
+from collections import OrderedDict, deque
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,6 +13,77 @@ from rem_card.app.network_write_worker import (
     NetworkWriteWorkerClient,
     NetworkWriteWorkerTimeout,
 )
+
+
+@pytest.mark.parametrize("failure_phase", ["row_factory", "configure", "pragma"])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_failed_network_connection_setup_closes_owned_handle_and_preserves_primary(
+    tmp_path, monkeypatch, failure_phase, close_fails,
+):
+    from rem_card.app import network_write_worker as worker
+    from rem_card.app import sqlite_connection_diagnostics as registry
+
+    monkeypatch.setattr(registry, "_connections", OrderedDict())
+    monkeypatch.setattr(registry, "_recent_cleanup", deque(maxlen=registry.MAX_RECENT_CLEANUP))
+    primary = sqlite3.OperationalError("synthetic setup failure")
+    primary.sqlite_errorcode = sqlite3.SQLITE_READONLY
+    primary.sqlite_errorname = "SQLITE_READONLY"
+    calls = []
+
+    class Connection:
+        @property
+        def row_factory(self):
+            return None
+
+        @row_factory.setter
+        def row_factory(self, _factory):
+            calls.append("row_factory")
+            if failure_phase == "row_factory":
+                raise primary
+
+        def execute(self, sql):
+            calls.append(sql)
+            assert sql == "PRAGMA busy_timeout = 250"
+            raise primary
+
+        def close(self):
+            calls.append("close")
+            if close_fails:
+                raise OSError("synthetic close failure")
+
+    connection = Connection()
+    def connect(*_args, **_kwargs):
+        calls.append("connect")
+        return connection
+
+    def configure(_connection, *, profile):
+        assert _connection is connection and profile == "network"
+        calls.append("configure")
+        if failure_phase == "configure":
+            raise primary
+
+    monkeypatch.setattr(worker.sqlite3, "connect", connect)
+    monkeypatch.setattr(worker, "configure_connection", configure)
+    database = str(tmp_path / "synthetic.db")
+    with pytest.raises(sqlite3.OperationalError) as caught:
+        worker._open_network_connection(database)
+    assert caught.value is primary
+    assert caught.value.sqlite_errorcode == sqlite3.SQLITE_READONLY
+    assert caught.value.sqlite_errorname == "SQLITE_READONLY"
+    expected = ["connect", "row_factory"]
+    if failure_phase != "row_factory":
+        expected.append("configure")
+    if failure_phase == "pragma":
+        expected.append("PRAGMA busy_timeout = 250")
+    assert calls == expected + ["close"]  # No re-open, replay or second cleanup.
+    snapshot = registry.candidates(registry.canonical_resource(database))
+    if close_fails:
+        candidate, = snapshot["local_connection_candidates"]
+        assert candidate["cleanup_phase"] == "close" and candidate["cleanup_error"] == "OSError"
+        assert registry.connection_token(connection)
+    else:
+        assert snapshot["connection_registry_size"] == 0
+        assert registry.connection_token(connection) is None
 
 
 def _initialize_worker_database(path: Path) -> None:

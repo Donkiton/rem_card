@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import threading
 import time
+import sqlite3
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from pathlib import Path
+import pytest
 
+from rem_card.app import sqlite_connection_diagnostics as registry
 from rem_card.data.dao.db_manager import DatabaseManager
 from rem_card.services.data_update_monitor import DataUpdateMonitor
 
@@ -128,6 +132,74 @@ def test_monitor_reopens_after_connection_is_discarded():
     assert db.open_count == 2
     assert db.connections[1] is not first
     monitor._close_persistent_read_connection()
+
+
+def test_repeated_actual_busy_reader_reopens_do_not_exhaust_connection_registry(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry, "_connections", OrderedDict())
+    monkeypatch.setattr(registry, "_recent_cleanup", deque(maxlen=registry.MAX_RECENT_CLEANUP))
+    monkeypatch.setattr(registry, "_overflow", 0)
+    path = str(tmp_path / "synthetic.db")
+    seed = sqlite3.connect(path)
+    try:
+        seed.execute("CREATE TABLE sample(value INTEGER)")
+        seed.execute("INSERT INTO sample VALUES (7)")
+        seed.commit()
+    finally:
+        seed.close()
+
+    class ActualDb:
+        db_path = path
+        _closed = False
+        _remcard_conn = object()
+        _thread_state = threading.local()
+        _readonly_db_uri = DatabaseManager._readonly_db_uri
+        _open_readonly_central_connection = DatabaseManager._open_readonly_central_connection
+        open_persistent_readonly_connection = DatabaseManager.open_persistent_readonly_connection
+        existing_central_read_scope = DatabaseManager.existing_central_read_scope
+
+    monitor = DataUpdateMonitor(_DataService(ActualDb()), enabled=True)
+    retained_closed_handles, failures, owner_threads = [], [], []
+    cycles = registry.MAX_CONNECTIONS + 17
+
+    def reopen_on_busy():
+        blocker = sqlite3.connect(path, isolation_level=None, timeout=0)
+        try:
+            for _ in range(cycles):
+                try:
+                    with monitor._persistent_read_scope():
+                        connection = monitor._persistent_read_conn
+                        retained_closed_handles.append(connection)  # Prevent id reuse from hiding a leak.
+                        assert registry.connection_token(connection)
+                        connection.execute("PRAGMA busy_timeout = 0")
+                        blocker.execute("BEGIN EXCLUSIVE")
+                        with pytest.raises(sqlite3.OperationalError) as caught:
+                            connection.execute("SELECT value FROM sample").fetchone()
+                        assert caught.value.sqlite_errorcode & 255 == sqlite3.SQLITE_BUSY
+                finally:
+                    # Same owning thread and same close path as run() after a failed poll.
+                    monitor._close_persistent_read_connection()
+                    owner_threads.append(threading.get_ident())
+                    blocker.rollback()
+                assert registry.connection_token(connection) is None
+                with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                    connection.execute("SELECT 1")
+                observed = registry.candidates(registry.canonical_resource(path))
+                assert observed["connection_registry_size"] == observed["connection_registry_overflow"] == 0
+                assert observed["local_connection_candidates"] == []
+                assert observed["native_owner_identified"] is False
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            monitor._close_persistent_read_connection()
+            blocker.close()
+
+    thread = threading.Thread(target=reopen_on_busy)
+    thread.start()
+    thread.join(15)
+    assert not thread.is_alive() and not failures
+    assert len(retained_closed_handles) == cycles
+    assert len(set(owner_threads)) == 1 and owner_threads[0] != threading.get_ident()
+    assert monitor._persistent_read_conn is None
 
 
 def test_paused_monitor_does_not_open_connection():

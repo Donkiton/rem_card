@@ -10,6 +10,7 @@ from PySide6.QtCore import QThread, Signal
 from rem_card.app.db_availability import DatabaseClosedError
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
+from rem_card.app import sqlite_connection_diagnostics as connection_diagnostics
 
 
 REM_CARD_MONITOR_ROLES = {"doctor", "nurse", "врач", "медсестра"}
@@ -190,7 +191,7 @@ class DataUpdateMonitor(QThread):
         if conn is None:
             return
         try:
-            conn.close()
+            connection_diagnostics.close_connection(conn)
             record_metric("persistent_read_connection_close", 1, component="DataUpdateMonitor")
         except Exception as exc:
             logger.debug("DataUpdateMonitor readonly connection close failed: %s", exc)

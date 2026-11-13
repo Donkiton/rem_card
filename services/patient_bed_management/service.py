@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Callable, Optional
@@ -47,12 +49,42 @@ class AdmissionRecord:
 
 
 class PatientBedManagementService:
+    PATIENT_FORM_WRITE_BUDGET_MS = 15000
+
     def __init__(self, db_manager, data_service=None):
         self.db = db_manager
         self.data_service = data_service
 
-    def enqueue_write(self, description: str, operation: Callable[[], Any], on_success=None, on_error=None):
-        enqueue_service_write(self.data_service, description, operation, on_success, on_error)
+    def enqueue_write(self, description: str, operation: Callable[[], Any], on_success=None, on_error=None, *, on_settled=None):
+        metadata = None
+        if description.startswith(("patient_bed_create_admission:", "patient_bed_update_admission:")):
+            metadata = {
+                "queue_deadline_sec": self.PATIENT_FORM_WRITE_BUDGET_MS / 1000.0,
+                "write_budget_ms": self.PATIENT_FORM_WRITE_BUDGET_MS,
+                # SQLite owns native BEGIN/COMMIT retries under this one budget.
+                # Replaying the clinical operation in the outer queue is unsafe.
+                "queue_retryable": False,
+                "queue_retries_left": 0,
+                "queue_cancel_before_start": True,
+            }
+        enqueue_service_write(
+            self.data_service, description, operation, on_success, on_error,
+            write_metadata=metadata, on_settled=on_settled,
+        )
+
+    def _run_patient_form_write(self, operation, *, source):
+        # Direct callers are bounded too. Keep the queue's earlier deadline and
+        # correlation instead of restarting fifteen seconds on execution.
+        current = getattr(self.db, "_current_thread_write_metadata", None)
+        options = dict(current() if callable(current) else {})
+        budget_ms = min(self.PATIENT_FORM_WRITE_BUDGET_MS, int(options.get("write_budget_ms") or self.PATIENT_FORM_WRITE_BUDGET_MS))
+        deadline = time.perf_counter() + budget_ms / 1000.0
+        if isinstance(options.get("write_deadline_monotonic"), (int, float)):
+            deadline = min(deadline, options["write_deadline_monotonic"])
+        options.update(write_budget_ms=budget_ms, write_deadline_monotonic=deadline)
+        metadata_scope = getattr(self.db, "write_metadata_context", None)
+        with metadata_scope(options) if callable(metadata_scope) else nullcontext():
+            return self.db.run_write_operation(operation, source=source)
 
     def get_beds_snapshot(self):
         return self.db.fetch_all_remcard(
@@ -286,7 +318,7 @@ class PatientBedManagementService:
                 raise RuntimeError(f"Койка {admission_data['bed_number']} уже занята другим пользователем.")
             return admission_id
 
-        return int(self.db.run_write_operation(operation, source="patient_bed_create_admission"))
+        return int(self._run_patient_form_write(operation, source="patient_bed_create_admission"))
 
     def update_patient_and_admission(
         self,
@@ -368,7 +400,7 @@ class PatientBedManagementService:
             )
             return True
 
-        return bool(self.db.run_write_operation(operation, source="patient_bed_update_admission"))
+        return bool(self._run_patient_form_write(operation, source="patient_bed_update_admission"))
 
     def move_patient(
         self,

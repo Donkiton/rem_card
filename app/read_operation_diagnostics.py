@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-import hashlib
 import json
 import logging
 import re
@@ -12,6 +11,7 @@ import time
 from rem_card.app.db_wait_diagnostics import current_context
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.write_operation_diagnostics import write_error_fields
+from rem_card.app import sqlite_connection_diagnostics as connection_lifetimes
 
 
 REPEAT_INTERVAL_SEC = 30.0
@@ -69,6 +69,13 @@ def _emit(payload):
         pass
 
 
+def _connection_candidates(resource, token):
+    try:
+        return connection_lifetimes.candidates(resource, exclude_connection_token=token) or {}
+    except Exception:
+        return {}
+
+
 class ReadOperationDiagnostics:
     """Only assignments on success; collect context and codes on SQL failure."""
 
@@ -78,11 +85,13 @@ class ReadOperationDiagnostics:
         self.phase = "connection_select"
         self.connection_scope = "unknown"
         self.connection_token = None
+        self.lifecycle_token = None
         self.uri_mode = "unknown"
         self.query_only_configured = None
 
     def bind(self, connection, *, scope, known_readonly=False):
         self.connection_token = id(connection)
+        self.lifecycle_token = connection_lifetimes.connection_token(connection)
         self.connection_scope = scope
         # Creation-site knowledge, not a new query of the current connection.
         self.uri_mode = "ro" if known_readonly else "unknown"
@@ -99,7 +108,7 @@ class ReadOperationDiagnostics:
             fields = write_error_fields(exc)
             payload = {
                 **context, "schema_version": 1,
-                "database_resource": hashlib.sha256(str(self.resource).encode("utf-8")).hexdigest()[:16],
+                "database_resource": connection_lifetimes.canonical_resource(self.resource),
                 "source": _label(self.source), "phase": self.phase,
                 "connection_scope": _label(self.connection_scope),
                 "uri_mode_at_creation": self.uri_mode,
@@ -109,6 +118,9 @@ class ReadOperationDiagnostics:
             for key in ("sqlite_errorcode", "sqlite_errorname", "winerror", "errno"):
                 if key in fields:
                     payload[key] = fields[key]
+            if self.lifecycle_token is not None:
+                payload["connection_token"] = self.lifecycle_token
+            payload.update(_connection_candidates(payload["database_resource"], self.lifecycle_token))
             if _permit(payload):
                 _emit(payload)
         except Exception:

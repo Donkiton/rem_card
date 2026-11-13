@@ -113,6 +113,9 @@ class _AmbiguousCommit:
     def cursor(self):
         return self.connection.cursor()
 
+    def close(self):
+        return self.connection.close()
+
     def execute(self, statement, *args):
         if statement == "COMMIT":
             if not self.rollback_fails:
@@ -129,7 +132,7 @@ class _AmbiguousCommit:
 def test_missing_commit_ack_or_failed_rollback_remains_unknown(database, events, rollback_fails):
     connection, controller = database
     proxy = _AmbiguousCommit(connection, rollback_fails=rollback_fails)
-    with pytest.raises((OSError, sqlite3.OperationalError)):
+    with pytest.raises((OSError, sqlite3.OperationalError, shared.SQLiteTransactionCleanupError)):
         with controller.transaction(proxy, source="mark:Private Patient") as cursor:
             cursor.execute("INSERT INTO marks VALUES ('private_value')")
     row = _transaction_event(events)
@@ -138,8 +141,10 @@ def test_missing_commit_ack_or_failed_rollback_remains_unknown(database, events,
     assert row["cleanup_error"] if rollback_fails else not row["cleanup_error"]
     assert "private" not in json.dumps(row)
     if rollback_fails:
-        assert connection.in_transaction
-        connection.rollback()
+        with pytest.raises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+        with closing(sqlite3.connect(controller.db_path)) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM marks").fetchone() == (0,)
     else:
         assert connection.execute("SELECT COUNT(*) FROM marks").fetchone() == (1,)
 
