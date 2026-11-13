@@ -107,17 +107,11 @@ Network test rigs, restore drills, emergency mode and offline mode read or modif
 The application interface, screenshots and linked technical documentation are primarily in Russian.
 
 <!-- remcard:release:start -->
+Overview of **RemCard 5.1.20**, updated **2026-11-13**. A single `RemCard.exe` opens a choice of four roles; the separate `RemCardUpdater.exe` installs full updates. The source version is recorded in [`VERSION`](../../VERSION), and each build's contents are recorded in its manifest.
 
-Overview of **RemCard 5.1.20**, updated **November 13, 2026**. A single `RemCard.exe` opens a choice of four roles; the separate `RemCardUpdater.exe` installs full updates. The source version is recorded in [`VERSION`](../../VERSION), and each build's contents are recorded in its manifest.
+[Windows installer 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) · [Full ZIP 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) · [File SHA-256 checksums](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)
 
-In [release 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20), adding or editing a patient has one 15-second budget for queue and SQLite waits, measured from acceptance of the write request. This does not guarantee interruption of a stalled operating-system SMB call. A write whose outcome is unknown is not repeated automatically; check the patient chart before another attempt.
-
-After a failed rollback, the faulty connection is taken out of use; reads explicitly close their cursors. Bounded local diagnostics cover delays, connections and possible locks without SQL or patient data. The scope and acceptance checks are documented in the [5.1.20 validation report](../release_5_1_20_validation.md).
-
-The shared database schema remains **29** and the minimum client version remains **5.1.15**; migrations are disabled in the 5.1.20 package. Before the first launch, close older clients using the shared database. The initial full snapshot still depends on network speed and database size.
-
-Installation options are the [5.1.20 Windows installer with Russian and English language selection](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) and the [full ZIP package](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip). [File SHA-256 checksums](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt).
-
+Read the full changes and upgrade requirements on the [release page 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20).
 <!-- remcard:release:end -->
 
 > [!WARNING]

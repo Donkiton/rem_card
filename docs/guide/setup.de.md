@@ -105,19 +105,13 @@ Netzwerktestumgebungen, Wiederherstellungsübungen sowie Notfall- und Offline-Mo
 ## Zur aktuellen Version
 
 <!-- remcard:release:start -->
-
-Übersicht zu **RemCard 5.1.20**, aktualisiert am **13. November 2026**. RemCard wurde vom Anästhesisten und Intensivmediziner Vadim Bityutsky entwickelt. Die gemeinsame Anwendung `RemCard.exe` bietet die Auswahl zwischen vier Rollen; das separate Programm `RemCardUpdater.exe` installiert vollständige Updates. Die Quellcodeversion steht in [`VERSION`](../../VERSION), die Zusammensetzung einer konkreten Ausgabe in deren Manifest.
+Übersicht zu **RemCard 5.1.20**, aktualisiert am **2026-11-13**. RemCard wurde vom Anästhesisten und Intensivmediziner Vadim Bityutsky entwickelt. Die gemeinsame Anwendung `RemCard.exe` bietet die Auswahl zwischen vier Rollen; das separate Programm `RemCardUpdater.exe` installiert vollständige Updates. Die Quellcodeversion steht in [`VERSION`](../../VERSION), die Zusammensetzung einer konkreten Ausgabe in deren Manifest.
 
 **Die Sprachumschaltung betrifft die Projektdokumentation.** Die Anwendungsoberfläche, die Screenshots und der überwiegende Teil der verlinkten ausführlichen Dokumentation sind weiterhin auf Russisch.
 
-In [Version 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20) gilt beim Hinzufügen und Ändern eines Patienten ein gemeinsames Wartebudget von 15 Sekunden für Warteschlange und SQLite, gerechnet ab Annahme des Schreibauftrags. Dies garantiert nicht, dass ein blockierter SMB-Systemaufruf unterbrochen wird. Ein Schreibvorgang mit unbekanntem Ergebnis wird nicht automatisch wiederholt; prüfen Sie vor einem neuen Versuch die Patientenkurve.
+[Windows-Installer 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) · [Vollständiges ZIP-Paket 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) · [SHA-256-Prüfsummen](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)
 
-Nach einem fehlgeschlagenen Rollback wird die fehlerhafte Verbindung nicht weiterverwendet; Lesevorgänge schließen ihre Cursor ausdrücklich. Eine begrenzte lokale Diagnose erfasst Verzögerungen, Verbindungen und mögliche Sperren ohne SQL oder medizinische Daten. Umfang und Abnahme sind im [Prüfbericht zu 5.1.20](../release_5_1_20_validation.md) beschrieben.
-
-Das Schema der gemeinsamen Datenbank bleibt **29**, die minimale Client-Version bleibt **5.1.15**; Migrationen sind im Paket 5.1.20 deaktiviert. Schließen Sie vor dem ersten Start ältere Clients, die auf die gemeinsame Datenbank zugreifen. Der erste vollständige Snapshot hängt weiterhin von der Netzwerkgeschwindigkeit und der Datenbankgröße ab.
-
-Zur Installation stehen der [Windows-Installer 5.1.20 mit russischer und englischer Sprachauswahl](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) und das [vollständige ZIP-Paket](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) bereit. [SHA-256-Prüfsummen](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt).
-
+Vollständige Änderungen und Update-Anforderungen: [Version 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20).
 <!-- remcard:release:end -->
 
 > [!WARNING]

@@ -105,19 +105,13 @@ git diff --check
 ## 現行リリースについて
 
 <!-- remcard:release:start -->
-
-<strong>RemCard 5.1.20</strong>の概要。最終更新：<strong>2026年11月13日</strong>。統合された`RemCard.exe`から4つの役割を選択でき、別プログラムの`RemCardUpdater.exe`が完全更新パッケージをインストールします。ソースのバージョン番号は[`VERSION`](../../VERSION)、各ビルドの構成はそのマニフェストに記載されています。
+<strong>RemCard 5.1.20</strong>の概要。最終更新：<strong>2026-11-13</strong>。統合された`RemCard.exe`から4つの役割を選択でき、別プログラムの`RemCardUpdater.exe`が完全更新パッケージをインストールします。ソースのバージョン番号は[`VERSION`](../../VERSION)、各ビルドの構成はそのマニフェストに記載されています。
 
 開発者は麻酔科・集中治療医のVadim Bityutskyです。現在のユーザーインターフェースとリンク先の詳細ドキュメントは主にロシア語です。READMEの翻訳は、アプリの画面やスクリーンショットが翻訳されていることを意味しません。
 
-[リリース5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20)では、患者の追加・変更時に、書き込み要求の受け付けからキューとSQLiteの待機に共通の15秒の上限を適用します。これは、停止したOSのSMB呼び出しを中断できることを保証するものではありません。結果が不明な書き込みは自動で再実行しません。再試行する前に患者記録を確認してください。
+[Windowsインストーラー 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) · [完全版ZIP 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) · [SHA-256チェックサム](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)
 
-ロールバックが失敗した場合は、その接続を以後使用しません。読み取り処理はカーソルを明示的に閉じます。遅延、接続、ロックの可能性を調べるための、範囲を限定したローカル診断を追加しました。SQLや医療データは含めません。変更範囲と受け入れ試験は[5.1.20検証レポート](../release_5_1_20_validation.md)に記載しています。
-
-共有データベースのスキーマは<strong>29</strong>、クライアントの最低バージョンは<strong>5.1.15</strong>のままです。5.1.20の配布パッケージではマイグレーションを無効にしています。初回起動前に、共有データベースを使用している旧バージョンのクライアントを終了してください。初回の完全スナップショットにかかる時間は、引き続きネットワーク速度とデータベースのサイズに依存します。
-
-インストールには、[Windowsインストーラー5.1.20（ロシア語・英語を選択可能）](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe)、または[完全版ZIPパッケージ](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip)を利用できます。[SHA-256チェックサム](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)。
-
+変更点と更新要件の全文は[リリース 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20)を確認してください。
 <!-- remcard:release:end -->
 
 > [!WARNING]

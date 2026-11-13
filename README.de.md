@@ -73,11 +73,9 @@ Anordnungen, Durchführungsnachweise und Flüssigkeitsbilanz über die Schicht v
 ## Erste Schritte
 
 <!-- remcard:release:start -->
+[Windows-Installer 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) · [Vollständiges ZIP-Paket 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) · [SHA-256-Prüfsummen](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)
 
-Laden Sie den [Windows-Installer für RemCard 5.1.20](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) mit russischer und englischer Sprachauswahl oder das [vollständige ZIP-Paket](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) herunter. [Versionshinweise](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20) · [SHA-256-Prüfsummen](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt).
-
-Version 5.1.20 verwendet beim Hinzufügen und Ändern eines Patienten ein gemeinsames Wartebudget von 15 Sekunden; Schreibvorgänge mit unbekanntem Ergebnis werden nicht erneut ausgeführt. Verbessert wurden die Freigabe von Datenbankressourcen nach Fehlern und die lokale Diagnose von Verzögerungen und Sperren ohne SQL oder medizinische Daten in den Diagnoseeinträgen. Datenbankschema 29 und die minimale Client-Version 5.1.15 bleiben unverändert. Schließen Sie vor dem ersten Start alle älteren Clients, die auf die gemeinsame Datenbank zugreifen.
-
+Vollständige Änderungen und Update-Anforderungen: [Version 5.1.20](https://github.com/Donkiton/rem_card/releases/tag/v5.1.20).
 <!-- remcard:release:end -->
 
 Starten Sie nach der Installation **`RemCard.exe`**. Entpacken Sie bei Verwendung des ZIP-Pakets den vollständigen Programmordner einschließlich `_internal`.
