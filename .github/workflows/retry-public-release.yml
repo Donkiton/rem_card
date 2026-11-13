@@ -1,0 +1,21 @@
+name: Повторная проверка публичного релиза
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  retry:
+    if: github.repository == 'Donkiton/rem_card' && vars.PUBLIC_RELEASE_APP_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Повторить идемпотентную синхронизацию последнего выпуска
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run sync-public-release.yml --repo "$GH_REPO" --ref main

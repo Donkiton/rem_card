@@ -12,6 +12,7 @@
 
 ## Действующие регламенты
 
+- [public_release_automation.md](public_release_automation.md) - автоматическое обновление сайта и README через подписанные PR после публикации GitHub Release; одноразовая настройка GitHub App.
 - [windows_installer.md](windows_installer.md) - канонические исходники WPF-установщика, сборка из принятого full ZIP, изолированная приёмка и отложенное требование русского/английского для следующего выпуска.
 - `versioning.md` - версия, changelog и full release-сборка.
 - `auto_update.md` - full-update, безопасная публикация в локальный и сетевой `UPD`, правила updater.

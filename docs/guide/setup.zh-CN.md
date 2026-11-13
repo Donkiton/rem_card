@@ -104,6 +104,8 @@ git diff --check
 
 ## 当前版本说明
 
+<!-- remcard:release:start -->
+
 本页介绍 <strong>RemCard 5.1.20</strong>，更新于 <strong>2026 年 11 月 13 日</strong>。统一的 `RemCard.exe` 提供四种角色入口；独立的 `RemCardUpdater.exe` 用于安装完整更新。源码版本号见 [`VERSION`](../../VERSION)，具体构建的组成见其清单。
 
 RemCard 由麻醉与重症医学医师 Vadim Bityutsky 开发。应用界面和链接中的详细文档目前主要为俄语。本文档的语言切换仅改变说明文字，不会翻译应用界面或截图。
@@ -115,6 +117,8 @@ RemCard 由麻醉与重症医学医师 Vadim Bityutsky 开发。应用界面和�
 共享数据库架构版本保持为 <strong>29</strong>，最低客户端版本保持为 <strong>5.1.15</strong>；5.1.20 软件包已禁用迁移。首次启动前，请关闭使用共享数据库的旧版客户端。首次完整快照的耗时仍取决于网络速度和数据库大小。
 
 安装时可选择 [Windows 5.1.20 安装程序（支持俄语和英语）](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe)或[完整 ZIP 安装包](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip)。[文件 SHA-256 校验值](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)。
+
+<!-- remcard:release:end -->
 
 > [!WARNING]
 > <strong>RemCard 不是医疗器械，不能替代临床规范、临床决策或专业人员的责任监督。</strong> 实际使用前，必须进行独立的技术与临床验证、目标环境验收，并准备备用工作流程。

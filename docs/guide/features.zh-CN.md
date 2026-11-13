@@ -65,7 +65,7 @@
 
 ## 系统运行展示
 
-以下为 <strong>RemCard 5.1.0</strong> 使用演示患者的界面截图；当前版本为 <strong>5.1.20</strong>。点击图片可查看原始尺寸。
+以下为 <strong>RemCard 5.1.0</strong> 使用演示患者的界面截图；当前版本为 <strong><!-- remcard:version:start -->5.1.20<!-- remcard:version:end --></strong>。点击图片可查看原始尺寸。
 
 ### 统一入口与角色选择
 
