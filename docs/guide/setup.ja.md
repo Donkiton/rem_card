@@ -104,6 +104,8 @@ git diff --check
 
 ## 現行リリースについて
 
+<!-- remcard:release:start -->
+
 <strong>RemCard 5.1.20</strong>の概要。最終更新：<strong>2026年11月13日</strong>。統合された`RemCard.exe`から4つの役割を選択でき、別プログラムの`RemCardUpdater.exe`が完全更新パッケージをインストールします。ソースのバージョン番号は[`VERSION`](../../VERSION)、各ビルドの構成はそのマニフェストに記載されています。
 
 開発者は麻酔科・集中治療医のVadim Bityutskyです。現在のユーザーインターフェースとリンク先の詳細ドキュメントは主にロシア語です。READMEの翻訳は、アプリの画面やスクリーンショットが翻訳されていることを意味しません。
@@ -115,6 +117,8 @@ git diff --check
 共有データベースのスキーマは<strong>29</strong>、クライアントの最低バージョンは<strong>5.1.15</strong>のままです。5.1.20の配布パッケージではマイグレーションを無効にしています。初回起動前に、共有データベースを使用している旧バージョンのクライアントを終了してください。初回の完全スナップショットにかかる時間は、引き続きネットワーク速度とデータベースのサイズに依存します。
 
 インストールには、[Windowsインストーラー5.1.20（ロシア語・英語を選択可能）](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe)、または[完全版ZIPパッケージ](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip)を利用できます。[SHA-256チェックサム](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt)。
+
+<!-- remcard:release:end -->
 
 > [!WARNING]
 > <strong>RemCardは医療機器ではなく、臨床プロトコル、臨床判断、専門職による責任ある確認に代わるものではありません。</strong> 実際の運用には、独立した技術・情報セキュリティ・臨床検証、使用環境での受け入れ試験、および代替の業務手順が必要です。

@@ -1,5 +1,8 @@
 {
   "core": [
+    "tests/test_public_release_docs.py",
+    "tests/test_public_release_github.py",
+    "tests/test_public_release_bot.py",
     "tests/test_sqlite_connection_diagnostics.py",
     "tests/test_sqlite_connection_cleanup.py",
     "tests/test_orders_delta_diagnostics.py",

@@ -65,7 +65,7 @@
 
 ## 利用画面
 
-デモ患者を使用した<strong>RemCard 5.1.0</strong>のスクリーンショットです。現在のリリースは<strong>5.1.20</strong>です。画像をクリックすると原寸で表示されます。
+デモ患者を使用した<strong>RemCard 5.1.0</strong>のスクリーンショットです。現在のリリースは<strong><!-- remcard:version:start -->5.1.20<!-- remcard:version:end --></strong>です。画像をクリックすると原寸で表示されます。
 
 ### 統合ログインと役割の選択
 

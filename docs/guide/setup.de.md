@@ -104,6 +104,8 @@ Netzwerktestumgebungen, Wiederherstellungsübungen sowie Notfall- und Offline-Mo
 
 ## Zur aktuellen Version
 
+<!-- remcard:release:start -->
+
 Übersicht zu **RemCard 5.1.20**, aktualisiert am **13. November 2026**. RemCard wurde vom Anästhesisten und Intensivmediziner Vadim Bityutsky entwickelt. Die gemeinsame Anwendung `RemCard.exe` bietet die Auswahl zwischen vier Rollen; das separate Programm `RemCardUpdater.exe` installiert vollständige Updates. Die Quellcodeversion steht in [`VERSION`](../../VERSION), die Zusammensetzung einer konkreten Ausgabe in deren Manifest.
 
 **Die Sprachumschaltung betrifft die Projektdokumentation.** Die Anwendungsoberfläche, die Screenshots und der überwiegende Teil der verlinkten ausführlichen Dokumentation sind weiterhin auf Russisch.
@@ -115,6 +117,8 @@ Nach einem fehlgeschlagenen Rollback wird die fehlerhafte Verbindung nicht weite
 Das Schema der gemeinsamen Datenbank bleibt **29**, die minimale Client-Version bleibt **5.1.15**; Migrationen sind im Paket 5.1.20 deaktiviert. Schließen Sie vor dem ersten Start ältere Clients, die auf die gemeinsame Datenbank zugreifen. Der erste vollständige Snapshot hängt weiterhin von der Netzwerkgeschwindigkeit und der Datenbankgröße ab.
 
 Zur Installation stehen der [Windows-Installer 5.1.20 mit russischer und englischer Sprachauswahl](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard-Setup-5.1.20.exe) und das [vollständige ZIP-Paket](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/RemCard_5.1.20_full.zip) bereit. [SHA-256-Prüfsummen](https://github.com/Donkiton/rem_card/releases/download/v5.1.20/SHA256SUMS.txt).
+
+<!-- remcard:release:end -->
 
 > [!WARNING]
 > **RemCard ist kein Medizinprodukt und ersetzt weder klinische Protokolle noch klinische Entscheidungen oder die verantwortliche Kontrolle durch medizinisches Fachpersonal.** Für den tatsächlichen Einsatz sind eine unabhängige technische, sicherheitstechnische und klinische Prüfung, die Abnahme in der vorgesehenen Umgebung sowie ein Ersatzarbeitsablauf erforderlich.
