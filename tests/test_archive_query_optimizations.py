@@ -17,7 +17,7 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
 from PySide6.QtCore import QDate  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionButton  # noqa: E402
 
 from rem_card.app.archive_schema_cache import (  # noqa: E402
     clear_archive_schema_cache,
@@ -269,6 +269,33 @@ def test_public_patient_page_opens_external_archive_once(tmp_path, monkeypatch):
     assert payload["total_count"] == 2
 
 
+def test_archive_25_row_pages_keep_search_across_unloaded_records(tmp_path, monkeypatch):
+    db_path = tmp_path / "archive.db"
+    _create_mixed_archive(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO patients (id, full_name) VALUES (?, ?)",
+            [(i, "Искомый пациент" if i == 100 else f"Тестовый пациент {i}") for i in range(100, 160)],
+        )
+        conn.executemany(
+            """INSERT INTO admissions (id, patient_id, history_number, admission_datetime, unit_scope, admission_type)
+               VALUES (?, ?, ?, '2026-07-12 12:00:00', 'rao', 'rao')""",
+            [(i, i, f"ТЕСТ-{i}") for i in range(100, 160)],
+        )
+    dao = object.__new__(PatientDAO)
+    dao.db = SimpleNamespace(db_path=str(tmp_path / "current.db"))
+    monkeypatch.setattr(dao, "_iter_archived_db_paths", lambda *args, **kwargs: [str(db_path)])
+    pages = [dao.get_archived_patients_page(page=p, page_size=25, search_ib="ТЕСТ-") for p in (1, 2, 3)]
+    assert [len(p["records"]) for p in pages] == [25, 25, 10]
+    assert all(p["total_count"] == 60 for p in pages)
+    assert len({row.id for page in pages for row in page["records"]}) == 60
+    assert 100 not in {row.id for row in pages[0]["records"]}
+
+    found = dao.get_archived_patients_page(page=1, page_size=25, search_name="искомый")
+    assert found["total_count"] == 1
+    assert [row.id for row in found["records"]] == [100]
+
+
 def test_operblock_archive_merges_current_and_legacy_rotated_db_without_transfer_columns(tmp_path):
     archiv = tmp_path / "archiv"
     archiv.mkdir()
@@ -454,13 +481,15 @@ class _DeferredWorker:
         self.failed = _SignalStub()
         self.finished = _SignalStub()
         self.started = False
+        self.running = False
         self.__class__.instances.append(self)
 
     def isRunning(self):
-        return False
+        return self.running
 
     def start(self):
         self.started = True
+        self.running = True
 
 
 class _PatientServiceSpy:
@@ -499,7 +528,7 @@ def test_archive_widget_snapshots_qt_filters_before_worker_start(monkeypatch):
                 "start_dt": "2026-07-12 00:00:00",
                 "end_dt": "2026-07-13 00:00:00",
                 "page": 2,
-                "page_size": 50,
+                "page_size": 25,
                 "search_name": "Иванов",
                 "search_ib": "РАО-1",
                 "search_diag": "Пневмония",
@@ -507,5 +536,150 @@ def test_archive_widget_snapshots_qt_filters_before_worker_start(monkeypatch):
         ]
     finally:
         widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def _finish_archive_request(worker, payload):
+    for callback in worker.succeeded.callbacks:
+        callback(payload)
+    worker.running = False
+    for callback in worker.finished.callbacks:
+        callback()
+
+
+def test_archive_load_renders_without_period_scan_and_reports_resolve_on_demand(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(archive_widget_module, "AsyncCallThread", _DeferredWorker)
+    service = _PatientServiceSpy()
+    period_calls = []
+    service.get_archive_db_paths_for_period = lambda *args: period_calls.append(args) or []
+    widget = archive_widget_module.ArchiveWidget(service)
+    try:
+        widget.load_data()
+        assert widget.records_stack.currentWidget() is widget.load_status_page
+        assert widget.load_status_label.text() == "Загрузка пациентов..."
+        assert widget._load_in_progress
+        assert not widget.btn_open.isEnabled()
+
+        payload = widget._load_worker.loader()
+        _finish_archive_request(widget._load_worker, payload)
+        assert widget.records_stack.currentWidget() is widget.table
+        assert not widget._load_in_progress
+        assert period_calls == []
+
+        # Reports cover the whole period, even when a patient search is empty.
+        assert widget.btn_report_stats.isEnabled()
+        monkeypatch.setattr(archive_widget_module.CustomMessageBox, "information", lambda *args: None)
+        widget.on_report_stats_clicked()
+        assert len(period_calls) == 1
+    finally:
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_archive_loading_stays_visible_for_pending_page_and_ignores_stale_result(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(archive_widget_module, "AsyncCallThread", _DeferredWorker)
+    widget = archive_widget_module.ArchiveWidget(_PatientServiceSpy())
+    try:
+        widget.load_data(page=1)
+        first_worker = widget._load_worker
+        widget.load_data(page=2)
+        _finish_archive_request(first_worker, {"records": [], "total_count": 100, "page": 1})
+        assert widget._load_in_progress
+        assert widget.records_stack.currentWidget() is widget.load_status_page
+        app.processEvents()
+        next_worker = widget._load_worker
+        assert next_worker is not first_worker
+        payload = next_worker.loader()
+        payload["total_count"] = 100
+        _finish_archive_request(next_worker, payload)
+        assert widget.current_page == 2
+        assert widget.records_stack.currentWidget() is widget.table
+        assert not widget._load_in_progress
+    finally:
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_archive_load_error_stops_spinner_and_retry_shows_table(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(archive_widget_module, "AsyncCallThread", _DeferredWorker)
+    widget = archive_widget_module.ArchiveWidget(_PatientServiceSpy())
+    try:
+        widget.load_data()
+        worker = widget._load_worker
+        for callback in worker.failed.callbacks:
+            callback(RuntimeError("test read failure"))
+        worker.running = False
+        for callback in worker.finished.callbacks:
+            callback()
+        assert not widget._load_in_progress
+        assert widget.load_spinner.isHidden()
+        assert "Не удалось загрузить архив" in widget.load_status_label.text()
+
+        widget.load_data()
+        worker = widget._load_worker
+        _finish_archive_request(worker, worker.loader())
+        assert widget.records_stack.currentWidget() is widget.table
+    finally:
+        widget.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("total_pages,current_page", [(1, 1), (3, 2), (5, 5), (12, 6), (100, 100)])
+def test_archive_quick_pages_stay_at_first_five_and_all_pages_remain_reachable(total_pages, current_page):
+    app = QApplication.instance() or QApplication([])
+    widget = archive_widget_module.ArchiveWidget(_PatientServiceSpy())
+    try:
+        widget.total_pages = total_pages
+        widget.current_page = current_page
+        widget._refresh_pagination_ui()
+        buttons = [widget.page_buttons_layout.itemAt(i).widget() for i in range(widget.page_buttons_layout.count())]
+        assert [button.text() for button in buttons] == [str(p) for p in range(1, min(5, total_pages) + 1)]
+        assert [button.text() for button in buttons if button.isChecked()] == ([str(current_page)] if current_page <= 5 else [])
+        assert widget.page_info.text() == f"Страница {current_page} из {total_pages}"
+        assert widget.btn_prev_page.isEnabled() == (current_page > 1)
+        assert widget.btn_next_page.isEnabled() == (current_page < total_pages)
+
+        requested_pages = []
+        widget.load_data = lambda *, page: requested_pages.append(page)
+        if current_page > 1:
+            widget.btn_prev_page.click()
+            assert requested_pages[-1] == current_page - 1
+        if current_page < total_pages:
+            widget.btn_next_page.click()
+            assert requested_pages[-1] == current_page + 1
+        widget.page_jump_input.setText(str(total_pages))
+        widget.btn_page_jump.click()
+        assert requested_pages[-1] == total_pages
+    finally:
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_archive_page_buttons_fit_text_with_center_style():
+    from rem_card.ui.styles.archive_center_styles import build_archive_center_style
+    from rem_card.ui.styles.theme_runtime import style_tokens
+
+    app = QApplication.instance() or QApplication([])
+    widget = archive_widget_module.ArchiveWidget(_PatientServiceSpy(), embedded=True)
+    widget.setStyleSheet(build_archive_center_style(style_tokens()))
+    try:
+        widget.total_pages = 12
+        widget._refresh_pagination_ui()
+        widget.resize(900, 650)
+        widget.show()
+        app.processEvents()
+        for index in range(widget.page_buttons_layout.count()):
+            button = widget.page_buttons_layout.itemAt(index).widget()
+            option = QStyleOptionButton()
+            option.initFrom(button)
+            content = button.style().subElementRect(QStyle.SE_PushButtonContents, option, button)
+            assert content.width() >= button.fontMetrics().horizontalAdvance(button.text())
+            assert content.height() >= button.fontMetrics().height()
+            assert button.height() >= 32
+    finally:
         widget.deleteLater()
         app.processEvents()
