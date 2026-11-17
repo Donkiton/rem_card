@@ -203,6 +203,11 @@ QPushButton#ArchivePageButton:checked {{
     background-color: {t("button.accent.bg")};
     color: {t("button.accent.text")};
 }}
+QPushButton#ArchivePageButton {{
+    min-width: 16px;
+    min-height: 22px;
+    padding: 4px 8px;
+}}
 QPushButton#ArchiveDangerAction:hover {{
     background-color: {t("button.danger.hover")};
 }}

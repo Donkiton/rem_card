@@ -4,11 +4,12 @@ from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                              QPushButton, QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit,
-                             QButtonGroup, QComboBox)
+                             QButtonGroup, QComboBox, QStackedWidget)
 from rem_card.app.logger import logger
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.archive_date_edit import ArchiveDateEdit
+from rem_card.ui.shared.loading_overlay import LoadingSpinner
 from rem_card.ui.styles.theme import (
     STYLE_ARCHIVE_FRAME,
     STYLE_ARCHIVE_PAGE_INFO,
@@ -24,6 +25,8 @@ from math import ceil
 ARCHIVE_MODE_RAO = "rao"
 ARCHIVE_MODE_OPERBLOCK = "operblock"
 ARCHIVE_FILTER_DEBOUNCE_MS = 350
+ARCHIVE_PAGE_SIZE = 25
+ARCHIVE_QUICK_PAGES = 5
 
 STYLE_ARCHIVE_MODE_BUTTON = STYLE_SMALL_NEUTRAL_BUTTON + """
     QPushButton:checked {
@@ -69,15 +72,15 @@ class ArchiveWidget(QWidget):
         )
         self.all_archived_patients = []
         self.filtered_patients = []
-        self.page_size = 50
+        self.page_size = ARCHIVE_PAGE_SIZE
         self.current_page = 1
         self.total_pages = 1
         self.total_records = 0
         self._load_worker = None
         self._load_pending = False
         self._load_token = 0
+        self._load_in_progress = False
         self._delete_pending = False
-        self._period_db_paths = []
         self._filter_reload_timer = QTimer(self)
         self._filter_reload_timer.setSingleShot(True)
         self._filter_reload_timer.timeout.connect(lambda: self.load_data(reset_page=True))
@@ -186,7 +189,20 @@ class ArchiveWidget(QWidget):
         self.table.itemClicked.connect(self.on_item_clicked)
         self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
         
-        layout.addWidget(self.table)
+        self.records_stack = QStackedWidget(self.frame)
+        self.records_stack.addWidget(self.table)
+        self.load_status_page = QWidget(self.records_stack)
+        status_layout = QVBoxLayout(self.load_status_page)
+        status_layout.setAlignment(Qt.AlignCenter)
+        self.load_spinner = LoadingSpinner(self.load_status_page)
+        status_layout.addWidget(self.load_spinner, 0, Qt.AlignHCenter)
+        self.load_status_label = QLabel("Загрузка пациентов...", self.load_status_page)
+        self.load_status_label.setAlignment(Qt.AlignCenter)
+        self.load_status_label.setWordWrap(True)
+        set_widget_style(self.load_status_label, STYLE_TRANSPARENT_LABEL)
+        status_layout.addWidget(self.load_status_label)
+        self.records_stack.addWidget(self.load_status_page)
+        layout.addWidget(self.records_stack, 1)
 
         # Пагинация архива
         self.pagination_frame = QFrame(self.frame)
@@ -334,6 +350,7 @@ class ArchiveWidget(QWidget):
             self.current_page = 1
         if page is not None:
             self.current_page = max(1, int(page or 1))
+        self._show_load_status("Загрузка пациентов...", loading=True)
         if self._load_worker and self._load_worker.isRunning():
             self._load_pending = True
             self._load_token += 1
@@ -346,7 +363,7 @@ class ArchiveWidget(QWidget):
         start_dt, end_dt = self._get_archive_query_period_bounds()
         mode = self.archive_source_mode
         requested_page = max(1, int(self.current_page or 1))
-        page_size = max(1, int(self.page_size or 50))
+        page_size = max(1, int(self.page_size or ARCHIVE_PAGE_SIZE))
         search_name = self.search_name.text()
         search_ib = self.search_ib.text()
         search_diag = self.search_diag.text()
@@ -383,6 +400,13 @@ class ArchiveWidget(QWidget):
         worker.failed.connect(lambda exc, token=load_token, source_mode=mode: self._on_load_failed(exc, token, source_mode))
         worker.finished.connect(lambda: self._on_load_finished(worker))
         worker.start()
+
+    def _show_load_status(self, message: str, *, loading: bool):
+        self._load_in_progress = loading
+        self.load_status_label.setText(message)
+        self.load_spinner.setVisible(loading)
+        self.records_stack.setCurrentWidget(self.load_status_page)
+        self._apply_action_buttons_state(None)
 
     def _load_rao_archive_page(
         self,
@@ -428,12 +452,14 @@ class ArchiveWidget(QWidget):
             QTimer.singleShot(0, lambda: self.load_data(page=self.current_page))
             return
         self.current_page = max(1, min(loaded_page, self.total_pages))
-        self._period_db_paths = self._collect_db_paths_for_archive_period()
+        self._load_in_progress = False
+        self.records_stack.setCurrentWidget(self.table)
         self._render_current_page()
 
     def _on_load_failed(self, exc: Exception, load_token: int, source_mode: str):
         if load_token != self._load_token or source_mode != self.archive_source_mode:
             return
+        self._show_load_status("Не удалось загрузить архив. Откройте раздел повторно.", loading=False)
         if source_mode == ARCHIVE_MODE_OPERBLOCK:
             logger.warning("Не удалось загрузить архив оперблока: %s", exc, exc_info=True)
             CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось загрузить архив оперблока:\n{exc}")
@@ -841,18 +867,12 @@ class ArchiveWidget(QWidget):
             if widget:
                 widget.deleteLater()
 
-        max_visible = 7
-        start_page = max(1, self.current_page - 3)
-        end_page = min(self.total_pages, start_page + max_visible - 1)
-        start_page = max(1, end_page - max_visible + 1)
-
-        for page in range(start_page, end_page + 1):
+        for page in range(1, min(self.total_pages, ARCHIVE_QUICK_PAGES) + 1):
             btn = QPushButton(str(page), self.pagination_frame)
             btn.setObjectName("ArchivePageButton")
             btn.setCheckable(True)
             btn.setChecked(page == self.current_page)
-            btn.setFixedHeight(26)
-            btn.setMinimumWidth(30)
+            btn.setMinimumSize(34, 32)
             btn.clicked.connect(lambda _checked=False, p=page: self._set_page(p))
             self.page_buttons_layout.addWidget(btn)
 
@@ -872,17 +892,26 @@ class ArchiveWidget(QWidget):
         self._set_page(int(raw))
 
     def _apply_action_buttons_state(self, patient):
+        if self._load_in_progress:
+            for button in (
+                self.btn_report_stats, self.btn_graphs, self.btn_open,
+                self.btn_edit, self.btn_delete_last, self.btn_delete,
+            ):
+                button.setEnabled(False)
+            return
+        # Statistics resolve the period's databases only when requested.  A
+        # patient search with no matches must not disable period-wide reports.
+        has_valid_period = self.date_from.date() <= self.date_to.date()
         if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
             has_selected_case = isinstance(patient, dict) and bool(patient.get("operation_case_id"))
             selected_external = has_selected_case and bool(patient.get("is_external_archive"))
-            has_period_data = bool(self._period_db_paths) or bool(self.filtered_patients)
             has_current_closed_cases = any(
                 str((case or {}).get("status") or "").strip().lower() == "closed"
                 and not bool((case or {}).get("is_external_archive"))
                 for case in self.filtered_patients
                 if isinstance(case, dict)
             )
-            self.btn_report_stats.setEnabled(self.operblock_service is not None and not self._delete_pending and has_period_data)
+            self.btn_report_stats.setEnabled(self.operblock_service is not None and not self._delete_pending and has_valid_period)
             self.btn_graphs.setEnabled(False)
             self.btn_open.setEnabled(has_selected_case and not self._delete_pending)
             self.btn_edit.setEnabled(
@@ -894,9 +923,8 @@ class ArchiveWidget(QWidget):
             self.btn_delete.setEnabled(self.operblock_service is not None and has_current_closed_cases and not self._delete_pending)
             return
 
-        has_period_data = bool(self._period_db_paths) or bool(self.filtered_patients)
-        self.btn_report_stats.setEnabled(has_period_data)
-        self.btn_graphs.setEnabled(has_period_data)
+        self.btn_report_stats.setEnabled(has_valid_period)
+        self.btn_graphs.setEnabled(has_valid_period)
 
         if not patient:
             self.btn_open.setEnabled(False)
@@ -1078,7 +1106,6 @@ class ArchiveWidget(QWidget):
         self.all_archived_patients = []
         self.filtered_patients = []
         self.total_records = 0
-        self._period_db_paths = []
         self.current_page = 1
         self.total_pages = 1
         self._sync_archive_mode_ui()
