@@ -71,7 +71,9 @@ class EmergencyStandbyScheduler:
     ):
         self.role = str(role or "").strip().lower()
         self.mode = str(mode or "").strip().lower()
-        self.manager = manager or EmergencyStandbyManager()
+        # Post-merge copies can already own db.lock. Only this background
+        # scheduler yields to competing clinical writers during the copy.
+        self.manager = manager or EmergencyStandbyManager(medical_backup_defer_reason=self._medical_backup_defer_reason)
         self.is_write_queue_idle = is_write_queue_idle or (lambda: True)
         self.is_foreground_busy = is_foreground_busy or self._default_foreground_busy
         self.is_shutdown = is_shutdown or (lambda: False)
@@ -128,6 +130,7 @@ class EmergencyStandbyScheduler:
             self._shutdown = True
             self._started = False
             self._pending_reason = ""
+            self._pending_forced = False
             thread = self._worker_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=max(0.0, float(timeout or 0.0)))
@@ -290,6 +293,9 @@ class EmergencyStandbyScheduler:
                 elif result is not None and result.status == "deferred":
                     self._last_error = result.reason
                     self._next_allowed_ts = time.monotonic() + min(5.0, max(0.5, self.cooldown_sec))
+                    if result.reason in {"writer_busy", "write_queue_busy"} and not self._shutdown:
+                        self._pending_reason = self._pending_reason or reason
+                        self._pending_forced = self._pending_forced or forced
                 else:
                     self._last_error = "" if result is None else result.reason
                     self._consecutive_failures += 1
@@ -301,6 +307,11 @@ class EmergencyStandbyScheduler:
             return EmergencyStandbyRefreshResult(ok=False, status="deferred", reason=block_reason)
 
         return self.manager.create_or_refresh_standby(forced=forced)
+
+    def _medical_backup_defer_reason(self) -> str:
+        if self._shutdown or self.is_shutdown():
+            return "shutdown"
+        return "" if self.is_write_queue_idle() else "writer_busy"
 
     def _refresh_block_reason(self) -> str:
         self._last_block_context = {}

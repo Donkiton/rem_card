@@ -331,6 +331,100 @@ def _advance_reuse_medical(medical):
     return _append_emergency_medical_change(medical, entity_id=991)
 
 
+def test_background_copy_yields_between_pages_and_preserves_previous_snapshot(tmp_path, monkeypatch):
+    from rem_card.app.emergency_paths import standby_dir
+    from rem_card.app.sqlite_shared import FileWriteLock
+    from scripts.regression_checks.emergency_standby import _prepare_emergency_standby_manager_fixture
+
+    initial, medical, settings = _prepare_emergency_standby_manager_fixture(str(tmp_path))
+    with _closed_sqlite(medical) as conn:
+        conn.execute("CREATE TABLE copy_padding(data BLOB)")
+        conn.executemany("INSERT INTO copy_padding VALUES(zeroblob(3200))", [()] * 512)
+    first = initial.create_or_refresh_standby(forced=True)
+    assert first.ok, first.reason
+    previous = first.metadata
+    manifest = Path(standby_metadata_path(initial.root))
+    previous_manifest = manifest.read_bytes()
+
+    manager = EmergencyStandbyManager(
+        root=initial.root,
+        source_medical_db_path=medical,
+        source_settings_db_path=settings,
+        medical_backup_defer_reason=lambda: "",
+    )
+    writer_lock = FileWriteLock(str(Path(medical).with_name("db.lock")))
+    original = standby_module.backup_connection
+    checkpoints = []
+
+    def backup_with_pending_writer(conn, target, **kwargs):
+        progress = kwargs["progress"]
+        assert 0 < kwargs["pages"] < 512
+
+        def after_step(status, remaining, total):
+            if remaining > 0 and not checkpoints:
+                checkpoints.append(remaining)
+                assert writer_lock.acquire("test-writer", "save_vital")
+            progress(status, remaining, total)
+
+        return original(conn, target, **dict(kwargs, progress=after_step))
+
+    monkeypatch.setattr(standby_module, "backup_connection", backup_with_pending_writer)
+    try:
+        deferred = manager.create_or_refresh_standby(forced=True)
+        assert checkpoints
+        assert (deferred.status, deferred.reason) == ("deferred", "writer_busy")
+        assert not deferred.ok and deferred.metadata.generation_id == previous.generation_id
+        assert manifest.read_bytes() == previous_manifest
+        assert compute_file_hash(previous.medical_db_path) == previous.medical_db_hash
+        assert not list(Path(standby_dir(initial.root)).glob(".staging.*"))
+        with _closed_sqlite(medical) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM copy_padding WHERE rowid = 1")
+    finally:
+        writer_lock.release()
+
+    monkeypatch.setattr(standby_module, "backup_connection", original)
+    cursor = _advance_reuse_medical(medical)
+    refreshed = manager.create_or_refresh_standby(forced=True)
+    assert refreshed.ok, refreshed.reason
+    assert refreshed.metadata.generation_id != previous.generation_id
+    assert refreshed.metadata.remote_last_change_id == cursor
+    assert manager.validate_standby().ok
+
+
+@pytest.mark.parametrize("defer_reason", ["writer_busy", "write_queue_busy"])
+def test_standby_scheduler_requeues_a_forced_copy_after_it_yields(tmp_path, defer_reason):
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+    from scripts.regression_checks.emergency_standby import _wait_for_emergency_scheduler_idle
+
+    calls = []
+
+    def refresh(*, forced):
+        calls.append(forced)
+        if len(calls) == 1:
+            return EmergencyStandbyRefreshResult(False, "deferred", defer_reason)
+        return EmergencyStandbyRefreshResult(True, "valid", "ok")
+
+    manager = SimpleNamespace(root=str(tmp_path), create_or_refresh_standby=refresh)
+    scheduler = EmergencyStandbyScheduler(
+        role="nurse", mode="network", manager=manager, is_foreground_busy=lambda: False, cooldown_sec=0,
+    )
+    assert scheduler.start()
+    try:
+        assert scheduler.request_refresh("manual", forced=True)
+        assert _wait_for_emergency_scheduler_idle(scheduler)
+        status = scheduler.get_status()
+        assert status["pending"] and status["last_status"] == "deferred" and status["consecutive_failures"] == 0
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not scheduler.request_refresh_on_idle():
+            time.sleep(0.01)
+        assert _wait_for_emergency_scheduler_idle(scheduler)
+        assert calls == [True, True]
+        assert scheduler.get_status()["refresh_count"] == 1
+    finally:
+        scheduler.stop()
+
+
 def test_unchanged_settings_reused_for_new_medical_generation(settings_reuse_pair):
     manager, medical, settings, previous, calls = settings_reuse_pair
     cursor = _advance_reuse_medical(medical)
