@@ -2974,8 +2974,8 @@ def _check_orders_widget_post_finalize_supersedes_hung_worker(temp_root: str) ->
         if retired.get("state") != "superseded":
             return False, f"old worker was not marked superseded: {retired}"
         label_text = widget._refresh_status_label.text() if widget._refresh_status_label is not None else ""
-        if "Сохранено" not in label_text:
-            return False, f"saved/pending status was not visible: {label_text!r}"
+        if label_text:
+            return False, f"post-save refresh added a floating status: {label_text!r}"
 
         widget._apply_snapshot(
             {

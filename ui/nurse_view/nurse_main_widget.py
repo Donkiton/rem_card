@@ -1047,6 +1047,9 @@ class NurseMainWidget(QWidget):
             for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
         )
         beds_widget = getattr(self.layout_manager, "beds_selection_widget", None)
+        if beds_widget is not None:
+            from rem_card.ui.shared.w1_bed_sync import require_beds_change
+            require_beds_change(beds_widget, payload.get("last_change_id"), reset=payload.get("reason") == "cursor_moved_backwards")
         admission_ids = self._admission_ids_from_payload(payload)
         if (
             not full_refresh_required

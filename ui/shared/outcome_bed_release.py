@@ -1,8 +1,10 @@
 """Deadline-driven reconciliation for visible RAO bed lists."""
 from datetime import datetime, timedelta
 import time
+import weakref
 
 from PySide6.QtCore import QObject, QTimer
+from shiboken6 import isValid
 
 
 class OutcomeBedReleaseMonitor(QObject):
@@ -43,13 +45,16 @@ class OutcomeBedReleaseMonitor(QObject):
         if callable(outage) and outage():
             return
         self._next_check = time.monotonic() + 15.0
-        # The write owner rechecks current status in its transaction. The
-        # asynchronous read can race that write; retry until the DB confirms
-        # release, or until a cancelled outcome removes the local deadline.
         release = getattr(beds.patient_service, 'maybe_release_due_outcome_beds_async', None)
         if callable(release):
-            release(force=True)
-        beds.refresh_admissions(due, queue_if_running=False)
+            widget = weakref.ref(beds)
+
+            def refresh_after_release(_released):
+                target = widget()
+                if target is not None and isValid(target) and not target._is_closing:
+                    target.refresh_admissions(due)
+
+            release(force=True, on_success=refresh_after_release)
 
 
 def remove_released_rows(beds, released_ids):

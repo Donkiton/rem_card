@@ -53,6 +53,7 @@ def test_missing_snapshot_row_resets_bed_to_free():
     stub = SimpleNamespace(
         _is_closing=False,
         _beds_snapshot_by_bed={1: object()},
+        _confirmed_new_beds={},
         _pending_side_card_update=None,
         bed_widgets=[bed_widget],
         side_card=side_card,

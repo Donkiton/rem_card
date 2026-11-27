@@ -15,6 +15,8 @@ from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
 from rem_card.services.order_domain_service import NURSE_MARK_NOT_EXECUTED
 from rem_card.services.order_service import OrderConflictError, OrderService
 from rem_card.services.orders_sync_observability import record_orders_sync_event
+from rem_card.services.shift_service import ShiftService
+from rem_card.services.write_dispatch import service_write_failure_state
 import time
 
 
@@ -35,6 +37,7 @@ class DraftManagementMixin:
         self._cached_has_orders = False
         self._last_applied_snapshot_signature = None
         self._legacy_central_draft_detected = False
+        self._post_finalize_projection_pending = False
         self._pending_admin_cell_write_keys.clear()
         self._recent_admin_cell_clicks.clear()
         # Replace the maps so callbacks from a previous visit cannot release
@@ -408,10 +411,22 @@ class DraftManagementMixin:
                 "Для них можно убрать только будущие ячейки."
             )
 
+    def _set_local_draft_save_pending(self, pending: bool):
+        self._local_draft_save_pending = pending
+        self.draftSavePendingChanged.emit(pending)
+
+    def _draft_save_context(self):
+        shift_start = ShiftService.get_day_period(self.shift_date)[0] if self.shift_date is not None else None
+        return id(self.service), self.admission_id, shift_start
+
+    def _draft_save_outcome_unknown(self):
+        return self._draft_save_context() in self._unknown_draft_save_contexts
+
     def finalize_card(self):
         if not self.admission_id or self._forced_read_only: return
-        if self._local_draft_save_pending:
+        if self._local_draft_save_pending or self._post_finalize_projection_pending or self._draft_save_outcome_unknown():
             return
+        save_context = self._draft_save_context()
         if getattr(self, "_pending_doctor_mark_writes", None):
             self._show_warning("Дождитесь подтверждения отметок перед сохранением назначений.")
             return
@@ -421,7 +436,8 @@ class DraftManagementMixin:
                 target_shift_date = self.shift_date
 
                 def legacy_success():
-                    self._local_draft_save_pending = False
+                    self.draftStatusChanged.emit(False)
+                    self._set_local_draft_save_pending(False)
                     if not self._is_current_context(target_admission_id, target_shift_date):
                         return
                     self._legacy_central_draft_detected = False
@@ -429,12 +445,14 @@ class DraftManagementMixin:
                     self._refresh_model(source="post_finalize")
                     self.localDraftResolutionFinished.emit(True)
 
-                def legacy_error(_exc):
-                    self._local_draft_save_pending = False
+                def legacy_error(exc):
+                    if service_write_failure_state(exc) == "unknown":
+                        self._unknown_draft_save_contexts.add(save_context)
+                    self._set_local_draft_save_pending(False)
                     self.check_drafts()
                     self.localDraftResolutionFinished.emit(False)
 
-                self._local_draft_save_pending = True
+                self._set_local_draft_save_pending(True)
                 try:
                     self._enqueue_write(
                         f"orders_finalize_legacy:{target_admission_id}",
@@ -447,7 +465,7 @@ class DraftManagementMixin:
                         on_error=legacy_error,
                     )
                 except Exception:
-                    self._local_draft_save_pending = False
+                    self._set_local_draft_save_pending(False)
                     raise
             return
         target_admission_id = self.admission_id
@@ -455,9 +473,14 @@ class DraftManagementMixin:
         payload = self._build_local_draft_payload()
         if not payload:
             return
+        service = self.service
+        commit_draft = getattr(service, "commit_local_order_draft_for_refresh", None)
+        if not callable(commit_draft):
+            commit_draft = service.commit_local_order_draft
 
         def after_success(result):
-            self._local_draft_save_pending = False
+            self.draftStatusChanged.emit(False)
+            self._set_local_draft_save_pending(False)
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
             from rem_card.app.logger import logger
@@ -470,6 +493,12 @@ class DraftManagementMixin:
             self._clear_pending_reorder()
             self._post_finalize_retry_count = 0
             self._last_applied_snapshot_signature = None
+            if isinstance(result, dict) and "committed_change_id" in result:
+                self._post_finalize_projection_pending = True
+                self._last_polled_change_id = max(self._last_polled_change_id, int(result["committed_change_id"]))
+                self._last_polled_context_key = self._current_context_key()
+                self._snapshot_stale = True
+                self.set_forced_read_only(self._forced_read_only)
 
             snapshot = result.get("snapshot") if isinstance(result, dict) else None
             snapshot_applied = False
@@ -524,7 +553,9 @@ class DraftManagementMixin:
             self.localDraftResolutionFinished.emit(True)
 
         def after_error(exc):
-            self._local_draft_save_pending = False
+            if service_write_failure_state(exc) == "unknown":
+                self._unknown_draft_save_contexts.add(save_context)
+            self._set_local_draft_save_pending(False)
             if isinstance(exc, OrderConflictError):
                 coordinator = self._get_read_coordinator()
                 conflict_context_hash = None
@@ -561,11 +592,11 @@ class DraftManagementMixin:
             self.check_drafts()
             self.localDraftResolutionFinished.emit(False)
 
-        self._local_draft_save_pending = True
+        self._set_local_draft_save_pending(True)
         try:
             self._enqueue_write(
                 f"orders_finalize:{target_admission_id}",
-                operation=lambda data=payload: self.service.commit_local_order_draft(
+                operation=lambda data=payload: commit_draft(
                     target_admission_id,
                     target_shift_date,
                     orders=data["orders"],
@@ -580,7 +611,7 @@ class DraftManagementMixin:
                 pass_result_to_success=True,
             )
         except Exception:
-            self._local_draft_save_pending = False
+            self._set_local_draft_save_pending(False)
             raise
 
     def clear_drafts(self):

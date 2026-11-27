@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -111,6 +112,60 @@ def test_vital_confirmed_receipt_hydrates_local_projection(widget):
     assert view._cached_vitals[0].id == 15
     assert view._cached_vitals[0].revision == 3
     assert view._cached_vitals[0].temp == 36.7
+
+
+def test_vital_checks_current_status_once_in_write_worker(widget, monkeypatch):
+    from rem_card.data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
+    from rem_card.services.vital_service import VitalService
+
+    view, service = widget
+    view.patient.transfer_datetime = None
+    time_read = []
+    commits = []
+    warnings = []
+    in_transaction = False
+    state = PatientStatus.ACTIVE
+
+    @contextmanager
+    def transaction():
+        nonlocal in_transaction
+        in_transaction = True
+        try:
+            yield
+        finally:
+            in_transaction = False
+
+    def get_event_at(_admission_id, when):
+        assert in_transaction
+        time_read.append(when)
+        return PatientStatusEventDTO(status=state, start_time=when - timedelta(minutes=1))
+
+    vital_service = VitalService(
+        SimpleNamespace(
+            db=SimpleNamespace(remcard_transaction=transaction),
+            add_vital=lambda dto, **_kw: commits.append(dto),
+        ),
+        SimpleNamespace(get_patient_by_id=lambda _: view.patient),
+        SimpleNamespace(get_event_at=get_event_at),
+    )
+    service.add_vital_from_card = vital_service.add_vital_from_card
+    monkeypatch.setattr(CustomMessageBox, "warning", lambda _, __, message: warnings.append(message))
+
+    view.save_data()
+    assert not time_read
+    state = PatientStatus.DEAD
+    request = service.queue.pop()
+    with pytest.raises(ValueError, match="умер") as error:
+        request["operation"]()
+    request["on_error"](error.value)
+    assert len(time_read) == 1 and not commits
+    assert view.pulse.text() == "70" and len(warnings) == 1
+    assert view.save_btn.isEnabled()
+
+    state = PatientStatus.ACTIVE
+    view.save_data()
+    service.finish()
+    assert len(time_read) == 2 and len(commits) == 1
 
 
 def test_queued_vital_undo_keeps_original_patient_and_service(widget):

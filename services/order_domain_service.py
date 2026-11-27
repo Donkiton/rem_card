@@ -566,9 +566,12 @@ class OrderDomainService:
         return {desc[0]: row[idx] for idx, desc in enumerate(cursor.description or [])}
 
     def _fetch_admin_for_nurse_update(self, cursor, admin_id: int, *, include_change_id: bool = False) -> Optional[dict]:
-        change_id_column = (
-            ", (SELECT COALESCE(MAX(id), 0) FROM change_log WHERE admission_id = o.admission_id) AS _change_id"
-            if include_change_id else ""
+        extra_column = (
+            "(SELECT COALESCE(MAX(id), 0) FROM change_log WHERE admission_id = o.admission_id) AS _change_id"
+            if include_change_id else
+            """(SELECT MAX(latest.id) FROM administrations latest
+                WHERE latest.order_id = a.order_id AND latest.is_committed = 1
+                  AND DATETIME(latest.planned_time) = DATETIME(a.planned_time)) AS latest_id"""
         )
         cursor.execute(
             f"""
@@ -576,8 +579,8 @@ class OrderDomainService:
                 a.*,
                 o.admission_id AS admission_id,
                 o.status AS order_status,
-                o.updated_at AS order_updated_at
-                {change_id_column}
+                o.updated_at AS order_updated_at,
+                {extra_column}
             FROM administrations a
             JOIN orders o ON o.id = a.order_id
             WHERE a.id = ?
@@ -636,7 +639,7 @@ class OrderDomainService:
             )
         raise OrderMarkConflictError(message, reason=reason, current_version=row.get("version"))
 
-    def _assert_nurse_admin_current(self, cursor, row: Optional[dict]) -> int:
+    def _assert_nurse_admin_current(self, row: Optional[dict]) -> int:
         if not row:
             self._raise_nurse_optimistic_conflict(
                 "admin_missing",
@@ -659,37 +662,11 @@ class OrderDomainService:
                 row=row,
             )
 
-        cursor.execute(
-            """
-            SELECT id, version, status, is_committed
-            FROM administrations
-            WHERE order_id = ? AND DATETIME(planned_time) = DATETIME(?)
-              AND is_committed = 1
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-            (row["order_id"], row["planned_time"]),
-        )
-        latest = self._cursor_row_to_dict(cursor, cursor.fetchone())
-        if not latest or int(latest.get("id") or 0) != int(row.get("id") or 0):
-            conflict_row = dict(row)
-            if latest:
-                conflict_row["latest_id"] = latest.get("id")
+        if int(row.get("latest_id") or 0) != int(row.get("id") or 0):
             self._raise_nurse_optimistic_conflict(
                 "latest_admin_changed",
                 "Назначение изменено врачом. Обновите карточку перед отметкой.",
-                row=conflict_row,
-            )
-
-        latest_status = str(latest.get("status") or "")
-        if latest_status in ("deleted", "cancelled"):
-            conflict_row = dict(row)
-            conflict_row["latest_id"] = latest.get("id")
-            conflict_row["status"] = latest_status
-            self._raise_nurse_optimistic_conflict(
-                "latest_admin_not_active",
-                "Назначение уже отменено или удалено. Обновите карточку.",
-                row=conflict_row,
+                row=row,
             )
 
         return int(row.get("version") or 0)
@@ -917,7 +894,7 @@ class OrderDomainService:
         self._sanitize_legacy_statuses_once()
         with self.db.remcard_transaction() as cursor:
             row = self._fetch_admin_for_nurse_update(cursor, admin_id)
-            current_version = self._assert_nurse_admin_current(cursor, row)
+            current_version = self._assert_nurse_admin_current(row)
             if expected_version is not None and current_version != int(expected_version):
                 self._raise_nurse_optimistic_conflict(
                     "displayed_version_changed",
@@ -963,7 +940,7 @@ class OrderDomainService:
         """Отменяет действие медсестры (очищает comment и actual_time)."""
         with self.db.remcard_transaction() as cursor:
             row = self._fetch_admin_for_nurse_update(cursor, admin_id)
-            current_version = self._assert_nurse_admin_current(cursor, row)
+            current_version = self._assert_nurse_admin_current(row)
             if expected_version is not None and current_version != int(expected_version):
                 self._raise_nurse_optimistic_conflict(
                     "displayed_version_changed",

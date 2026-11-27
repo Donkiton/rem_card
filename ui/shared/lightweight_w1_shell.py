@@ -327,6 +327,7 @@ class LightweightW1Shell(QWidget):
         if self.remcard_service is None:
             return None
         from rem_card.ui.patient_bed_management.management_widget import PatientBedManagementWidget
+        from rem_card.ui.shared.w1_bed_sync import bind_admission_commits
 
         db_manager = self.remcard_service.orders_dao.db
         self.journal_widget = PatientBedManagementWidget.create(
@@ -335,6 +336,7 @@ class LightweightW1Shell(QWidget):
             parent=self.journal_view,
         )
         self._journal_layout.addWidget(self.journal_widget)
+        bind_admission_commits(self.journal_widget, self.beds_selection_widget)
         return self.journal_widget
 
     def prewarm_journal_widget(self):

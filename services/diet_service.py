@@ -12,6 +12,9 @@ from rem_card.data.dto.remcard_dto import DietPlanDTO, DietPlanVersionDTO, DietT
 from rem_card.services.shift_service import ShiftService
 
 
+DIET_ASSIGNMENT_WRITE_BUDGET_MS = 15_000
+
+
 def _dt_to_db(value: datetime) -> str:
     return value.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
 
@@ -553,9 +556,12 @@ class DietPlanService:
         change_note: str = "",
         version_id: Optional[int] = None,
         expected_version: Optional[int] = None,
+        clear_facts_mode: str = "preserve",
     ) -> DietPlanVersionDTO:
         if self.version_dao is None:
             raise RuntimeError("История назначений диеты недоступна")
+        if clear_facts_mode not in {"preserve", "all", "before"}:
+            raise ValueError("Неизвестный режим очистки фактов питания")
         effective = normalize_minute(effective_from)
         template = self.template_service.get_template(int(template_id)) if template_id is not None else None
         if template is not None:
@@ -589,7 +595,11 @@ class DietPlanService:
         if version_id is not None:
             previous = self.version_dao.get_by_id(int(version_id))
             previous_shift = previous.shift_start if previous is not None else None
-        with self.dao.db.remcard_transaction(source="diet_plan_version_assign") as cur:
+        db = self.dao.db
+        current_metadata = getattr(db, "_current_thread_write_metadata", None)
+        options = current_metadata() if callable(current_metadata) else {}
+        options.setdefault("write_budget_ms", DIET_ASSIGNMENT_WRITE_BUDGET_MS)
+        with db.remcard_transaction(source="diet_plan_version_assign", write_options=options) as cur:
             if template is not None:
                 self._sync_template_row_for_fk(cur, template)
             if version_id is not None:
@@ -607,6 +617,12 @@ class DietPlanService:
                 affected_shifts.add(previous_shift)
             for affected_shift in affected_shifts:
                 self._sync_day_anchor(cur, int(admission_id), affected_shift)
+            if clear_facts_mode != "preserve":
+                OralIntakeDAO(db).clear_events(
+                    admission_id,
+                    before=effective if clear_facts_mode == "before" else None,
+                    cursor=cur,
+                )
             return version
 
     def delete_version(

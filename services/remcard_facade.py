@@ -29,7 +29,7 @@ from ..data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabOrderStatus
 from .patient_service import PatientService
 from .vital_service import VitalService
 from .fluid_service import FluidService
-from .diet_service import DietPlanService, DietTemplateService, OralIntakeService
+from .diet_service import DIET_ASSIGNMENT_WRITE_BUDGET_MS, DietPlanService, DietTemplateService, OralIntakeService
 from .order_service import OrderService
 from .shift_service import ShiftService
 from .ventilation_service import VentilationService
@@ -105,7 +105,7 @@ def read_scoped_snapshot(method):
         if callable(scope):
             read_scope = scope(
                 method.__name__,
-                force_central=bool(kwargs.get("ensure_initial_status")),
+                force_central=bool(kwargs.get("ensure_initial_status") or kwargs.get("force_central")),
             )
         else:
             scope = getattr(db, "central_read_scope", None)
@@ -545,6 +545,38 @@ class RemCardService(QObject):
             }
         return snapshot
 
+    def create_empty_card(self, admission_id: int, target_date: datetime, *, ensure_initial_status: bool):
+        start, end = self.get_day_period(target_date)
+        with self.orders_dao.db.remcard_transaction(source="doctor_create_empty_card") as cursor:
+            cursor.execute(
+                """
+                SELECT a.admission_datetime, a.outcome, a.transfer_datetime, a.death_datetime
+                FROM admissions a
+                JOIN beds b ON b.current_admission_id = a.id AND b.status = 'OCCUPIED'
+                WHERE a.id = ? AND a.is_active = 1
+                """,
+                (int(admission_id),),
+            )
+            admission = cursor.fetchone()
+            if admission is None:
+                raise ValueError("Пациент больше не занимает койку.")
+            status = self.get_current_status(admission_id)
+            if any(admission[field] for field in ("outcome", "transfer_datetime", "death_datetime")) or (
+                status is not None and status.status.is_outcome()
+            ):
+                raise ValueError("Создание новой карты недоступно, пока у пациента не отменен исход.")
+            if self.has_card(admission_id, start):
+                return False
+
+            admitted_at = datetime.fromisoformat(admission["admission_datetime"]) if admission["admission_datetime"] else None
+            vital_time = max(start, admitted_at) if admitted_at is not None else start
+            if vital_time >= end:
+                raise ValueError("Пациент поступил после окончания выбранной смены.")
+            if ensure_initial_status and self.status_service is not None:
+                self.status_service.ensure_initial_status(admission_id, start, admitted_at)
+            self.add_vital(VitalDTO(id=None, admission_id=admission_id, timestamp=vital_time), target_date, force=True)
+            return True
+
     def create_plan_card(self, admission_id: int, target_date: datetime, *, requested_at: datetime):
         """Создаёт план-карту и переносит новое поступление одной транзакцией."""
         start, _ = self.get_day_period(target_date)
@@ -619,6 +651,7 @@ class RemCardService(QObject):
         reference_dt: Optional[datetime] = None,
         *,
         include_change_cursor: bool = False,
+        force_central: bool = False,
     ) -> Dict[str, Any]:
         now = reference_dt or datetime.now()
         yesterday = now - timedelta(days=1)
@@ -646,6 +679,7 @@ class RemCardService(QObject):
         reference_dt: Optional[datetime] = None,
         *,
         include_change_cursor: bool = False,
+        force_central: bool = False,
     ) -> Dict[str, Any]:
         ids = sorted({int(adm_id) for adm_id in (admission_ids or []) if adm_id is not None})
         now = reference_dt or datetime.now()
@@ -1642,6 +1676,23 @@ class RemCardService(QObject):
     def undo_vital_change(self, change):
         return self._vitals.undo_vital_change(change)
 
+    def add_vital_from_card(
+        self,
+        dto: VitalDTO,
+        shift_date: datetime,
+        *,
+        force: bool,
+        allow_inactive: bool,
+        expected_revision: Optional[int] = None,
+    ):
+        return self._vitals.add_vital_from_card(
+            dto,
+            shift_date,
+            force=force,
+            allow_inactive=allow_inactive,
+            expected_revision=expected_revision,
+        )
+
     def get_latest_vital(self, admission_id: int) -> Optional[VitalDTO]:
         return self._vitals.get_latest_vital(admission_id)
 
@@ -2099,6 +2150,12 @@ class RemCardService(QObject):
             ordered_order_ids=ordered_order_ids,
             expected_revisions=expected_revisions,
         )
+
+    def commit_local_order_draft_for_refresh(self, admission_id, shift_date, **draft):
+        order_ids, change_id = self._orders.commit_local_draft(
+            admission_id, shift_date, return_change_cursor=True, **draft,
+        )
+        return {"order_id_map": order_ids, "committed_change_id": change_id}
 
     def commit_local_order_draft(
         self,
@@ -2905,6 +2962,15 @@ class RemCardService(QObject):
         UI РїРѕР»СѓС‡Р°РµС‚ СЂРµР·СѓР»СЊС‚Р°С‚ С‡РµСЂРµР· on_success/on_error, РЅРµ СЂР°Р±РѕС‚Р°СЏ СЃ lock/retry РЅР°РїСЂСЏРјСѓСЋ.
         """
         if self.data_service:
+            if description == "diet_version_assign":
+                write_metadata = {
+                    **(write_metadata or {}),
+                    "queue_deadline_sec": DIET_ASSIGNMENT_WRITE_BUDGET_MS / 1000.0,
+                    "write_budget_ms": DIET_ASSIGNMENT_WRITE_BUDGET_MS,
+                    "queue_retryable": False,
+                    "queue_retries_left": 0,
+                    "queue_cancel_before_start": True,
+                }
             return self.data_service.enqueue_write(
                 description=description,
                 operation=operation,

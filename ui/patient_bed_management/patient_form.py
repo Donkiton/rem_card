@@ -468,14 +468,18 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                 description = f"patient_bed_create_admission:{self.bed_number}"
 
                 def operation():
-                    result = self.patient_bed_service.create_patient_and_admission(patient_data, admission_data)
+                    save = getattr(self.patient_bed_service, "create_patient_and_admission_with_bed", None)
+                    if not callable(save):
+                        save = self.patient_bed_service.create_patient_and_admission
+                    result = save(patient_data, admission_data)
+                    admission_id = result["bed"]["current_admission_id"] if isinstance(result, dict) else result
                     logger.info(
                         "patient_form_service_result role=%s form_id=%s bed=%s op=%s result=%s",
                         _current_role(),
                         self._form_log_id,
                         self.bed_number,
                         description,
-                        result,
+                        admission_id,
                     )
                     return result
             else:
@@ -651,6 +655,9 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
     def _on_write_success(self, description: str = "", result=None):
         if self._closing or self._write_outcome_unknown or not _qt_is_valid(self):
             return
+        if self.is_new_admission and isinstance(result, dict):
+            self.committed_admission = result
+            result = result["bed"]["current_admission_id"]
         logger.info(
             "patient_form_write_success role=%s form_id=%s bed=%s admission_id=%s op=%s result=%s",
             _current_role(),

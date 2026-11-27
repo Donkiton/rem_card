@@ -86,9 +86,7 @@ class PatientBedManagementService:
         with metadata_scope(options) if callable(metadata_scope) else nullcontext():
             return self.db.run_write_operation(operation, source=source)
 
-    def get_beds_snapshot(self):
-        return self.db.fetch_all_remcard(
-            """
+    _BED_SNAPSHOT_QUERY = """
             SELECT
                 b.bed_number,
                 b.status,
@@ -121,9 +119,10 @@ class PatientBedManagementService:
             FROM beds b
             LEFT JOIN admissions a ON a.id = b.current_admission_id
             LEFT JOIN patients p ON p.id = a.patient_id
-            ORDER BY b.bed_number
             """
-        )
+
+    def get_beds_snapshot(self):
+        return self.db.fetch_all_remcard(self._BED_SNAPSHOT_QUERY + " ORDER BY b.bed_number")
 
     def get_bed_by_number(self, bed_number: int):
         return self.db.fetch_one_remcard("SELECT * FROM beds WHERE bed_number = ?", (int(bed_number),))
@@ -255,6 +254,12 @@ class PatientBedManagementService:
         return patient, admission
 
     def create_patient_and_admission(self, patient_data: dict[str, Any], admission_data: dict[str, Any]) -> int:
+        return int(self._create_patient_and_admission(patient_data, admission_data, return_bed=False))
+
+    def create_patient_and_admission_with_bed(self, patient_data, admission_data):
+        return self._create_patient_and_admission(patient_data, admission_data, return_bed=True)
+
+    def _create_patient_and_admission(self, patient_data, admission_data, *, return_bed):
         admission_uid = str(patient_data.get("admission_uid") or uuid.uuid4())
         full_name = str(patient_data.get("full_name") or "").strip()
         birth_date = self._to_sql_date(patient_data.get("birth_date"))
@@ -316,9 +321,17 @@ class PatientBedManagementService:
             )
             if cursor.rowcount != 1:
                 raise RuntimeError(f"Койка {admission_data['bed_number']} уже занята другим пользователем.")
+            if return_bed:
+                cursor.execute(
+                    self._BED_SNAPSHOT_QUERY + " WHERE b.bed_number = ?",
+                    (bed_number,),
+                )
+                bed = dict(cursor.fetchone())
+                cursor.execute("SELECT COALESCE(MAX(id), 0) FROM change_log")
+                return {"bed": bed, "change_id": int(cursor.fetchone()[0])}
             return admission_id
 
-        return int(self._run_patient_form_write(operation, source="patient_bed_create_admission"))
+        return self._run_patient_form_write(operation, source="patient_bed_create_admission")
 
     def update_patient_and_admission(
         self,

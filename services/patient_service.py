@@ -119,7 +119,7 @@ class PatientService:
             with self._outcome_release_guard:
                 self._outcome_release_worker_active = False
 
-    def maybe_release_due_outcome_beds_async(self, force: bool = False) -> bool:
+    def maybe_release_due_outcome_beds_async(self, force: bool = False, *, on_success=None) -> bool:
         if self.data_service is not None:
             outage_detected = getattr(self.data_service, "is_network_outage_detected", None)
             if callable(outage_detected) and outage_detected():
@@ -154,6 +154,7 @@ class PatientService:
                 self.data_service.enqueue_write(
                     description="auto_release_outcome_beds",
                     operation=self._release_due_outcome_beds_operation,
+                    on_success=on_success,
                     on_error=_on_error,
                     on_settled=_on_settled,
                     write_metadata={

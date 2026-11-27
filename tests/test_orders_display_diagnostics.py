@@ -53,6 +53,24 @@ def test_hidden_widget_finishes_click_and_ignores_late_snapshot(visible_orders):
     assert events[0][2]["status"] == "cancelled"
 
 
+def test_loading_overlay_follows_applied_snapshot_and_clears_on_cancel(visible_orders, monkeypatch):
+    widget, _ = visible_orders
+    changes = []
+    monkeypatch.setattr(diagnostics, "show_app_loading", lambda *_, **__: changes.append("show") or "orders")
+    monkeypatch.setattr(diagnostics, "hide_app_loading", lambda _widget, key: changes.append(key))
+    widget.admission_id, widget.shift_date = 1, "date"
+    widget.model = SimpleNamespace(admission_id=1, shift_date="date", orders=[1])
+    widget._snapshot_stale = True
+    _click(widget)
+    diagnostics.finish_if_orders_already_visible(widget)
+    assert changes == ["show"]
+    diagnostics.observe_visible_orders_snapshot(widget, {}, role="nurse", change_cursor=2)
+    assert changes == ["show", "orders"]
+    _click(widget)
+    widget.hide()
+    assert changes == ["show", "orders", "show", "orders"]
+
+
 def test_empty_but_ready_model_and_timeout_have_distinct_outcomes(visible_orders):
     widget, events = visible_orders
     widget.admission_id, widget.shift_date = 1, "date"

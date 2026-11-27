@@ -7,6 +7,11 @@ from rem_card.data.dto.remcard_dto import OrderDTO
 from rem_card.data.dto.remcard_dto import OrderStatus
 
 
+def can_save_order_draft(widget, has_drafts):
+    unknown = getattr(widget, "_draft_save_outcome_unknown", None)
+    return bool(has_drafts and not (callable(unknown) and unknown()))
+
+
 class OrderStateMixin:
     def _is_read_only(self) -> bool:
         """
@@ -14,12 +19,15 @@ class OrderStateMixin:
         В данной версии редактирование назначений врачом разрешено ВСЕГДА, 
         независимо от статуса пациента (в т.ч. при Исходе).
         """
-        return bool(self._forced_read_only or self._legacy_central_draft_detected)
+        return bool(
+            self._forced_read_only or self._legacy_central_draft_detected
+            or getattr(self, "_post_finalize_projection_pending", False)
+        )
 
     def set_forced_read_only(self, enabled: bool):
         self._forced_read_only = bool(enabled)
         if hasattr(self, "input_widget") and self.input_widget is not None:
-            self.input_widget.setEnabled(not self._forced_read_only and not self._legacy_central_draft_detected)
+            self.input_widget.setEnabled(not self._is_read_only())
         if hasattr(self, "table_view") and self.table_view is not None:
             self.table_view.viewport().update()
 

@@ -3,6 +3,7 @@
 from PySide6.QtWidgets import QHeaderView
 from rem_card.app.logger import logger
 from rem_card.services.order_service import OrderConflictError
+from rem_card.services.write_dispatch import service_write_failure_state
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 import sqlite3
 import time
@@ -76,7 +77,8 @@ class ChangeWriteCoordinationMixin:
     def _clear_soft_update_state(self):
         self._soft_update_timer.stop()
         self._soft_update_message = ""
-        self._set_refresh_status("")
+        if not getattr(getattr(self, "_orders_display_probe", None), "error_visible", False):
+            self._set_refresh_status("")
 
     @staticmethod
     def _is_foreign_key_error(exc: Exception) -> bool:
@@ -177,6 +179,12 @@ class ChangeWriteCoordinationMixin:
         )
 
     def _show_write_error(self, description: str, exc: Exception):
+        if description.startswith(("orders_finalize:", "orders_finalize_legacy:")) and service_write_failure_state(exc) == "unknown":
+            self._show_warning(
+                "Не удалось подтвердить сохранение назначений. Повторное сохранение заблокировано. "
+                "Проверьте лист после восстановления соединения и перезапуска программы."
+            )
+            return
         if isinstance(exc, OrderConflictError):
             self._show_warning(
                 "Назначения были изменены на другом рабочем месте. "

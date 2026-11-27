@@ -9,6 +9,8 @@ class ControlPanel(QWidget):
     def __init__(self, parent=None, orientation=Qt.Horizontal):
         super().__init__(parent)
         self.orientation = orientation
+        self._save_active = False
+        self._save_pending = False
         self.icon_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "icon")
         self.icon_dir = os.path.normpath(self.icon_dir)
         self.init_ui()
@@ -112,16 +114,32 @@ class ControlPanel(QWidget):
         if self.orientation == Qt.Vertical:
             self.layout.addStretch(1)
         
-        # По умолчанию кнопки неактивны
+        # Reserve enough width for both captions before the panel is shown.
+        self.set_save_active(True)
+        idle_width = self.btn_save.sizeHint().width()
+        self.set_save_pending(True)
+        self.btn_save.setFixedWidth(max(idle_width, self.btn_save.sizeHint().width()))
         self.set_save_active(False)
+        self.set_save_pending(False)
+        # По умолчанию кнопки неактивны
         self.set_clean_active(False)
         self.set_rollback_active(False)
         self.btn_templates.setEnabled(True)
 
     def set_save_active(self, active: bool):
         """Меняет состояние и иконку кнопки сохранения."""
+        self._save_active = bool(active)
+        self._update_save_button()
+
+    def set_save_pending(self, pending: bool):
+        self._save_pending = bool(pending)
+        self._update_save_button()
+
+    def _update_save_button(self):
+        active = self._save_active and not self._save_pending
+        self.btn_save.setText(" Сохранение" if self._save_pending else " Сохранить")
         self.btn_save.setEnabled(active)
-        icon_name = "savecard.png" if active else "nosave.png"
+        icon_name = "savecard.png" if active or self._save_pending else "nosave.png"
         icon_path = os.path.join(self.icon_dir, icon_name)
         self.btn_save.setIcon(QIcon(icon_path))
 
