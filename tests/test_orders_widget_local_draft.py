@@ -15,6 +15,7 @@ from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStat
 from rem_card.services.order_service import OrderConflictError, OrderService
 from rem_card.services.read_coordinator import OrdersContext
 from rem_card.ui.doctor_view.components.order_template_builder import build_orders_from_template
+from rem_card.ui.doctor_view.components.control_panel import ControlPanel
 from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 from rem_card.ui.shared.components.vital_settings_dialog import VitalSettingsDialog
 from rem_card.ui.shared.orders_model import OrdersModel
@@ -518,6 +519,59 @@ def test_save_submits_exactly_one_write_task():
         assert service.commit_calls == 1
     finally:
         widget.shutdown()
+
+
+def test_save_button_keeps_geometry_and_waits_for_current_projection():
+    widget, service = _make_widget()
+    control = ControlPanel()
+    control.resize(control.sizeHint())
+    control.layout.activate()
+    widget.draftStatusChanged.connect(control.set_save_active)
+    widget.draftSavePendingChanged.connect(control.set_save_pending)
+    control.btn_save.clicked.connect(widget.finalize_card)
+    requests = []
+    refresh = []
+    service.enqueue_write = lambda **request: requests.append(request)
+    widget.request_refresh = lambda **kwargs: refresh.append(kwargs)
+    service.commit_local_order_draft_for_refresh = lambda *_a, **_k: {
+        "order_id_map": {}, "committed_change_id": 18,
+    }
+    try:
+        widget._handle_cell_action(widget.model.index(0, 1), "orders_left_click", service.forbidden_cell_write)
+        widget.check_drafts()
+        original_geometry = control.btn_save.geometry()
+        neighbor_geometry = control.btn_clean_sheet.geometry()
+
+        control.btn_save.click()
+        widget.check_drafts()
+        control.layout.activate()
+        assert control.btn_save.text().strip() == "Сохранение"
+        assert not control.btn_save.isEnabled()
+        assert control.btn_save.geometry() == original_geometry
+        assert control.btn_clean_sheet.geometry() == neighbor_geometry
+        control.btn_save.click()
+        assert len(requests) == 1
+
+        request = requests[0]
+        request["on_success"](request["operation"]())
+        assert control.btn_save.text().strip() == "Сохранить"
+        assert not control.btn_save.isEnabled()
+        assert widget._is_read_only()
+        assert refresh[-1]["source"] == "post_finalize"
+
+        def apply(change_id):
+            return widget._apply_snapshot_data(
+                snapshot=_committed_snapshot_for_current_mark(widget, change_id=change_id),
+                admission_id=widget.admission_id, shift_date=widget.shift_date,
+            )
+
+        assert not apply(17)
+        assert widget._is_read_only()
+        assert apply(18)
+        assert not widget._is_read_only()
+    finally:
+        widget.shutdown()
+        control.deleteLater()
 
 
 def test_post_finalize_snapshot_emits_committed_orders_for_balance_before_refresh():

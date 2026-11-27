@@ -1320,11 +1320,14 @@ def test_outcome_release_monitor_checks_only_visible_due_rows(monkeypatch):
         beds.show()
         monitor.check()
         beds.patient_service.maybe_release_due_outcome_beds_async.assert_called_once()
-        beds.refresh_admissions.assert_called_once_with([7], queue_if_running=False)
+        beds.refresh_admissions.assert_not_called()
+        beds.patient_service.maybe_release_due_outcome_beds_async.call_args.kwargs["on_success"](1)
+        beds.refresh_admissions.assert_called_once_with([7])
         monitor.check()
         assert beds.refresh_admissions.call_count == 1
         clock[0] += 15
         monitor.check()
+        beds.patient_service.maybe_release_due_outcome_beds_async.call_args.kwargs["on_success"](0)
         assert beds.refresh_admissions.call_count == 2
         sector._outcome_timer_status_dto = None  # outcome cancelled by another PC
         clock[0] += 15

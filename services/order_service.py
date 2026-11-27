@@ -238,18 +238,16 @@ class OrderService:
         placeholders = ",".join("?" for _ in normalized_ids)
         cursor.execute(
             f"""
-            SELECT a.*
-            FROM administrations a
-            WHERE a.order_id IN ({placeholders})
-              AND DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
-              AND a.is_committed = 1
-              AND a.id = (
-                  SELECT MAX(a2.id)
-                  FROM administrations a2
-                  WHERE a2.order_id = a.order_id
-                    AND DATETIME(a2.planned_time) = DATETIME(a.planned_time)
-                    AND a2.is_committed = 1
-              )
+            SELECT *
+            FROM administrations
+            WHERE id IN (
+                SELECT MAX(id)
+                FROM administrations
+                WHERE order_id IN ({placeholders})
+                  AND DATETIME(planned_time) >= DATETIME(?) AND DATETIME(planned_time) < DATETIME(?)
+                  AND is_committed = 1
+                GROUP BY order_id, DATETIME(planned_time)
+            )
             """,
             (*normalized_ids, start.isoformat(), end.isoformat()),
         )
@@ -712,12 +710,20 @@ class OrderService:
         baseline_admin_map: Mapping[tuple, AdministrationDTO],
         expected_revisions=None,
         expected_active_order_ids: Optional[Sequence[int]] = None,
-    ) -> dict[int, int]:
+        return_change_cursor: bool = False,
+    ) -> dict[int, int] | tuple[dict[int, int], int]:
         """Apply the doctor's in-memory draft as one central transaction.
 
         Intermediate clicks never reach SQLite.  Only the final effective order
         list and the final shape of changed cells are persisted here.
         """
+        normalized_baseline, normalized_desired, normalized_dirty = self._normalize_local_draft_admins(
+            admin_map,
+            dirty_admin_keys,
+            baseline_admin_map,
+        )
+        dirty_order_ids = {order_id for order_id, _ in normalized_dirty}
+
         with self.dao.db.remcard_transaction(source="orders_commit_local_draft") as cursor:
             start, end = self._resolve_shift_bounds(cursor, admission_id, shift_date)
             self._assert_order_revisions(cursor, expected_revisions)
@@ -738,11 +744,8 @@ class OrderService:
                 current_orders,
             )
 
-            current_admins = self._fetch_latest_committed_admins(cursor, existing_ids, start, end)
-            normalized_baseline, normalized_desired, normalized_dirty = self._normalize_local_draft_admins(
-                admin_map,
-                dirty_admin_keys,
-                baseline_admin_map,
+            current_admins = self._fetch_latest_committed_admins(
+                cursor, dirty_order_ids.intersection(existing_ids), start, end,
             )
             temporary_chain_groups = self._collect_temporary_admin_chains(
                 normalized_dirty,
@@ -765,7 +768,6 @@ class OrderService:
                 temporary_chain_map,
             )
 
-            dirty_order_ids = {int(key[0]) for key in normalized_dirty}
             transfusion_ids = []
             for order in effective_orders:
                 local_id = int(order.id)
@@ -784,6 +786,9 @@ class OrderService:
                 self._domain_service.sync_transfusions_for_admission(
                     cursor, int(admission_id), order_ids=transfusion_ids,
                 )
+            if return_change_cursor:
+                cursor.execute("SELECT COALESCE(MAX(id), 0) FROM change_log WHERE admission_id = ?", (admission_id,))
+                return order_id_map, int(cursor.fetchone()[0])
             return order_id_map
 
     def add_order(self, dto: OrderDTO):

@@ -256,13 +256,16 @@ class DoctorMainWidget(QWidget):
             for source in force_sources
             for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
         )
+        remcard_widget = getattr(self, "remcard_widget", None)
+        layout = getattr(remcard_widget, "layout_manager", None) if _qt_is_valid(remcard_widget) else None
+        beds_widget = getattr(layout, "beds_selection_widget", None) if layout is not None else None
+        if beds_widget is not None and _qt_is_valid(beds_widget):
+            from rem_card.ui.shared.w1_bed_sync import require_beds_change
+            require_beds_change(beds_widget, payload.get("last_change_id"), reset=payload.get("reason") == "cursor_moved_backwards")
         if forced_refresh or payload.get("forced") or source_requires_full:
             self._refresh_beds_if_available()
             return
 
-        remcard_widget = getattr(self, "remcard_widget", None)
-        layout = getattr(remcard_widget, "layout_manager", None) if _qt_is_valid(remcard_widget) else None
-        beds_widget = getattr(layout, "beds_selection_widget", None) if layout is not None else None
         admission_ids = self._admission_ids_from_payload(payload)
         if (
             admission_ids

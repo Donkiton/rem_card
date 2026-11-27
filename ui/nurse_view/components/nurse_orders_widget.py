@@ -1396,16 +1396,25 @@ class NurseOrdersWidget(QWidget):
         worker = self.sender()
         if worker is not None and worker is not self._snapshot_worker:
             return
-        finish_orders_display(self, "cancelled" if isinstance(exc, OrdersRefreshCancelled) else "error")
         self._clear_soft_update_state()
-        self._set_orders_load_state("error")
         if isinstance(exc, OrdersRefreshCancelled):
             orders_snapshot_recovery(self, role="nurse").recover(
                 dict(self._active_snapshot_worker_state or {}), self._snapshot_worker,
             )
             logger.info("[NurseOrdersWidget] Orders snapshot load cancelled: %s", exc)
             return
+        finish_orders_display(self, "error")
+        self._set_orders_load_state("error")
         logger.warning("[NurseOrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)
+
+    def _on_orders_display_timeout(self):
+        worker = self._snapshot_worker
+        if self._is_closing or worker is None or not worker.isRunning():
+            return
+        retired = self._detach_snapshot_worker(worker, state="detached", reason="display_timeout")
+        self._snapshot_seq += 1
+        self._snapshot_stale = True
+        orders_snapshot_recovery(self, role="nurse").recover(retired, worker)
 
     def _on_snapshot_finished(self):
         worker = self.sender()

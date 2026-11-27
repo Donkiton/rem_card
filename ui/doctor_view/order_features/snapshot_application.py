@@ -274,6 +274,7 @@ class SnapshotApplicationMixin:
             scroll_value,
         )
         self._apply_full_snapshot_to_model(snapshot)
+        self._post_finalize_projection_pending = False
         legacy_preflight_detected = bool(
             snapshot.get("only_committed", False)
             and snapshot.get("has_any_draft", False)
@@ -474,18 +475,16 @@ class SnapshotApplicationMixin:
         worker = self.sender()
         if worker is not None and worker is not self._snapshot_worker:
             return
-        finish_orders_display(self, "cancelled" if isinstance(exc, OrdersRefreshCancelled) else "error")
+        if self._active_request_source == "post_finalize":
+            try:
+                context_hash = self._build_orders_context().hash()
+            except Exception:
+                context_hash = None
+            self._post_finalize_retry_after_cancel = True
+            self._post_finalize_retry_context_hash = context_hash
+            logger.info("[OrdersWidget] post_finalize snapshot will be retried: %s", exc)
+            return
         if isinstance(exc, OrdersRefreshCancelled):
-            request_source = str(self._active_request_source or "refresh").strip().lower()
-            if request_source == "post_finalize":
-                try:
-                    context_hash = self._build_orders_context().hash()
-                except Exception:
-                    context_hash = None
-                self._post_finalize_retry_after_cancel = True
-                self._post_finalize_retry_context_hash = context_hash
-                logger.info("[OrdersWidget] post_finalize snapshot load cancelled; retry will be scheduled: %s", exc)
-                return
             self._clear_soft_update_state()
             orders_snapshot_recovery(self, role="doctor").recover(
                 dict(self._active_snapshot_worker_state or {}), self._snapshot_worker,
@@ -493,6 +492,7 @@ class SnapshotApplicationMixin:
             logger.info("[OrdersWidget] Orders snapshot load cancelled: %s", exc)
             return
         self._clear_soft_update_state()
+        finish_orders_display(self, "error")
         logger.warning("[OrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)
 
     def _on_post_finalize_snapshot_watchdog(self):
@@ -556,7 +556,6 @@ class SnapshotApplicationMixin:
         self._snapshot_seq += 1
         self._clear_soft_update_state()
         if request_source == "post_finalize" and context is not None:
-            self._set_refresh_status("Сохранено, данные обновляются...")
             self._schedule_post_finalize_retry(context_hash=context_hash)
         else:
             orders_snapshot_recovery(self, role="doctor").recover(retired, worker)
@@ -593,7 +592,7 @@ class SnapshotApplicationMixin:
                 retries=self._post_finalize_retry_count,
                 context_hash=context_hash,
             )
-            self._set_refresh_status("Сохранено. Не удалось обновить список назначений автоматически.")
+            self._set_refresh_status("Назначения сохранены. Чтобы обновить лист, откройте вкладку повторно.")
             return
         self._post_finalize_retry_count += 1
         retry_index = self._post_finalize_retry_count
@@ -665,7 +664,6 @@ class SnapshotApplicationMixin:
                 context_hash = context_hash or context.hash()
             except Exception:
                 context = None
-            self._set_refresh_status("Сохранено, данные обновляются...")
             self._schedule_post_finalize_retry(context_hash=context_hash)
             return
         if self._snapshot_pending:

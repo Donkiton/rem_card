@@ -24,6 +24,44 @@ from rem_card.ui.shared.lightweight_w1_shell import LightweightW1Shell  # noqa: 
 from rem_card.ui.shared.remcard_layout import RemCardLayoutManager  # noqa: E402
 
 
+def test_both_bed_lists_keep_committed_admission_until_newer_removal():
+    from rem_card.ui.doctor_view.components.beds_selection_widget import BedsSelectionWidget
+    from rem_card.ui.nurse_view.components.nurse_beds_selection_widget import NurseBedsSelectionWidget
+    from rem_card.ui.shared.w1_bed_sync import require_beds_change, show_committed_admission
+
+    app = QApplication.instance() or QApplication([])
+    bed = {
+        "current_admission_id": 19, "full_name": "Тестовый пациент", "history_number": "QA",
+        "bed_number": 2, "admission_datetime": "2026-10-10 13:30", "diagnosis_text": "",
+        "patient_age": 40, "patient_months": None, "patient_age_unit": "years",
+        "patient_gender": "male", "birth_date": None, "diagnosis_code": "", "current_status": None,
+    }
+    for widget_type in (BedsSelectionWidget, NurseBedsSelectionWidget):
+        beds = widget_type(SimpleNamespace(), SimpleNamespace(), auto_initial_refresh=False)
+        beds.refresh = MagicMock()
+        show_committed_admission(beds, {"bed": bed, "change_id": 12})
+        assert beds._last_ordered_row_ids == (19,)
+        beds.refresh.assert_called_once()
+        if widget_type is BedsSelectionWidget:
+            signal = []
+            beds.patient_selected.connect(lambda patient, action: signal.append((patient.id, action)))
+            beds._rows_by_admission_id[19].sector_4v.btn_new_card.click()
+            assert signal == [(19, "create")]
+        beds._apply_beds_snapshot({"patients": [], "change_id": 11})
+        assert beds._last_ordered_row_ids == (19,)
+        beds._apply_beds_snapshot({"patients": [], "change_id": 13})
+        assert not beds._last_ordered_row_ids
+        beds._apply_beds_snapshot({"patients": [], "change_id": 12})
+        assert not beds._last_ordered_row_ids
+        require_beds_change(beds, 2, reset=True)
+        beds._apply_beds_snapshot({"patients": [], "change_id": 120, "_read_epoch": 0})
+        assert beds._beds_change_floor == 2
+        show_committed_admission(beds, {"bed": bed, "change_id": 3})
+        assert beds._last_ordered_row_ids == (19,)
+        beds.deleteLater()
+    app.processEvents()
+
+
 class _SignalProbe:
     def disconnect(self, _slot):
         return None

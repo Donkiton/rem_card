@@ -8,6 +8,7 @@ from .patient_bed_row import PatientBedRow
 from rem_card.app.logger import logger
 from rem_card.ui.shared.background_settings import get_active_background_path
 from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
+from rem_card.ui.shared.w1_bed_sync import accept_beds_snapshot, load_beds_snapshot
 from rem_card.ui.shared.w1_beds_signature import build_w1_bed_row_signature
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.ui.shared.pdf_report_jobs import ReportDataWorker, report_jobs, shutdown_report_jobs
@@ -281,7 +282,7 @@ class BedsSelectionWidget(QWidget):
 
     def _load_beds_snapshot(self):
         if self.remcard_service and hasattr(self.remcard_service, "build_beds_snapshot"):
-            return self.remcard_service.build_beds_snapshot()
+            return load_beds_snapshot(self, self.remcard_service.build_beds_snapshot)
 
         active_patients = self.patient_service.get_active_patients()
         now = datetime.datetime.now()
@@ -304,7 +305,7 @@ class BedsSelectionWidget(QWidget):
     def _load_beds_partial_snapshot(self, admission_ids):
         ids = sorted({int(adm_id) for adm_id in (admission_ids or []) if adm_id is not None})
         if self.remcard_service and hasattr(self.remcard_service, "build_beds_partial_snapshot"):
-            return self.remcard_service.build_beds_partial_snapshot(ids)
+            return load_beds_snapshot(self, self.remcard_service.build_beds_partial_snapshot, ids)
 
         getter = getattr(self.patient_service, "get_active_patients_by_ids", None)
         if callable(getter):
@@ -340,6 +341,8 @@ class BedsSelectionWidget(QWidget):
             return
         from rem_card.ui.shared.window_transition import defer_transition_update
         if defer_transition_update(self, 'beds', lambda: self._apply_beds_snapshot(snapshot)):
+            return
+        if not accept_beds_snapshot(self, snapshot):
             return
         self._refresh_apply_count += 1
         active_patients = list(snapshot.get("patients") or [])
@@ -425,6 +428,8 @@ class BedsSelectionWidget(QWidget):
 
     def _apply_beds_partial_snapshot(self, snapshot):
         if self._is_closing:
+            return
+        if not accept_beds_snapshot(self, snapshot):
             return
         if not snapshot or not snapshot.get("partial"):
             self._refresh_pending = True

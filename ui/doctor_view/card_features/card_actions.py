@@ -7,6 +7,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtCore import Qt
 from rem_card.ui.shared.orders_balance_adapter import apply_current_order_mark_overrides
 from rem_card.ui.shared.orders_balance_adapter import apply_orders_widget_mark_overrides
+from rem_card.ui.doctor_view.order_features.order_state import can_save_order_draft
 from datetime import datetime
 from rem_card.app.logger import logger
 from rem_card.app.foreground_activity import mark_foreground_activity
@@ -148,16 +149,6 @@ class DoctorCardActionsMixin:
             return
 
         target_date = target_date or datetime.now()
-        start, _ = self.service.get_day_period(target_date)
-        patient = self.service.get_patient(self.admission_id) if not planned else None
-        adm_dt = patient.admission_datetime if patient else None
-        vital_time = start
-        if patient and patient.admission_datetime and start < patient.admission_datetime:
-            vital_time = patient.admission_datetime
-            
-        from rem_card.data.dto.remcard_dto import VitalDTO
-        dto = VitalDTO(id=None, admission_id=self.admission_id, timestamp=vital_time,
-                       sys=None, dia=None, pulse=None, temp=None, spo2=None, rr=None, cvp=None)
         admission_id = self.admission_id
         service = self.service
         ensure_guard = getattr(self, "_should_ensure_initial_status_for_date", None)
@@ -167,9 +158,18 @@ class DoctorCardActionsMixin:
         def operation():
             if planned:
                 return service.create_plan_card(admission_id, target_date, requested_at=requested_at)
+            create = getattr(service, "create_empty_card", None)
+            if callable(create):
+                return create(admission_id, target_date, ensure_initial_status=should_ensure_initial_status)
+
+            from rem_card.data.dto.remcard_dto import VitalDTO
+            start, _ = service.get_day_period(target_date)
+            patient = service.get_patient(admission_id)
+            adm_dt = patient.admission_datetime if patient else None
+            vital_time = max(start, adm_dt) if adm_dt is not None else start
             if admission_id and service.status_service and should_ensure_initial_status:
                 service.status_service.ensure_initial_status(admission_id, start, adm_dt)
-            service.add_vital(dto, shift_date=target_date, force=True)
+            service.add_vital(VitalDTO(id=None, admission_id=admission_id, timestamp=vital_time), shift_date=target_date, force=True)
             return True
 
         def on_success(_result):
@@ -195,7 +195,7 @@ class DoctorCardActionsMixin:
                 ("Плановая карта успешно создана. Вы можете заполнить её заранее."
                  if _result.get("card_created", True) else "Плановая карта открыта.")
                 if planned
-                else "Карта успешно создана. Вы можете приступить к её заполнению."
+                else ("Карта уже создана." if _result is False else "Карта успешно создана. Вы можете приступить к её заполнению.")
             )
             CustomMessageBox.information(self, "Создание карты", message)
 
@@ -429,7 +429,7 @@ class DoctorCardActionsMixin:
                         ow.ensure_ready_for_show()
                 finally:
                     ow.blockSignals(False)
-                self.controls.set_save_active(ow.has_drafts())
+                self.controls.set_save_active(can_save_order_draft(ow, ow.has_drafts()))
                 self.controls.set_rollback_active(ow.has_drafts())
                 self.controls.set_clean_active(ow.has_administrations())
                 self.controls.set_clear_active(ow.has_orders())
@@ -655,7 +655,7 @@ class DoctorCardActionsMixin:
                 is_draft = ow.has_drafts()
 
                 # Проверяем статусы кнопок управления
-                self.controls.set_save_active(is_draft)
+                self.controls.set_save_active(can_save_order_draft(ow, is_draft))
                 self.controls.set_rollback_active(is_draft)
                 self.controls.set_clean_active(ow.has_administrations())
                 self.controls.set_clear_active(ow.has_orders())

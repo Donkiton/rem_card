@@ -1,5 +1,6 @@
 from datetime import datetime
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,7 @@ def recovery_widget(monkeypatch):
             self.release = threading.Event()
             self.block_first = False
             self.cancel_count = 0
+            self.read_error = OrdersRefreshCancelled
             self.ignore_cancel = False
             self.active = 0
             self.max_active = 0
@@ -70,7 +72,7 @@ def recovery_widget(monkeypatch):
                     self.entered.set()
                     assert self.release.wait(3)
                 if index <= self.cancel_count or (not self.ignore_cancel and options["cancel_check"]()):
-                    raise OrdersRefreshCancelled("synthetic cancelled orders read")
+                    raise self.read_error("synthetic orders read failure")
                 return {"admission_id": context.admission_id, "shift_date": context.shift_date, "orders": []}
             finally:
                 self.active -= 1
@@ -150,6 +152,35 @@ def test_controlled_cancellation_recovers_with_a_new_generation(recovery_widget,
     until(lambda: bool(applied))
     assert len(backend.calls) == 2 and backend.max_active == 1
     assert widget._snapshot_seq == 2
+
+
+def test_read_error_after_commit_retries_without_another_write(recovery_widget):
+    widget, backend, applied = recovery_widget("doctor")
+    backend.cancel_count = 1
+    backend.read_error = RuntimeError
+    widget._request_snapshot(source="post_finalize", priority="HIGH")
+    until(lambda: bool(applied))
+    assert len(backend.calls) == 2
+    assert all(call[1]["source"] == "post_finalize" for call in backend.calls)
+
+
+def test_nurse_display_timeout_cancels_old_generation_until_worker_releases(recovery_widget):
+    from rem_card.ui.shared.orders_display_diagnostics import begin_orders_display
+
+    widget, backend, applied = recovery_widget("nurse")
+    backend.block_first = True
+    begin_orders_display(widget, SimpleNamespace(_orders_click_started_at=time.perf_counter()), role="nurse")
+    widget._request_snapshot(source="user", priority="HIGH")
+    until(backend.entered.is_set)
+    old_generation = widget._snapshot_seq
+    widget._orders_display_probe.timer.timeout.emit()
+    assert widget._snapshot_worker is None and widget._orders_load_state == "error"
+    widget._request_snapshot(source="user", priority="HIGH")
+    pump()
+    assert len(backend.calls) == 1
+    backend.release.set()
+    until(lambda: bool(applied))
+    assert widget._snapshot_seq > old_generation and backend.max_active == 1
 
 
 @pytest.mark.parametrize("role", ["doctor", "nurse"])

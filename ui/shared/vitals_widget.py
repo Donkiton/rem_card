@@ -10,6 +10,7 @@ from ...data.dto.remcard_dto import VitalDTO
 from rem_card.ui.styles.context_menu_style import install_russian_line_edit_context_menu
 from .hybrid_shift_time_picker import HybridShiftTimePicker
 from rem_card.services.shift_service import ShiftService
+from rem_card.services.vital_service import CardVitalStatusError
 
 
 class CommaDotDoubleValidator(QDoubleValidator):
@@ -225,18 +226,6 @@ class VitalsWidget(QWidget):
 
     def _time_context_changed(self) -> bool:
         return self._make_time_context_key(self.admission_id, self.shift_date) != self._time_context_key
-
-    def _is_status_transition_minute(self, status_event, current_dt: datetime) -> bool:
-        event_start = getattr(status_event, "start_time", None)
-        if not event_start:
-            return False
-        return self._minute_floor(event_start) == self._minute_floor(current_dt)
-
-    def _should_block_inactive_status_input(self, status_service, status_event, current_dt: datetime) -> bool:
-        if self._allow_inactive_status_input:
-            return False
-        is_active = status_service.is_active_at(self.admission_id, current_dt) if status_service else True
-        return not is_active and not self._is_status_transition_minute(status_event, current_dt)
 
     def _set_time_from_service(self, time_value: str):
         self._programmatic_time_change = True
@@ -592,28 +581,11 @@ class VitalsWidget(QWidget):
         current_dt = self.service.resolve_datetime(current_time, self.shift_date)
         current_minute = self._minute_floor(current_dt)
         
-        if self.patient and self.patient.admission_datetime:
-            if current_minute < self._minute_floor(self.patient.admission_datetime):
-                CustomMessageBox.warning(self, "Внимание", f"Пациент поступил в {self.patient.admission_datetime.strftime('%d.%m %H:%M')}. Ввод данных ранее этого времени невозможен.")
+        patient = getattr(self, "patient", None)
+        if patient and patient.admission_datetime:
+            if current_minute < self._minute_floor(patient.admission_datetime):
+                CustomMessageBox.warning(self, "Внимание", f"Пациент поступил в {patient.admission_datetime.strftime('%d.%m %H:%M')}. Ввод данных ранее этого времени невозможен.")
                 return
-
-        status_service = getattr(self.service, "status_service", None)
-        status_event = status_service.get_event_at(self.admission_id, current_dt) if status_service else None
-        if status_event and status_event.status.is_outcome():
-            if current_minute > self._minute_floor(status_event.start_time):
-                outcome_name = "переведен" if status_event.status == status_event.status.TRANSFERRED else "умер"
-                CustomMessageBox.warning(self, "Внимание", f"Пациент {outcome_name} в {status_event.start_time.strftime('%H:%M')}. Ввод данных позже этого времени невозможен.")
-                return
-
-        if self._should_block_inactive_status_input(status_service, status_event, current_dt):
-            CustomMessageBox.warning(self, "Внимание", "Пациент в операционной или вне отделения. Ввод витальных функций невозможен.")
-            next_start = status_service.get_next_active_event_start(self.admission_id, current_dt) if status_service else None
-            if next_start:
-                real_now_limit = self._future_input_limit()
-                if real_now_limit is not None and next_start > real_now_limit:
-                    next_start = real_now_limit
-                self._set_time_from_service(self.service.now_time(next_start, self.shift_date))
-            return
 
         now_limit = self._future_input_limit()
         if now_limit is not None and current_dt > now_limit:
@@ -628,8 +600,7 @@ class VitalsWidget(QWidget):
         try:
             dto = self._vital_dto_from_inputs(current_dt)
             has_real_data = any([dto.sys, dto.dia, dto.pulse, dto.temp, dto.spo2, dto.rr, dto.cvp is not None])
-            expected_revision = self._expected_revision_for_minute(current_dt)
-            self._enqueue_vital_save(dto, current_time, expected_revision, has_real_data, context, generation)
+            self._enqueue_vital_save(dto, current_time, has_real_data, context, generation)
         except ValueError as e:
             CustomMessageBox.warning(self, "Ошибка валидации", str(e))
 
@@ -666,8 +637,12 @@ class VitalsWidget(QWidget):
             raise ValueError(f"Значение {label} должно быть в диапазоне от {min_v} до {max_v}")
         return value
 
-    def _enqueue_vital_save(self, dto, current_time, expected_revision, has_real_data, context, generation):
+    def _enqueue_vital_save(self, dto, current_time, has_real_data, context, generation):
         service, shift_date, force = self._capture_writer(), self.shift_date, self._force_vital_status
+        allow_inactive = self._allow_inactive_status_input
+        target_minute = self._minute_floor(dto.timestamp)
+        cached_vitals = None if self._cached_vitals is None else tuple(self._cached_vitals)
+        loaded_vitals = None
         input_texts = {field: field.text() for field in (self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp)}
         self._pending_contexts.add(context)
         self.update_undo_button_state()
@@ -699,6 +674,8 @@ class VitalsWidget(QWidget):
                 next_hour = self.service.next_full_hour(current_time, self.shift_date)
                 self._set_time_from_service(next_hour)
 
+            if self._cached_vitals is None and loaded_vitals is not None:
+                self._cached_vitals = loaded_vitals
             self._cache_saved_vital(dto)
             self.update_undo_button_state()
             self.vital_changed.emit(
@@ -712,36 +689,46 @@ class VitalsWidget(QWidget):
             self.update_undo_button_state()
 
         def on_error(exc):
-            from ...app.logger import logger
-            logger.error("Error saving vital values: %s", exc, exc_info=True)
             self._pending_contexts.discard(context)
             self.update_undo_button_state()
+            if isinstance(exc, CardVitalStatusError):
+                if self._write_context() == context and generation == self._context_generation:
+                    CustomMessageBox.warning(self, "Внимание", str(exc))
+                    if (
+                        exc.next_active_at is not None and self.time_edit.value_str() == current_time
+                        and self._write_context() == context and generation == self._context_generation
+                    ):
+                        limit = self._future_input_limit()
+                        next_start = min(exc.next_active_at, limit) if limit is not None else exc.next_active_at
+                        self._set_time_from_service(self.service.now_time(next_start, self.shift_date))
+                return
+            from ...app.logger import logger
+            logger.error("Error saving vital values: %s", exc, exc_info=True)
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось сохранить витальные функции: {exc}")
+
+        def operation():
+            nonlocal loaded_vitals
+            vitals = cached_vitals
+            if vitals is None:
+                loaded_vitals = list(service.get_vitals(dto.admission_id, shift_date) or [])
+                vitals = loaded_vitals
+            expected_revision = next((
+                int(getattr(vital, "revision", 0) or 0)
+                for vital in vitals if VitalsWidget._minute_floor(vital.timestamp) == target_minute
+            ), None)
+            add_from_card = getattr(service, "add_vital_from_card", None)
+            if callable(add_from_card):
+                return add_from_card(
+                    dto, shift_date, force=force, allow_inactive=allow_inactive, expected_revision=expected_revision,
+                )
+            return service.add_vital(dto, shift_date, force=force, expected_revision=expected_revision)
 
         try:
             service.enqueue_write(
                 description=f"save_vital:{dto.admission_id}",
-                operation=lambda: service.add_vital(
-                    dto,
-                    shift_date,
-                    force=force,
-                    expected_revision=expected_revision,
-                ),
+                operation=operation,
                 on_success=on_success,
                 on_error=on_error,
             )
         except Exception as exc:
             on_error(exc)
-
-    def _expected_revision_for_minute(self, timestamp):
-        if not self.service or not self.admission_id:
-            return None
-        target = self._minute_floor(timestamp)
-        vitals = self._cached_vitals
-        if vitals is None:
-            vitals = self.service.get_vitals(self.admission_id, self.shift_date)
-            self._cached_vitals = list(vitals or [])
-        for vital in vitals:
-            if self._minute_floor(vital.timestamp) == target:
-                return int(getattr(vital, "revision", 0) or 0)
-        return None

@@ -3,7 +3,7 @@ import os
 from functools import partial
 from math import ceil
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QFrame,
@@ -60,6 +60,8 @@ def _current_role() -> str:
 
 
 class PatientBedManagementWidget(QWidget):
+    admissionCommitted = Signal(object)
+
     def __init__(self, db_manager, data_service=None, parent=None, *, preparing=False):
         super().__init__(parent)
         self.db_manager = db_manager
@@ -73,6 +75,7 @@ class PatientBedManagementWidget(QWidget):
         self._refresh_pending = False
         self._beds_snapshot_by_bed = {}
         self._pending_side_card_update = None
+        self._confirmed_new_beds = {}
 
         self.bed_widgets = []
         self._init_ui()
@@ -265,6 +268,16 @@ class PatientBedManagementWidget(QWidget):
             if _qt_is_valid(dialog):
                 dialog.deleteLater()
             return
+        receipt = getattr(dialog, "committed_admission", None)
+        if not self._is_closing and int(result) == int(PatientForm.Accepted) and receipt is not None:
+            row = receipt["bed"]
+            expected_admission_id = int(row["current_admission_id"])
+            self._confirmed_new_beds[int(bed_number)] = row
+            rows = dict(self._beds_snapshot_by_bed)
+            rows[int(bed_number)] = row
+            self._pending_side_card_update = (int(bed_number), expected_admission_id)
+            self._apply_bed_status_rows(rows.values(), from_receipt=True)
+            self.admissionCommitted.emit(receipt)
         self._on_patient_form_finished(result, int(bed_number), expected_admission_id)
         if _qt_is_valid(dialog):
             dialog.deleteLater()
@@ -493,7 +506,7 @@ class PatientBedManagementWidget(QWidget):
         if self._is_closing or self.patient_bed_service is None:
             return
         worker = self._refresh_worker
-        if worker is not None and worker.isRunning():
+        if worker is not None:
             self._refresh_pending = True
             return
         self._refresh_pending = False
@@ -508,11 +521,18 @@ class PatientBedManagementWidget(QWidget):
     def _load_bed_status_rows(self):
         return self.patient_bed_service.get_beds_snapshot()
 
-    def _apply_bed_status_rows(self, rows):
+    def _apply_bed_status_rows(self, rows, *, from_receipt=False):
         if self._is_closing:
             return
         rows = list(rows or [])
         by_bed = {int(row["bed_number"]): row for row in rows}
+        if not from_receipt:
+            for bed_number, confirmed in tuple(self._confirmed_new_beds.items()):
+                observed = by_bed.get(bed_number)
+                if observed is None or int(observed["bed_revision"]) < int(confirmed["bed_revision"]):
+                    by_bed[bed_number] = confirmed
+                else:
+                    del self._confirmed_new_beds[bed_number]
         self._beds_snapshot_by_bed = by_bed
 
         for bed_widget in self.bed_widgets:
@@ -539,8 +559,8 @@ class PatientBedManagementWidget(QWidget):
             pending_row = by_bed.get(int(bed_number))
             if pending_row is None:
                 self.side_card.update_info(int(bed_number), None, None)
-            else:
-                self._update_side_card_from_snapshot(bed_number, expected_admission_id=expected_admission_id)
+            elif not self._update_side_card_from_snapshot(bed_number, expected_admission_id=expected_admission_id):
+                self._update_side_card_from_snapshot(bed_number)
             current_id = self._row_admission_id(pending_row)
             logger.info(
                 "patient_form_refresh_end role=%s bed=%s admission_id=%s current_admission_id=%s",

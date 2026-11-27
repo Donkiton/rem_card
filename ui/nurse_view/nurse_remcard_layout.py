@@ -648,6 +648,7 @@ class NurseRemCardLayoutManager(QWidget):
         if not self.remcard_service:
             return None
         from rem_card.ui.patient_bed_management.management_widget import PatientBedManagementWidget
+        from rem_card.ui.shared.w1_bed_sync import bind_admission_commits
 
         db_manager = self.remcard_service.orders_dao.db
         self.journal_widget = PatientBedManagementWidget.create(
@@ -656,6 +657,7 @@ class NurseRemCardLayoutManager(QWidget):
             parent=self.journal_view,
         )
         self._journal_layout.addWidget(self.journal_widget)
+        bind_admission_commits(self.journal_widget, self.beds_selection_widget)
         return self.journal_widget
 
     def prewarm_journal_widget(self):
@@ -909,7 +911,7 @@ class NurseRemCardLayoutManager(QWidget):
             tab_name=str(tab_name or ""),
             role="nurse",
         )
-        if normalized_source == "click":
+        if normalized_source == "click" and tab_name != "Назначения":
             loading_key = show_app_loading(
                 self,
                 f"Открытие вкладки: {tab_name}",

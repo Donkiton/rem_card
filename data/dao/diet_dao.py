@@ -735,15 +735,17 @@ class OralIntakeDAO:
             )
             return int(cur.rowcount or 0)
 
-    def clear_events(self, admission_id: int, before: Optional[datetime] = None) -> int:
+    def clear_events(self, admission_id: int, before: Optional[datetime] = None, *, cursor=None) -> int:
+        if cursor is None:
+            with self.db.remcard_transaction(source="oral_intake_doctor_clear") as cur:
+                return self.clear_events(admission_id, before=before, cursor=cur)
         params: list = [int(admission_id)]
         time_clause = ""
         if before is not None:
             time_clause = " AND DATETIME(event_time) < DATETIME(?)"
             params.append(_dt_to_db(before))
-        with self.db.remcard_transaction(source="oral_intake_doctor_clear") as cur:
-            cur.execute(f"DELETE FROM oral_intake_events WHERE admission_id = ?{time_clause}", tuple(params))
-            return int(cur.rowcount or 0)
+        cursor.execute(f"DELETE FROM oral_intake_events WHERE admission_id = ?{time_clause}", tuple(params))
+        return int(cursor.rowcount or 0)
 
     def get_totals(self, admission_id: int, start: datetime, end: datetime, current_time: datetime) -> dict:
         rows = self.db.fetch_all_remcard(

@@ -4,6 +4,7 @@ import time
 from PySide6.QtCore import QEvent, QObject, QTimer
 
 from rem_card.app.local_metrics import record_metric
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 
 
 class _OrdersDisplayProbe(QObject):
@@ -11,6 +12,8 @@ class _OrdersDisplayProbe(QObject):
         super().__init__(widget)
         self.role = role
         self.started_at = None
+        self.loading_key = None
+        self.error_visible = False
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self._timed_out)
@@ -19,14 +22,39 @@ class _OrdersDisplayProbe(QObject):
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Type.Hide:
             self.finish("cancelled")
+            self.clear_error()
         return False
 
     def _timed_out(self):
         self.finish("timeout")
+        self.show_error()
+        timeout = getattr(self.parent(), "_on_orders_display_timeout", None)
+        if callable(timeout):
+            timeout()
+
+    def show_error(self):
+        widget = self.parent()
+        set_state = getattr(widget, "_set_orders_load_state", None)
+        if callable(set_state):
+            set_state("error")
+        else:
+            set_status = getattr(widget, "_set_refresh_status", None)
+            if callable(set_status):
+                self.error_visible = True
+                set_status("Не удалось загрузить назначения. Откройте вкладку повторно.")
+
+    def clear_error(self):
+        if self.error_visible:
+            self.error_visible = False
+            self.parent()._set_refresh_status("")
 
     def start(self, started_at):
         self.finish("superseded")
+        self.clear_error()
         self.started_at = started_at
+        self.loading_key = show_app_loading(
+            self.parent(), "Загрузка назначений…", key=f"orders-display:{id(self)}",
+        )
         self.timer.start(10_000)
 
     def finish(self, status, *, source=None, change_cursor=None, trace_id=None):
@@ -34,6 +62,9 @@ class _OrdersDisplayProbe(QObject):
         if started_at is None:
             return
         self.timer.stop()
+        if self.loading_key is not None:
+            hide_app_loading(self.parent(), self.loading_key)
+            self.loading_key = None
         record_metric(
             "orders_click_to_data_ms", round((time.perf_counter() - started_at) * 1000, 3),
             role=self.role, status=status, source=source, change_cursor=change_cursor,
@@ -55,7 +86,12 @@ def begin_orders_display(widget, tabs, *, role):
 def finish_orders_display(widget, status):
     probe = getattr(widget, "_orders_display_probe", None)
     if probe is not None:
+        was_loading = probe.started_at is not None
         probe.finish(status)
+        if was_loading and status == "error":
+            probe.show_error()
+        elif status == "cancelled":
+            probe.clear_error()
 
 
 def finish_if_orders_already_visible(widget):
@@ -63,6 +99,8 @@ def finish_if_orders_already_visible(widget):
     if probe is None or probe.started_at is None:
         return
     if getattr(widget, "_orders_load_state", None) in {"idle", "loading", "error"}:
+        return
+    if getattr(widget, "_snapshot_worker", None) is not None:
         return
     model = widget.model
     if (model is not None and model.admission_id == widget.admission_id and model.shift_date == widget.shift_date
@@ -83,5 +121,6 @@ def observe_visible_orders_snapshot(widget, snapshot, *, role, change_cursor, ap
         )
     probe = getattr(widget, "_orders_display_probe", None)
     if probe is not None:
+        probe.clear_error()
         probe.finish("ready", source="snapshot" if applied else "visible_model",
                      change_cursor=change_cursor, trace_id=trace_id)

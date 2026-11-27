@@ -148,7 +148,12 @@ class OrdersSnapshotRecovery(QObject):
     def show_limit_status(self):
         if not self._limit_reached or not self._eligible(self._context):
             return
-        set_status = getattr(self._owner(), "_set_refresh_status", None)
+        owner = self._owner()
+        set_load_state = getattr(owner, "_set_orders_load_state", None)
+        if callable(set_load_state):
+            set_load_state("error")
+            return
+        set_status = getattr(owner, "_set_refresh_status", None)
         if callable(set_status):
             set_status("Не удалось загрузить назначения автоматически. Откройте вкладку повторно.")
 

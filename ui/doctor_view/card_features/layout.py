@@ -8,6 +8,7 @@ from rem_card.services.archive_readonly_service import create_archive_readonly_s
 from rem_card.app.logger import logger
 import os
 from rem_card.ui.shared.balance_snapshot_sync import show_balance_sync_status
+from rem_card.ui.doctor_view.order_features.order_state import can_save_order_draft
 from .constants import CARD_UI_PREWARM_STAGGER_MS, CHART_LAZY_INIT_DELAY_MS, JOURNAL_WIDGET_PREWARM_ENABLED, PATIENT_BED_MANAGEMENT_MODE
 
 class DoctorLayoutMixin:
@@ -405,7 +406,12 @@ class DoctorLayoutMixin:
         ow = ow or getattr(getattr(self, "layout_manager", None), "orders_widget", None)
         if ow is None or not hasattr(self, "controls"):
             return
-        ow.draftStatusChanged.connect(self.controls.set_save_active)
+        def update_save_button(has_drafts):
+            self.controls.set_save_active(can_save_order_draft(ow, has_drafts))
+
+        ow.draftStatusChanged.connect(update_save_button)
+        if hasattr(ow, "draftSavePendingChanged"):
+            ow.draftSavePendingChanged.connect(self.controls.set_save_pending)
         ow.draftStatusChanged.connect(self.controls.set_rollback_active)
         ow.administrationStatusChanged.connect(self.controls.set_clean_active)
         ow.ordersPresenceChanged.connect(self.controls.set_clear_active)
@@ -425,7 +431,7 @@ class DoctorLayoutMixin:
         self.controls.btn_rollback.clicked.connect(self.on_rollback_clicked)
         self.controls.btn_templates.clicked.connect(ow.open_template_dialog)
         has_drafts = ow.has_drafts()
-        self.controls.set_save_active(has_drafts)
+        update_save_button(has_drafts)
         self.controls.set_rollback_active(has_drafts)
         self.controls.set_clean_active(ow.has_administrations())
         self.controls.set_clear_active(ow.has_orders())

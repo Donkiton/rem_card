@@ -603,8 +603,6 @@ class RefreshCoordinationMixin:
             "force": bool(force),
         }
         self._schedule_soft_update_state(source=source)
-        if self._active_request_source == "post_finalize":
-            self._set_refresh_status("Сохранено, обновляю назначения...")
         self._post_finalize_watchdog_timer.start(ORDERS_POST_FINALIZE_WATCHDOG_MS)
 
         def cancel_check():

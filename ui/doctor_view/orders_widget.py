@@ -28,6 +28,7 @@ class OrdersWidget(
     QWidget,
 ):
     draftStatusChanged = Signal(bool)
+    draftSavePendingChanged = Signal(bool)
     administrationStatusChanged = Signal(bool)
     ordersPresenceChanged = Signal(bool)
     localBalanceChanged = Signal()
@@ -143,6 +144,8 @@ class OrdersWidget(
         self._local_draft_dirty_admin_keys = set()
         self._local_deleted_orders = {}
         self._local_draft_save_pending = False
+        self._post_finalize_projection_pending = False
+        self._unknown_draft_save_contexts = set()
         self._legacy_central_draft_detected = False
         self._next_local_order_id = -1
         self._next_local_admin_id = -1

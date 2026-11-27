@@ -5,6 +5,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtCore import QTimer
 from rem_card.services.shift_service import ShiftService
 from rem_card.services.archive_readonly_service import create_archive_readonly_service
+from rem_card.ui.doctor_view.order_features.order_state import can_save_order_draft
 from datetime import datetime
 from rem_card.app.logger import logger
 import os
@@ -180,7 +181,7 @@ class DoctorArchiveContextMixin:
                 has_drafts = ow.has_drafts() if ow else False
                 has_admins = ow.has_administrations() if ow else False
                 has_orders = ow.has_orders() if ow else False
-                self.controls.set_save_active(has_drafts)
+                self.controls.set_save_active(can_save_order_draft(ow, has_drafts))
                 self.controls.set_rollback_active(has_drafts)
                 self.controls.set_clean_active(has_admins)
                 self.controls.set_clear_active(has_orders)

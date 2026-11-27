@@ -11,6 +11,14 @@ from .vital_undo import undo_vital_change
 from .vital_context import vital_context_bounds
 
 
+class CardVitalStatusError(ValueError):
+    """The patient's status rejects this card entry."""
+
+    def __init__(self, message: str, next_active_at: Optional[datetime] = None):
+        super().__init__(message)
+        self.next_active_at = next_active_at
+
+
 class VitalService:
     VITAL_SETTINGS_KEYS = ("ad", "pulse", "temp", "spo2", "rr", "cvp")
 
@@ -114,6 +122,39 @@ class VitalService:
         if not is_ok:
             raise ValueError(msg)
         with self.vitals_dao.db.remcard_transaction():
+            return self.vitals_dao.add_vital(dto, expected_revision=expected_revision)
+
+    def add_vital_from_card(
+        self,
+        dto: VitalDTO,
+        shift_date: datetime,
+        *,
+        force: bool,
+        allow_inactive: bool,
+        expected_revision: Optional[int] = None,
+    ):
+        validate_vital_dto(dto)
+        is_ok, message = self.validate_timestamp(dto.admission_id, dto.timestamp, shift_date, force=True)
+        if not is_ok:
+            raise ValueError(message)
+
+        # Read the timeline once, on the write connection. A status saved by
+        # another client while this operation was queued must take effect.
+        with self.vitals_dao.db.remcard_transaction():
+            if self.status_service:
+                event = self.status_service.get_event_at(dto.admission_id, dto.timestamp)
+                if event and event.status.is_outcome() and self._minute_floor(dto.timestamp) > self._minute_floor(event.start_time):
+                    outcome = "переведен" if event.status == PatientStatus.TRANSFERRED else "умер"
+                    raise CardVitalStatusError(
+                        f"Пациент {outcome} в {event.start_time.strftime('%H:%M')}. "
+                        "Ввод данных позже этого времени невозможен."
+                    )
+                if not (allow_inactive and force) and not self._event_allows_vital_at(event, dto.timestamp):
+                    next_active_at = self.status_service.get_next_active_event_start(dto.admission_id, dto.timestamp)
+                    raise CardVitalStatusError(
+                        "Пациент в операционной или вне отделения. Ввод витальных функций невозможен.",
+                        next_active_at,
+                    )
             return self.vitals_dao.add_vital(dto, expected_revision=expected_revision)
 
     def undo_vital_change(self, change):
@@ -260,15 +301,15 @@ class VitalService:
         if not self.status_service:
             return True
 
-        event = self.status_service.get_event_at(admission_id, timestamp)
+        return self._event_allows_vital_at(self.status_service.get_event_at(admission_id, timestamp), timestamp)
+
+    @classmethod
+    def _event_allows_vital_at(cls, event, timestamp: datetime) -> bool:
         if event and event.status == PatientStatus.ACTIVE:
             return True
 
         event_start = getattr(event, "start_time", None)
-        if event_start and self._minute_floor(event_start) == self._minute_floor(timestamp):
-            return True
-
-        return False
+        return bool(event_start and cls._minute_floor(event_start) == cls._minute_floor(timestamp))
 
     def validate_timestamp(
         self,

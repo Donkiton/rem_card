@@ -30,7 +30,8 @@ class SQLiteRemcardDB:
         return cursor
 
     @contextmanager
-    def remcard_transaction(self, source="test"):
+    def remcard_transaction(self, source="test", write_options=None):
+        self.last_write_options = write_options
         cursor = self.conn.cursor()
         try:
             yield cursor
@@ -38,6 +39,8 @@ class SQLiteRemcardDB:
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            cursor.close()
 
 
 class Templates:
@@ -118,6 +121,30 @@ def test_diet_change_applies_from_effective_time_and_can_be_backdated():
         expected_version=hunger.version,
     )
     assert [item["key"] for item in plans.planned_items_for_day(1, day)] == ["breakfast"]
+
+
+def test_assign_diet_and_clear_facts_rollback_together():
+    db, plans, oral = _services()
+    first = datetime(2026, 8, 29, 8, 0)
+    change = datetime(2026, 8, 29, 12, 0)
+    plans.assign_version(1, first, template_id=9)
+    for event_time in (first + timedelta(minutes=30), change):
+        oral.create_fact(1, event_time=event_time, amount_ml=150, entry_kind="unplanned", actor="nurse")
+
+    db.conn.execute(
+        """CREATE TRIGGER fail_clear BEFORE DELETE ON oral_intake_events
+           BEGIN SELECT RAISE(ABORT, 'test clear failure'); END"""
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="test clear failure"):
+        plans.assign_version(1, change, template_id=10, clear_facts_mode="before")
+    assert db.conn.execute("SELECT COUNT(*) FROM diet_plan_versions").fetchone()[0] == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM oral_intake_events").fetchone()[0] == 2
+
+    db.conn.execute("DROP TRIGGER fail_clear")
+    plans.assign_version(1, change, template_id=10, clear_facts_mode="before")
+    assert db.last_write_options["write_budget_ms"] == 15_000
+    assert db.conn.execute("SELECT COUNT(*) FROM diet_plan_versions").fetchone()[0] == 2
+    assert db.conn.execute("SELECT COUNT(*) FROM oral_intake_events").fetchone()[0] == 1
 
 
 def test_template_assignment_preserves_doctor_schedule_edits():

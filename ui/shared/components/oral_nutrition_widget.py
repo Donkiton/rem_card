@@ -1049,23 +1049,15 @@ class OralNutritionWidget(QWidget):
             )
             return
         clear_mode = data.pop("clear_mode")
-        effective = data["effective_from"]
         if clear_mode != "preserve":
             text = "Будут удалены все факты питания пациента." if clear_mode == "all" else "Будут удалены факты до времени изменения диеты."
             if CustomMessageBox.question(self, "Очистка фактов", text + " Продолжить?") != CustomMessageBox.Yes:
                 return
 
-        def operation():
-            result = self.service.assign_diet_version(self.admission_id, **data)
-            if clear_mode == "all":
-                self.service.clear_oral_intake_facts(self.admission_id)
-            elif clear_mode == "before":
-                self.service.clear_oral_intake_facts(self.admission_id, before=effective)
-            return result
-
+        admission_id = self.admission_id
         self._enqueue_write(
             "diet_version_assign",
-            operation,
+            lambda: self.service.assign_diet_version(admission_id, clear_facts_mode=clear_mode, **data),
             after_success=(lambda _result: self._local_undo.clear()) if clear_mode != "preserve" else None,
         )
 
