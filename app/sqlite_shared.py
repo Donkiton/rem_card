@@ -659,6 +659,10 @@ def backup_meta_path(backup_path: str) -> str:
     return os.path.join(backup_dir, f".{digest}.meta.json")
 
 
+class SQLiteBackupDeferred(RuntimeError):
+    """A background copy yielded before its snapshot was complete."""
+
+
 def backup_connection(
     conn: sqlite3.Connection,
     backup_path: str,
@@ -670,6 +674,8 @@ def backup_connection(
     owner_id: Optional[str] = None,
     source: str = "backup",
     lock_wait_sec: float = 60.0,
+    pages: int = -1,
+    progress: Optional[Callable[[int, int, int], None]] = None,
 ):
     logger = logger or logging.getLogger(__name__)
     started = time.perf_counter()
@@ -694,7 +700,7 @@ def backup_connection(
         backup_conn = sqlite3.connect(temp_path)
         try:
             with backup_conn:
-                conn.backup(backup_conn)
+                conn.backup(backup_conn, pages=pages, progress=progress)
         except Exception:
             try:
                 backup_conn.close()
@@ -746,6 +752,9 @@ def backup_connection(
         )
         backup_result = "ok"
         return backup_path
+    except SQLiteBackupDeferred:
+        backup_result = "deferred"
+        raise
     finally:
         record_metric(
             "backup_duration_ms",

@@ -45,7 +45,7 @@ from rem_card.app.emergency_validation import (
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.network_maintenance import find_active_network_sessions, network_maintenance_lock
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
-from rem_card.app.sqlite_shared import backup_connection, configure_connection
+from rem_card.app.sqlite_shared import SQLiteBackupDeferred, backup_connection, configure_connection
 from rem_card.data.settings import settings_schema
 from rem_card.app.version import APP_VERSION
 
@@ -71,6 +71,8 @@ EMERGENCY_STORAGE_PAIR_MULTIPLIER = max(
     int(float(os.environ.get("REMCARD_EMERGENCY_STORAGE_PAIR_MULTIPLIER", "6"))),
 )
 _SETTINGS_REUSE_PROOF_KEY = "settings_commit_proof_v1"
+MEDICAL_STANDBY_BACKUP_PAGES = 128
+MEDICAL_STANDBY_WRITER_PROBE_SEC = 0.1
 
 
 def _source_file_identity(path: str, *, content: bool = True) -> dict:
@@ -276,6 +278,7 @@ class EmergencyStandbyManager:
         source_settings_db_path: str | None = None,
         settings_required: bool = True,
         is_safe_to_refresh: Callable[[], bool] | None = None,
+        medical_backup_defer_reason: Callable[[], str] | None = None,
         store: EmergencyLocalStore | None = None,
         session_locks_dir: str | None = None,
     ):
@@ -289,6 +292,11 @@ class EmergencyStandbyManager:
         )
         self.settings_required = bool(settings_required)
         self.is_safe_to_refresh = is_safe_to_refresh or (lambda: True)
+        self._medical_backup_defer_reason = medical_backup_defer_reason
+        self._medical_writer_lock_path = (
+            os.path.join(os.path.dirname(self.source_medical_db_path), "db.lock")
+            if source_medical_db_path is not None else network_context.medical_db_lock_path
+        )
         self.store = store or EmergencyLocalStore(root=self.root, settings_required=self.settings_required)
         explicit_source = source_medical_db_path is not None or source_settings_db_path is not None
         self.session_locks_dir = os.path.abspath(
@@ -935,6 +943,8 @@ class EmergencyStandbyManager:
                 medical_validation=final_medical_validation,
                 settings_validation=final_settings_validation,
             )
+        except SQLiteBackupDeferred as exc:
+            return EmergencyStandbyRefreshResult(ok=False, status="deferred", reason=str(exc), metadata=previous_metadata)
         except Exception as exc:
             if self.settings_required:
                 record_metric(
@@ -1062,6 +1072,9 @@ class EmergencyStandbyManager:
 
     def _backup_sqlite_to_temp(self, source_path: str, temp_target_path: str, *, source: str) -> str:
         os.makedirs(os.path.dirname(temp_target_path), exist_ok=True)
+        cooperative = source == "emergency_medical_standby" and self._medical_backup_defer_reason is not None
+        if cooperative:
+            self._check_medical_backup_can_continue()
         conn = None
         try:
             conn = sqlite3.connect(
@@ -1069,22 +1082,56 @@ class EmergencyStandbyManager:
                 uri=True,
                 check_same_thread=False,
                 isolation_level=None,
-                timeout=5.0,
+                timeout=0.25 if cooperative else 5.0,
             )
             configure_connection(conn, readonly=True, profile="network")
+            if cooperative:
+                conn.execute("PRAGMA busy_timeout = 250")
+                self._check_medical_backup_can_continue()
             return backup_connection(
                 conn,
                 temp_target_path,
                 validate=False,
                 lock_path=None,
                 source=source,
+                pages=MEDICAL_STANDBY_BACKUP_PAGES if cooperative else -1,
+                progress=self._medical_backup_progress() if cooperative else None,
             )
+        except sqlite3.OperationalError as exc:
+            error_code = int(getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF
+            if cooperative and error_code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise SQLiteBackupDeferred("writer_busy") from exc
+            raise
         finally:
             if conn is not None:
                 try:
                     conn.close()
                 except Exception:
                     pass
+
+    def _check_medical_backup_can_continue(self) -> None:
+        reason = self._medical_backup_defer_reason()
+        if reason:
+            raise SQLiteBackupDeferred(reason)
+        if os.path.exists(self._medical_writer_lock_path):
+            raise SQLiteBackupDeferred("writer_busy")
+
+    def _medical_backup_progress(self):
+        next_probe_at = 0.0
+
+        def after_step(status: int, _remaining: int, _total: int) -> None:
+            nonlocal next_probe_at
+            status &= 0xFF
+            if status == sqlite3.SQLITE_DONE:
+                return
+            if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise SQLiteBackupDeferred("writer_busy")
+            now = time.monotonic()
+            if now >= next_probe_at:
+                self._check_medical_backup_can_continue()
+                next_probe_at = time.monotonic() + MEDICAL_STANDBY_WRITER_PROBE_SEC
+
+        return after_step
 
     def _new_generation_id(self) -> str:
         return f"gen_{uuid.uuid4().hex[:16]}"
