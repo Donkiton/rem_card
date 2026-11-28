@@ -9,6 +9,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
@@ -521,9 +522,10 @@ def test_save_submits_exactly_one_write_task():
         widget.shutdown()
 
 
-def test_save_button_keeps_geometry_and_waits_for_current_projection():
+@pytest.mark.parametrize("orientation", [Qt.Horizontal, Qt.Vertical])
+def test_save_button_keeps_geometry_and_waits_for_current_projection(orientation):
     widget, service = _make_widget()
-    control = ControlPanel()
+    control = ControlPanel(orientation=orientation)
     control.resize(control.sizeHint())
     control.layout.activate()
     widget.draftStatusChanged.connect(control.set_save_active)
@@ -541,6 +543,9 @@ def test_save_button_keeps_geometry_and_waits_for_current_projection():
         widget.check_drafts()
         original_geometry = control.btn_save.geometry()
         neighbor_geometry = control.btn_clean_sheet.geometry()
+        if orientation == Qt.Vertical:
+            assert original_geometry.x() == neighbor_geometry.x()
+            assert original_geometry.size() == neighbor_geometry.size()
 
         control.btn_save.click()
         widget.check_drafts()
