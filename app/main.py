@@ -21,7 +21,6 @@ from rem_card.app.runtime_paths import (
     DataPathConfigurationError,
     cleanup_old_local_logs,
     configure_operblock_runtime_path,
-    create_baza_structure_and_db,
     data_path_configuration_guard,
     get_runtime_logs_dir,
     get_writable_runtime_logs_dir,
@@ -825,6 +824,7 @@ def _configure_data_path_interactively_unlocked(*, first_run: bool = False) -> b
     os.environ["REMCARD_PATH_SETUP_MODE"] = "1"
 
     from PySide6.QtWidgets import QApplication, QFileDialog
+    from rem_card.app.unified_database_setup import prepare_database_root
 
     app = QApplication.instance() or QApplication(sys.argv)
     _apply_app_theme(app, "system")
@@ -839,7 +839,7 @@ def _configure_data_path_interactively_unlocked(*, first_run: bool = False) -> b
         if not selected:
             return False
 
-        ok, message = create_baza_structure_and_db(selected)
+        ok, message = prepare_database_root(selected)
         if not ok:
             _show_custom_warning("Путь не сохранен", message)
             continue

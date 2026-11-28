@@ -626,8 +626,8 @@ class WelcomePage(_EntryPageBase):
         self.access_label.setObjectName("UnifiedEntryAccessState")
         self.access_label.setAlignment(Qt.AlignCenter)
         self.access_label.setWordWrap(True)
-        # Reserve room for three status lines without shrinking the text.
-        self.access_label.setMinimumHeight(72)
+        self.access_label.setTextFormat(Qt.PlainText)
+        self.access_label.setMinimumHeight(64)
         self.root_layout.addSpacing(6)
 
         footer = QGridLayout()
@@ -682,7 +682,7 @@ class WelcomePage(_EntryPageBase):
         bottom_actions.setContentsMargins(0, 0, 0, 0)
         bottom_actions.setHorizontalSpacing(12)
         bottom_actions.addWidget(self.theme_switch, 0, 0, Qt.AlignLeft | Qt.AlignBottom)
-        bottom_actions.addWidget(self.access_label, 0, 1, Qt.AlignCenter)
+        bottom_actions.addWidget(self.access_label, 0, 1)
         bottom_actions.addWidget(self.about_button, 0, 2, Qt.AlignRight | Qt.AlignVCenter)
         bottom_actions.addWidget(self.update_button, 0, 2, Qt.AlignRight | Qt.AlignVCenter)
         bottom_actions.setColumnStretch(0, 1)
@@ -729,9 +729,9 @@ class WelcomePage(_EntryPageBase):
         if self._preparing_role:
             self.access_label.setStyleSheet("color: #cfefff; font: 600 14px 'Segoe UI';")
         elif self._access_blocked:
-            self.access_label.setStyleSheet("color: #ffc2c8; font: 600 12px 'Segoe UI';")
+            self.access_label.setStyleSheet("color: #ffc2c8; font: 600 14px 'Segoe UI';")
         else:
-            self.access_label.setStyleSheet("color: #91dabc; font: 600 12px 'Segoe UI';")
+            self.access_label.setStyleSheet("color: #91dabc; font: 600 14px 'Segoe UI';")
         self.access_label._entry_dark_style = self.access_label.styleSheet()
         self.access_label.setStyleSheet(_entry_style(self.access_label._entry_dark_style, self._theme_mode))
         # Reserve the status strip even while empty so the quote stays still.
