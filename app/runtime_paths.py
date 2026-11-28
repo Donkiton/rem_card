@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from typing import Optional
 
 from rem_card.app.roles import (
@@ -1089,6 +1089,34 @@ def _probe_writable_dir(directory: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _initialize_new_medical_database(db_path: str, policy_path: str) -> None:
+    from rem_card.app.sqlite_shared import configure_connection, run_quick_check
+    from rem_card.app.startup_db_guard import initialize_client_policy_for_new_database
+    from rem_card.app.unified_db_schema import initialize_empty_unified_schema, is_unified_schema_ready
+
+    fd, temporary = tempfile.mkstemp(prefix=".remcard_init_", suffix=".db", dir=os.path.dirname(db_path))
+    try:
+        os.close(fd)
+        with closing(sqlite3.connect(temporary)) as conn, conn:
+            configure_connection(conn, profile="network")
+            conn.execute("BEGIN IMMEDIATE")
+            initialize_empty_unified_schema(conn)
+            if not is_unified_schema_ready(conn):
+                raise RuntimeError("Новая база не прошла проверку схемы.")
+            ok, reason = run_quick_check(conn)
+            if not ok:
+                raise RuntimeError(f"Проверка новой базы не пройдена: {reason}")
+
+        initialize_client_policy_for_new_database(policy_path)
+        if os.name == "nt":
+            os.rename(temporary, db_path)
+        else:
+            os.link(temporary, db_path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
 def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
     normalized = _normalize_baza_dir(baza_dir)
     if not normalized:
@@ -1101,8 +1129,7 @@ def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
         db_existed = os.path.isfile(db_path)
 
         if existing_entries and not db_existed:
-            allowed_top_level = {part.split("/", 1)[0] for part in REQUIRED_BAZA_DIRS}
-            foreign_entries = sorted(name for name in existing_entries if name not in allowed_top_level)
+            foreign_entries = sorted(existing_entries - {"session_locks"})
             if foreign_entries:
                 shown = ", ".join(foreign_entries[:6])
                 suffix = f" и ещё {len(foreign_entries) - 6}" if len(foreign_entries) > 6 else ""
@@ -1112,13 +1139,11 @@ def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
                 )
 
         if db_existed:
-            ok, message = _validate_existing_sqlite_schema(
+            return _validate_existing_sqlite_schema(
                 db_path,
                 required_tables={"patients", "admissions", "beds"},
                 label="Основная база данных",
             )
-            if not ok:
-                return False, message
 
         os.makedirs(normalized, exist_ok=True)
         for directory in get_required_baza_paths(normalized):
@@ -1128,30 +1153,7 @@ def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
         if not ok:
             return False, f"Нет доступа на запись в папку archiv: {reason}"
 
-        conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None, timeout=5.0)
-        try:
-            from rem_card.app.sqlite_shared import configure_connection, run_quick_check
-            from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
-
-            configure_connection(conn, profile="network")
-            ensure_unified_schema_with_migration_backup(
-                conn,
-                db_path=db_path,
-                backup_dir=os.path.join(normalized, "backups", "valid"),
-                invalid_dir=os.path.join(normalized, "backup_health", "invalid_backups"),
-                policy_path=os.path.join(normalized, "config", "client_policy.json"),
-                baza_dir=normalized,
-                lock_path=os.path.join(normalized, "archiv", "db.lock"),
-                source="path_setup_schema_init",
-            )
-            test_row = conn.execute("SELECT 1").fetchone()
-            if not test_row or int(test_row[0]) != 1:
-                return False, "Тестовый запрос к БД не вернул ожидаемый результат."
-            ok, result = run_quick_check(conn)
-            if not ok:
-                return False, f"Проверка БД не пройдена: {result}"
-        finally:
-            conn.close()
+        _initialize_new_medical_database(db_path, os.path.join(normalized, "config", "client_policy.json"))
         from rem_card.services.crash_reports import ensure_shared_crash_directories
 
         ensure_shared_crash_directories(normalized)

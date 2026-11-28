@@ -45,6 +45,23 @@ def _render(widget, path: Path) -> QImage:
     return image
 
 
+def test_welcome_page_fits_wrapped_database_error():
+    app = application()
+    page = WelcomePage()
+    page.resize(900, 600)
+    page.show()
+    page.set_access_state(
+        "Не удалось подготовить папку базы: база требует обновления схемы. "
+        "В этой сборке автоматическое обновление базы отключено. "
+        "Выберите другую папку данных или обратитесь к администратору."
+    )
+    app.processEvents()
+
+    label = page.access_label
+    assert label.height() >= label.heightForWidth(label.width())
+    assert page.content.rect().contains(label.geometry())
+
+
 def test_welcome_page_exposes_all_roles_actions_and_access_state(tmp_path):
     app = application()
     page = WelcomePage()

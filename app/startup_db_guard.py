@@ -377,6 +377,20 @@ def _complete_client_policy(policy: dict[str, Any]) -> bool:
     return changed
 
 
+def initialize_client_policy_for_new_database(policy_path: str) -> None:
+    from rem_card.app.client_build_profile import database_upgrades_disabled
+
+    with _client_policy_write_lock(policy_path):
+        policy, missing = _read_client_policy(policy_path)
+        if not missing:
+            raise StartupPolicyError("В выбранной папке уже есть политика доступа к базе.")
+        if database_upgrades_disabled() or _compare_client_versions(
+            policy["min_client_version"], SCHEMA_REQUIRED_CLIENT_VERSION
+        ) < 0:
+            policy["min_client_version"] = SCHEMA_REQUIRED_CLIENT_VERSION
+        _write_client_policy_atomically(policy_path, policy)
+
+
 def _load_or_create_client_policy(baza_dir: str, role: Optional[str]) -> dict[str, Any]:
     from rem_card.app.client_build_profile import database_upgrades_disabled
     no_upgrades = database_upgrades_disabled()
