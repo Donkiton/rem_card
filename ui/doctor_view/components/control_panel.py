@@ -114,11 +114,11 @@ class ControlPanel(QWidget):
         if self.orientation == Qt.Vertical:
             self.layout.addStretch(1)
         
-        # Reserve enough width for both captions before the panel is shown.
+        # Reserve room for both captions while allowing the layout to stretch the button.
         self.set_save_active(True)
         idle_width = self.btn_save.sizeHint().width()
         self.set_save_pending(True)
-        self.btn_save.setFixedWidth(max(idle_width, self.btn_save.sizeHint().width()))
+        self.btn_save.setMinimumWidth(max(idle_width, self.btn_save.sizeHint().width()))
         self.set_save_active(False)
         self.set_save_pending(False)
         # По умолчанию кнопки неактивны
