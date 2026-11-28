@@ -783,6 +783,17 @@ def ensure_unified_schema(
     if database_upgrades_disabled() and not allow_local_schema_upgrades:
         require_compatible_schema(is_unified_schema_ready(conn))
         return
+    _apply_unified_schema(conn, logger)
+
+
+def initialize_empty_unified_schema(conn: sqlite3.Connection) -> None:
+    """Build the current schema in a freshly created database."""
+    if conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is not None:
+        raise RuntimeError("Создать схему можно только в новой пустой базе.")
+    _apply_unified_schema(conn)
+
+
+def _apply_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Logger] = None):
     logger = logger or logging.getLogger(__name__)
     if _is_fastpath_schema_ready(conn):
         return

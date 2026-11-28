@@ -4,14 +4,19 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
+from contextlib import closing
 
 import pytest
 
+from rem_card.app import client_build_profile
 from rem_card.app.isolated_test_runtime import user_profile_environment
 from rem_card.app.runtime_paths import get_journal_db_path, get_required_baza_paths, validate_dev_baza_dir
 from rem_card.app.unified_access import MaintenanceStore
 from rem_card.app.unified_database_setup import prepare_database_root
-from rem_card.app.unified_db_schema import is_unified_schema_ready
+from rem_card.app.unified_db_schema import (
+    SCHEMA_FASTPATH_META_KEY, SCHEMA_MIN_MIGRATION_VERSION, SCHEMA_REQUIRED_CLIENT_VERSION,
+    is_unified_schema_ready,
+)
 from rem_card.data.settings import settings_schema
 
 
@@ -36,7 +41,9 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def test_empty_selected_folder_creates_complete_supported_database(isolated_profile):
+@pytest.mark.parametrize("no_upgrades", [False, True])
+def test_empty_selected_folder_creates_complete_supported_database(isolated_profile, monkeypatch, no_upgrades):
+    monkeypatch.setattr(client_build_profile, "NO_DATABASE_UPGRADES", no_upgrades)
     root = isolated_profile / "fresh-root"
     root.mkdir()
 
@@ -50,6 +57,9 @@ def test_empty_selected_folder_creates_complete_supported_database(isolated_prof
     journal_path = Path(get_journal_db_path(str(root)))
     with sqlite3.connect(journal_path) as connection:
         assert is_unified_schema_ready(connection)
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (
+            SCHEMA_MIN_MIGRATION_VERSION,
+        )
         assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
 
@@ -62,9 +72,28 @@ def test_empty_selected_folder_creates_complete_supported_database(isolated_prof
 
     policy = json.loads((root / "config" / "client_policy.json").read_text(encoding="utf-8"))
     assert isinstance(policy.get("min_client_version"), str)
+    if no_upgrades:
+        assert policy["min_client_version"] == SCHEMA_REQUIRED_CLIENT_VERSION
     assert not Path(str(journal_path) + "-wal").exists()
     assert not Path(str(settings_path) + "-wal").exists()
     assert not (root / "session_locks" / "database_setup.lock").exists()
+
+
+@pytest.mark.parametrize("no_upgrades", [False, True])
+def test_selecting_existing_older_database_preserves_schema_and_policy(isolated_profile, monkeypatch, no_upgrades):
+    root = isolated_profile / "older-root"
+    root.mkdir()
+    assert prepare_database_root(root) == (True, "created")
+    journal = Path(get_journal_db_path(str(root)))
+    with closing(sqlite3.connect(journal)) as connection, connection:
+        connection.execute("DELETE FROM schema_migrations WHERE version = ?", (SCHEMA_MIN_MIGRATION_VERSION,))
+        connection.execute("UPDATE meta SET value = ? WHERE key = ?", (SCHEMA_MIN_MIGRATION_VERSION - 1, SCHEMA_FASTPATH_META_KEY))
+    policy = root / "config" / "client_policy.json"
+    before = {path: _digest(path) for path in (journal, policy)}
+    monkeypatch.setattr(client_build_profile, "NO_DATABASE_UPGRADES", no_upgrades)
+
+    assert prepare_database_root(root) == (True, "existing")
+    assert {path: _digest(path) for path in before} == before
 
 
 def test_existing_valid_root_is_attached_without_reinitializing_databases(isolated_profile):
